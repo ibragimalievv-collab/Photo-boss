@@ -3,15 +3,33 @@ services:
     image: postgres:16
     restart: unless-stopped
     environment:
-      POSTGRES_DB: hotel_photo_bot
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports: ['5432:5432']
-    volumes: [hotel_photo_pg:/var/lib/postgresql/data]
+      POSTGRES_DB: ${POSTGRES_DB:-hotel_photo_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - hotel_photo_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
   bot:
     build: .
     restart: unless-stopped
+    init: true
     env_file: .env
-    depends_on: [postgres]
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN:?Set BOT_TOKEN in .env}
+      ADMIN_TELEGRAM_IDS: ${ADMIN_TELEGRAM_IDS:?Set ADMIN_TELEGRAM_IDS in .env}
+      DATABASE_URL: ""
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-hotel_photo_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
 volumes:
   hotel_photo_pg:

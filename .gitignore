@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Runtime credentials; only the empty example belongs in Git.
+.env
+.env.*
+!.env.example

@@ -1,10 +1,10 @@
 from datetime import datetime, date, time
-from sqlalchemy import String, Integer, Float, Boolean, DateTime, Date, Time, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import String, Integer, BigInteger, Float, Boolean, DateTime, Date, Time, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
 class User(Base):
     __tablename__='users'
-    id: Mapped[int]=mapped_column(primary_key=True); tg_id: Mapped[int]=mapped_column(Integer,unique=True,index=True)
+    id: Mapped[int]=mapped_column(primary_key=True); tg_id: Mapped[int]=mapped_column(BigInteger,unique=True,index=True)
     name: Mapped[str]=mapped_column(String(150)); username: Mapped[str|None]=mapped_column(String(150),nullable=True)
     active: Mapped[bool]=mapped_column(Boolean,default=True); created_at: Mapped[datetime]=mapped_column(DateTime,default=datetime.utcnow)
     roles=relationship('UserRole',back_populates='user',cascade='all, delete-orphan')
