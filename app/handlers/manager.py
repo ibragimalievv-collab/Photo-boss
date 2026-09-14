@@ -1,10 +1,11 @@
-from datetime import datetime
 from aiogram import Router,F
-from aiogram.types import Message
 from ..db import Session
-from ..models import *
-from ..services.core import get_user,roles_of,has
+from sqlalchemy import select, func
+from ..models import Booking, Hotel, Client, Shooting, Sale
+from ..access import StaffFilter
+from ..services.core import get_user
 r=Router()
+r.message.filter(StaffFilter("MANAGER"), F.text)
 @r.message(F.text=='📋 Мои записи')
 async def bookings(m):
  async with Session() as s:

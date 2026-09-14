@@ -1,11 +1,15 @@
 from datetime import datetime
 from aiogram import Router,F
-from aiogram.types import Message,CallbackQuery
+from aiogram.types import CallbackQuery
 from ..db import Session
-from ..models import *
-from ..services.core import get_user,roles_of,has,audit
+from sqlalchemy import select, func
+from ..models import Booking, Shooting, Hotel, Client, Photo, Sale, PayrollEntry
+from ..access import StaffFilter
+from ..services.core import get_user,roles_of,has,audit,ROLES
 from ..keyboards import inline
 r=Router()
+r.message.filter(StaffFilter("PHOTOGRAPHER"), F.text)
+r.callback_query.filter(StaffFilter("PHOTOGRAPHER"))
 @r.message(F.text=='📸 Мои съёмки')
 async def shoots(m):
  async with Session() as s:
@@ -15,20 +19,37 @@ async def shoots(m):
   rows=q.all()
   if not rows: return await m.answer('Съёмок нет.')
   for b,sh,h,c in rows: await m.answer(f'📸 Съёмка #{b.id}\n🏨 {h.name}\n🚪 {b.room}\n👤 {c.name}\n📅 {b.shoot_date} {b.shoot_time}\nСтатус: {sh.status}',reply_markup=inline([[('▶️ Принять',f'accept:{sh.id}'),('📍 Прибыл',f'arrive:{sh.id}')],[('▶️ Начать',f'start:{sh.id}'),('✅ Готово',f'done:{sh.id}')]]))
-@r.callback_query(F.data.startswith(('accept:','arrive:','start:','done:')))
-async def action(c:CallbackQuery):
- act,sid=c.data.split(':'); sid=int(sid)
+@r.callback_query(F.data.startswith(('accept:', 'arrive:', 'start:', 'done:')))
+async def action(c: CallbackQuery):
+ try:
+  act, raw_id = c.data.split(':', 1)
+  sid = int(raw_id)
+  if not 0 < sid <= 2**31 - 1: raise ValueError
+ except (TypeError, ValueError):
+  return await c.answer('Некорректная кнопка.')
+ transitions = {
+  'accept': ('ASSIGNED', 'ACCEPTED', 'accepted_at'),
+  'arrive': ('ACCEPTED', 'ARRIVED', 'arrived_at'),
+  'start': ('ARRIVED', 'SHOOTING', 'started_at'),
+  'done': ('SHOOTING', 'READY_FOR_MANAGER', 'completed_at'),
+ }
  async with Session() as s:
-  u=await get_user(s,c.from_user.id); sh=await s.get(Shooting,sid)
-  if not sh: return await c.answer('Нет')
-  b=await s.get(Booking,sh.booking_id)
-  if b.photographer_id!=u.id: return await c.answer('Это не ваша съёмка')
-  now=datetime.utcnow(); sh.status={'accept':'ACCEPTED','arrive':'ARRIVED','start':'SHOOTING','done':'READY_FOR_MANAGER'}[act]
-  if act=='accept': sh.accepted_at=now
-  if act=='arrive': sh.arrived_at=now
-  if act=='start': sh.started_at=now
-  if act=='done': sh.completed_at=now; b.status='READY_FOR_MANAGER'
-  await s.commit(); await audit(s,u,f'shooting_{act}','shooting',sid); await c.message.answer('Готово: '+sh.status); await c.answer()
+  u = await get_user(s, c.from_user.id)
+  sh = (await s.execute(select(Shooting).where(Shooting.id == sid).with_for_update())).scalar_one_or_none()
+  if sh is None: return await c.answer('Съёмка не найдена.')
+  b = await s.get(Booking, sh.booking_id)
+  if u is None or not u.active or b is None or b.photographer_id != u.id:
+   return await c.answer('Это не ваша съёмка.')
+  expected, target, timestamp = transitions[act]
+  if sh.status != expected:
+   return await c.answer('Этот шаг уже выполнен или предыдущий ещё не завершён.')
+  sh.status = target
+  setattr(sh, timestamp, datetime.utcnow())
+  if act == 'done': b.status = target
+  await audit(s, u, f'shooting_{act}', 'shooting', sid)
+  await s.commit()
+  await c.message.answer('Готово: ' + target)
+  await c.answer()
 @r.message(F.text=='📊 Моя статистика')
 async def stats(m):
  async with Session() as s:
