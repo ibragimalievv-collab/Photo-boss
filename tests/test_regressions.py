@@ -11,7 +11,7 @@ from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
-from aiogram.methods import AnswerCallbackQuery, SendMessage
+from aiogram.methods import AnswerCallbackQuery, SendMessage, SendPhoto
 from aiogram.types import CallbackQuery, Chat, Message, Update
 from aiogram.types import User as TelegramUser
 from sqlalchemy import BigInteger, func, select
@@ -58,12 +58,13 @@ class FakeTelegramSession(BaseSession):
 
     async def make_request(self, bot, method, timeout=None):
         self.calls.append(method)
-        if isinstance(method, SendMessage):
+        if isinstance(method, (SendMessage, SendPhoto)):
             return Message(
                 message_id=9000 + len(self.calls),
                 date=datetime.now(timezone.utc),
                 chat=Chat(id=int(method.chat_id), type="private"),
-                text=method.text,
+                text=getattr(method, "text", None),
+                caption=getattr(method, "caption", None),
             )
         if isinstance(method, AnswerCallbackQuery):
             return True
@@ -466,6 +467,17 @@ def test_training_is_available_to_every_staff_role(tg_id):
         await message(tg_id, "🎓 Обучение")
         assert len(telegram.calls) == before + 1
         assert telegram.calls[-1].text.startswith("🎓 Обучение")
-        assert "5." in telegram.calls[-1].text
+        assert "эталонный кадр" in telegram.calls[-1].text
+
+    run(scenario())
+
+
+def test_training_category_sends_a_real_reference_photo():
+    async def scenario():
+        await callback(OWNER, "training:family")
+        photo_calls = [call for call in telegram.calls if isinstance(call, SendPhoto)]
+        assert len(photo_calls) == 1
+        assert photo_calls[0].photo.path.name == "family-lifestyle.jpg"
+        assert "Повторите этот кадр" in photo_calls[0].caption
 
     run(scenario())
