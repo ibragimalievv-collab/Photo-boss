@@ -10,8 +10,6 @@ from ..db import Session
 from ..keyboards import inline, reply, request_location
 from ..models import (
     Booking,
-    Client,
-    Hotel,
     PayrollEntry,
     Photo,
     Sale,
@@ -19,6 +17,7 @@ from ..models import (
     ShiftCheckOut,
     Shooting,
 )
+from ..services.bookings import booking_card
 from ..services.core import ROLES, audit, get_user, has, menu, roles_of
 from ..services.shifts import LATE_FINE, is_late, shift_now
 
@@ -32,6 +31,10 @@ class ShiftFlow(StatesGroup):
     photo = State()
     end_location = State()
     workplace_photo = State()
+
+
+class PhotoUploadFlow(StatesGroup):
+    uploading = State()
 
 
 async def today_check_in(session, user_id, *, lock=False):
@@ -337,48 +340,53 @@ async def shoots(m):
         if not has(rs, "PHOTOGRAPHER"):
             return
         q = await s.execute(
-            select(Booking, Shooting, Hotel, Client)
+            select(Booking, Shooting)
             .join(Shooting, Shooting.booking_id == Booking.id)
-            .join(Hotel, Hotel.id == Booking.hotel_id)
-            .join(Client, Client.id == Booking.client_id)
-            .where(Booking.photographer_id == u.id)
+            .where(
+                Booking.photographer_id == u.id,
+                Booking.status.notin_(("PENDING_CONFIRMATION", "REJECTED")),
+            )
             .order_by(Booking.shoot_date, Booking.shoot_time)
         )
         rows = q.all()
         if not rows:
             return await m.answer("Съёмок нет.")
-        for b, sh, h, c in rows:
+        for b, sh in rows:
             await m.answer(
-                f"📸 Съёмка #{b.id}\n🏨 {h.name}\n🚪 {b.room}\n👤 {c.name}\n📅 {b.shoot_date} {b.shoot_time}\nСтатус: {sh.status}",
+                await booking_card(s, b),
                 reply_markup=inline(
                     [
                         [
-                            ("▶️ Принять", f"accept:{sh.id}"),
-                            ("📍 Прибыл", f"arrive:{sh.id}"),
+                            ("📥 Забрал съёмку", f"photo:pickup:{sh.id}", "primary"),
                         ],
                         [
-                            ("▶️ Начать", f"start:{sh.id}"),
-                            ("✅ Готово", f"done:{sh.id}"),
+                            ("📸 Отснял съёмку", f"photo:shot:{sh.id}", "primary"),
+                        ],
+                        [
+                            ("💰 Готово к продаже", f"photo:ready:{sh.id}", "success"),
                         ],
                     ]
                 ),
             )
 
 
-@r.callback_query(F.data.startswith(("accept:", "arrive:", "start:", "done:")))
-async def action(c: CallbackQuery):
+@r.callback_query(
+    F.data.startswith(
+        ("photo:pickup:", "photo:shot:", "photo:ready:")
+    )
+)
+async def action(c: CallbackQuery, state):
     try:
-        act, raw_id = c.data.split(":", 1)
+        _, act, raw_id = c.data.split(":", 2)
         sid = int(raw_id)
         if not 0 < sid <= 2**31 - 1:
             raise ValueError
     except (TypeError, ValueError):
         return await c.answer("Некорректная кнопка.")
     transitions = {
-        "accept": ("ASSIGNED", "ACCEPTED", "accepted_at"),
-        "arrive": ("ACCEPTED", "ARRIVED", "arrived_at"),
-        "start": ("ARRIVED", "SHOOTING", "started_at"),
-        "done": ("SHOOTING", "READY_FOR_MANAGER", "completed_at"),
+        "pickup": ("ASSIGNED", "PICKED_UP", "accepted_at"),
+        "shot": ("PICKED_UP", "SHOT", "completed_at"),
+        "ready": ("SHOT", "UPLOADING", "completed_at"),
     }
     async with Session() as s:
         u = await get_user(s, c.from_user.id)
@@ -399,12 +407,91 @@ async def action(c: CallbackQuery):
             )
         sh.status = target
         setattr(sh, timestamp, datetime.now(UTC).replace(tzinfo=None))
-        if act == "done":
-            b.status = target
+        b.status = target
         await audit(s, u, f"shooting_{act}", "shooting", sid)
         await s.commit()
-        await c.message.answer("Готово: " + target)
+        if act == "ready":
+            await state.set_state(PhotoUploadFlow.uploading)
+            await state.set_data({"shooting_id": sid})
+            await c.message.answer(
+                "📤 Загрузите сюда все готовые фотографии этой съёмки. "
+                "Можно отправлять по одной или альбомом. Когда закончите, нажмите кнопку ниже.",
+                reply_markup=inline(
+                    [[("✅ Завершить загрузку", "photo:upload_done", "success")]]
+                ),
+            )
+        else:
+            labels = {
+                "pickup": "📥 Съёмка забрана.",
+                "shot": "📸 Съёмка закончена.",
+            }
+            await c.message.answer(labels[act])
         await c.answer()
+
+
+@r.message(PhotoUploadFlow.uploading, F.photo | F.document)
+async def upload_sale_photo(m, state):
+    data = await state.get_data()
+    shooting_id = data.get("shooting_id")
+    file_id = m.photo[-1].file_id if m.photo else m.document.file_id
+    async with Session() as s:
+        u = await get_user(s, m.from_user.id)
+        shooting = await s.get(Shooting, shooting_id)
+        booking = await s.get(Booking, shooting.booking_id) if shooting else None
+        if booking is None or booking.photographer_id != u.id or shooting.status != "UPLOADING":
+            await state.clear()
+            return await m.answer("Эта загрузка уже закрыта. Откройте «📸 Мои съёмки».")
+        exists = await s.scalar(
+            select(Photo.id).where(Photo.shooting_id == shooting.id, Photo.file_id == file_id)
+        )
+        if exists is None:
+            s.add(Photo(shooting_id=shooting.id, file_id=file_id))
+            await s.commit()
+        count = await s.scalar(
+            select(func.count(Photo.id)).where(Photo.shooting_id == shooting.id)
+        )
+    await m.answer(
+        f"✅ Загружено фотографий: {count}",
+        reply_markup=inline(
+            [[("✅ Завершить загрузку", "photo:upload_done", "success")]]
+        ),
+    )
+
+
+@r.message(PhotoUploadFlow.uploading)
+async def require_sale_photo(m):
+    await m.answer("Отправьте фотографию или файл с фотографией.")
+
+
+@r.callback_query(PhotoUploadFlow.uploading, F.data == "photo:upload_done")
+async def finish_photo_upload(c: CallbackQuery, state):
+    if c.message is None:
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    data = await state.get_data()
+    shooting_id = data.get("shooting_id")
+    async with Session() as s:
+        u = await get_user(s, c.from_user.id)
+        shooting = await s.get(Shooting, shooting_id, with_for_update=True)
+        booking = await s.get(Booking, shooting.booking_id) if shooting else None
+        if booking is None or booking.photographer_id != u.id or shooting.status != "UPLOADING":
+            await state.clear()
+            return await c.answer("Загрузка уже закрыта.", show_alert=True)
+        count = await s.scalar(
+            select(func.count(Photo.id)).where(Photo.shooting_id == shooting.id)
+        )
+        if not count:
+            return await c.answer("Сначала загрузите фотографии.", show_alert=True)
+        shooting.status = "READY_FOR_SALE"
+        booking.status = "READY_FOR_SALE"
+        await audit(
+            s, u, "photos_ready_for_sale", "shooting", shooting.id, f"photos={count}"
+        )
+        await s.commit()
+    await state.clear()
+    await c.answer()
+    await c.message.answer(
+        f"💰 Готово к продаже. Загружено фотографий: {count}."
+    )
 
 
 @r.message(F.text == "📊 Моя статистика")

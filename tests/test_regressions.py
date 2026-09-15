@@ -33,7 +33,7 @@ from app.db import Base, Session, engine, init_db
 from app.handlers import photographer as photographer_module
 from app.handlers.admin import E
 from app.handlers.manager import BookingFlow
-from app.handlers.photographer import ShiftFlow
+from app.handlers.photographer import PhotoUploadFlow, ShiftFlow
 from app.handlers.sales import S
 from app.main import create_dispatcher
 from app.models import (
@@ -44,6 +44,7 @@ from app.models import (
     Hotel,
     Package,
     PayrollEntry,
+    Photo,
     Sale,
     ShiftCheckIn,
     ShiftCheckOut,
@@ -298,7 +299,6 @@ def test_manager_and_photographer_screens_and_admin_sales_route():
     async def scenario():
         for tg_id, text in [
             (MANAGER, "📋 Мои записи"),
-            (MANAGER, "📸 Съёмки"),
             (MANAGER, "📊 Статистика"),
             (PHOTO_B, "📸 Мои съёмки"),
             (PHOTO_B, "📊 Моя статистика"),
@@ -398,20 +398,26 @@ def test_disabled_credited_employee_is_rechecked_at_save():
 
 def test_shooting_order_ownership_and_repeated_clicks():
     async def scenario():
-        await callback(PHOTO_A, "accept:1")
-        await callback(PHOTO_B, "done:1")
+        await callback(PHOTO_A, "photo:pickup:1")
+        await callback(PHOTO_B, "photo:ready:1")
         async with Session() as session:
             assert (await session.get(Shooting, 1)).status == "ASSIGNED"
-        await callback(PHOTO_B, "accept:1")
+        await callback(PHOTO_B, "photo:pickup:1")
         async with Session() as session:
             first_time = (await session.get(Shooting, 1)).accepted_at
-        await callback(PHOTO_B, "accept:1")
-        for action in ["arrive", "start", "done"]:
-            await callback(PHOTO_B, f"{action}:1")
+        await callback(PHOTO_B, "photo:pickup:1")
+        await callback(PHOTO_B, "photo:shot:1")
+        await callback(PHOTO_B, "photo:ready:1")
+        assert await state_for(PHOTO_B).get_state() == PhotoUploadFlow.uploading.state
+        await photo(PHOTO_B, "sale-ready-photo")
+        await callback(PHOTO_B, "photo:upload_done")
         async with Session() as session:
             shoot = await session.get(Shooting, 1)
-            assert shoot.status == "READY_FOR_MANAGER"
+            assert shoot.status == "READY_FOR_SALE"
             assert shoot.accepted_at == first_time
+            assert await session.scalar(
+                select(func.count(Photo.id)).where(Photo.shooting_id == shoot.id)
+            ) == 1
             assert (
                 await session.execute(select(func.count(AuditLog.id)))
             ).scalar_one() == 4
@@ -767,10 +773,54 @@ def test_new_booking_button_creates_complete_booking():
             assert booking.shoot_date == date(2026, 9, 20)
             assert booking.shoot_time == time(14, 30)
             assert booking.photographer_id == photographer.id
-            assert booking.status == "ASSIGNED"
+            assert booking.status == "PENDING_CONFIRMATION"
             assert await session.scalar(
                 select(func.count(Shooting.id)).where(Shooting.booking_id == booking.id)
             ) == 1
+
+    run(scenario())
+
+
+def test_manager_cards_have_colored_decisions_and_reminder():
+    async def scenario():
+        await message(MANAGER, "📋 Мои записи")
+        call = telegram.calls[-1]
+        assert "📞 Телефон:" in call.text
+        assert "📸 Фотограф:" in call.text
+        buttons = [button for row in call.reply_markup.inline_keyboard for button in row]
+        by_callback = {button.callback_data: button for button in buttons}
+        assert by_callback["booking:confirm:1"].style == "success"
+        assert by_callback["booking:reject:1"].style == "danger"
+        assert by_callback["booking:reschedule:1"].style == "primary"
+        assert "booking:remind:1" in by_callback
+
+        await callback(MANAGER, "booking:remind:1")
+        assert telegram.calls[-1].text.startswith("🔔 Напоминание гостю")
+        await callback(MANAGER, "booking:confirm:1")
+        async with Session() as session:
+            assert (await session.get(Booking, 1)).status == "CONFIRMED"
+            assert (await session.get(Shooting, 1)).status == "ASSIGNED"
+
+    run(scenario())
+
+
+def test_admin_sees_complete_booking_cards():
+    async def scenario():
+        await message(OWNER, "📋 Все записи")
+        assert telegram.calls[-2].text == "📋 Все записи: 1"
+        card = telegram.calls[-1].text
+        for field in [
+            "🏨 Отель:",
+            "🚪 Комната:",
+            "👤 Клиент:",
+            "📞 Телефон:",
+            "📅 Дата:",
+            "🕐 Время:",
+            "📦 Пакет:",
+            "📋 Менеджер:",
+            "📸 Фотограф:",
+        ]:
+            assert field in card
 
     run(scenario())
 

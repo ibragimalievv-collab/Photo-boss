@@ -21,6 +21,7 @@ from ..models import (
     User,
     UserRole,
 )
+from ..services.bookings import booking_card
 from ..services.core import audit, get_user, has, roles_of
 
 r = Router()
@@ -428,8 +429,18 @@ async def allbook(m):
     async with Session() as s:
         if not (await guard(m, s))[1]:
             return
-        n = (await s.execute(select(func.count(Booking.id)))).scalar() or 0
-        await m.answer(f"📋 Всего записей: {n}")
+        rows = (
+            await s.scalars(
+                select(Booking)
+                .order_by(Booking.shoot_date.desc(), Booking.shoot_time.desc())
+                .limit(100)
+            )
+        ).all()
+        if not rows:
+            return await m.answer("Записей нет.")
+        await m.answer(f"📋 Все записи: {len(rows)}")
+        for booking in rows:
+            await m.answer(await booking_card(s, booking))
 
 
 @r.message(F.text == "📸 Все съёмки")

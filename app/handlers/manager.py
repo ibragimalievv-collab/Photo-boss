@@ -9,6 +9,7 @@ from ..access import StaffFilter
 from ..db import Session
 from ..keyboards import inline, reply
 from ..models import Booking, Client, Hotel, Package, Sale, Shooting, User, UserRole
+from ..services.bookings import booking_card
 from ..services.core import audit, get_user, menu
 
 r = Router()
@@ -25,6 +26,8 @@ class BookingFlow(StatesGroup):
     shoot_time = State()
     package = State()
     photographer = State()
+    reschedule_date = State()
+    reschedule_time = State()
 
 
 @r.message(F.text == "➕ Новая запись")
@@ -174,11 +177,11 @@ async def booking_photographer(c: CallbackQuery, state, current_roles):
             shoot_time=time.fromisoformat(data["shoot_time"]),
             package_id=data["package_id"], manager_id=manager.id,
             photographer_id=photographer_id,
-            status="ASSIGNED" if photographer_id else "NEW",
+            status="PENDING_CONFIRMATION",
         )
         s.add(booking)
         await s.flush()
-        s.add(Shooting(booking_id=booking.id, status="ASSIGNED"))
+        s.add(Shooting(booking_id=booking.id, status="PENDING_CONFIRMATION"))
         await audit(s, manager, "booking_created", "booking", booking.id)
         await s.commit()
     await state.clear()
@@ -194,38 +197,159 @@ async def bookings(m):
     async with Session() as s:
         u = await get_user(s, m.from_user.id)
         rows = (
-            await s.execute(
-                select(Booking, Hotel, Client)
-                .join(Hotel, Hotel.id == Booking.hotel_id)
-                .join(Client, Client.id == Booking.client_id)
+            await s.scalars(
+                select(Booking)
                 .where(Booking.manager_id == u.id)
-                .order_by(Booking.shoot_date.desc())
-                .limit(30)
+                .order_by(Booking.shoot_date.desc(), Booking.shoot_time.desc())
+                .limit(50)
             )
         ).all()
-        await m.answer(
-            "\n".join(
-                f"#{b.id} {h.name} / {c.name} / {b.shoot_date} {b.shoot_time} / {b.status}"
-                for b, h, c in rows
+        if not rows:
+            return await m.answer("Записей нет.")
+        for booking in rows:
+            await m.answer(
+                await booking_card(s, booking),
+                reply_markup=inline(
+                    [
+                        [
+                            ("✅ Подтверждена", f"booking:confirm:{booking.id}", "success"),
+                            ("❌ Отказана", f"booking:reject:{booking.id}", "danger"),
+                        ],
+                        [("📅 Перенесена", f"booking:reschedule:{booking.id}", "primary")],
+                        [("🔔 Напомнить гостю", f"booking:remind:{booking.id}", "primary")],
+                    ]
+                ),
             )
-            or "Записей нет."
-        )
 
 
-@r.message(F.text == "📸 Съёмки")
-async def shootings(m):
+async def owned_booking(session, telegram_id, booking_id, *, lock=False):
+    manager = await get_user(session, telegram_id)
+    query = select(Booking).where(
+        Booking.id == booking_id, Booking.manager_id == manager.id
+    )
+    if lock:
+        query = query.with_for_update()
+    return (await session.scalars(query)).one_or_none(), manager
+
+
+def callback_booking_id(data):
+    try:
+        value = int(data.rsplit(":", 1)[1])
+        return value if 0 < value <= 2**31 - 1 else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+@r.callback_query(F.data.startswith(("booking:confirm:", "booking:reject:")))
+async def set_booking_decision(c: CallbackQuery):
+    booking_id = callback_booking_id(c.data)
+    if booking_id is None or c.message is None:
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    action = c.data.split(":", 2)[1]
     async with Session() as s:
-        u = await get_user(s, m.from_user.id)
-        rows = (
-            await s.execute(
-                select(Booking, Shooting)
-                .join(Shooting, Shooting.booking_id == Booking.id)
-                .where(Booking.manager_id == u.id)
-            )
-        ).all()
-        await m.answer(
-            "\n".join(f"#{b.id}: {sh.status}" for b, sh in rows) or "Съёмок нет."
+        booking, manager = await owned_booking(s, c.from_user.id, booking_id, lock=True)
+        if booking is None:
+            return await c.answer("Запись не найдена.", show_alert=True)
+        shooting = (
+            await s.scalars(select(Shooting).where(Shooting.booking_id == booking.id))
+        ).one_or_none()
+        if action == "confirm":
+            booking.status = "CONFIRMED"
+            if shooting:
+                shooting.status = "ASSIGNED"
+            audit_action = "booking_confirmed"
+            answer = "✅ Съёмка подтверждена."
+        else:
+            booking.status = "REJECTED"
+            if shooting:
+                shooting.status = "REJECTED"
+            audit_action = "booking_rejected"
+            answer = "❌ Съёмка отказана."
+        await audit(s, manager, audit_action, "booking", booking.id)
+        await s.commit()
+    await c.answer()
+    await c.message.answer(answer)
+
+
+@r.callback_query(F.data.startswith("booking:remind:"))
+async def remind_guest(c: CallbackQuery):
+    booking_id = callback_booking_id(c.data)
+    if booking_id is None or c.message is None:
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as s:
+        booking, manager = await owned_booking(s, c.from_user.id, booking_id)
+        if booking is None:
+            return await c.answer("Запись не найдена.", show_alert=True)
+        client = await s.get(Client, booking.client_id)
+        hotel = await s.get(Hotel, booking.hotel_id)
+        await audit(s, manager, "guest_reminder_prepared", "booking", booking.id)
+        await s.commit()
+    await c.answer()
+    await c.message.answer(
+        f"🔔 Напоминание гостю\n\n"
+        f"Телефон: {client.phone or 'не указан'}\n\n"
+        f"Здравствуйте, {client.name}! Напоминаем о фотосъёмке "
+        f"{booking.shoot_date:%d.%m.%Y} в {booking.shoot_time:%H:%M}, "
+        f"отель «{hotel.name}». Будем вас ждать!"
+    )
+
+
+@r.callback_query(F.data.startswith("booking:reschedule:"))
+async def start_reschedule(c: CallbackQuery, state):
+    booking_id = callback_booking_id(c.data)
+    if booking_id is None or c.message is None:
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as s:
+        booking, _manager = await owned_booking(s, c.from_user.id, booking_id)
+    if booking is None:
+        return await c.answer("Запись не найдена.", show_alert=True)
+    await state.set_state(BookingFlow.reschedule_date)
+    await state.set_data({"reschedule_booking_id": booking_id})
+    await c.answer()
+    await c.message.answer("Введите новую дату в формате ДД.ММ.ГГГГ:")
+
+
+@r.message(BookingFlow.reschedule_date)
+async def reschedule_date(m, state):
+    try:
+        day, month, year = map(int, m.text.strip().split("."))
+        value = date(year, month, day)
+    except (TypeError, ValueError):
+        return await m.answer("Неверная дата. Пример: 21.09.2026")
+    await state.update_data(reschedule_date=value.isoformat())
+    await state.set_state(BookingFlow.reschedule_time)
+    await m.answer("Введите новое время в формате ЧЧ:ММ:")
+
+
+@r.message(BookingFlow.reschedule_time)
+async def finish_reschedule(m, state, current_roles):
+    try:
+        new_time = time.fromisoformat(m.text.strip())
+    except ValueError:
+        return await m.answer("Неверное время. Пример: 16:30")
+    data = await state.get_data()
+    async with Session() as s:
+        booking, manager = await owned_booking(
+            s, m.from_user.id, data["reschedule_booking_id"], lock=True
         )
+        if booking is None:
+            await state.clear()
+            return await m.answer("Запись не найдена.")
+        booking.shoot_date = date.fromisoformat(data["reschedule_date"])
+        booking.shoot_time = new_time
+        booking.status = "RESCHEDULED"
+        shooting = (
+            await s.scalars(select(Shooting).where(Shooting.booking_id == booking.id))
+        ).one_or_none()
+        if shooting:
+            shooting.status = "ASSIGNED"
+        await audit(s, manager, "booking_rescheduled", "booking", booking.id)
+        await s.commit()
+    await state.clear()
+    await m.answer(
+        f"📅 Съёмка #{booking.id} перенесена на {booking.shoot_date:%d.%m.%Y} в {booking.shoot_time:%H:%M}.",
+        reply_markup=reply(menu(current_roles)),
+    )
 
 
 @r.message(F.text == "💰 Продажи")

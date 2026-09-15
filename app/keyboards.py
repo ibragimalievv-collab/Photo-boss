@@ -19,7 +19,15 @@ def reply(items):
 def inline(rows):
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t, callback_data=d) for t, d in r] for r in rows
+            [
+                InlineKeyboardButton(
+                    text=item[0],
+                    callback_data=item[1],
+                    style=item[2] if len(item) > 2 else None,
+                )
+                for item in row
+            ]
+            for row in rows
         ]
     )
 
