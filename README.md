@@ -1,6 +1,6 @@
 # Photo-boss — проект Telegram-бота для фотосервиса
 
-Python 3.12, aiogram 3.26, SQLAlchemy 2, PostgreSQL 16.
+Python 3.12, aiogram 3.31, SQLAlchemy 2, PostgreSQL 16.
 
 ## Состояние
 
@@ -34,12 +34,14 @@ Python 3.12, aiogram 3.26, SQLAlchemy 2, PostgreSQL 16.
 
 ```bash
 docker compose config --quiet
-docker compose up -d --build
+docker compose up -d --build --wait
 docker compose ps
 docker compose logs --tail=100 bot
 ```
 
-Проверьте `postgres: healthy`, работу контейнера `bot` и ответ на `/start`.
+Проверьте `postgres: healthy`, `bot: healthy`, отсутствие перезапусков и ответ на `/start`.
+Бот сначала ждёт PostgreSQL, создаёт/обновляет схему, проверяет соединение с Telegram,
+и только после этого отмечает контейнер здоровым. Логи Docker ограничены по размеру.
 Владелец определяется по `ADMIN_TELEGRAM_IDS`. Новый пользователь получает доступ только
 после назначения роли администратором. Назначать ADMIN и изменять OWNER/ADMIN может владелец.
 `/cancel` прерывает текущий ввод, `/start` обновляет меню, `/myid` показывает Telegram ID.
@@ -51,13 +53,12 @@ docker compose logs --tail=100 bot
 
 ## Если база уже существует
 
-`create_all()` не меняет типы существующих колонок. После резервной копии и остановки бота
-выполните `migrations/001_telegram_id_bigint.sql` для `users.tg_id`:
+При запуске бот безопасно и повторяемо меняет старый `users.tg_id INTEGER` на `BIGINT`.
+Перед первым запуском обновления всё равно рекомендуется сделать резервную копию:
 
 ```bash
 docker compose stop bot
 docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backup-before-patch.sql
-docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < migrations/001_telegram_id_bigint.sql
 docker compose up -d --build bot
 ```
 
@@ -101,5 +102,6 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q tests
 ```
 
-26 регрессионных проверок используют отдельную SQLite in-memory базу и имитацию Telegram API.
-Они не отправляют сообщения реальным людям и не проверяют сборку Docker или соединение с PostgreSQL.
+Регрессионные проверки используют отдельную SQLite in-memory базу и не отправляют сообщения
+реальным людям. GitHub Actions дополнительно собирает Docker-образ, запускает PostgreSQL 16
+и имитацию Telegram API, проверяет здоровье бота и требует нулевое число перезапусков.

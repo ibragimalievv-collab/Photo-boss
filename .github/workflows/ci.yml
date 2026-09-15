@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
+      ADMIN_TELEGRAM_IDS: "5000000001"
+      POSTGRES_PASSWORD: ci-only-password
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install and verify dependencies
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pip check
+          pip-audit -r requirements.txt
+
+      - name: Static and regression checks
+        run: |
+          python -m compileall -q app tests
+          ruff check app tests
+          pytest -q
+
+      - name: Build and start the complete Docker stack
+        run: |
+          cp .env.example .env
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build --wait --wait-timeout 120
+
+      - name: Verify PostgreSQL, bot health and restart count
+        run: |
+          compose="docker compose -f docker-compose.yml -f docker-compose.ci.yml"
+          $compose exec -T bot python -m app.smoke
+          sleep 15
+          bot_id="$($compose ps -q bot)"
+          test "$(docker inspect -f '{{.State.Status}}' "$bot_id")" = running
+          test "$(docker inspect -f '{{.State.Health.Status}}' "$bot_id")" = healthy
+          test "$(docker inspect -f '{{.RestartCount}}' "$bot_id")" = 0
+          $compose ps
+          $compose logs --tail=100 bot postgres
+
+      - name: Stop test stack
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v

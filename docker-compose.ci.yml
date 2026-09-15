@@ -1,0 +1,22 @@
+services:
+  telegram-mock:
+    build:
+      context: .
+      target: test
+    command: ["python", "tests/fake_telegram_api.py"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  bot:
+    environment:
+      TELEGRAM_API_BASE: http://telegram-mock:8080
+    depends_on:
+      telegram-mock:
+        condition: service_healthy
