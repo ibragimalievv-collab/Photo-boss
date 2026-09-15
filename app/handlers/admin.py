@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from ..access import StaffFilter
 from ..config import number
 from ..db import Session
+from ..keyboards import inline
 from ..models import (
     AuditLog,
     Booking,
@@ -21,6 +22,7 @@ from ..services.core import audit, get_user, has, roles_of
 
 r = Router()
 r.message.filter(StaffFilter("ADMIN"), F.text)
+r.callback_query.filter(StaffFilter("ADMIN"))
 
 
 class E(StatesGroup):
@@ -63,7 +65,10 @@ async def employees(m):
             )
         await m.answer(
             ("\n".join(out) or "Сотрудников нет.")
-            + "\n\nЧтобы добавить сотрудника, нажмите «➕ Добавить сотрудника»."
+            + "\n\nНажмите кнопку ниже, чтобы добавить сотрудника.",
+            reply_markup=inline(
+                [[("➕ Добавить сотрудника", "employee:add")]]
+            ),
         )
 
 
@@ -199,6 +204,14 @@ async def addemp(m, state):
     await state.clear()
     await state.set_state(E.tg)
     await m.answer("Telegram ID сотрудника (отмена: /cancel):")
+
+
+@r.callback_query(F.data == "employee:add")
+async def addemp_button(callback, state):
+    await state.clear()
+    await state.set_state(E.tg)
+    await callback.message.answer("Telegram ID сотрудника (отмена: /cancel):")
+    await callback.answer()
 
 
 @r.message(E.tg)

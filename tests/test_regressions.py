@@ -470,6 +470,16 @@ def test_owner_can_start_employee_creation_from_menu_button():
     run(scenario())
 
 
+def test_owner_can_press_employee_add_inline_button():
+    async def scenario():
+        await message(OWNER, "👥 Сотрудники")
+        await callback(OWNER, "employee:add")
+        assert await state_for(OWNER).get_state() == E.tg.state
+        assert telegram.calls[-2].text.startswith("Telegram ID сотрудника")
+
+    run(scenario())
+
+
 @pytest.mark.parametrize("tg_id", [OWNER, ADMIN, MANAGER, PHOTO_A])
 def test_training_is_available_to_every_staff_role(tg_id):
     async def scenario():
