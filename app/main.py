@@ -10,7 +10,7 @@ from aiogram.fsm.storage.memory import SimpleEventIsolation
 
 from .config import config
 from .db import engine, init_db, wait_for_database
-from .handlers import admin, common, manager, photographer, sales
+from .handlers import admin, common, manager, photographer, sales, training
 
 logger = logging.getLogger(__name__)
 READY_FILE = Path(os.getenv("HEALTHCHECK_FILE", "/tmp/photo-boss.ready"))
@@ -19,7 +19,9 @@ READY_FILE = Path(os.getenv("HEALTHCHECK_FILE", "/tmp/photo-boss.ready"))
 def create_dispatcher():
     dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
     # Admin filtering must precede the manager's identically named Sales button.
-    dispatcher.include_routers(common.r, admin.r, photographer.r, manager.r, sales.r)
+    dispatcher.include_routers(
+        common.r, admin.r, photographer.r, manager.r, sales.r, training.r
+    )
     return dispatcher
 
 

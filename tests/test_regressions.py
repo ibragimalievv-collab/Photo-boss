@@ -453,6 +453,19 @@ def test_ready_file_lifecycle(monkeypatch, tmp_path):
 def test_menu_merges_roles_without_duplicates():
     items = menu({"ADMIN", "MANAGER", "PHOTOGRAPHER"})
     assert len(items) == len(set(items))
+    assert "🎓 Обучение" in items
     assert "🧾 Продажа" in items
     assert "📋 Мои записи" in items
     assert "📸 Мои съёмки" in items
+
+
+@pytest.mark.parametrize("tg_id", [OWNER, ADMIN, MANAGER, PHOTO_A])
+def test_training_is_available_to_every_staff_role(tg_id):
+    async def scenario():
+        before = len(telegram.calls)
+        await message(tg_id, "🎓 Обучение")
+        assert len(telegram.calls) == before + 1
+        assert telegram.calls[-1].text.startswith("🎓 Обучение")
+        assert "5." in telegram.calls[-1].text
+
+    run(scenario())
