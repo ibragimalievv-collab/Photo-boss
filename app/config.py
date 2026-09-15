@@ -2,6 +2,7 @@ import math
 import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram.utils.token import TokenValidationError, validate_token
 from dotenv import load_dotenv
@@ -46,6 +47,7 @@ class Config:
     database_connect_attempts: int
     database_connect_delay: float
     telegram_api_base: str | None
+    training_timezone: str
 
     @classmethod
     def from_env(cls):
@@ -102,6 +104,10 @@ class Config:
                 maximum=60,
             ),
             telegram_api_base=telegram_api_base,
+            training_timezone=(
+                os.getenv("TRAINING_TIMEZONE", "Europe/Moscow").strip()
+                or "Europe/Moscow"
+            ),
         )
 
     def validate(self):
@@ -134,6 +140,12 @@ class Config:
                 raise ValueError(
                     "TELEGRAM_API_BASE: укажите безопасный HTTP(S)-адрес без логина и пароля"
                 )
+        try:
+            ZoneInfo(self.training_timezone)
+        except (ValueError, ZoneInfoNotFoundError):
+            raise ValueError(
+                "TRAINING_TIMEZONE: укажите часовой пояс в формате Europe/Moscow"
+            ) from None
 
 
 config = Config.from_env()

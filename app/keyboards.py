@@ -22,3 +22,17 @@ def inline(rows):
             [InlineKeyboardButton(text=t, callback_data=d) for t, d in r] for r in rows
         ]
     )
+
+
+def request_location():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(
+                    text="📍 Поделиться местоположением", request_location=True
+                )
+            ]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )

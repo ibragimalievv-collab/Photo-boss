@@ -3,8 +3,10 @@ No real token, Telegram request or production database is used.
 """
 
 import asyncio
+import hashlib
 import os
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from aiogram import Bot
@@ -12,7 +14,7 @@ from aiogram.client.session.base import BaseSession
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.methods import AnswerCallbackQuery, SendMessage, SendPhoto
-from aiogram.types import CallbackQuery, Chat, Message, Update
+from aiogram.types import CallbackQuery, Chat, Location, Message, PhotoSize, Update
 from aiogram.types import User as TelegramUser
 from sqlalchemy import BigInteger, func, select
 from sqlalchemy.dialects.postgresql import dialect
@@ -28,7 +30,9 @@ from app import db as db_module
 from app import main as main_module
 from app.config import Config
 from app.db import Base, Session, engine, init_db
+from app.handlers import photographer as photographer_module
 from app.handlers.admin import E
+from app.handlers.photographer import ShiftFlow
 from app.handlers.sales import S
 from app.main import create_dispatcher
 from app.models import (
@@ -38,12 +42,17 @@ from app.models import (
     Compensation,
     Hotel,
     Package,
+    PayrollEntry,
     Sale,
+    ShiftCheckIn,
     Shooting,
+    TrainingAssignment,
+    TrainingSubmission,
     User,
     UserRole,
 )
 from app.services.core import bootstrap, get_user, menu, roles_of
+from app.services.training import TRAINING_CATEGORIES, training_day
 
 OWNER, ADMIN, MANAGER, PHOTO_A, PHOTO_B, STRANGER = range(5000000001, 5000000007)
 
@@ -119,6 +128,39 @@ async def callback(tg_id, data):
         ),
     )
     return await dp.feed_update(bot, Update(update_id=update_id, callback_query=event))
+
+
+async def photo(tg_id, file_id):
+    global update_id
+    update_id += 1
+    event = Message(
+        message_id=update_id,
+        date=datetime.now(timezone.utc),
+        chat=Chat(id=tg_id, type="private"),
+        from_user=TelegramUser(id=tg_id, first_name="Test", is_bot=False),
+        photo=[
+            PhotoSize(
+                file_id=file_id,
+                file_unique_id=f"unique-{file_id}",
+                width=1200,
+                height=1600,
+            )
+        ],
+    )
+    return await dp.feed_update(bot, Update(update_id=update_id, message=event))
+
+
+async def location(tg_id, latitude=55.7558, longitude=37.6173):
+    global update_id
+    update_id += 1
+    event = Message(
+        message_id=update_id,
+        date=datetime.now(timezone.utc),
+        chat=Chat(id=tg_id, type="private"),
+        from_user=TelegramUser(id=tg_id, first_name="Test", is_bot=False),
+        location=Location(latitude=latitude, longitude=longitude),
+    )
+    return await dp.feed_update(bot, Update(update_id=update_id, message=event))
 
 
 @pytest.fixture(autouse=True)
@@ -480,6 +522,95 @@ def test_owner_can_press_employee_add_inline_button():
     run(scenario())
 
 
+def test_employee_list_has_management_buttons():
+    async def scenario():
+        await message(OWNER, "👥 Сотрудники")
+        markup = telegram.calls[-1].reply_markup
+        callbacks = {
+            button.callback_data for row in markup.inline_keyboard for button in row
+        }
+        assert "employee:add" in callbacks
+        assert any(value.startswith("employee:view:") for value in callbacks)
+
+    run(scenario())
+
+
+def test_owner_can_remove_one_role_without_firing_employee():
+    async def scenario():
+        async with Session() as session:
+            target = await get_user(session, PHOTO_A)
+            session.add(UserRole(user_id=target.id, role="MANAGER"))
+            await session.commit()
+            target_id = target.id
+        await callback(OWNER, f"employee:remove_role:{target_id}:MANAGER")
+        async with Session() as session:
+            target = await get_user(session, PHOTO_A)
+            assert target.active is True
+            assert await roles_of(session, target) == {"PHOTOGRAPHER"}
+
+    run(scenario())
+
+
+def test_owner_can_fire_and_restore_employee_but_owner_is_protected():
+    async def scenario():
+        async with Session() as session:
+            target_id = (await get_user(session, PHOTO_B)).id
+            owner_id = (await get_user(session, OWNER)).id
+        await callback(OWNER, f"employee:fire_confirm:{target_id}")
+        async with Session() as session:
+            assert (await get_user(session, PHOTO_B)).active is False
+            assert (
+                await session.scalar(
+                    select(func.count(AuditLog.id)).where(
+                        AuditLog.action == "employee_fired"
+                    )
+                )
+            ) == 1
+        await callback(OWNER, f"employee:restore:{target_id}")
+        async with Session() as session:
+            assert (await get_user(session, PHOTO_B)).active is True
+
+        await callback(ADMIN, f"employee:fire_confirm:{owner_id}")
+        async with Session() as session:
+            assert (await get_user(session, OWNER)).active is True
+
+    run(scenario())
+
+
+def test_removing_last_role_disables_access_and_readding_restores_it():
+    async def scenario():
+        async with Session() as session:
+            target_id = (await get_user(session, PHOTO_A)).id
+        await callback(OWNER, f"employee:remove_role:{target_id}:PHOTOGRAPHER")
+        async with Session() as session:
+            target = await session.get(User, target_id)
+            assert target.active is False
+            assert await stored_role_names(session, target_id) == set()
+
+        for value in [
+            "➕ Добавить сотрудника",
+            str(PHOTO_A),
+            "Photo A Restored",
+            "PHOTOGRAPHER",
+        ]:
+            await message(OWNER, value)
+        async with Session() as session:
+            target = await get_user(session, PHOTO_A)
+            assert target.active is True
+            assert await roles_of(session, target) == {"PHOTOGRAPHER"}
+
+    async def stored_role_names(session, user_id):
+        return set(
+            (
+                await session.scalars(
+                    select(UserRole.role).where(UserRole.user_id == user_id)
+                )
+            ).all()
+        )
+
+    run(scenario())
+
+
 @pytest.mark.parametrize("tg_id", [OWNER, ADMIN, MANAGER, PHOTO_A])
 def test_training_is_available_to_every_staff_role(tg_id):
     async def scenario():
@@ -487,7 +618,7 @@ def test_training_is_available_to_every_staff_role(tg_id):
         await message(tg_id, "🎓 Обучение")
         assert len(telegram.calls) == before + 1
         assert telegram.calls[-1].text.startswith("🎓 Обучение")
-        assert "эталонный кадр" in telegram.calls[-1].text
+        assert "5 разных поз" in telegram.calls[-1].text
 
     run(scenario())
 
@@ -496,8 +627,191 @@ def test_training_category_sends_a_real_reference_photo():
     async def scenario():
         await callback(OWNER, "training:family")
         photo_calls = [call for call in telegram.calls if isinstance(call, SendPhoto)]
-        assert len(photo_calls) == 1
-        assert photo_calls[0].photo.path.name == "family-lifestyle.jpg"
-        assert "Повторите этот кадр" in photo_calls[0].caption
+        assert len(photo_calls) == 5
+        assert [call.photo.path.name for call in photo_calls] == [
+            "01.jpg",
+            "02.jpg",
+            "03.jpg",
+            "04.jpg",
+            "05.jpg",
+        ]
+        assert [call.caption.rsplit(" ", 1)[-1] for call in photo_calls] == [
+            "1/5",
+            "2/5",
+            "3/5",
+            "4/5",
+            "5/5",
+        ]
+        async with Session() as session:
+            assignment = (await session.scalars(select(TrainingAssignment))).one()
+            assert assignment.category_slug == "family"
+            assert assignment.status == "ACTIVE"
+
+    run(scenario())
+
+
+def test_shift_requires_location_and_photo_and_charges_late_fine(monkeypatch):
+    fixed = datetime(2026, 9, 15, 9, 1, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    def fixed_shift_now(value=None):
+        if value is None:
+            return fixed
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(ZoneInfo("Europe/Moscow"))
+
+    monkeypatch.setattr(photographer_module, "shift_now", fixed_shift_now)
+
+    async def scenario():
+        await message(PHOTO_A, "🔄 Моя смена")
+        assert telegram.calls[-1].text.startswith("🔄 Моя смена")
+        await callback(PHOTO_A, "shift:begin")
+        assert await state_for(PHOTO_A).get_state() == ShiftFlow.location.state
+
+        await location(PHOTO_A)
+        assert await state_for(PHOTO_A).get_state() == ShiftFlow.photo.state
+        assert "полный рост" in telegram.calls[-1].text
+
+        await photo(PHOTO_A, "full-body-check-in")
+        assert await state_for(PHOTO_A).get_state() is None
+        assert "штраф 500" in telegram.calls[-1].text
+        async with Session() as session:
+            check_in = (await session.scalars(select(ShiftCheckIn))).one()
+            assert check_in.status == "STARTED"
+            assert check_in.full_body_file_id == "full-body-check-in"
+            assert check_in.latitude == pytest.approx(55.7558)
+            assert check_in.longitude == pytest.approx(37.6173)
+            assert check_in.late is True
+            assert check_in.fine_amount == 500
+            fine = (await session.scalars(select(PayrollEntry))).one()
+            assert fine.kind == "Штраф за опоздание"
+            assert fine.amount == -500
+
+        await message(PHOTO_A, "🔄 Моя смена")
+        assert "Смена начата в 09:01" in telegram.calls[-1].text
+
+    run(scenario())
+
+
+def test_shift_before_nine_has_no_fine(monkeypatch):
+    fixed = datetime(2026, 9, 15, 8, 59, tzinfo=ZoneInfo("Europe/Moscow"))
+    monkeypatch.setattr(photographer_module, "shift_now", lambda value=None: fixed)
+
+    async def scenario():
+        await callback(PHOTO_B, "shift:begin")
+        await location(PHOTO_B)
+        await photo(PHOTO_B, "on-time-full-body")
+        async with Session() as session:
+            check_in = (await session.scalars(select(ShiftCheckIn))).one()
+            assert check_in.late is False
+            assert check_in.fine_amount == 0
+            assert await session.scalar(select(func.count(PayrollEntry.id))) == 0
+        assert "вовремя" in telegram.calls[-1].text
+
+    run(scenario())
+
+
+def test_each_training_category_has_five_distinct_photos():
+    assert len(TRAINING_CATEGORIES) == 9
+    for category in TRAINING_CATEGORIES:
+        paths = category.image_paths
+        assert len(paths) == 5
+        assert all(path.is_file() for path in paths)
+        digests = {hashlib.sha256(path.read_bytes()).digest() for path in paths}
+        assert len(digests) == 5
+
+
+def test_training_is_locked_until_owner_reviews_and_rejected_pose_is_repeated():
+    async def scenario():
+        await callback(PHOTO_A, "training:woman")
+        await callback(PHOTO_A, "training:man")
+        async with Session() as session:
+            assert (
+                await session.scalar(select(func.count(TrainingAssignment.id)))
+            ) == 1
+
+        for index in range(1, 6):
+            await photo(PHOTO_A, f"training-upload-{index}")
+        async with Session() as session:
+            assignment = (await session.scalars(select(TrainingAssignment))).one()
+            assert assignment.status == "PENDING_REVIEW"
+            assert (
+                await session.scalar(select(func.count(TrainingSubmission.id)))
+            ) == 5
+
+        await callback(ADMIN, f"training_approve:{assignment.id}")
+        async with Session() as session:
+            assert (await session.get(TrainingAssignment, assignment.id)).status == (
+                "PENDING_REVIEW"
+            )
+
+        await callback(OWNER, f"training_review:{assignment.id}")
+        review_photos = [call for call in telegram.calls if isinstance(call, SendPhoto)]
+        assert len(review_photos) >= 16
+
+        await callback(OWNER, f"training_reject:{assignment.id}:3")
+        async with Session() as session:
+            current = await session.get(TrainingAssignment, assignment.id)
+            assert current.status == "ACTIVE"
+            indexes = set(
+                (
+                    await session.scalars(
+                        select(TrainingSubmission.pose_index).where(
+                            TrainingSubmission.assignment_id == assignment.id
+                        )
+                    )
+                ).all()
+            )
+            assert indexes == {1, 2, 4, 5}
+
+        await photo(PHOTO_A, "training-upload-3-redone")
+        async with Session() as session:
+            assert (await session.get(TrainingAssignment, assignment.id)).status == (
+                "PENDING_REVIEW"
+            )
+
+        await callback(OWNER, f"training_approve:{assignment.id}")
+        async with Session() as session:
+            approved = await session.get(TrainingAssignment, assignment.id)
+            assert approved.status == "COMPLETED"
+            assert approved.completed_at is not None
+
+        await callback(PHOTO_A, "training:man")
+        async with Session() as session:
+            assert (
+                await session.scalar(select(func.count(TrainingAssignment.id)))
+            ) == 1
+
+        async with Session() as session:
+            approved = await session.get(TrainingAssignment, assignment.id)
+            approved.assigned_date = training_day() - timedelta(days=1)
+            approved.completed_at = datetime.now(timezone.utc).replace(
+                tzinfo=None
+            ) - timedelta(days=1)
+            await session.commit()
+        await callback(PHOTO_A, "training:woman")
+        async with Session() as session:
+            assert (
+                await session.scalar(select(func.count(TrainingAssignment.id)))
+            ) == 1
+        await callback(PHOTO_A, "training:man")
+        async with Session() as session:
+            assignments = (
+                await session.scalars(
+                    select(TrainingAssignment).order_by(TrainingAssignment.id)
+                )
+            ).all()
+            assert [item.category_slug for item in assignments] == ["woman", "man"]
+
+        await callback(PHOTO_B, "training:woman")
+        async with Session() as session:
+            assert (
+                await session.scalar(
+                    select(func.count(TrainingAssignment.id)).where(
+                        TrainingAssignment.user_id
+                        == (await get_user(session, PHOTO_B)).id
+                    )
+                )
+            ) == 1
 
     run(scenario())

@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime, time
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -166,6 +167,31 @@ class Shift(Base):
     status: Mapped[str] = mapped_column(String(20), default="PLANNED")
 
 
+class ShiftCheckIn(Base):
+    __tablename__ = "shift_check_ins"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    shift_date: Mapped[date] = mapped_column(Date, index=True)
+    status: Mapped[str] = mapped_column(
+        String(30), default="AWAITING_LOCATION", index=True
+    )
+    initiated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    location_received_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    full_body_file_id: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    late: Mapped[bool] = mapped_column(Boolean, default=False)
+    fine_amount: Mapped[float] = mapped_column(Float, default=0)
+    __table_args__ = (
+        UniqueConstraint("user_id", "shift_date", name="uq_shift_check_in_user_day"),
+    )
+
+
 class SalesPlan(Base):
     __tablename__ = "sales_plans"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -199,3 +225,44 @@ class AuditLog(Base):
     entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     details: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class TrainingAssignment(Base):
+    __tablename__ = "training_assignments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    assigned_date: Mapped[date] = mapped_column(Date, index=True)
+    category_slug: Mapped[str] = mapped_column(String(50))
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE", index=True)
+    assigned_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    submissions = relationship(
+        "TrainingSubmission",
+        back_populates="assignment",
+        cascade="all, delete-orphan",
+        order_by="TrainingSubmission.pose_index",
+    )
+    __table_args__ = (
+        UniqueConstraint("user_id", "assigned_date", name="uq_training_user_day"),
+    )
+
+
+class TrainingSubmission(Base):
+    __tablename__ = "training_submissions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    assignment_id: Mapped[int] = mapped_column(
+        ForeignKey("training_assignments.id", ondelete="CASCADE"), index=True
+    )
+    pose_index: Mapped[int] = mapped_column(Integer)
+    reference_filename: Mapped[str] = mapped_column(String(200))
+    submitted_file_id: Mapped[str] = mapped_column(String(300))
+    submitted_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    assignment = relationship("TrainingAssignment", back_populates="submissions")
+    __table_args__ = (
+        UniqueConstraint(
+            "assignment_id", "pose_index", name="uq_training_assignment_pose"
+        ),
+        CheckConstraint("pose_index BETWEEN 1 AND 5", name="ck_training_pose_index"),
+    )

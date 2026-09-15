@@ -1,4 +1,7 @@
+import logging
+
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import func, select
 
@@ -23,6 +26,7 @@ from ..services.core import audit, get_user, has, roles_of
 r = Router()
 r.message.filter(StaffFilter("ADMIN"), F.text)
 r.callback_query.filter(StaffFilter("ADMIN"))
+logger = logging.getLogger(__name__)
 
 
 class E(StatesGroup):
@@ -40,10 +44,119 @@ class P(StatesGroup):
     price = State()
 
 
+ROLE_NAMES = {
+    "OWNER": "Владелец",
+    "ADMIN": "Администратор",
+    "MANAGER": "Менеджер",
+    "PHOTOGRAPHER": "Фотограф",
+}
+
+
 async def guard(m, s):
     u = await get_user(s, m.from_user.id)
     rs = await roles_of(s, u)
     return u, has(rs, "ADMIN")
+
+
+async def stored_roles(session, user_id):
+    return set(
+        (
+            await session.scalars(
+                select(UserRole.role).where(UserRole.user_id == user_id)
+            )
+        ).all()
+    )
+
+
+def employee_card(user, roles):
+    role_text = ", ".join(ROLE_NAMES.get(role, role) for role in sorted(roles))
+    return (
+        f"👤 {user.name}\nTelegram ID: {user.tg_id}\n"
+        f"Статус: {'работает ✅' if user.active else 'уволен ⛔'}\n"
+        f"Роли: {role_text or 'нет ролей'}"
+    )
+
+
+def employee_actions(user, roles, actor_id, actor_roles):
+    rows = []
+    if user.id != actor_id:
+        for role in sorted(roles):
+            if role == "OWNER" or (role == "ADMIN" and "OWNER" not in actor_roles):
+                continue
+            rows.append(
+                [
+                    (
+                        f"➖ Убрать роль: {ROLE_NAMES.get(role, role)}",
+                        f"employee:role_remove:{user.id}:{role}",
+                    )
+                ]
+            )
+        protected = "OWNER" in roles or (
+            "ADMIN" in roles and "OWNER" not in actor_roles
+        )
+        if not protected:
+            if user.active:
+                rows.append([("⛔ Уволить", f"employee:fire:{user.id}")])
+            elif roles:
+                rows.append([("♻️ Восстановить", f"employee:restore:{user.id}")])
+    rows.append([("⬅️ К списку", "employee:list")])
+    return inline(rows)
+
+
+async def send_employee_card(message, user_id, actor_id, actor_roles):
+    async with Session() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            return await message.answer("Сотрудник не найден.")
+        roles = await stored_roles(session, user.id)
+    await message.answer(
+        employee_card(user, roles),
+        reply_markup=employee_actions(user, roles, actor_id, actor_roles),
+    )
+
+
+async def send_employee_list(message):
+    async with Session() as session:
+        users = (
+            await session.scalars(
+                select(User)
+                .where(User.roles.any())
+                .order_by(User.active.desc(), User.name, User.id)
+                .limit(50)
+            )
+        ).all()
+    buttons = [
+        [
+            (
+                f"{'✅' if user.active else '⛔'} {user.name[:32]} (#{user.id})",
+                f"employee:view:{user.id}",
+            )
+        ]
+        for user in users
+    ]
+    buttons.append([("➕ Добавить сотрудника", "employee:add")])
+    await message.answer(
+        f"👥 Сотрудники: {len(users)}\n\n"
+        "Выберите сотрудника, чтобы изменить роли, уволить или восстановить.",
+        reply_markup=inline(buttons),
+    )
+
+
+def employee_id(data, prefix):
+    try:
+        value = int(data.removeprefix(prefix))
+        if not 0 < value <= 2**31 - 1:
+            raise ValueError
+        return value
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+async def notify_employee(bot, tg_id, text):
+    try:
+        await bot.send_message(tg_id, text)
+    except TelegramAPIError as exc:
+        logger.warning("Could not notify employee %s: %s", tg_id, type(exc).__name__)
 
 
 @r.message(F.text == "👥 Сотрудники")
@@ -52,24 +165,236 @@ async def employees(m):
         _user, ok = await guard(m, s)
         if not ok:
             return
-        rows = (
-            (await s.execute(select(User).order_by(User.id.desc()).limit(50)))
-            .scalars()
-            .all()
+    await send_employee_list(m)
+
+
+@r.callback_query(F.data == "employee:list")
+async def employees_button(callback):
+    if callback.message is None:
+        return await callback.answer("Некорректная кнопка.", show_alert=True)
+    await callback.answer()
+    await send_employee_list(callback.message)
+
+
+@r.callback_query(F.data.startswith("employee:view:"))
+async def employee_view(callback, current_user, current_roles):
+    user_id = employee_id(callback.data, "employee:view:")
+    if user_id is None or callback.message is None:
+        return await callback.answer("Некорректная кнопка.", show_alert=True)
+    await callback.answer()
+    await send_employee_card(callback.message, user_id, current_user.id, current_roles)
+
+
+@r.callback_query(F.data.startswith("employee:fire:"))
+async def employee_fire(callback, current_user, current_roles):
+    user_id = employee_id(callback.data, "employee:fire:")
+    if user_id is None or callback.message is None:
+        return await callback.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as session:
+        target = await session.get(User, user_id)
+        roles = await stored_roles(session, user_id) if target else set()
+    if target is None:
+        return await callback.answer("Сотрудник не найден.", show_alert=True)
+    if target.id == current_user.id or "OWNER" in roles:
+        return await callback.answer(
+            "Эту учётную запись увольнять нельзя.", show_alert=True
         )
-        out = []
-        for x in rows:
-            rs = await roles_of(s, x)
-            out.append(
-                f"#{x.id} {x.name} tg:{x.tg_id} [{', '.join(rs)}] {'✅' if x.active else '⛔'}"
+    if "ADMIN" in roles and "OWNER" not in current_roles:
+        return await callback.answer(
+            "Уволить администратора может только владелец.", show_alert=True
+        )
+    await callback.answer()
+    await callback.message.answer(
+        f"Подтвердить увольнение сотрудника «{target.name}»? "
+        "Доступ к боту будет отключён, история сохранится.",
+        reply_markup=inline(
+            [
+                [("⛔ Да, уволить", f"employee:fire_confirm:{target.id}")],
+                [("Отмена", f"employee:view:{target.id}")],
+            ]
+        ),
+    )
+
+
+@r.callback_query(F.data.startswith("employee:fire_confirm:"))
+async def employee_fire_confirm(callback, current_user, current_roles):
+    user_id = employee_id(callback.data, "employee:fire_confirm:")
+    if user_id is None or callback.message is None:
+        return await callback.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as session:
+        target = await session.get(User, user_id, with_for_update=True)
+        roles = await stored_roles(session, user_id) if target else set()
+        if target is None:
+            return await callback.answer("Сотрудник не найден.", show_alert=True)
+        if target.id == current_user.id or "OWNER" in roles:
+            return await callback.answer(
+                "Эту учётную запись увольнять нельзя.", show_alert=True
             )
-        await m.answer(
-            ("\n".join(out) or "Сотрудников нет.")
-            + "\n\nНажмите кнопку ниже, чтобы добавить сотрудника.",
-            reply_markup=inline(
-                [[("➕ Добавить сотрудника", "employee:add")]]
-            ),
+        if "ADMIN" in roles and "OWNER" not in current_roles:
+            return await callback.answer(
+                "Уволить администратора может только владелец.", show_alert=True
+            )
+        if not target.active:
+            return await callback.answer("Сотрудник уже уволен.", show_alert=True)
+        target.active = False
+        actor = await get_user(session, callback.from_user.id)
+        await audit(session, actor, "employee_fired", "user", target.id)
+        await session.commit()
+        target_tg_id = target.tg_id
+        target_name = target.name
+    await callback.answer("Сотрудник уволен.")
+    await callback.message.answer(
+        f"⛔ {target_name} уволен. Доступ отключён, история сохранена.",
+        reply_markup=inline([[("⬅️ К списку", "employee:list")]]),
+    )
+    await notify_employee(
+        callback.bot, target_tg_id, "⛔ Ваш доступ к рабочему боту отключён."
+    )
+
+
+@r.callback_query(F.data.startswith("employee:restore:"))
+async def employee_restore(callback, current_roles):
+    user_id = employee_id(callback.data, "employee:restore:")
+    if user_id is None or callback.message is None:
+        return await callback.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as session:
+        target = await session.get(User, user_id, with_for_update=True)
+        roles = await stored_roles(session, user_id) if target else set()
+        if target is None or not roles:
+            return await callback.answer(
+                "Сотрудник или его роли не найдены.", show_alert=True
+            )
+        if "OWNER" in roles or ("ADMIN" in roles and "OWNER" not in current_roles):
+            return await callback.answer(
+                "Восстановить администратора может только владелец.", show_alert=True
+            )
+        if target.active:
+            return await callback.answer("Сотрудник уже работает.", show_alert=True)
+        target.active = True
+        actor = await get_user(session, callback.from_user.id)
+        await audit(session, actor, "employee_restored", "user", target.id)
+        await session.commit()
+        target_tg_id = target.tg_id
+        target_name = target.name
+    await callback.answer("Сотрудник восстановлен.")
+    await callback.message.answer(
+        f"♻️ {target_name} восстановлен. Доступ включён.",
+        reply_markup=inline([[("⬅️ К списку", "employee:list")]]),
+    )
+    await notify_employee(
+        callback.bot,
+        target_tg_id,
+        "♻️ Ваш доступ к рабочему боту восстановлен. Нажмите /start.",
+    )
+
+
+@r.callback_query(F.data.startswith("employee:role_remove:"))
+async def employee_remove_role_prompt(callback, current_user, current_roles):
+    try:
+        _, _, raw_user_id, role = callback.data.split(":", 3)
+        user_id = int(raw_user_id)
+        if not 0 < user_id <= 2**31 - 1 or role not in ROLE_NAMES:
+            raise ValueError
+    except (AttributeError, TypeError, ValueError):
+        return await callback.answer("Некорректная кнопка.", show_alert=True)
+    if callback.message is None:
+        return await callback.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as session:
+        target = await session.get(User, user_id)
+        roles = await stored_roles(session, user_id) if target else set()
+    if target is None or role not in roles:
+        return await callback.answer("Роль уже удалена.", show_alert=True)
+    if user_id == current_user.id or "OWNER" in roles:
+        return await callback.answer(
+            "Роли этой учётной записи защищены.", show_alert=True
         )
+    if role == "ADMIN" and "OWNER" not in current_roles:
+        return await callback.answer(
+            "Убрать администратора может только владелец.", show_alert=True
+        )
+    await callback.answer()
+    await callback.message.answer(
+        f"Убрать у сотрудника «{target.name}» роль «{ROLE_NAMES[role]}»?",
+        reply_markup=inline(
+            [
+                [
+                    (
+                        "➖ Да, убрать роль",
+                        f"employee:remove_role:{target.id}:{role}",
+                    )
+                ],
+                [("Отмена", f"employee:view:{target.id}")],
+            ]
+        ),
+    )
+
+
+@r.callback_query(F.data.startswith("employee:remove_role:"))
+async def employee_remove_role(callback, current_user, current_roles):
+    try:
+        _, _, raw_user_id, role = callback.data.split(":", 3)
+        user_id = int(raw_user_id)
+        if not 0 < user_id <= 2**31 - 1 or role not in ROLE_NAMES:
+            raise ValueError
+    except (AttributeError, TypeError, ValueError):
+        return await callback.answer("Некорректная кнопка.", show_alert=True)
+    if callback.message is None:
+        return await callback.answer("Некорректная кнопка.", show_alert=True)
+    if user_id == current_user.id:
+        return await callback.answer(
+            "Нельзя убрать роль у собственной учётной записи.", show_alert=True
+        )
+    if role == "OWNER":
+        return await callback.answer(
+            "Роль владельца защищена от удаления.", show_alert=True
+        )
+    if role == "ADMIN" and "OWNER" not in current_roles:
+        return await callback.answer(
+            "Убрать администратора может только владелец.", show_alert=True
+        )
+    async with Session() as session:
+        target = await session.get(User, user_id, with_for_update=True)
+        target_roles = await stored_roles(session, user_id) if target else set()
+        if target is None or role not in target_roles:
+            return await callback.answer("Роль уже удалена.", show_alert=True)
+        if "OWNER" in target_roles:
+            return await callback.answer(
+                "Роли владельца защищены от изменения.", show_alert=True
+            )
+        user_role = (
+            await session.scalars(
+                select(UserRole).where(
+                    UserRole.user_id == target.id, UserRole.role == role
+                )
+            )
+        ).one()
+        await session.delete(user_role)
+        remaining = target_roles - {role}
+        if not remaining:
+            target.active = False
+        actor = await get_user(session, callback.from_user.id)
+        await audit(
+            session,
+            actor,
+            "employee_role_removed",
+            "user",
+            target.id,
+            role,
+        )
+        await session.commit()
+        target_tg_id = target.tg_id
+        target_name = target.name
+    await callback.answer("Роль удалена.")
+    await callback.message.answer(
+        f"➖ У сотрудника {target_name} удалена роль «{ROLE_NAMES[role]}»."
+        + (" Доступ отключён: ролей не осталось." if not remaining else ""),
+        reply_markup=inline([[("⬅️ К списку", "employee:list")]]),
+    )
+    await notify_employee(
+        callback.bot,
+        target_tg_id,
+        f"➖ У вас удалена роль «{ROLE_NAMES[role]}». Нажмите /start, чтобы обновить меню.",
+    )
 
 
 @r.message(F.text == "🏨 Отели")
@@ -208,6 +533,8 @@ async def addemp(m, state):
 
 @r.callback_query(F.data == "employee:add")
 async def addemp_button(callback, state):
+    if callback.message is None:
+        return await callback.answer("Некорректная кнопка.", show_alert=True)
     await state.clear()
     await state.set_state(E.tg)
     await callback.message.answer("Telegram ID сотрудника (отмена: /cancel):")
@@ -268,6 +595,7 @@ async def eroles(m, state, current_roles):
         user.name = data["name"]
         for role in requested - existing:
             session.add(UserRole(user_id=user.id, role=role))
+        user.active = True
         await audit(
             session,
             actor,
