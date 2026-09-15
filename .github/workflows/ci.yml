@@ -38,7 +38,7 @@ jobs:
         run: |
           python -m compileall -q app tests
           ruff check app tests
-          pytest -q
+          python -m pytest -q
 
       - name: Build and start the complete Docker stack
         run: |
@@ -60,4 +60,7 @@ jobs:
 
       - name: Stop test stack
         if: always()
-        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v
+        run: |
+          if [ -f .env ]; then
+            docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v
+          fi
