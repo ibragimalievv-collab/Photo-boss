@@ -14,8 +14,15 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
   bot:
-    build: .
+    build:
+      context: .
+      target: runtime
     restart: unless-stopped
     init: true
     env_file: .env
@@ -31,5 +38,24 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /tmp/photo-boss.ready"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 volumes:
   hotel_photo_pg:
