@@ -61,7 +61,10 @@ async def employees(m):
             out.append(
                 f"#{x.id} {x.name} tg:{x.tg_id} [{', '.join(rs)}] {'✅' if x.active else '⛔'}"
             )
-        await m.answer("\n".join(out) or "Сотрудников нет.\n\nДобавить: /add_employee")
+        await m.answer(
+            ("\n".join(out) or "Сотрудников нет.")
+            + "\n\nЧтобы добавить сотрудника, нажмите «➕ Добавить сотрудника»."
+        )
 
 
 @r.message(F.text == "🏨 Отели")
@@ -191,7 +194,7 @@ async def auditlog(m):
         )
 
 
-@r.message(F.text == "/add_employee")
+@r.message(F.text.in_({"/add_employee", "➕ Добавить сотрудника"}))
 async def addemp(m, state):
     await state.clear()
     await state.set_state(E.tg)

@@ -458,6 +458,16 @@ def test_menu_merges_roles_without_duplicates():
     assert "🧾 Продажа" in items
     assert "📋 Мои записи" in items
     assert "📸 Мои съёмки" in items
+    assert "➕ Добавить сотрудника" in items
+
+
+def test_owner_can_start_employee_creation_from_menu_button():
+    async def scenario():
+        await message(OWNER, "➕ Добавить сотрудника")
+        assert await state_for(OWNER).get_state() == E.tg.state
+        assert telegram.calls[-1].text.startswith("Telegram ID сотрудника")
+
+    run(scenario())
 
 
 @pytest.mark.parametrize("tg_id", [OWNER, ADMIN, MANAGER, PHOTO_A])
