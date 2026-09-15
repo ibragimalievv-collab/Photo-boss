@@ -192,6 +192,29 @@ class ShiftCheckIn(Base):
     )
 
 
+class ShiftCheckOut(Base):
+    __tablename__ = "shift_check_outs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    shift_date: Mapped[date] = mapped_column(Date, index=True)
+    status: Mapped[str] = mapped_column(
+        String(30), default="AWAITING_LOCATION", index=True
+    )
+    initiated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    location_received_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    workplace_file_id: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (
+        UniqueConstraint("user_id", "shift_date", name="uq_shift_check_out_user_day"),
+    )
+
+
 class SalesPlan(Base):
     __tablename__ = "sales_plans"
     id: Mapped[int] = mapped_column(primary_key=True)

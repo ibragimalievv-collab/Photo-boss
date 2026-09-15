@@ -32,6 +32,7 @@ from app.config import Config
 from app.db import Base, Session, engine, init_db
 from app.handlers import photographer as photographer_module
 from app.handlers.admin import E
+from app.handlers.manager import BookingFlow
 from app.handlers.photographer import ShiftFlow
 from app.handlers.sales import S
 from app.main import create_dispatcher
@@ -45,6 +46,7 @@ from app.models import (
     PayrollEntry,
     Sale,
     ShiftCheckIn,
+    ShiftCheckOut,
     Shooting,
     TrainingAssignment,
     TrainingSubmission,
@@ -707,6 +709,68 @@ def test_shift_before_nine_has_no_fine(monkeypatch):
             assert check_in.fine_amount == 0
             assert await session.scalar(select(func.count(PayrollEntry.id))) == 0
         assert "вовремя" in telegram.calls[-1].text
+
+    run(scenario())
+
+
+def test_shift_end_requires_location_and_workplace_photo():
+    async def scenario():
+        await callback(PHOTO_A, "shift:begin")
+        await location(PHOTO_A)
+        await photo(PHOTO_A, "start-full-body")
+
+        await message(PHOTO_A, "🔄 Моя смена")
+        markup = telegram.calls[-1].reply_markup
+        assert markup.inline_keyboard[0][0].callback_data == "shift:end"
+        await callback(PHOTO_A, "shift:end")
+        assert await state_for(PHOTO_A).get_state() == ShiftFlow.end_location.state
+        await location(PHOTO_A, latitude=55.7, longitude=37.5)
+        assert await state_for(PHOTO_A).get_state() == ShiftFlow.workplace_photo.state
+        await photo(PHOTO_A, "workplace-photo")
+        assert await state_for(PHOTO_A).get_state() is None
+
+        async with Session() as session:
+            check_out = (await session.scalars(select(ShiftCheckOut))).one()
+            assert check_out.status == "FINISHED"
+            assert check_out.latitude == pytest.approx(55.7)
+            assert check_out.longitude == pytest.approx(37.5)
+            assert check_out.workplace_file_id == "workplace-photo"
+            assert check_out.ended_at is not None
+
+    run(scenario())
+
+
+def test_new_booking_button_creates_complete_booking():
+    async def scenario():
+        async with Session() as session:
+            hotel = (await session.scalars(select(Hotel))).first()
+            package = (await session.scalars(select(Package))).first()
+            photographer = await get_user(session, PHOTO_A)
+            before = await session.scalar(select(func.count(Booking.id)))
+
+        await message(MANAGER, "➕ Новая запись")
+        assert await state_for(MANAGER).get_state() == BookingFlow.hotel.state
+        await callback(MANAGER, f"booking:hotel:{hotel.id}")
+        for text in ["Новый клиент", "+79990000000", "404", "20.09.2026", "14:30"]:
+            await message(MANAGER, text)
+        assert await state_for(MANAGER).get_state() == BookingFlow.package.state
+        await callback(MANAGER, f"booking:package:{package.id}")
+        await callback(MANAGER, f"booking:photographer:{photographer.id}")
+        assert await state_for(MANAGER).get_state() is None
+
+        async with Session() as session:
+            assert await session.scalar(select(func.count(Booking.id))) == before + 1
+            booking = (
+                await session.scalars(select(Booking).order_by(Booking.id.desc()))
+            ).first()
+            assert booking.room == "404"
+            assert booking.shoot_date == date(2026, 9, 20)
+            assert booking.shoot_time == time(14, 30)
+            assert booking.photographer_id == photographer.id
+            assert booking.status == "ASSIGNED"
+            assert await session.scalar(
+                select(func.count(Shooting.id)).where(Shooting.booking_id == booking.id)
+            ) == 1
 
     run(scenario())
 

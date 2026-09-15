@@ -16,6 +16,7 @@ from ..models import (
     Photo,
     Sale,
     ShiftCheckIn,
+    ShiftCheckOut,
     Shooting,
 )
 from ..services.core import ROLES, audit, get_user, has, menu, roles_of
@@ -29,12 +30,24 @@ r.callback_query.filter(StaffFilter("PHOTOGRAPHER"))
 class ShiftFlow(StatesGroup):
     location = State()
     photo = State()
+    end_location = State()
+    workplace_photo = State()
 
 
 async def today_check_in(session, user_id, *, lock=False):
     query = select(ShiftCheckIn).where(
         ShiftCheckIn.user_id == user_id,
         ShiftCheckIn.shift_date == shift_now().date(),
+    )
+    if lock:
+        query = query.with_for_update()
+    return (await session.scalars(query)).one_or_none()
+
+
+async def today_check_out(session, user_id, *, lock=False):
+    query = select(ShiftCheckOut).where(
+        ShiftCheckOut.user_id == user_id,
+        ShiftCheckOut.shift_date == shift_now().date(),
     )
     if lock:
         query = query.with_for_update()
@@ -65,6 +78,7 @@ async def my_shift(m, state, current_roles):
     async with Session() as s:
         u = await get_user(s, m.from_user.id)
         check_in = await today_check_in(s, u.id)
+        check_out = await today_check_out(s, u.id)
     if check_in is None:
         await state.clear()
         return await m.answer(
@@ -78,7 +92,20 @@ async def my_shift(m, state, current_roles):
         result = f"✅ Смена начата в {started:%H:%M}. Геолокация и фото сохранены."
         if check_in.late:
             result += f"\n⚠️ Опоздание: штраф {check_in.fine_amount:.0f} ₽."
-        return await m.answer(result, reply_markup=reply(menu(current_roles)))
+        if check_out and check_out.status == "FINISHED":
+            ended = shift_now(check_out.ended_at)
+            return await m.answer(
+                result + f"\n🏁 Смена завершена в {ended:%H:%M}.",
+                reply_markup=reply(menu(current_roles)),
+            )
+        if check_out and check_out.status == "AWAITING_PHOTO":
+            return await ask_for_workplace_photo(m, state)
+        if check_out:
+            return await ask_for_end_location(m, state)
+        return await m.answer(
+            result,
+            reply_markup=inline([[('🏁 Закончить смену', 'shift:end')]]),
+        )
     if check_in.status == "AWAITING_PHOTO":
         return await ask_for_full_body_photo(m, state)
     return await ask_for_location(m, state)
@@ -195,6 +222,109 @@ async def require_shift_photo(m):
     await m.answer(
         "Нужна фотография в полный рост. Откройте камеру через значок камеры/скрепки "
         "и отправьте снимок сюда.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+async def ask_for_end_location(message, state):
+    await state.set_state(ShiftFlow.end_location)
+    await message.answer(
+        "📍 Для завершения смены отправьте текущее местоположение кнопкой ниже.",
+        reply_markup=request_location(),
+    )
+
+
+async def ask_for_workplace_photo(message, state):
+    await state.set_state(ShiftFlow.workplace_photo)
+    await message.answer(
+        "📷 Сфотографируйте рабочее место перед уходом и отправьте фотографию сюда.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+@r.callback_query(F.data == "shift:end")
+async def end_shift(c: CallbackQuery, state, current_roles):
+    if c.message is None:
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as s:
+        u = await get_user(s, c.from_user.id)
+        check_in = await today_check_in(s, u.id)
+        if check_in is None or check_in.status != "STARTED":
+            return await c.answer("Сначала начните смену.", show_alert=True)
+        check_out = await today_check_out(s, u.id, lock=True)
+        if check_out is None:
+            check_out = ShiftCheckOut(user_id=u.id, shift_date=shift_now().date())
+            s.add(check_out)
+            await s.flush()
+            await audit(s, u, "shift_check_out_started", "shift_check_out", check_out.id)
+            await s.commit()
+    await c.answer()
+    if check_out.status == "FINISHED":
+        await state.clear()
+        return await c.message.answer("✅ Сегодняшняя смена уже завершена.")
+    if check_out.status == "AWAITING_PHOTO":
+        return await ask_for_workplace_photo(c.message, state)
+    await ask_for_end_location(c.message, state)
+
+
+@r.message(ShiftFlow.end_location, F.location)
+async def save_end_location(m, state):
+    now = datetime.now(UTC).replace(tzinfo=None)
+    async with Session() as s:
+        u = await get_user(s, m.from_user.id)
+        check_out = await today_check_out(s, u.id, lock=True)
+        if check_out is None:
+            await state.clear()
+            return await m.answer("Начните завершение заново через «🔄 Моя смена».")
+        check_out.latitude = m.location.latitude
+        check_out.longitude = m.location.longitude
+        check_out.location_received_at = now
+        check_out.status = "AWAITING_PHOTO"
+        await audit(s, u, "shift_end_location_received", "shift_check_out", check_out.id)
+        await s.commit()
+    await m.answer("✅ Геолокация сохранена.", reply_markup=ReplyKeyboardRemove())
+    await ask_for_workplace_photo(m, state)
+
+
+@r.message(ShiftFlow.end_location)
+async def require_end_location(m):
+    await m.answer(
+        "Нужно отправить геолокацию кнопкой «📍 Поделиться местоположением».",
+        reply_markup=request_location(),
+    )
+
+
+@r.message(ShiftFlow.workplace_photo, F.photo)
+async def save_workplace_photo(m, state, current_roles):
+    now_local = shift_now()
+    now_utc = now_local.astimezone(UTC).replace(tzinfo=None)
+    async with Session() as s:
+        u = await get_user(s, m.from_user.id)
+        check_out = await today_check_out(s, u.id, lock=True)
+        if check_out is None:
+            await state.clear()
+            return await m.answer("Начните завершение заново через «🔄 Моя смена».")
+        if check_out.status == "FINISHED":
+            await state.clear()
+            return await m.answer("✅ Сегодняшняя смена уже завершена.")
+        if check_out.status != "AWAITING_PHOTO" or check_out.latitude is None:
+            return await ask_for_end_location(m, state)
+        check_out.workplace_file_id = m.photo[-1].file_id
+        check_out.ended_at = now_utc
+        check_out.status = "FINISHED"
+        await audit(s, u, "shift_finished", "shift_check_out", check_out.id)
+        await s.commit()
+    await state.clear()
+    await m.answer(
+        f"🏁 Смена завершена в {now_local:%H:%M}. Геолокация и фото рабочего места сохранены.",
+        reply_markup=reply(menu(current_roles)),
+    )
+
+
+@r.message(ShiftFlow.workplace_photo)
+async def require_workplace_photo(m):
+    await m.answer(
+        "Нужна фотография рабочего места. Откройте камеру и отправьте снимок сюда.",
         reply_markup=ReplyKeyboardRemove(),
     )
 
