@@ -32,6 +32,9 @@ def menu(roles):
         items += [
             "➕ Новая запись",
             "📋 Мои записи",
+            "💰 Продажи",
+            "📊 Статистика",
+            "🏆 Премия",
             "🔄 Моя смена",
         ]
     if {"ADMIN", "OWNER"} & roles:
@@ -49,12 +52,8 @@ def menu(roles):
             "📜 Аудит",
             "👨‍💼 Контроль обучения",
         ]
-    if "PHOTOGRAPHER" in roles:
-        items += ["🎓 Обучение"]
-    if {"PHOTOGRAPHER", "ADMIN", "OWNER"} & roles:
-        items += ["🧾 Продажа"]
     if set(ROLES) & roles:
-        items += ["❌ Отменить"]
+        items += ["🎓 Обучение", "🧾 Продажа", "❌ Отменить"]
     return list(dict.fromkeys(items))
 
 
