@@ -490,7 +490,11 @@ async def finish_photo_upload(c: CallbackQuery, state):
     await state.clear()
     await c.answer()
     await c.message.answer(
-        f"💰 Готово к продаже. Загружено фотографий: {count}."
+        f"💰 Готово к продаже. Загружено фотографий: {count}.\n\n"
+        "Можно сразу отправить работу в Академию на разбор.",
+        reply_markup=inline(
+            [[("🎓 Отправить работу в Академию", f"academy:send-review:{shooting_id}", "primary")]]
+        ),
     )
 
 
