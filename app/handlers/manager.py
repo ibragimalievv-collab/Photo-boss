@@ -379,3 +379,5 @@ async def finish_reschedule(m, state, current_roles):
         f"📅 Съёмка #{booking.id} перенесена на {booking.shoot_date:%d.%m.%Y} в {booking.shoot_time:%H:%M}.",
         reply_markup=reply(menu(current_roles)),
     )
+
+
