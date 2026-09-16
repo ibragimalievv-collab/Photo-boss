@@ -136,6 +136,7 @@ class Sale(Base):
     percent: Mapped[float] = mapped_column(Float, default=0)
     commission: Mapped[float] = mapped_column(Float, default=0)
     payment_status: Mapped[str] = mapped_column(String(20), default="UNPAID")
+    receipt_file_id: Mapped[str | None] = mapped_column(String(300), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
