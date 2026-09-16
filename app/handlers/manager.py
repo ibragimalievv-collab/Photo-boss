@@ -397,13 +397,14 @@ async def sales(m):
             .scalars()
             .all()
         )
-        await m.answer(
-            "\n".join(
-                f"#{x.id}: {x.sold_photos} фото = {x.amount:.2f} ₽, засчитано #{x.credited_user_id}"
-                for x in rows
+        lines = []
+        for sale in rows:
+            employee = await s.get(User, sale.credited_user_id)
+            lines.append(
+                f"Продажа #{sale.id}: {sale.sold_photos} фото = {sale.amount:.2f} ₽, "
+                f"начислено сотруднику {employee.name if employee else 'сотрудник удалён'}"
             )
-            or "Продаж нет."
-        )
+        await m.answer("\n".join(lines) or "Продаж нет.")
 
 
 @r.message(F.text == "🏆 Премия")

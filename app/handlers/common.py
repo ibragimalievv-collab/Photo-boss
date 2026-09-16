@@ -25,7 +25,8 @@ async def start(m, state):
         roles = await roles_of(session, user)
     if not roles:
         return await m.answer(
-            f"Доступ не назначен или отключён. Обратитесь к администратору.\nВаш Telegram ID: {m.from_user.id}",
+            f"Доступ не назначен или отключён. Обратитесь к администратору.\n"
+            f"Ваш номер в системе: {m.from_user.id}",
             reply_markup=ReplyKeyboardRemove(),
         )
     await m.answer(

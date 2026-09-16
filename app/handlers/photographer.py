@@ -544,5 +544,5 @@ async def profile(m):
         u = await get_user(s, m.from_user.id)
         rs = await roles_of(s, u)
         await m.answer(
-            f"👤 {u.name}\nID: {u.tg_id}\nРоли: {', '.join(ROLES[x] for x in rs)}"
+            f"👤 {u.name}\nРоли: {', '.join(ROLES[x] for x in rs)}"
         )

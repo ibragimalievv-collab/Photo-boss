@@ -34,6 +34,22 @@ r.message.filter(StaffFilter("ADMIN"), F.text)
 r.callback_query.filter(StaffFilter("ADMIN"))
 logger = logging.getLogger(__name__)
 
+AUDIT_ACTION_NAMES = {
+    "booking_created": "Создана запись",
+    "booking_confirmed": "Съёмка подтверждена",
+    "booking_rejected": "Съёмка отклонена",
+    "booking_rescheduled": "Съёмка перенесена",
+    "guest_reminder_prepared": "Подготовлено напоминание гостю",
+    "sale_created": "Оформлена продажа",
+    "premium_added": "Начислена премия",
+    "employee_fired": "Сотрудник уволен",
+    "employee_restored": "Сотрудник восстановлен",
+    "employee_role_removed": "Снята роль сотрудника",
+    "shift_started": "Смена начата",
+    "shift_finished": "Смена завершена",
+    "photos_ready_for_sale": "Фотографии готовы к продаже",
+}
+
 
 class E(StatesGroup):
     tg = State()
@@ -54,6 +70,10 @@ class PremiumFlow(StatesGroup):
     employee = State()
     amount = State()
     note = State()
+
+
+class DateLookup(StatesGroup):
+    value = State()
 
 
 ROLE_NAMES = {
@@ -83,7 +103,7 @@ async def stored_roles(session, user_id):
 def employee_card(user, roles):
     role_text = ", ".join(ROLE_NAMES.get(role, role) for role in sorted(roles))
     return (
-        f"👤 {user.name}\nTelegram ID: {user.tg_id}\n"
+        f"👤 {user.name}\n"
         f"Статус: {'работает ✅' if user.active else 'уволен ⛔'}\n"
         f"Роли: {role_text or 'нет ролей'}"
     )
@@ -140,7 +160,7 @@ async def send_employee_list(message):
     buttons = [
         [
             (
-                f"{'✅' if user.active else '⛔'} {user.name[:32]} (#{user.id})",
+                f"{'✅' if user.active else '⛔'} {user.name[:40]}",
                 f"employee:view:{user.id}",
             )
         ]
@@ -486,12 +506,121 @@ async def send_day_picker(message, session, prefix, offset, title):
         ]
         for value in days
     ]
+    rows.append([("🔎 Найти по дате", f"{prefix}:search", "success")])
     navigation = []
     if offset:
         navigation.append(("⬅️ Неделя", f"{prefix}:page:{max(0, offset - 7)}"))
     navigation.append(("Неделя ➡️", f"{prefix}:page:{offset + 7}"))
     rows.append(navigation)
     await message.answer(title, reply_markup=inline(rows))
+
+
+@r.callback_query(
+    F.data.in_(
+        {
+            "admin:bookings:search",
+            "admin:shoots:search",
+            "admin:report:search",
+        }
+    )
+)
+async def start_date_search(c, state):
+    mode = c.data.split(":")[1]
+    await state.set_state(DateLookup.value)
+    await state.set_data({"date_lookup_mode": mode})
+    await c.answer()
+    await c.message.answer("Введите нужную дату в формате ДД.ММ.ГГГГ:")
+
+
+@r.callback_query(F.data.startswith("admin:sales:search:"))
+async def start_sales_date_search(c, state):
+    try:
+        hotel_id = int(c.data.rsplit(":", 1)[1])
+    except (TypeError, ValueError):
+        return await c.answer("Некорректный отель.", show_alert=True)
+    await state.set_state(DateLookup.value)
+    await state.set_data({"date_lookup_mode": "sales", "hotel_id": hotel_id})
+    await c.answer()
+    await c.message.answer("Введите нужную дату продаж в формате ДД.ММ.ГГГГ:")
+
+
+@r.message(DateLookup.value)
+async def finish_date_search(m, state):
+    try:
+        day, month, year = map(int, m.text.strip().split("."))
+        selected = date(year, month, day)
+    except (TypeError, ValueError):
+        return await m.answer("Неверная дата. Пример: 15.09.2026")
+    data = await state.get_data()
+    mode = data.get("date_lookup_mode")
+    await state.clear()
+    async with Session() as s:
+        if mode == "bookings":
+            rows = (
+                await s.scalars(
+                    select(Booking)
+                    .where(Booking.shoot_date == selected)
+                    .order_by(Booking.shoot_time, Booking.id)
+                )
+            ).all()
+            await m.answer(
+                f"📋 ЕЖЕДНЕВНИК\nДата: {selected:%d.%m.%Y}\n"
+                f"Съёмок: {len(rows)}\n━━━━━━━━━━━━"
+            )
+            for booking in rows:
+                await m.answer(await booking_card(s, booking))
+            report_text, employee_ids = await build_financial_report(
+                s, selected, selected + timedelta(days=1)
+            )
+            buttons = [
+                [(employee.name, f"employee:view:{employee.id}", "primary")]
+                for user_id in employee_ids
+                if (employee := await s.get(User, user_id)) is not None
+            ]
+            return await m.answer(
+                "━━━━━━━━━━━━\n" + report_text,
+                reply_markup=inline(buttons) if buttons else None,
+            )
+        if mode == "shoots":
+            rows = (
+                await s.execute(
+                    select(Booking, Client)
+                    .join(Client, Client.id == Booking.client_id)
+                    .where(Booking.shoot_date == selected)
+                    .order_by(Booking.shoot_time, Booking.id)
+                )
+            ).all()
+            buttons = [
+                [
+                    (
+                        f"{booking.shoot_time:%H:%M} · {client.name}",
+                        f"admin:shoot:view:{booking.id}",
+                        "primary",
+                    )
+                ]
+                for booking, client in rows
+            ]
+            return await m.answer(
+                f"📸 Съёмки на {selected:%d.%m.%Y}: {len(rows)}",
+                reply_markup=inline(buttons) if buttons else None,
+            )
+        if mode == "report":
+            text, employee_ids = await build_financial_report(
+                s, selected, selected + timedelta(days=1)
+            )
+            buttons = [
+                [(employee.name, f"employee:view:{employee.id}", "primary")]
+                for user_id in employee_ids
+                if (employee := await s.get(User, user_id)) is not None
+            ]
+            return await m.answer(
+                text, reply_markup=inline(buttons) if buttons else None
+            )
+        if mode == "sales":
+            return await send_sales_report(
+                m, s, data.get("hotel_id", 0), selected, selected + timedelta(days=1)
+            )
+    await m.answer("Раздел поиска не найден. Откройте меню заново.")
 
 
 def callback_date(data):
@@ -582,7 +711,10 @@ async def allshoot_date(c):
     buttons = [
         [
             (
-                f"{booking.shoot_time:%H:%M} · {client.name} · {STATUS_NAMES.get(booking.status, booking.status)}",
+                (
+                    f"{booking.shoot_time:%H:%M} · {client.name} · "
+                    f"{STATUS_NAMES.get(booking.status, 'Статус обновляется')}"
+                ),
                 f"admin:shoot:view:{booking.id}",
                 "primary",
             )
@@ -647,6 +779,7 @@ async def send_sales_period_picker(message, session, hotel_id, offset=0):
         for value in days
     ]
     rows += [
+        [("🔎 Найти по дате", f"admin:sales:search:{hotel_id}", "success")],
         [("📅 Текущая неделя", f"admin:sales:period:{hotel_id}:week", "primary")],
         [("🗓 Текущий месяц", f"admin:sales:period:{hotel_id}:month", "primary")],
         [("⬅️ Предыдущие 7 дней", f"admin:sales:page:{hotel_id}:{offset + 7}")],
@@ -1024,7 +1157,7 @@ async def report_period(c):
 @r.message(F.text == "⚙️ Настройки")
 async def settings(m):
     await m.answer(
-        "Настройки хранятся в БД. Ключи: PHOTO_PRICE, MANAGER_PERCENT, PHOTOGRAPHER_PERCENT. Используйте /set key value."
+        "⚙️ Настройки: цена фотографии, процент менеджера и правила начисления фотографу."
     )
 
 
@@ -1047,7 +1180,8 @@ async def auditlog(m):
             employee = await s.get(User, entry.user_id) if entry.user_id else None
             lines.append(
                 f"{entry.created_at:%d.%m %H:%M} · "
-                f"{employee.name if employee else 'Система'} · {entry.action}"
+                f"{employee.name if employee else 'Система'} · "
+                f"{AUDIT_ACTION_NAMES.get(entry.action, 'Служебное действие')}"
             )
         await m.answer("\n".join(lines) or "Аудит пуст.")
 
@@ -1056,7 +1190,7 @@ async def auditlog(m):
 async def addemp(m, state):
     await state.clear()
     await state.set_state(E.tg)
-    await m.answer("Telegram ID сотрудника (отмена: /cancel):")
+    await m.answer("Введите номер сотрудника в Telegram (отмена: /cancel):")
 
 
 @r.callback_query(F.data == "employee:add")
@@ -1065,7 +1199,7 @@ async def addemp_button(callback, state):
         return await callback.answer("Некорректная кнопка.", show_alert=True)
     await state.clear()
     await state.set_state(E.tg)
-    await callback.message.answer("Telegram ID сотрудника (отмена: /cancel):")
+    await callback.message.answer("Введите номер сотрудника в Telegram (отмена: /cancel):")
     await callback.answer()
 
 
@@ -1076,7 +1210,7 @@ async def etg(m, state):
         if not 0 < tg_id < 2**52:
             raise ValueError
     except (TypeError, ValueError):
-        return await m.answer("Введите положительный Telegram ID.")
+        return await m.answer("Введите положительный номер сотрудника в Telegram.")
     await state.update_data(tg=tg_id)
     await state.set_state(E.name)
     await m.answer("Имя:")
@@ -1090,15 +1224,27 @@ async def ename(m, state):
     await state.update_data(name=name)
     await state.set_state(E.roles)
     await m.answer(
-        "Роли через запятую: ADMIN, MANAGER, PHOTOGRAPHER. Назначать ADMIN может только владелец."
+        "Роли через запятую: Администратор, Менеджер, Фотограф. "
+        "Назначать администратора может только владелец."
     )
 
 
 @r.message(E.roles)
 async def eroles(m, state, current_roles):
-    requested = {value.strip().upper() for value in m.text.split(",") if value.strip()}
+    role_aliases = {
+        "АДМИНИСТРАТОР": "ADMIN",
+        "МЕНЕДЖЕР": "MANAGER",
+        "ФОТОГРАФ": "PHOTOGRAPHER",
+    }
+    requested = {
+        role_aliases.get(value.strip().upper(), value.strip().upper())
+        for value in m.text.split(",")
+        if value.strip()
+    }
     if not requested or requested - {"ADMIN", "MANAGER", "PHOTOGRAPHER"}:
-        return await m.answer("Допустимы ADMIN, MANAGER, PHOTOGRAPHER.")
+        return await m.answer(
+            "Допустимые роли: Администратор, Менеджер, Фотограф."
+        )
     if "ADMIN" in requested and "OWNER" not in current_roles:
         return await m.answer("Назначать администратора может только владелец.")
     data = await state.get_data()

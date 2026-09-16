@@ -11,6 +11,7 @@ from aiogram.fsm.storage.memory import SimpleEventIsolation
 from .config import config
 from .db import engine, init_db, wait_for_database
 from .handlers import admin, common, manager, photographer, sales, training
+from .ui import CompactUiMiddleware, enable_compact_ui
 
 logger = logging.getLogger(__name__)
 READY_FILE = Path(os.getenv("HEALTHCHECK_FILE", "/tmp/photo-boss.ready"))
@@ -18,6 +19,7 @@ READY_FILE = Path(os.getenv("HEALTHCHECK_FILE", "/tmp/photo-boss.ready"))
 
 def create_dispatcher():
     dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
+    dispatcher.update.outer_middleware(CompactUiMiddleware())
     # Admin filtering must precede the manager's identically named Sales button.
     dispatcher.include_routers(
         common.r, admin.r, photographer.r, manager.r, sales.r, training.r
@@ -31,7 +33,9 @@ def create_bot():
         session = AiohttpSession(
             api=TelegramAPIServer.from_base(config.telegram_api_base, is_local=True)
         )
-    return Bot(config.bot_token, session=session)
+    bot = Bot(config.bot_token, session=session)
+    enable_compact_ui(bot)
+    return bot
 
 
 def clear_ready_file():

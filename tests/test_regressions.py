@@ -31,7 +31,7 @@ from app import main as main_module
 from app.config import Config
 from app.db import Base, Session, engine, init_db
 from app.handlers import photographer as photographer_module
-from app.handlers.admin import E
+from app.handlers.admin import DateLookup, E
 from app.handlers.manager import BookingFlow
 from app.handlers.photographer import PhotoUploadFlow, ShiftFlow
 from app.handlers.sales import S
@@ -538,7 +538,7 @@ def test_owner_can_start_employee_creation_from_menu_button():
     async def scenario():
         await message(OWNER, "➕ Добавить сотрудника")
         assert await state_for(OWNER).get_state() == E.tg.state
-        assert telegram.calls[-1].text.startswith("Telegram ID сотрудника")
+        assert telegram.calls[-1].text.startswith("Введите номер сотрудника в Telegram")
 
     run(scenario())
 
@@ -548,7 +548,7 @@ def test_owner_can_press_employee_add_inline_button():
         await message(OWNER, "👥 Сотрудники")
         await callback(OWNER, "employee:add")
         assert await state_for(OWNER).get_state() == E.tg.state
-        assert telegram.calls[-2].text.startswith("Telegram ID сотрудника")
+        assert telegram.calls[-2].text.startswith("Введите номер сотрудника в Telegram")
 
     run(scenario())
 
@@ -841,7 +841,7 @@ def test_admin_sees_complete_booking_cards():
     async def scenario():
         await message(OWNER, "📋 Все записи")
         assert telegram.calls[-1].text == "📋 Выберите день записей"
-        assert len(telegram.calls[-1].reply_markup.inline_keyboard) == 8
+        assert len(telegram.calls[-1].reply_markup.inline_keyboard) == 9
         await callback(OWNER, "admin:bookings:date:2026-09-15")
         sent = [call for call in telegram.calls if isinstance(call, SendMessage)]
         assert sent[-3].text.startswith("📋 ЕЖЕДНЕВНИК\nДата: 15.09.2026")
@@ -932,6 +932,27 @@ def test_owner_sales_are_filtered_by_hotel_and_period():
         assert telegram.calls[-2].text.startswith(f"💰 Продажи · {hotel.name}")
         await callback(OWNER, f"admin:sales:period:{hotel.id}:month")
         assert telegram.calls[-2].text.startswith(f"💰 Продажи · {hotel.name}")
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("section", "search_callback", "expected"),
+    [
+        ("📋 Все записи", "admin:bookings:search", "📋 ЕЖЕДНЕВНИК"),
+        ("📸 Все съёмки", "admin:shoots:search", "📸 Съёмки на 15.09.2026"),
+        ("📊 Отчёты", "admin:report:search", "📊 Отчёт 15.09.2026"),
+    ],
+)
+def test_owner_can_search_any_date(section, search_callback, expected):
+    async def scenario():
+        await message(OWNER, section)
+        await callback(OWNER, search_callback)
+        assert await state_for(OWNER).get_state() == DateLookup.value.state
+        await message(OWNER, "15.09.2026")
+        assert await state_for(OWNER).get_state() is None
+        sent = [call.text for call in telegram.calls if isinstance(call, SendMessage)]
+        assert any(text.startswith(expected) for text in sent)
 
     run(scenario())
 

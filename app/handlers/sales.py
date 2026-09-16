@@ -7,11 +7,22 @@ from sqlalchemy import func, select
 from ..access import StaffFilter
 from ..config import config, number
 from ..db import Session
-from ..models import Booking, Compensation, Package, Photo, Sale, Shooting, User
+from ..keyboards import inline
+from ..models import (
+    Booking,
+    Compensation,
+    Package,
+    Photo,
+    Sale,
+    Shooting,
+    User,
+    UserRole,
+)
 from ..services.core import audit, get_user, roles_of, setting
 
 r = Router()
 r.message.filter(StaffFilter("PHOTOGRAPHER", "MANAGER"), F.text)
+r.callback_query.filter(StaffFilter("PHOTOGRAPHER", "MANAGER"))
 
 
 class S(StatesGroup):
@@ -44,7 +55,7 @@ async def begin(m, state):
     await state.clear()
     await state.set_state(S.booking)
     await m.answer(
-        "Введите ID записи:\n"
+        "Введите номер записи:\n"
         + ", ".join(str(booking.id) for booking in bookings)
         + "\nОтмена: /cancel"
     )
@@ -57,7 +68,7 @@ async def b(m, state):
         if not 0 < bid <= 2**31 - 1:
             raise ValueError
     except (TypeError, ValueError):
-        return await m.answer("Нужен положительный числовой ID записи.")
+        return await m.answer("Введите положительный номер записи.")
     async with Session() as session:
         booking = await session.get(Booking, bid)
         if booking is None:
@@ -67,14 +78,59 @@ async def b(m, state):
             if booking.photographer_id
             else None
         )
+        employees = (
+            await session.scalars(
+                select(User)
+                .join(UserRole, UserRole.user_id == User.id)
+                .where(
+                    User.active.is_(True),
+                    UserRole.role.in_(("MANAGER", "PHOTOGRAPHER")),
+                )
+                .distinct()
+                .order_by(User.name)
+            )
+        ).all()
     await state.update_data(booking=bid)
     await state.set_state(S.credited)
-    hint = (
-        f"\nФотограф записи: {photographer.name}, Telegram ID {photographer.tg_id}."
-        if photographer
-        else ""
+    hint = f"\nФотограф записи: {photographer.name}." if photographer else ""
+    await m.answer(
+        "Выберите сотрудника, которому засчитать продажу:" + hint,
+        reply_markup=inline(
+            [[(employee.name, f"sale:credit:{employee.id}")] for employee in employees]
+        ),
     )
-    await m.answer("Введите Telegram ID сотрудника, кому засчитать продажу:" + hint)
+
+
+async def ask_commission_role(message, state, credited, roles):
+    commission_roles = roles & {"MANAGER", "PHOTOGRAPHER"}
+    if not commission_roles:
+        return await message.answer(
+            "Нужен активный сотрудник с ролью менеджера или фотографа."
+        )
+    names = {"MANAGER": "Менеджер", "PHOTOGRAPHER": "Фотограф"}
+    await state.update_data(credited=credited.id)
+    await state.set_state(S.role)
+    await message.answer(
+        "Выберите роль для начисления:",
+        reply_markup=inline(
+            [[(names[role], f"sale:role:{role}")] for role in sorted(commission_roles)]
+        ),
+    )
+
+
+@r.callback_query(S.credited, F.data.startswith("sale:credit:"))
+async def credit_button(c, state):
+    try:
+        employee_id = int(c.data.rsplit(":", 1)[1])
+    except (TypeError, ValueError):
+        return await c.answer("Некорректный сотрудник.", show_alert=True)
+    async with Session() as session:
+        credited = await session.get(User, employee_id)
+        roles = await roles_of(session, credited)
+    if credited is None or not credited.active:
+        return await c.answer("Сотрудник недоступен.", show_alert=True)
+    await c.answer()
+    await ask_commission_role(c.message, state, credited, roles)
 
 
 @r.message(S.credited)
@@ -84,22 +140,26 @@ async def cr(m, state):
         if not 0 < tg_id < 2**52:
             raise ValueError
     except (TypeError, ValueError):
-        return await m.answer("Нужен положительный Telegram ID.")
+        return await m.answer("Выберите сотрудника кнопкой под сообщением.")
     async with Session() as session:
         credited = await get_user(session, tg_id)
         roles = await roles_of(session, credited)
-    commission_roles = roles & {"MANAGER", "PHOTOGRAPHER"}
-    if not commission_roles:
-        return await m.answer(
-            "Нужен активный сотрудник с ролью MANAGER или PHOTOGRAPHER."
-        )
-    await state.update_data(credited=credited.id)
-    await state.set_state(S.role)
-    names = {"MANAGER": "Менеджер", "PHOTOGRAPHER": "Фотограф"}
-    await m.answer(
-        "Роль для начисления: "
-        + " или ".join(names[role] for role in sorted(commission_roles))
-    )
+    await ask_commission_role(m, state, credited, roles)
+
+
+@r.callback_query(S.role, F.data.startswith("sale:role:"))
+async def role_button(c, state):
+    role = c.data.rsplit(":", 1)[1]
+    data = await state.get_data()
+    async with Session() as session:
+        credited = await session.get(User, data["credited"])
+        roles = await roles_of(session, credited)
+    if role not in {"MANAGER", "PHOTOGRAPHER"} or role not in roles:
+        return await c.answer("Роль сотруднику не назначена.", show_alert=True)
+    await state.update_data(role=role)
+    await state.set_state(S.photos)
+    await c.answer()
+    await c.message.answer("Введите количество купленных фотографий:")
 
 
 @r.message(S.role)

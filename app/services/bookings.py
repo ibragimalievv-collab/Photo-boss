@@ -13,6 +13,14 @@ STATUS_NAMES = {
     "SHOT": "Съёмка отснята",
     "UPLOADING": "Загрузка готовых фотографий",
     "READY_FOR_SALE": "Готово к продаже",
+    "ACCEPTED": "Съёмка забрана фотографом",
+    "ARRIVED": "Фотограф на месте",
+    "SHOOTING": "Идёт съёмка",
+    "READY_FOR_MANAGER": "Съёмка завершена",
+    "AWAITING_LOCATION": "Ожидается геопозиция",
+    "AWAITING_PHOTO": "Ожидается фотография",
+    "STARTED": "Смена начата",
+    "FINISHED": "Смена завершена",
 }
 
 
@@ -43,7 +51,7 @@ async def booking_card(session, booking: Booking):
     )
     return (
         f"📋 Запись #{booking.id}\n"
-        f"Статус: {STATUS_NAMES.get(booking.status, booking.status)}\n"
+        f"Статус: {STATUS_NAMES.get(booking.status, 'Статус обновляется')}\n"
         f"🏨 Отель: {hotel.name if hotel else 'не найден'}\n"
         f"🚪 Комната: {booking.room}\n"
         f"👤 Клиент: {client.name if client else 'не найден'}\n"
