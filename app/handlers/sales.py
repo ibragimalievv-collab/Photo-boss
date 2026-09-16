@@ -30,6 +30,7 @@ class S(StatesGroup):
     credited = State()
     role = State()
     photos = State()
+    receipt = State()
 
 
 PHOTO_TIER_THRESHOLD = 150
