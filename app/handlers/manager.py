@@ -3,12 +3,12 @@ from datetime import date, time
 from aiogram import F, Router
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from ..access import StaffFilter
 from ..db import Session
 from ..keyboards import inline, reply
-from ..models import Booking, Client, Hotel, Package, Sale, Shooting, User, UserRole
+from ..models import Booking, Client, Hotel, Package, Shooting, User, UserRole
 from ..services.bookings import booking_card
 from ..services.core import audit, get_user, menu
 
