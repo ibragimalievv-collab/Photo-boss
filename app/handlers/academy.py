@@ -17,6 +17,7 @@ from ..models import (
     AcademyReview,
     AcademyUserAchievement,
     Booking,
+    GuestSelectedPhoto,
     Photo,
     Shooting,
     User,
@@ -404,10 +405,13 @@ async def manager_review(callback, current_roles):
         review = await session.get(AcademyReview, review_id)
         shooting = await session.get(Shooting, review.shooting_id) if review else None
         photos = (await session.scalars(select(Photo).where(Photo.shooting_id == shooting.id).limit(10))).all() if shooting else []
+        guest_selected = (await session.scalars(select(GuestSelectedPhoto).where(GuestSelectedPhoto.shooting_id == shooting.id))).all() if shooting else []
     if review is None or shooting is None:
         return await callback.answer("Разбор не найден.", show_alert=True)
     await callback.answer()
-    await callback.message.answer(f"🔍 Разбор съёмки #{shooting.id}\n\nОткройте фото ниже и выберите итог оценки.")
+    await callback.message.answer(f"🔍 Разбор съёмки #{shooting.id}\n\n💛 Выбрано гостем: {len(guest_selected)}. Эти кадры показывают, что понравилось клиенту — учитывайте их при разборе ошибок.")
+    for photo in guest_selected:
+        await callback.message.answer_photo(photo.file_id, caption="💛 Выбор гостя")
     for photo in photos:
         await callback.message.answer_photo(photo.file_id)
     await callback.message.answer("Оценка и главный фокус:", reply_markup=inline([
