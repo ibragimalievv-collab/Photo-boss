@@ -365,8 +365,8 @@ async def best_works(callback):
 
 @r.message(F.text == "👨‍💼 Контроль обучения")
 async def manager_control(message, current_roles):
-    if not ({"MANAGER", "ADMIN", "OWNER"} & current_roles):
-        return await message.answer("Доступно менеджеру, администратору или владельцу.")
+    if not ({"ADMIN", "OWNER"} & current_roles):
+        return await message.answer("Доступно только администратору или владельцу.")
     async with Session() as session:
         await seed(session)
         photographers = (await session.scalars(select(User).join(UserRole, UserRole.user_id == User.id).where(User.active.is_(True), UserRole.role == "PHOTOGRAPHER").order_by(User.name))).all()
@@ -375,7 +375,7 @@ async def manager_control(message, current_roles):
 
 @r.callback_query(F.data.startswith("academy:manager-user:"))
 async def manager_user(callback, current_roles):
-    if not ({"MANAGER", "ADMIN", "OWNER"} & current_roles):
+    if not ({"ADMIN", "OWNER"} & current_roles):
         return await callback.answer("Нет доступа.", show_alert=True)
     try:
         user_id = int(callback.data.rsplit(":", 1)[1])
@@ -394,7 +394,7 @@ async def manager_user(callback, current_roles):
 
 @r.callback_query(F.data.startswith("academy:manager-review:"))
 async def manager_review(callback, current_roles):
-    if not ({"MANAGER", "ADMIN", "OWNER"} & current_roles):
+    if not ({"ADMIN", "OWNER"} & current_roles):
         return await callback.answer("Нет доступа.", show_alert=True)
     try:
         review_id = int(callback.data.rsplit(":", 1)[1])
@@ -418,7 +418,7 @@ async def manager_review(callback, current_roles):
 
 @r.callback_query(F.data.startswith("academy:grade:"))
 async def grade_review(callback, current_roles):
-    if not ({"MANAGER", "ADMIN", "OWNER"} & current_roles):
+    if not ({"ADMIN", "OWNER"} & current_roles):
         return await callback.answer("Нет доступа.", show_alert=True)
     try:
         _, _, raw_id, raw_score, issue = callback.data.split(":", 4)
