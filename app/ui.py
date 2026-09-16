@@ -5,7 +5,7 @@ from collections import defaultdict
 from aiogram import BaseMiddleware
 from aiogram.exceptions import TelegramAPIError
 from aiogram.methods import SendDocument, SendMediaGroup, SendMessage, SendPhoto
-from aiogram.types import CallbackQuery, Message, Update
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, Update
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +23,9 @@ class CompactChat:
             if isinstance(message, Message) and message.chat.type == "private":
                 self._messages[message.chat.id].add(message.message_id)
 
-    async def clear(self, bot, chat_id, incoming_id=None):
+    async def clear(self, bot, chat_id):
         async with self._locks[chat_id]:
             message_ids = self._messages.pop(chat_id, set())
-            if incoming_id is not None:
-                message_ids.add(incoming_id)
             if not message_ids:
                 return
             # Telegram accepts no more than 100 identifiers per request.
@@ -53,13 +51,18 @@ class CompactUiMiddleware(BaseMiddleware):
                 await compact_chat.clear(
                     data["bot"],
                     message.chat.id,
-                    None if isinstance(source, CallbackQuery) else message.message_id,
                 )
         return await handler(event, data)
 
 
 async def remember_sent_message(make_request, bot, method):
     result = await make_request(bot, method)
+    # The message carrying the permanent bottom menu is the chat's anchor.
+    # Removing it makes Telegram show the "Start bot" screen again.
+    if isinstance(method, SendMessage) and isinstance(
+        method.reply_markup, ReplyKeyboardMarkup
+    ):
+        return result
     if isinstance(method, (SendMessage, SendPhoto, SendDocument, SendMediaGroup)):
         await compact_chat.remember(result)
     return result
