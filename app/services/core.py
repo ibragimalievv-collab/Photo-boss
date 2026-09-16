@@ -32,6 +32,7 @@ def menu(roles):
         items += [
             "➕ Новая запись",
             "📋 Мои записи",
+            "🔄 Моя смена",
         ]
     if {"ADMIN", "OWNER"} & roles:
         items += [
