@@ -87,7 +87,7 @@ async def current_user(session, tg_id):
 async def academy_stats(session, user_id):
     total = await session.scalar(select(func.count(AcademyLesson.id))) or 0
     completed = await session.scalar(select(func.count(AcademyProgress.id)).where(AcademyProgress.user_id == user_id, AcademyProgress.status == "COMPLETED")) or 0
-    practices = await session.scalar(select(func.count(AcademyPractice.id)).where(AcademyPractice.user_id == user_id, AcademyPractice.status == "COMPLETED")) or 0
+    practices = await session.scalar(select(func.count(AcademyPractice.id)).where(AcademyPractice.user_id == user_id, AcademyPractice.status.in_(("SUBMITTED", "COMPLETED")))) or 0
     quality = await session.scalar(select(func.avg(AcademyReview.score)).where(AcademyReview.photographer_id == user_id, AcademyReview.status == "REVIEWED"))
     return total, completed, practices, round(float(quality or 0))
 
@@ -119,7 +119,18 @@ async def academy_home(message):
 @r.callback_query(F.data == "academy:home")
 async def academy_home_callback(callback):
     await callback.answer()
-    await academy_home(callback.message)
+    async with Session() as session:
+        user = await current_user(session, callback.from_user.id)
+        total, completed, practices, quality = await academy_stats(session, user.id)
+    percent = round(completed / total * 100) if total else 0
+    await callback.message.answer(
+        f"📚 Академия фотографа\n\nФотограф: {user.name}\n\nУровень: {level(percent)}\nПрогресс: {percent}%\nВсего уроков: {completed}/{total}\nПрактика: {practices} выполнено\nКачество работ: {quality or '—'}%\n\nВыберите раздел:",
+        reply_markup=inline([
+            [("📖 Обучение", "academy:learn"), ("📸 Практика", "academy:practice")],
+            [("🔍 Разбор моих работ", "academy:reviews"), ("🏆 Достижения", "academy:achievements")],
+            [("📊 Прогресс", "academy:progress"), ("🌟 Лучшие работы", "academy:best")],
+        ]),
+    )
 
 
 @r.callback_query(F.data == "academy:learn")
@@ -257,7 +268,7 @@ async def reviews(callback):
     async with Session() as session:
         user = await current_user(session, callback.from_user.id)
         reviews = (await session.scalars(select(AcademyReview).where(AcademyReview.photographer_id == user.id).order_by(AcademyReview.created_at.desc()).limit(15))).all()
-        shootings = (await session.scalars(select(Shooting).join(Booking, Booking.id == Shooting.booking_id).where(Booking.photographer_id == user.id, Shooting.status == "COMPLETED").order_by(Shooting.completed_at.desc()).limit(20))).all()
+        shootings = (await session.scalars(select(Shooting).join(Booking, Booking.id == Shooting.booking_id).where(Booking.photographer_id == user.id, Shooting.status.in_(("READY_FOR_SALE", "COMPLETED"))).order_by(Shooting.completed_at.desc()).limit(20))).all()
         reviewed = set(review.shooting_id for review in reviews if review.shooting_id)
     rows = [[(f"🎓 Отправить съёмку #{shooting.id}", f"academy:send-review:{shooting.id}")] for shooting in shootings if shooting.id not in reviewed]
     rows += [[(f"{'✅' if review.status == 'REVIEWED' else '⏳'} Разбор съёмки #{review.shooting_id}", f"academy:review-card:{review.id}")] for review in reviews]
@@ -275,7 +286,7 @@ async def send_review(callback):
         user = await current_user(session, callback.from_user.id)
         shooting = await session.get(Shooting, shooting_id)
         booking = await session.get(Booking, shooting.booking_id) if shooting else None
-        if shooting is None or booking is None or booking.photographer_id != user.id or shooting.status != "COMPLETED":
+        if shooting is None or booking is None or booking.photographer_id != user.id or shooting.status not in {"READY_FOR_SALE", "COMPLETED"}:
             return await callback.answer("Эта съёмка недоступна.", show_alert=True)
         existing = (await session.scalars(select(AcademyReview).where(AcademyReview.shooting_id == shooting.id))).one_or_none()
         if existing:
