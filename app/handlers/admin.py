@@ -1,4 +1,7 @@
 import logging
+from collections import defaultdict
+from datetime import UTC, date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -6,23 +9,25 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import func, select
 
 from ..access import StaffFilter
-from ..config import number
+from ..config import config, number
 from ..db import Session
 from ..keyboards import inline
 from ..models import (
     AuditLog,
     Booking,
+    Client,
+    Compensation,
     Hotel,
     Package,
     PayrollEntry,
     Sale,
     Setting,
-    Shooting,
     User,
     UserRole,
 )
-from ..services.bookings import booking_card
+from ..services.bookings import STATUS_NAMES, booking_card
 from ..services.core import audit, get_user, has, roles_of
+from ..services.training import training_day
 
 r = Router()
 r.message.filter(StaffFilter("ADMIN"), F.text)
@@ -43,6 +48,12 @@ class H(StatesGroup):
 class P(StatesGroup):
     name = State()
     price = State()
+
+
+class PremiumFlow(StatesGroup):
+    employee = State()
+    amount = State()
+    note = State()
 
 
 ROLE_NAMES = {
@@ -429,18 +440,110 @@ async def allbook(m):
     async with Session() as s:
         if not (await guard(m, s))[1]:
             return
+        await send_day_picker(m, s, "admin:bookings", 0, "📋 Выберите день записей")
+
+
+def day_label(value, today):
+    if value == today:
+        prefix = "Сегодня"
+    elif value == today + timedelta(days=1):
+        prefix = "Завтра"
+    elif value == today + timedelta(days=2):
+        prefix = "Послезавтра"
+    else:
+        prefix = [
+            "Понедельник",
+            "Вторник",
+            "Среда",
+            "Четверг",
+            "Пятница",
+            "Суббота",
+            "Воскресенье",
+        ][value.weekday()]
+    return f"{prefix} — {value:%d.%m.%Y}"
+
+
+async def send_day_picker(message, session, prefix, offset, title):
+    offset = max(0, min(offset, 364))
+    today = training_day()
+    days = [today + timedelta(days=offset + index) for index in range(7)]
+    counts = dict(
+        (
+            await session.execute(
+                select(Booking.shoot_date, func.count(Booking.id))
+                .where(Booking.shoot_date.in_(days))
+                .group_by(Booking.shoot_date)
+            )
+        ).all()
+    )
+    rows = [
+        [
+            (
+                f"{day_label(value, today)} · {counts.get(value, 0)}",
+                f"{prefix}:date:{value.isoformat()}",
+                "primary",
+            )
+        ]
+        for value in days
+    ]
+    navigation = []
+    if offset:
+        navigation.append(("⬅️ Неделя", f"{prefix}:page:{max(0, offset - 7)}"))
+    navigation.append(("Неделя ➡️", f"{prefix}:page:{offset + 7}"))
+    rows.append(navigation)
+    await message.answer(title, reply_markup=inline(rows))
+
+
+def callback_date(data):
+    try:
+        return date.fromisoformat(data.rsplit(":", 1)[1])
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+@r.callback_query(F.data.startswith("admin:bookings:page:"))
+async def allbook_page(c):
+    try:
+        offset = int(c.data.rsplit(":", 1)[1])
+    except (TypeError, ValueError):
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as s:
+        await send_day_picker(c.message, s, "admin:bookings", offset, "📋 Выберите день записей")
+    await c.answer()
+
+
+@r.callback_query(F.data.startswith("admin:bookings:date:"))
+async def allbook_date(c):
+    selected = callback_date(c.data)
+    if selected is None or c.message is None:
+        return await c.answer("Некорректная дата.", show_alert=True)
+    async with Session() as s:
         rows = (
             await s.scalars(
                 select(Booking)
-                .order_by(Booking.shoot_date.desc(), Booking.shoot_time.desc())
-                .limit(100)
+                .where(Booking.shoot_date == selected)
+                .order_by(Booking.shoot_time, Booking.id)
             )
         ).all()
-        if not rows:
-            return await m.answer("Записей нет.")
-        await m.answer(f"📋 Все записи: {len(rows)}")
+        await c.message.answer(
+            f"📋 ЕЖЕДНЕВНИК\nДата: {selected:%d.%m.%Y}\n"
+            f"Съёмок: {len(rows)}\n━━━━━━━━━━━━"
+        )
         for booking in rows:
-            await m.answer(await booking_card(s, booking))
+            await c.message.answer(await booking_card(s, booking))
+        report_text, employee_ids = await build_financial_report(
+            s, selected, selected + timedelta(days=1)
+        )
+        buttons = [
+            [(employee.name, f"employee:view:{employee.id}", "primary")]
+            for user_id in employee_ids
+            if (employee := await s.get(User, user_id)) is not None
+        ]
+        await c.message.answer(
+            "━━━━━━━━━━━━\n" + report_text,
+            reply_markup=inline(buttons) if buttons else None,
+        )
+    await c.answer()
 
 
 @r.message(F.text == "📸 Все съёмки")
@@ -448,12 +551,64 @@ async def allshoot(m):
     async with Session() as s:
         if not (await guard(m, s))[1]:
             return
+        await send_day_picker(m, s, "admin:shoots", 0, "📸 Выберите день съёмок")
+
+
+@r.callback_query(F.data.startswith("admin:shoots:page:"))
+async def allshoot_page(c):
+    try:
+        offset = int(c.data.rsplit(":", 1)[1])
+    except (TypeError, ValueError):
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as s:
+        await send_day_picker(c.message, s, "admin:shoots", offset, "📸 Выберите день съёмок")
+    await c.answer()
+
+
+@r.callback_query(F.data.startswith("admin:shoots:date:"))
+async def allshoot_date(c):
+    selected = callback_date(c.data)
+    if selected is None or c.message is None:
+        return await c.answer("Некорректная дата.", show_alert=True)
+    async with Session() as s:
         rows = (
-            (await s.execute(select(Shooting).order_by(Shooting.id.desc()).limit(30)))
-            .scalars()
-            .all()
-        )
-        await m.answer("\n".join(f"#{x.id}: {x.status}" for x in rows) or "Нет съёмок.")
+            await s.execute(
+                select(Booking, Client)
+                .join(Client, Client.id == Booking.client_id)
+                .where(Booking.shoot_date == selected)
+                .order_by(Booking.shoot_time, Booking.id)
+            )
+        ).all()
+    buttons = [
+        [
+            (
+                f"{booking.shoot_time:%H:%M} · {client.name} · {STATUS_NAMES.get(booking.status, booking.status)}",
+                f"admin:shoot:view:{booking.id}",
+                "primary",
+            )
+        ]
+        for booking, client in rows
+    ]
+    await c.answer()
+    await c.message.answer(
+        f"📸 Съёмки на {selected:%d.%m.%Y}: {len(rows)}",
+        reply_markup=inline(buttons) if buttons else None,
+    )
+
+
+@r.callback_query(F.data.startswith("admin:shoot:view:"))
+async def allshoot_view(c):
+    try:
+        booking_id = int(c.data.rsplit(":", 1)[1])
+    except (TypeError, ValueError):
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as s:
+        booking = await s.get(Booking, booking_id)
+        if booking is None:
+            return await c.answer("Съёмка не найдена.", show_alert=True)
+        card = await booking_card(s, booking)
+    await c.answer()
+    await c.message.answer(card)
 
 
 @r.message(F.text == "💰 Продажи")
@@ -461,10 +616,33 @@ async def allsales(m):
     async with Session() as s:
         if not (await guard(m, s))[1]:
             return
-        total = (
-            await s.execute(select(func.coalesce(func.sum(Sale.amount), 0)))
-        ).scalar() or 0
-        await m.answer(f"💰 Продажи сети: {total:.2f} ₽")
+        rows = (
+            await s.scalars(select(Sale).order_by(Sale.created_at.desc()).limit(50))
+        ).all()
+        total = sum(item.amount for item in rows)
+        lines = [f"💰 Продажи сети: {total:.2f} ₽"]
+        employee_ids = set()
+        for item in rows:
+            creator = await s.get(User, item.created_by_id)
+            credited = await s.get(User, item.credited_user_id)
+            employee_ids.update((item.created_by_id, item.credited_user_id))
+            lines.append(
+                f"#{item.id} · {item.created_at:%d.%m.%Y} · {item.amount:.2f} ₽ · "
+                f"кадров {item.sold_photos} · оформил {creator.name} · "
+                f"начислено {credited.name}: {item.commission:.2f} ₽"
+            )
+        await m.answer(
+            "\n".join(lines),
+            reply_markup=inline(
+                [
+                    [(s_user.name, f"employee:view:{s_user.id}", "primary")]
+                    for user_id in sorted(employee_ids)
+                    if (s_user := await s.get(User, user_id)) is not None
+                ]
+            )
+            if employee_ids
+            else None,
+        )
 
 
 @r.message(F.text == "💵 Зарплаты/выплаты")
@@ -483,12 +661,98 @@ async def payroll(m):
             .scalars()
             .all()
         )
-        await m.answer(
-            "\n".join(
-                f"{x.period} #{x.user_id} {x.kind}: {x.amount:.2f} ₽" for x in rows
+        lines = []
+        employee_ids = set()
+        for entry in rows:
+            employee = await s.get(User, entry.user_id)
+            employee_ids.add(entry.user_id)
+            lines.append(
+                f"{entry.period} · {employee.name if employee else 'Сотрудник удалён'} · "
+                f"{entry.kind}: {entry.amount:.2f} ₽"
             )
-            or "Выплат нет."
+        buttons = [[("🏆 Начислить премию", "premium:add", "success")]]
+        buttons += [
+            [(employee.name, f"employee:view:{employee.id}", "primary")]
+            for user_id in sorted(employee_ids)
+            if (employee := await s.get(User, user_id)) is not None
+        ]
+        await m.answer("\n".join(lines) or "Выплат нет.", reply_markup=inline(buttons))
+
+
+@r.callback_query(F.data == "premium:add")
+async def premium_add(c, state):
+    async with Session() as s:
+        users = (
+            await s.scalars(
+                select(User).where(User.active.is_(True)).order_by(User.name)
+            )
+        ).all()
+    await state.set_state(PremiumFlow.employee)
+    await c.answer()
+    await c.message.answer(
+        "Выберите сотрудника:",
+        reply_markup=inline(
+            [[(user.name, f"premium:user:{user.id}")] for user in users]
+        ),
+    )
+
+
+@r.callback_query(PremiumFlow.employee, F.data.startswith("premium:user:"))
+async def premium_employee(c, state):
+    try:
+        user_id = int(c.data.rsplit(":", 1)[1])
+    except (TypeError, ValueError):
+        return await c.answer("Некорректный сотрудник.", show_alert=True)
+    async with Session() as s:
+        user = await s.get(User, user_id)
+    if user is None or not user.active:
+        return await c.answer("Сотрудник недоступен.", show_alert=True)
+    await state.update_data(premium_user_id=user_id)
+    await state.set_state(PremiumFlow.amount)
+    await c.answer()
+    await c.message.answer(f"Введите сумму премии для {user.name}:")
+
+
+@r.message(PremiumFlow.amount)
+async def premium_amount(m, state):
+    try:
+        amount = float(m.text.strip().replace(",", "."))
+        if not 0 < amount <= 10_000_000:
+            raise ValueError
+    except ValueError:
+        return await m.answer("Введите положительную сумму премии.")
+    await state.update_data(premium_amount=amount)
+    await state.set_state(PremiumFlow.note)
+    await m.answer("Введите причину премии:")
+
+
+@r.message(PremiumFlow.note)
+async def premium_note(m, state):
+    note = m.text.strip()
+    if not 2 <= len(note) <= 500:
+        return await m.answer("Введите причину от 2 до 500 символов.")
+    data = await state.get_data()
+    async with Session() as s:
+        actor = await get_user(s, m.from_user.id)
+        employee = await s.get(User, data["premium_user_id"])
+        if employee is None or not employee.active:
+            await state.clear()
+            return await m.answer("Сотрудник недоступен.")
+        entry = PayrollEntry(
+            user_id=employee.id,
+            kind="Премия",
+            amount=data["premium_amount"],
+            period=training_day().isoformat(),
+            note=note,
         )
+        s.add(entry)
+        await s.flush()
+        await audit(s, actor, "premium_added", "payroll_entry", entry.id, note)
+        await s.commit()
+    await state.clear()
+    await m.answer(
+        f"🏆 Премия {employee.name}: {entry.amount:.2f} ₽. Начисление сохранено."
+    )
 
 
 @r.message(F.text == "📊 Отчёты")
@@ -496,13 +760,154 @@ async def reports(m):
     async with Session() as s:
         if not (await guard(m, s))[1]:
             return
-        sales = (
-            await s.execute(select(func.coalesce(func.sum(Sale.amount), 0)))
-        ).scalar() or 0
-        photos = (
-            await s.execute(select(func.coalesce(func.sum(Sale.sold_photos), 0)))
-        ).scalar() or 0
-        await m.answer(f"📊 Сеть\nПродажи: {sales:.2f} ₽\nПродано фото: {photos}")
+        await send_report_picker(m, s, 0)
+
+
+async def send_report_picker(message, session, offset):
+    await send_day_picker(message, session, "admin:report", offset, "📊 Дневной отчёт — выберите день")
+    await message.answer(
+        "Итоговый период:",
+        reply_markup=inline(
+            [
+                [("📅 Текущая неделя", "admin:report:period:week", "primary")],
+                [("🗓 Текущий месяц", "admin:report:period:month", "primary")],
+            ]
+        ),
+    )
+
+
+@r.callback_query(F.data.startswith("admin:report:page:"))
+async def report_page(c):
+    try:
+        offset = int(c.data.rsplit(":", 1)[1])
+    except (TypeError, ValueError):
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as s:
+        await send_report_picker(c.message, s, offset)
+    await c.answer()
+
+
+def utc_period(start_date, end_date):
+    timezone = ZoneInfo(config.training_timezone)
+    start = datetime.combine(start_date, time.min, timezone).astimezone(UTC)
+    end = datetime.combine(end_date, time.min, timezone).astimezone(UTC)
+    return start.replace(tzinfo=None), end.replace(tzinfo=None)
+
+
+async def build_financial_report(session, start_date, end_date):
+    lower, upper = utc_period(start_date, end_date)
+    sales = (
+        await session.scalars(
+            select(Sale).where(Sale.created_at >= lower, Sale.created_at < upper)
+        )
+    ).all()
+    payroll_rows = (
+        await session.scalars(
+            select(PayrollEntry).where(
+                PayrollEntry.created_at >= lower, PayrollEntry.created_at < upper
+            )
+        )
+    ).all()
+    compensation = (await session.scalars(select(Compensation))).all()
+    users = {user.id: user for user in (await session.scalars(select(User))).all()}
+
+    cash = sum(item.amount for item in sales)
+    photos = sum(item.sold_photos for item in sales)
+    commissions = sum(item.commission for item in sales)
+    payroll_total = sum(item.amount for item in payroll_rows)
+    employee_commissions = defaultdict(float)
+    employee_sales = defaultdict(float)
+    employee_roles = defaultdict(lambda: defaultdict(lambda: [0.0, 0.0]))
+    employee_payroll = defaultdict(lambda: defaultdict(float))
+    salary_settings = defaultdict(float)
+
+    for item in sales:
+        employee_commissions[item.credited_user_id] += item.commission
+        employee_sales[item.credited_user_id] += item.amount
+        role_values = employee_roles[item.credited_user_id][item.commission_role]
+        role_values[0] += item.commission
+        role_values[1] = item.percent
+    for item in payroll_rows:
+        employee_payroll[item.user_id][item.kind] += item.amount
+    for item in compensation:
+        salary_settings[item.user_id] += item.base_salary
+
+    company_total = cash - commissions - payroll_total
+    lines = [
+        f"📊 Отчёт {start_date:%d.%m.%Y}–{(end_date - timedelta(days=1)):%d.%m.%Y}",
+        f"Касса: {cash:.2f} ₽",
+        f"Процент сотрудников: {commissions:.2f} ₽",
+        f"Начисления/штрафы: {payroll_total:.2f} ₽",
+        f"Итого компании: {company_total:.2f} ₽",
+        f"Продано кадров: {photos}",
+    ]
+    employee_ids = sorted(
+        set(employee_commissions) | set(employee_payroll) | set(salary_settings),
+        key=lambda user_id: users.get(user_id).name if users.get(user_id) else "",
+    )
+    if employee_ids:
+        lines.append("\n👥 Сотрудники:")
+    role_names = {"MANAGER": "Менеджер", "PHOTOGRAPHER": "Фотограф"}
+    for user_id in employee_ids:
+        user = users.get(user_id)
+        lines.append(f"\n{user.name if user else f'Сотрудник #{user_id}'}")
+        lines.append(f"Продажи: {employee_sales[user_id]:.2f} ₽")
+        for role, (amount, percent) in employee_roles[user_id].items():
+            lines.append(
+                f"{role_names.get(role, role)}: {percent:g}% = {amount:.2f} ₽"
+            )
+        for kind, amount in employee_payroll[user_id].items():
+            lines.append(f"{kind}: {amount:.2f} ₽")
+        if salary_settings[user_id]:
+            lines.append(f"Установленный оклад: {salary_settings[user_id]:.2f} ₽")
+        earned = employee_commissions[user_id] + sum(employee_payroll[user_id].values())
+        lines.append(f"Начислено за период: {earned:.2f} ₽")
+    return "\n".join(lines), employee_ids
+
+
+@r.callback_query(F.data.startswith("admin:report:date:"))
+async def report_date(c):
+    selected = callback_date(c.data)
+    if selected is None or c.message is None:
+        return await c.answer("Некорректная дата.", show_alert=True)
+    async with Session() as s:
+        text, employee_ids = await build_financial_report(
+            s, selected, selected + timedelta(days=1)
+        )
+        buttons = [
+            [(users_name.name, f"employee:view:{users_name.id}", "primary")]
+            for user_id in employee_ids
+            if (users_name := await s.get(User, user_id)) is not None
+        ]
+    await c.answer()
+    await c.message.answer(text, reply_markup=inline(buttons) if buttons else None)
+
+
+@r.callback_query(F.data.startswith("admin:report:period:"))
+async def report_period(c):
+    today = training_day()
+    period = c.data.rsplit(":", 1)[1]
+    if period == "week":
+        start = today - timedelta(days=today.weekday())
+        end = start + timedelta(days=7)
+    elif period == "month":
+        start = today.replace(day=1)
+        end = (
+            start.replace(year=start.year + 1, month=1)
+            if start.month == 12
+            else start.replace(month=start.month + 1)
+        )
+    else:
+        return await c.answer("Некорректный период.", show_alert=True)
+    async with Session() as s:
+        text, employee_ids = await build_financial_report(s, start, end)
+        buttons = [
+            [(users_name.name, f"employee:view:{users_name.id}", "primary")]
+            for user_id in employee_ids
+            if (users_name := await s.get(User, user_id)) is not None
+        ]
+    await c.answer()
+    await c.message.answer(text, reply_markup=inline(buttons) if buttons else None)
 
 
 @r.message(F.text == "⚙️ Настройки")
@@ -526,13 +931,14 @@ async def auditlog(m):
             .scalars()
             .all()
         )
-        await m.answer(
-            "\n".join(
-                f"{x.created_at:%d.%m %H:%M} #{x.user_id} {x.action} {x.entity or ''}#{x.entity_id or ''}"
-                for x in rows
+        lines = []
+        for entry in rows:
+            employee = await s.get(User, entry.user_id) if entry.user_id else None
+            lines.append(
+                f"{entry.created_at:%d.%m %H:%M} · "
+                f"{employee.name if employee else 'Система'} · {entry.action}"
             )
-            or "Аудит пуст."
-        )
+        await m.answer("\n".join(lines) or "Аудит пуст.")
 
 
 @r.message(F.text.in_({"/add_employee", "➕ Добавить сотрудника"}))

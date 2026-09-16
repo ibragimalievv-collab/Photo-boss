@@ -21,7 +21,9 @@ class BookingFlow(StatesGroup):
     hotel = State()
     client_name = State()
     client_phone = State()
+    guest_count = State()
     room = State()
+    deposit = State()
     shoot_date = State()
     shoot_time = State()
     package = State()
@@ -78,6 +80,19 @@ async def booking_client_phone(m, state):
     if phone != "-" and not 5 <= len(phone) <= 80:
         return await m.answer("Введите телефон от 5 до 80 символов либо «-».")
     await state.update_data(client_phone=None if phone == "-" else phone)
+    await state.set_state(BookingFlow.guest_count)
+    await m.answer("Введите количество гостей на съёмке:")
+
+
+@r.message(BookingFlow.guest_count)
+async def booking_guest_count(m, state):
+    try:
+        guest_count = int(m.text.strip())
+        if not 1 <= guest_count <= 100:
+            raise ValueError
+    except ValueError:
+        return await m.answer("Введите количество гостей числом от 1 до 100.")
+    await state.update_data(guest_count=guest_count)
     await state.set_state(BookingFlow.room)
     await m.answer("Введите номер комнаты:")
 
@@ -88,6 +103,19 @@ async def booking_room(m, state):
     if not room or len(room) > 100:
         return await m.answer("Введите корректный номер комнаты.")
     await state.update_data(room=room)
+    await state.set_state(BookingFlow.deposit)
+    await m.answer("Введите сумму брони в рублях или 0:")
+
+
+@r.message(BookingFlow.deposit)
+async def booking_deposit(m, state):
+    try:
+        deposit = float(m.text.strip().replace(",", "."))
+        if not 0 <= deposit <= 10_000_000:
+            raise ValueError
+    except ValueError:
+        return await m.answer("Введите корректную сумму брони, например 1000 или 0.")
+    await state.update_data(deposit=deposit)
     await state.set_state(BookingFlow.shoot_date)
     await m.answer("Введите дату съёмки в формате ДД.ММ.ГГГГ:")
 
@@ -173,6 +201,7 @@ async def booking_photographer(c: CallbackQuery, state, current_roles):
         await s.flush()
         booking = Booking(
             hotel_id=data["hotel_id"], client_id=client.id, room=data["room"],
+            guest_count=data["guest_count"], deposit=data["deposit"],
             shoot_date=date.fromisoformat(data["shoot_date"]),
             shoot_time=time.fromisoformat(data["shoot_time"]),
             package_id=data["package_id"], manager_id=manager.id,

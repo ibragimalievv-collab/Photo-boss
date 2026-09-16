@@ -84,6 +84,8 @@ class Booking(Base):
     hotel_id: Mapped[int] = mapped_column(ForeignKey("hotels.id"))
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"))
     room: Mapped[str] = mapped_column(String(100))
+    guest_count: Mapped[int] = mapped_column(Integer, default=1)
+    deposit: Mapped[float] = mapped_column(Float, default=0)
     shoot_date: Mapped[date] = mapped_column(Date)
     shoot_time: Mapped[time] = mapped_column(Time)
     package_id: Mapped[int] = mapped_column(ForeignKey("packages.id"))

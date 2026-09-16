@@ -216,6 +216,21 @@ async def prepare_sale(creator, *, role="PHOTOGRAPHER"):
     async with Session() as session:
         credited = await get_user(session, PHOTO_B)
         booking = (await session.execute(select(Booking))).scalar_one()
+        shooting = (
+            await session.scalars(
+                select(Shooting).where(Shooting.booking_id == booking.id)
+            )
+        ).one()
+        if not await session.scalar(
+            select(func.count(Photo.id)).where(Photo.shooting_id == shooting.id)
+        ):
+            session.add_all(
+                [
+                    Photo(shooting_id=shooting.id, file_id=f"ready-sale-{index}")
+                    for index in range(1, 11)
+                ]
+            )
+            await session.commit()
     state = state_for(creator)
     await state.set_data({"booking": booking.id, "credited": credited.id, "role": role})
     await state.set_state(S.photos)
@@ -327,9 +342,17 @@ def test_invalid_sale_quantity_is_rejected(count):
 
 
 @pytest.mark.parametrize("creator", [PHOTO_A, MANAGER, ADMIN, OWNER])
-def test_sale_credits_other_photographer_and_uses_database_percent(creator):
+def test_sale_credits_other_photographer_and_uses_photo_count_tier(creator):
     async def scenario():
-        await message(OWNER, "/set PHOTOGRAPHER_PERCENT 12.5")
+        async with Session() as session:
+            shooting = (await session.scalars(select(Shooting))).one()
+            session.add_all(
+                [
+                    Photo(shooting_id=shooting.id, file_id=f"sale-source-{index}")
+                    for index in range(1, 11)
+                ]
+            )
+            await session.commit()
         # Exercise the complete FSM, not just its final function.
         for text in ["🧾 Продажа", "1", str(PHOTO_B), "PHOTOGRAPHER", "2"]:
             await message(creator, text)
@@ -338,8 +361,8 @@ def test_sale_credits_other_photographer_and_uses_database_percent(creator):
             assert sale.created_by_id == (await get_user(session, creator)).id
             assert sale.credited_user_id == (await get_user(session, PHOTO_B)).id
             assert sale.amount == 800
-            assert sale.percent == 12.5
-            assert sale.commission == 100
+            assert sale.percent == 10
+            assert sale.commission == 80
             assert (
                 await session.execute(
                     select(func.count(AuditLog.id)).where(
@@ -357,7 +380,7 @@ def test_sale_credits_other_photographer_and_uses_database_percent(creator):
     run(scenario())
 
 
-def test_employee_percent_takes_precedence_and_forged_role_is_rejected():
+def test_photographer_tier_takes_precedence_and_forged_role_is_rejected():
     async def scenario():
         async with Session() as session:
             credited = await get_user(session, PHOTO_B)
@@ -375,7 +398,7 @@ def test_employee_percent_takes_precedence_and_forged_role_is_rejected():
         await message(PHOTO_A, "2")
         async with Session() as session:
             sale = (await session.execute(select(Sale))).scalar_one()
-            assert sale.commission == 184
+            assert sale.commission == 80
 
     run(scenario())
 
@@ -757,7 +780,15 @@ def test_new_booking_button_creates_complete_booking():
         await message(MANAGER, "➕ Новая запись")
         assert await state_for(MANAGER).get_state() == BookingFlow.hotel.state
         await callback(MANAGER, f"booking:hotel:{hotel.id}")
-        for text in ["Новый клиент", "+79990000000", "404", "20.09.2026", "14:30"]:
+        for text in [
+            "Новый клиент",
+            "+79990000000",
+            "3",
+            "404",
+            "1000",
+            "20.09.2026",
+            "14:30",
+        ]:
             await message(MANAGER, text)
         assert await state_for(MANAGER).get_state() == BookingFlow.package.state
         await callback(MANAGER, f"booking:package:{package.id}")
@@ -770,6 +801,8 @@ def test_new_booking_button_creates_complete_booking():
                 await session.scalars(select(Booking).order_by(Booking.id.desc()))
             ).first()
             assert booking.room == "404"
+            assert booking.guest_count == 3
+            assert booking.deposit == 1000
             assert booking.shoot_date == date(2026, 9, 20)
             assert booking.shoot_time == time(14, 30)
             assert booking.photographer_id == photographer.id
@@ -807,20 +840,121 @@ def test_manager_cards_have_colored_decisions_and_reminder():
 def test_admin_sees_complete_booking_cards():
     async def scenario():
         await message(OWNER, "📋 Все записи")
-        assert telegram.calls[-2].text == "📋 Все записи: 1"
-        card = telegram.calls[-1].text
+        assert telegram.calls[-1].text == "📋 Выберите день записей"
+        assert len(telegram.calls[-1].reply_markup.inline_keyboard) == 8
+        await callback(OWNER, "admin:bookings:date:2026-09-15")
+        sent = [call for call in telegram.calls if isinstance(call, SendMessage)]
+        assert sent[-3].text.startswith("📋 ЕЖЕДНЕВНИК\nДата: 15.09.2026")
+        card = sent[-2].text
         for field in [
             "🏨 Отель:",
             "🚪 Комната:",
             "👤 Клиент:",
             "📞 Телефон:",
+            "👥 Количество гостей:",
             "📅 Дата:",
             "🕐 Время:",
             "📦 Пакет:",
+            "💳 Бронь:",
+            "💰 Продажа:",
+            "🖼 Кадры:",
             "📋 Менеджер:",
             "📸 Фотограф:",
         ]:
             assert field in card
+
+    run(scenario())
+
+
+def test_admin_shootings_are_selected_by_date_and_time():
+    async def scenario():
+        await message(OWNER, "📸 Все съёмки")
+        assert telegram.calls[-1].text == "📸 Выберите день съёмок"
+        await callback(OWNER, "admin:shoots:date:2026-09-15")
+        call = telegram.calls[-1]
+        assert call.text == "📸 Съёмки на 15.09.2026: 1"
+        assert call.reply_markup.inline_keyboard[0][0].callback_data == (
+            "admin:shoot:view:1"
+        )
+        await callback(OWNER, "admin:shoot:view:1")
+        assert telegram.calls[-1].text.startswith("📋 Запись #1")
+
+    run(scenario())
+
+
+def test_daily_weekly_and_monthly_reports_show_cash_and_employee_percent():
+    async def scenario():
+        await prepare_sale(PHOTO_A)
+        await message(PHOTO_A, "2")
+        await message(OWNER, "📊 Отчёты")
+        assert telegram.calls[-2].text == "📊 Дневной отчёт — выберите день"
+        assert telegram.calls[-1].text == "Итоговый период:"
+
+        today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+        await callback(OWNER, f"admin:report:date:{today.isoformat()}")
+        report = telegram.calls[-1].text
+        assert "Касса: 800.00 ₽" in report
+        assert "Процент сотрудников: 80.00 ₽" in report
+        assert "Итого компании: 720.00 ₽" in report
+        assert "PHOTOGRAPHER" in report
+        assert "Фотограф: 10% = 80.00 ₽" in report
+
+        await callback(OWNER, "admin:report:period:week")
+        assert telegram.calls[-1].text.startswith("📊 Отчёт")
+        await callback(OWNER, "admin:report:period:month")
+        assert telegram.calls[-1].text.startswith("📊 Отчёт")
+
+    run(scenario())
+
+
+def test_photographer_gets_fifteen_percent_for_150_photos_in_one_shoot():
+    async def scenario():
+        await prepare_sale(PHOTO_A)
+        async with Session() as session:
+            shooting = (await session.scalars(select(Shooting))).one()
+            session.add_all(
+                [
+                    Photo(shooting_id=shooting.id, file_id=f"tier-photo-{index}")
+                    for index in range(11, 151)
+                ]
+            )
+            await session.commit()
+        await message(PHOTO_A, "150")
+        async with Session() as session:
+            sale = (await session.scalars(select(Sale))).one()
+            assert sale.percent == 15
+            assert sale.commission == 9000
+
+    run(scenario())
+
+
+def test_owner_can_add_named_premium_and_open_employee_profile():
+    async def scenario():
+        await message(OWNER, "💵 Зарплаты/выплаты")
+        await callback(OWNER, "premium:add")
+        async with Session() as session:
+            employee = await get_user(session, PHOTO_A)
+        await callback(OWNER, f"premium:user:{employee.id}")
+        await message(OWNER, "2500")
+        await message(OWNER, "Отличная работа")
+        async with Session() as session:
+            premium = (
+                await session.scalars(
+                    select(PayrollEntry).where(PayrollEntry.kind == "Премия")
+                )
+            ).one()
+            assert premium.user_id == employee.id
+            assert premium.amount == 2500
+
+        await message(OWNER, "💵 Зарплаты/выплаты")
+        call = telegram.calls[-1]
+        assert "PHOTOGRAPHER" in call.text
+        callbacks = {
+            button.callback_data
+            for row in call.reply_markup.inline_keyboard
+            for button in row
+        }
+        assert f"employee:view:{employee.id}" in callbacks
 
     run(scenario())
 

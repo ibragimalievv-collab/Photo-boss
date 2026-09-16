@@ -31,6 +31,18 @@ async def init_db():
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         if connection.dialect.name == "postgresql":
+            await connection.execute(
+                text(
+                    "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS guest_count "
+                    "INTEGER NOT NULL DEFAULT 1"
+                )
+            )
+            await connection.execute(
+                text(
+                    "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit "
+                    "DOUBLE PRECISION NOT NULL DEFAULT 0"
+                )
+            )
             column_type = await connection.scalar(
                 text(
                     """

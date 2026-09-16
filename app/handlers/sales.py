@@ -2,12 +2,12 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from aiogram import F, Router
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ..access import StaffFilter
 from ..config import config, number
 from ..db import Session
-from ..models import Booking, Compensation, Package, Sale, User
+from ..models import Booking, Compensation, Package, Photo, Sale, Shooting, User
 from ..services.core import audit, get_user, roles_of, setting
 
 r = Router()
@@ -19,6 +19,11 @@ class S(StatesGroup):
     credited = State()
     role = State()
     photos = State()
+
+
+PHOTO_TIER_THRESHOLD = 150
+PHOTO_PERCENT_STANDARD = Decimal(10)
+PHOTO_PERCENT_HIGH = Decimal(15)
 
 
 @r.message(F.text == "🧾 Продажа")
@@ -90,23 +95,43 @@ async def cr(m, state):
         )
     await state.update_data(credited=credited.id)
     await state.set_state(S.role)
-    await m.answer("Роль для комиссии: " + " или ".join(sorted(commission_roles)))
+    names = {"MANAGER": "Менеджер", "PHOTOGRAPHER": "Фотограф"}
+    await m.answer(
+        "Роль для начисления: "
+        + " или ".join(names[role] for role in sorted(commission_roles))
+    )
 
 
 @r.message(S.role)
 async def rr(m, state):
-    role = (m.text or "").strip().upper()
+    entered = (m.text or "").strip().upper()
+    role = {"МЕНЕДЖЕР": "MANAGER", "ФОТОГРАФ": "PHOTOGRAPHER"}.get(
+        entered, entered
+    )
     data = await state.get_data()
     async with Session() as session:
         credited = await session.get(User, data["credited"])
         roles = await roles_of(session, credited)
+        uploaded = await session.scalar(
+            select(func.count(Photo.id))
+            .join(Shooting, Shooting.id == Photo.shooting_id)
+            .where(Shooting.booking_id == data["booking"])
+        )
+        already_sold = await session.scalar(
+            select(func.coalesce(func.sum(Sale.sold_photos), 0)).where(
+                Sale.booking_id == data["booking"]
+            )
+        )
     if role not in {"MANAGER", "PHOTOGRAPHER"} or role not in roles:
         return await m.answer(
-            "Выберите роль, назначенную этому сотруднику: MANAGER или PHOTOGRAPHER."
+            "Выберите назначенную сотруднику роль: Менеджер или Фотограф."
         )
     await state.update_data(role=role)
     await state.set_state(S.photos)
-    await m.answer("Сколько фото продано?")
+    await m.answer(
+        f"Всего готовых фотографий: {uploaded}. Уже куплено: {already_sold}.\n"
+        "Сколько фотографий куплено сейчас?"
+    )
 
 
 @r.message(S.photos)
@@ -141,6 +166,23 @@ async def save(m, state):
             return await m.answer(
                 "У записи не найден пакет. Обратитесь к администратору."
             )
+        uploaded = await session.scalar(
+            select(func.count(Photo.id))
+            .join(Shooting, Shooting.id == Photo.shooting_id)
+            .where(Shooting.booking_id == booking.id)
+        )
+        already_sold = await session.scalar(
+            select(func.coalesce(func.sum(Sale.sold_photos), 0)).where(
+                Sale.booking_id == booking.id
+            )
+        )
+        if not uploaded:
+            return await m.answer("Сначала фотограф должен загрузить готовые фотографии.")
+        if already_sold + count > uploaded:
+            return await m.answer(
+                f"Нельзя продать больше загруженных. Всего: {uploaded}, "
+                f"уже куплено: {already_sold}, доступно: {uploaded - already_sold}."
+            )
         compensations = (
             (
                 await session.execute(
@@ -161,9 +203,25 @@ async def save(m, state):
             config.manager_percent if role == "MANAGER" else config.photographer_percent
         )
         percent_value = (
-            compensations[0].sales_percent
-            if compensations
-            else await setting(session, key, default)
+            (
+                PHOTO_PERCENT_HIGH
+                if await session.scalar(
+                    select(func.count(Photo.id))
+                    .join(Shooting, Shooting.id == Photo.shooting_id)
+                    .join(Booking, Booking.id == Shooting.booking_id)
+                    .where(
+                        Booking.id == booking.id,
+                    )
+                )
+                >= PHOTO_TIER_THRESHOLD
+                else PHOTO_PERCENT_STANDARD
+            )
+            if role == "PHOTOGRAPHER"
+            else (
+                compensations[0].sales_percent
+                if compensations
+                else await setting(session, key, default)
+            )
         )
         try:
             price = Decimal(str(number(package.price_per_photo, "Цена", minimum=0.01)))
@@ -188,6 +246,42 @@ async def save(m, state):
         )
         session.add(sale)
         await session.flush()
+        if role == "PHOTOGRAPHER":
+            photographed = await session.scalar(
+                select(func.count(Photo.id))
+                .join(Shooting, Shooting.id == Photo.shooting_id)
+                .join(Booking, Booking.id == Shooting.booking_id)
+                .where(
+                    Booking.id == booking.id,
+                )
+            )
+            day_sales = (
+                await session.scalars(
+                    select(Sale)
+                    .join(Booking, Booking.id == Sale.booking_id)
+                    .where(
+                        Sale.credited_user_id == credited.id,
+                        Sale.commission_role == "PHOTOGRAPHER",
+                        Booking.id == booking.id,
+                    )
+                )
+            ).all()
+            tier_percent = (
+                PHOTO_PERCENT_HIGH
+                if photographed >= PHOTO_TIER_THRESHOLD
+                else PHOTO_PERCENT_STANDARD
+            )
+            for item in day_sales:
+                item.percent = float(tier_percent)
+                item.commission = float(
+                    (Decimal(str(item.amount)) * tier_percent / 100).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                )
+            percent = tier_percent
+            commission = Decimal(str(sale.commission)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
         await audit(
             session,
             creator,
@@ -199,5 +293,7 @@ async def save(m, state):
         await session.commit()
     await state.clear()
     await m.answer(
-        f"Продажа #{sale.id} сохранена: {amount:.2f} ₽; комиссия {commission:.2f} ₽.\nЗасчитано: {credited.name} (Telegram ID {credited.tg_id})."
+        f"Продажа #{sale.id} сохранена. Фотографии: всего {uploaded}, "
+        f"куплено {already_sold + count}.\nСумма: {amount:.2f} ₽; "
+        f"комиссия {commission:.2f} ₽.\nЗасчитано: {credited.name}."
     )
