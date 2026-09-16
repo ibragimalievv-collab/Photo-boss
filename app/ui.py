@@ -5,7 +5,14 @@ from collections import defaultdict
 from aiogram import BaseMiddleware
 from aiogram.exceptions import TelegramAPIError
 from aiogram.methods import SendDocument, SendMediaGroup, SendMessage, SendPhoto
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup, Update
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    ReplyKeyboardMarkup,
+    Update,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +47,48 @@ class CompactChat:
 compact_chat = CompactChat()
 
 
+def add_navigation(method):
+    markup = getattr(method, "reply_markup", None)
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return
+    callbacks = {
+        button.callback_data
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+    if callbacks & {"nav:back", "nav:home"}:
+        return
+    labels = {
+        button.text for row in markup.inline_keyboard for button in row
+    }
+    navigation = []
+    if not any(label.startswith("⬅️") or label == "Отмена" for label in labels):
+        navigation.append(
+            InlineKeyboardButton(text="⬅️ Назад", callback_data="nav:back")
+        )
+    navigation.append(
+        InlineKeyboardButton(text="🏠 Главная", callback_data="nav:home")
+    )
+    method.reply_markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            *markup.inline_keyboard,
+            navigation,
+        ]
+    )
+
+
+def should_preserve(method):
+    if isinstance(method, (SendPhoto, SendDocument, SendMediaGroup)):
+        return True
+    if not isinstance(method, SendMessage):
+        return False
+    text = method.text or ""
+    return text.startswith(
+        ("📊 Отчёт", "📋 ЕЖЕДНЕВНИК", "💰 Продажи ·", "✅ ", "⛔ ")
+    )
+
+
 class CompactUiMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: Update, data):
         if not getattr(data["bot"], "_compact_ui_enabled", False):
@@ -56,6 +105,7 @@ class CompactUiMiddleware(BaseMiddleware):
 
 
 async def remember_sent_message(make_request, bot, method):
+    add_navigation(method)
     result = await make_request(bot, method)
     # The message carrying the permanent bottom menu is the chat's anchor.
     # Removing it makes Telegram show the "Start bot" screen again.
@@ -63,7 +113,9 @@ async def remember_sent_message(make_request, bot, method):
         method.reply_markup, ReplyKeyboardMarkup
     ):
         return result
-    if isinstance(method, (SendMessage, SendPhoto, SendDocument, SendMediaGroup)):
+    if not should_preserve(method) and isinstance(
+        method, (SendMessage, SendPhoto, SendDocument, SendMediaGroup)
+    ):
         await compact_chat.remember(result)
     return result
 

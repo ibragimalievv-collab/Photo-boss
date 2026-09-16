@@ -1,6 +1,6 @@
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, ReplyKeyboardRemove
 
 from ..config import config
 from ..db import Session
@@ -30,7 +30,7 @@ async def start(m, state):
             reply_markup=ReplyKeyboardRemove(),
         )
     await m.answer(
-        "🏨 Hotel Photo Bot\n\nРоли: "
+        "🏨 PHOTO BOSS\n\nРоли: "
         + ", ".join(ROLES.get(role, role) for role in sorted(roles)),
         reply_markup=reply(menu(roles)),
     )
@@ -42,12 +42,20 @@ async def myid(m):
 
 
 @r.message(Command("cancel"))
+@r.message(F.text == "❌ Отменить")
 async def cancel(m, state):
     await state.clear()
     async with Session() as session:
         user = await get_user(session, m.from_user.id)
         roles = await roles_of(session, user)
-    await m.answer(
-        "Ввод отменён.",
-        reply_markup=reply(menu(roles)) if roles else ReplyKeyboardRemove(),
-    )
+    await m.answer("Действие отменено." if roles else "Доступ отключён.")
+
+
+@r.callback_query(F.data.in_({"nav:back", "nav:home"}))
+async def navigation(callback: CallbackQuery, state):
+    await state.clear()
+    await callback.answer()
+    if callback.message is not None:
+        await callback.message.answer(
+            "🏠 Главное меню\n\nВыберите нужный раздел кнопками внизу."
+        )
