@@ -376,3 +376,19 @@ class AcademyBestWork(Base):
     author_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class GuestSelectedPhoto(Base):
+    __tablename__ = "guest_selected_photos"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    shooting_id: Mapped[int] = mapped_column(
+        ForeignKey("shootings.id", ondelete="CASCADE"), index=True
+    )
+    file_id: Mapped[str] = mapped_column(String(300))
+    selected_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (
+        UniqueConstraint(
+            "shooting_id", "file_id", name="uq_guest_selected_photo_per_shooting"
+        ),
+    )
