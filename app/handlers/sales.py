@@ -21,8 +21,8 @@ from ..models import (
 from ..services.core import audit, get_user, roles_of, setting
 
 r = Router()
-r.message.filter(StaffFilter("PHOTOGRAPHER", "MANAGER"), F.text)
-r.callback_query.filter(StaffFilter("PHOTOGRAPHER", "MANAGER"))
+r.message.filter(StaffFilter("PHOTOGRAPHER"), F.text)
+r.callback_query.filter(StaffFilter("PHOTOGRAPHER"))
 
 
 class S(StatesGroup):
@@ -84,7 +84,7 @@ async def b(m, state):
                 .join(UserRole, UserRole.user_id == User.id)
                 .where(
                     User.active.is_(True),
-                    UserRole.role.in_(("MANAGER", "PHOTOGRAPHER")),
+                    UserRole.role == "PHOTOGRAPHER",
                 )
                 .distinct()
                 .order_by(User.name)
@@ -102,12 +102,12 @@ async def b(m, state):
 
 
 async def ask_commission_role(message, state, credited, roles):
-    commission_roles = roles & {"MANAGER", "PHOTOGRAPHER"}
+    commission_roles = roles & {"PHOTOGRAPHER"}
     if not commission_roles:
         return await message.answer(
-            "Нужен активный сотрудник с ролью менеджера или фотографа."
+            "Нужен активный сотрудник с ролью фотографа."
         )
-    names = {"MANAGER": "Менеджер", "PHOTOGRAPHER": "Фотограф"}
+    names = {"PHOTOGRAPHER": "Фотограф"}
     await state.update_data(credited=credited.id)
     await state.set_state(S.role)
     await message.answer(
@@ -154,7 +154,7 @@ async def role_button(c, state):
     async with Session() as session:
         credited = await session.get(User, data["credited"])
         roles = await roles_of(session, credited)
-    if role not in {"MANAGER", "PHOTOGRAPHER"} or role not in roles:
+    if role != "PHOTOGRAPHER" or role not in roles:
         return await c.answer("Роль сотруднику не назначена.", show_alert=True)
     await state.update_data(role=role)
     await state.set_state(S.photos)
@@ -165,7 +165,7 @@ async def role_button(c, state):
 @r.message(S.role)
 async def rr(m, state):
     entered = (m.text or "").strip().upper()
-    role = {"МЕНЕДЖЕР": "MANAGER", "ФОТОГРАФ": "PHOTOGRAPHER"}.get(
+    role = {"ФОТОГРАФ": "PHOTOGRAPHER"}.get(
         entered, entered
     )
     data = await state.get_data()
@@ -182,9 +182,9 @@ async def rr(m, state):
                 Sale.booking_id == data["booking"]
             )
         )
-    if role not in {"MANAGER", "PHOTOGRAPHER"} or role not in roles:
+    if role != "PHOTOGRAPHER" or role not in roles:
         return await m.answer(
-            "Выберите назначенную сотруднику роль: Менеджер или Фотограф."
+            "Выберите назначенного фотографа."
         )
     await state.update_data(role=role)
     await state.set_state(S.photos)
@@ -206,7 +206,7 @@ async def save(m, state):
     async with Session() as session:
         creator = await get_user(session, m.from_user.id)
         creator_roles = await roles_of(session, creator)
-        if not creator_roles & {"OWNER", "ADMIN", "MANAGER", "PHOTOGRAPHER"}:
+        if not creator_roles & {"OWNER", "ADMIN", "PHOTOGRAPHER"}:
             await state.clear()
             return await m.answer("Нет доступа.")
         booking = await session.get(Booking, data.get("booking"))
@@ -214,7 +214,7 @@ async def save(m, state):
         role = data.get("role")
         if (
             booking is None
-            or role not in {"MANAGER", "PHOTOGRAPHER"}
+            or role != "PHOTOGRAPHER"
             or role not in await roles_of(session, credited)
         ):
             await state.clear()
