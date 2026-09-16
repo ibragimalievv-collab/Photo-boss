@@ -616,33 +616,144 @@ async def allsales(m):
     async with Session() as s:
         if not (await guard(m, s))[1]:
             return
-        rows = (
-            await s.scalars(select(Sale).order_by(Sale.created_at.desc()).limit(50))
+        hotels = (
+            await s.scalars(select(Hotel).where(Hotel.active.is_(True)).order_by(Hotel.name))
         ).all()
-        total = sum(item.amount for item in rows)
-        lines = [f"💰 Продажи сети: {total:.2f} ₽"]
-        employee_ids = set()
-        for item in rows:
-            creator = await s.get(User, item.created_by_id)
-            credited = await s.get(User, item.credited_user_id)
-            employee_ids.update((item.created_by_id, item.credited_user_id))
-            lines.append(
-                f"#{item.id} · {item.created_at:%d.%m.%Y} · {item.amount:.2f} ₽ · "
-                f"кадров {item.sold_photos} · оформил {creator.name} · "
-                f"начислено {credited.name}: {item.commission:.2f} ₽"
-            )
+        rows = [[("Все отели", "admin:sales:hotel:0", "primary")]]
+        rows += [
+            [(hotel.name, f"admin:sales:hotel:{hotel.id}", "primary")]
+            for hotel in hotels
+        ]
         await m.answer(
-            "\n".join(lines),
-            reply_markup=inline(
-                [
-                    [(s_user.name, f"employee:view:{s_user.id}", "primary")]
-                    for user_id in sorted(employee_ids)
-                    if (s_user := await s.get(User, user_id)) is not None
-                ]
-            )
-            if employee_ids
-            else None,
+            "💰 Продажи\nВыберите отель:",
+            reply_markup=inline(rows),
         )
+
+
+async def send_sales_period_picker(message, session, hotel_id, offset=0):
+    hotel = await session.get(Hotel, hotel_id) if hotel_id else None
+    title = hotel.name if hotel else "Все отели"
+    today = training_day()
+    offset = max(0, min(offset, 364))
+    days = [today - timedelta(days=offset + index) for index in range(7)]
+    rows = [
+        [
+            (
+                day_label(value, today),
+                f"admin:sales:day:{hotel_id}:{value.isoformat()}",
+                "primary",
+            )
+        ]
+        for value in days
+    ]
+    rows += [
+        [("📅 Текущая неделя", f"admin:sales:period:{hotel_id}:week", "primary")],
+        [("🗓 Текущий месяц", f"admin:sales:period:{hotel_id}:month", "primary")],
+        [("⬅️ Предыдущие 7 дней", f"admin:sales:page:{hotel_id}:{offset + 7}")],
+    ]
+    if offset:
+        rows.append([("Ближе к сегодня ➡️", f"admin:sales:page:{hotel_id}:{max(0, offset - 7)}")])
+    await message.answer(f"🏨 {title}\nВыберите период продаж:", reply_markup=inline(rows))
+
+
+@r.callback_query(F.data.startswith("admin:sales:hotel:"))
+async def sales_hotel(c):
+    try:
+        hotel_id = int(c.data.rsplit(":", 1)[1])
+    except (TypeError, ValueError):
+        return await c.answer("Некорректный отель.", show_alert=True)
+    async with Session() as s:
+        if hotel_id and await s.get(Hotel, hotel_id) is None:
+            return await c.answer("Отель не найден.", show_alert=True)
+        await send_sales_period_picker(c.message, s, hotel_id)
+    await c.answer()
+
+
+@r.callback_query(F.data.startswith("admin:sales:page:"))
+async def sales_page(c):
+    try:
+        _, _, _, raw_hotel, raw_offset = c.data.split(":")
+        hotel_id, offset = int(raw_hotel), int(raw_offset)
+    except (TypeError, ValueError):
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as s:
+        await send_sales_period_picker(c.message, s, hotel_id, offset)
+    await c.answer()
+
+
+async def send_sales_report(message, session, hotel_id, start_date, end_date):
+    lower, upper = utc_period(start_date, end_date)
+    query = (
+        select(Sale)
+        .join(Booking, Booking.id == Sale.booking_id)
+        .where(Sale.created_at >= lower, Sale.created_at < upper)
+        .order_by(Sale.created_at, Sale.id)
+    )
+    if hotel_id:
+        query = query.where(Booking.hotel_id == hotel_id)
+    rows = (await session.scalars(query)).all()
+    hotel = await session.get(Hotel, hotel_id) if hotel_id else None
+    lines = [
+        f"💰 Продажи · {hotel.name if hotel else 'Все отели'}",
+        f"Период: {start_date:%d.%m.%Y}–{(end_date - timedelta(days=1)):%d.%m.%Y}",
+        f"Касса: {sum(item.amount for item in rows):.2f} ₽",
+        f"Куплено кадров: {sum(item.sold_photos for item in rows)}",
+    ]
+    employee_ids = set()
+    for item in rows:
+        creator = await session.get(User, item.created_by_id)
+        credited = await session.get(User, item.credited_user_id)
+        employee_ids.update((item.created_by_id, item.credited_user_id))
+        lines.append(
+            f"\nПродажа #{item.id}: {item.amount:.2f} ₽ · {item.sold_photos} кадров\n"
+            f"Оформил: {creator.name}\nНачислено: {credited.name} — "
+            f"{item.percent:g}% = {item.commission:.2f} ₽"
+        )
+    buttons = [
+        [(employee.name, f"employee:view:{employee.id}", "primary")]
+        for user_id in sorted(employee_ids)
+        if (employee := await session.get(User, user_id)) is not None
+    ]
+    await message.answer(
+        "\n".join(lines), reply_markup=inline(buttons) if buttons else None
+    )
+
+
+@r.callback_query(F.data.startswith("admin:sales:day:"))
+async def sales_day(c):
+    try:
+        _, _, _, raw_hotel, raw_date = c.data.split(":")
+        hotel_id, selected = int(raw_hotel), date.fromisoformat(raw_date)
+    except (TypeError, ValueError):
+        return await c.answer("Некорректная дата.", show_alert=True)
+    async with Session() as s:
+        await send_sales_report(c.message, s, hotel_id, selected, selected + timedelta(days=1))
+    await c.answer()
+
+
+@r.callback_query(F.data.startswith("admin:sales:period:"))
+async def sales_period(c):
+    try:
+        _, _, _, raw_hotel, period = c.data.split(":")
+        hotel_id = int(raw_hotel)
+    except (TypeError, ValueError):
+        return await c.answer("Некорректный период.", show_alert=True)
+    today = training_day()
+    if period == "week":
+        start, end = today - timedelta(days=today.weekday()), None
+        end = start + timedelta(days=7)
+    elif period == "month":
+        start = today.replace(day=1)
+        end = (
+            start.replace(year=start.year + 1, month=1)
+            if start.month == 12
+            else start.replace(month=start.month + 1)
+        )
+    else:
+        return await c.answer("Некорректный период.", show_alert=True)
+    async with Session() as s:
+        await send_sales_report(c.message, s, hotel_id, start, end)
+    await c.answer()
 
 
 @r.message(F.text == "💵 Зарплаты/выплаты")

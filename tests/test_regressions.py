@@ -323,7 +323,7 @@ def test_manager_and_photographer_screens_and_admin_sales_route():
             before = len(telegram.calls)
             await message(tg_id, text)
             assert len(telegram.calls) > before
-        assert telegram.calls[-1].text.startswith("💰 Продажи сети:")
+        assert telegram.calls[-1].text == "💰 Продажи\nВыберите отель:"
 
     run(scenario())
 
@@ -903,6 +903,35 @@ def test_daily_weekly_and_monthly_reports_show_cash_and_employee_percent():
         assert telegram.calls[-1].text.startswith("📊 Отчёт")
         await callback(OWNER, "admin:report:period:month")
         assert telegram.calls[-1].text.startswith("📊 Отчёт")
+
+    run(scenario())
+
+
+def test_owner_sales_are_filtered_by_hotel_and_period():
+    async def scenario():
+        await prepare_sale(PHOTO_A)
+        await message(PHOTO_A, "2")
+        async with Session() as session:
+            hotel = (await session.scalars(select(Hotel))).first()
+
+        await message(OWNER, "💰 Продажи")
+        await callback(OWNER, f"admin:sales:hotel:{hotel.id}")
+        assert telegram.calls[-2].text.startswith(f"🏨 {hotel.name}")
+        today = datetime.now(ZoneInfo("Europe/Moscow")).date()
+        await callback(
+            OWNER, f"admin:sales:day:{hotel.id}:{today.isoformat()}"
+        )
+        report = telegram.calls[-2]
+        assert f"💰 Продажи · {hotel.name}" in report.text
+        assert "Касса: 800.00 ₽" in report.text
+        assert "Куплено кадров: 2" in report.text
+        assert "PHOTOGRAPHER" in report.text
+        assert report.reply_markup is not None
+
+        await callback(OWNER, f"admin:sales:period:{hotel.id}:week")
+        assert telegram.calls[-2].text.startswith(f"💰 Продажи · {hotel.name}")
+        await callback(OWNER, f"admin:sales:period:{hotel.id}:month")
+        assert telegram.calls[-2].text.startswith(f"💰 Продажи · {hotel.name}")
 
     run(scenario())
 
