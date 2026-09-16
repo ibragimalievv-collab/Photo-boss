@@ -1,10 +1,8 @@
-import json
 from datetime import UTC, datetime
 
 from aiogram import F, Router
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import StateFilter
-from aiogram.types import CallbackQuery
+from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import func, select
 
 from ..access import StaffFilter
@@ -19,13 +17,12 @@ from ..models import (
     AcademyReview,
     AcademyUserAchievement,
     Booking,
-    Hotel,
     Photo,
     Shooting,
     User,
     UserRole,
 )
-from ..services.core import ROLES, audit, get_user, roles_of, has
+from ..services.core import ROLES, audit, get_user
 
 r = Router()
 r.message.filter(StaffFilter(*ROLES))
@@ -269,7 +266,7 @@ async def reviews(callback):
         user = await current_user(session, callback.from_user.id)
         reviews = (await session.scalars(select(AcademyReview).where(AcademyReview.photographer_id == user.id).order_by(AcademyReview.created_at.desc()).limit(15))).all()
         shootings = (await session.scalars(select(Shooting).join(Booking, Booking.id == Shooting.booking_id).where(Booking.photographer_id == user.id, Shooting.status.in_(("READY_FOR_SALE", "COMPLETED"))).order_by(Shooting.completed_at.desc()).limit(20))).all()
-        reviewed = set(review.shooting_id for review in reviews if review.shooting_id)
+        reviewed = {review.shooting_id for review in reviews if review.shooting_id}
     rows = [[(f"🎓 Отправить съёмку #{shooting.id}", f"academy:send-review:{shooting.id}")] for shooting in shootings if shooting.id not in reviewed]
     rows += [[(f"{'✅' if review.status == 'REVIEWED' else '⏳'} Разбор съёмки #{review.shooting_id}", f"academy:review-card:{review.id}")] for review in reviews]
     await callback.answer()
