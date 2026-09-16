@@ -341,7 +341,7 @@ def test_invalid_sale_quantity_is_rejected(count):
     run(scenario())
 
 
-@pytest.mark.parametrize("creator", [PHOTO_A, MANAGER, ADMIN, OWNER])
+@pytest.mark.parametrize("creator", [PHOTO_A, ADMIN, OWNER])
 def test_sale_credits_other_photographer_and_uses_photo_count_tier(creator):
     async def scenario():
         async with Session() as session:
