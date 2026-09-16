@@ -440,7 +440,7 @@ async def upload_sale_photo(m, state):
         u = await get_user(s, m.from_user.id)
         shooting = await s.get(Shooting, shooting_id)
         booking = await s.get(Booking, shooting.booking_id) if shooting else None
-        if booking is None or booking.photographer_id != u.id or shooting.status != "UPLOADING":
+        if booking is None or booking.photographer_id != u.id or shooting.status != "READY_FOR_SALE":
             await state.clear()
             return await m.answer("Эта загрузка уже закрыта. Откройте «📸 Мои съёмки».")
         exists = await s.scalar(
@@ -475,7 +475,7 @@ async def finish_photo_upload(c: CallbackQuery, state):
         u = await get_user(s, c.from_user.id)
         shooting = await s.get(Shooting, shooting_id, with_for_update=True)
         booking = await s.get(Booking, shooting.booking_id) if shooting else None
-        if booking is None or booking.photographer_id != u.id or shooting.status != "UPLOADING":
+        if booking is None or booking.photographer_id != u.id or shooting.status != "READY_FOR_SALE":
             await state.clear()
             return await c.answer("Загрузка уже закрыта.", show_alert=True)
         count = await s.scalar(
@@ -483,6 +483,8 @@ async def finish_photo_upload(c: CallbackQuery, state):
         )
         if not count:
             return await c.answer("Сначала загрузите фотографии.", show_alert=True)
+        shooting.status = "READY_FOR_SALE"
+        booking.status = "READY_FOR_SALE"
         await audit(
             s, u, "shooting_all_photos_uploaded", "shooting", shooting.id, f"photos={count}"
         )
@@ -562,8 +564,6 @@ async def finish_guest_selection(c: CallbackQuery, state):
                 GuestSelectedPhoto.shooting_id == shooting.id
             )
         ) or 0
-        shooting.status = "READY_FOR_SALE"
-        booking.status = "READY_FOR_SALE"
         await audit(
             s,
             u,
