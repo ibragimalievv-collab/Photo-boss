@@ -3,12 +3,12 @@ from datetime import date, time
 from aiogram import F, Router
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ..access import StaffFilter
 from ..db import Session
 from ..keyboards import inline, reply
-from ..models import Booking, Client, Hotel, Package, Shooting, User, UserRole
+from ..models import Booking, Client, Hotel, Package, Sale, Shooting, User, UserRole
 from ..services.bookings import booking_card
 from ..services.core import audit, get_user, menu
 
@@ -43,7 +43,9 @@ async def new_booking(m, state):
         return await m.answer("Нет активных отелей. Сначала добавьте отель.")
     await state.set_state(BookingFlow.hotel)
     await m.answer(
-        "➕ Новая запись\n\nВыберите отель:",
+        "➕ Новая запись
+
+Выберите отель:",
         reply_markup=inline([[(hotel.name, f"booking:hotel:{hotel.id}")] for hotel in hotels]),
     )
 
@@ -315,8 +317,12 @@ async def remind_guest(c: CallbackQuery):
         await s.commit()
     await c.answer()
     await c.message.answer(
-        f"🔔 Напоминание гостю\n\n"
-        f"Телефон: {client.phone or 'не указан'}\n\n"
+        f"🔔 Напоминание гостю
+
+"
+        f"Телефон: {client.phone or 'не указан'}
+
+"
         f"Здравствуйте, {client.name}! Напоминаем о фотосъёмке "
         f"{booking.shoot_date:%d.%m.%Y} в {booking.shoot_time:%H:%M}, "
         f"отель «{hotel.name}». Будем вас ждать!"
@@ -403,7 +409,8 @@ async def sales(m):
                 f"Продажа #{sale.id}: {sale.sold_photos} фото = {sale.amount:.2f} ₽, "
                 f"начислено сотруднику {employee.name if employee else 'сотрудник удалён'}"
             )
-        await m.answer("\n".join(lines) or "Продаж нет.")
+        await m.answer("
+".join(lines) or "Продаж нет.")
 
 
 @r.message(F.text == "🏆 Премия")
