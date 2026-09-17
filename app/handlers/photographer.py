@@ -10,6 +10,7 @@ from ..db import Session
 from ..keyboards import inline, reply, request_location
 from ..models import (
     Booking,
+    GuestSelectedPhoto,
     PayrollEntry,
     Photo,
     Sale,
@@ -22,8 +23,8 @@ from ..services.core import ROLES, audit, get_user, has, menu, roles_of
 from ..services.shifts import LATE_FINE, is_late, shift_now
 
 r = Router()
-r.message.filter(StaffFilter("PHOTOGRAPHER"))
-r.callback_query.filter(StaffFilter("PHOTOGRAPHER"))
+r.message.filter(StaffFilter("PHOTOGRAPHER", "MANAGER"))
+r.callback_query.filter(StaffFilter("PHOTOGRAPHER", "MANAGER"))
 
 
 class ShiftFlow(StatesGroup):
@@ -35,6 +36,7 @@ class ShiftFlow(StatesGroup):
 
 class PhotoUploadFlow(StatesGroup):
     uploading = State()
+    selecting = State()
 
 
 async def today_check_in(session, user_id, *, lock=False):
@@ -76,8 +78,8 @@ async def ask_for_full_body_photo(message, state):
 
 @r.message(F.text == "🔄 Моя смена")
 async def my_shift(m, state, current_roles):
-    if "PHOTOGRAPHER" not in current_roles:
-        return await m.answer("Смена доступна сотруднику с ролью фотографа.")
+    if not ({"PHOTOGRAPHER", "MANAGER"} & current_roles):
+        return await m.answer("Смена доступна фотографу или менеджеру.")
     async with Session() as s:
         u = await get_user(s, m.from_user.id)
         check_in = await today_check_in(s, u.id)
@@ -118,8 +120,8 @@ async def my_shift(m, state, current_roles):
 async def begin_shift(c: CallbackQuery, state, current_roles):
     if c.message is None:
         return await c.answer("Некорректная кнопка.", show_alert=True)
-    if "PHOTOGRAPHER" not in current_roles:
-        return await c.answer("Нужна роль фотографа.", show_alert=True)
+    if not ({"PHOTOGRAPHER", "MANAGER"} & current_roles):
+        return await c.answer("Нужна роль фотографа или менеджера.", show_alert=True)
     async with Session() as s:
         u = await get_user(s, c.from_user.id)
         check_in = await today_check_in(s, u.id, lock=True)
@@ -438,7 +440,7 @@ async def upload_sale_photo(m, state):
         u = await get_user(s, m.from_user.id)
         shooting = await s.get(Shooting, shooting_id)
         booking = await s.get(Booking, shooting.booking_id) if shooting else None
-        if booking is None or booking.photographer_id != u.id or shooting.status != "UPLOADING":
+        if booking is None or booking.photographer_id != u.id or shooting.status != "READY_FOR_SALE":
             await state.clear()
             return await m.answer("Эта загрузка уже закрыта. Откройте «📸 Мои съёмки».")
         exists = await s.scalar(
@@ -473,7 +475,7 @@ async def finish_photo_upload(c: CallbackQuery, state):
         u = await get_user(s, c.from_user.id)
         shooting = await s.get(Shooting, shooting_id, with_for_update=True)
         booking = await s.get(Booking, shooting.booking_id) if shooting else None
-        if booking is None or booking.photographer_id != u.id or shooting.status != "UPLOADING":
+        if booking is None or booking.photographer_id != u.id or shooting.status != "READY_FOR_SALE":
             await state.clear()
             return await c.answer("Загрузка уже закрыта.", show_alert=True)
         count = await s.scalar(
@@ -484,13 +486,101 @@ async def finish_photo_upload(c: CallbackQuery, state):
         shooting.status = "READY_FOR_SALE"
         booking.status = "READY_FOR_SALE"
         await audit(
-            s, u, "photos_ready_for_sale", "shooting", shooting.id, f"photos={count}"
+            s, u, "shooting_all_photos_uploaded", "shooting", shooting.id, f"photos={count}"
+        )
+        await s.commit()
+    await state.set_state(PhotoUploadFlow.selecting)
+    await state.update_data({"shooting_id": shooting_id})
+    await c.answer()
+    await c.message.answer(
+        f"✅ Все фотографии сохранены: {count}.\n\n"
+        "Теперь пришлите сюда фотографии, которые выбрал гость. "
+        "Можно отправить несколько. Когда закончите — нажмите кнопку.",
+        reply_markup=inline(
+            [[("✅ Выбор гостя завершён", "photo:selection_done", "success")]]
+        ),
+    )
+
+
+
+@r.message(PhotoUploadFlow.selecting, F.photo | F.document)
+async def save_guest_selected_photo(m, state):
+    data = await state.get_data()
+    shooting_id = data.get("shooting_id")
+    file_id = m.photo[-1].file_id if m.photo else m.document.file_id
+    async with Session() as s:
+        u = await get_user(s, m.from_user.id)
+        shooting = await s.get(Shooting, shooting_id)
+        booking = await s.get(Booking, shooting.booking_id) if shooting else None
+        if booking is None or booking.photographer_id != u.id or shooting.status != "UPLOADING":
+            await state.clear()
+            return await m.answer("Эта загрузка уже закрыта. Откройте «📸 Мои съёмки».")
+        exists = await s.scalar(
+            select(GuestSelectedPhoto.id).where(
+                GuestSelectedPhoto.shooting_id == shooting.id,
+                GuestSelectedPhoto.file_id == file_id,
+            )
+        )
+        if exists is None:
+            s.add(
+                GuestSelectedPhoto(
+                    shooting_id=shooting.id, file_id=file_id, selected_by_id=u.id
+                )
+            )
+            await s.commit()
+        count = await s.scalar(
+            select(func.count(GuestSelectedPhoto.id)).where(
+                GuestSelectedPhoto.shooting_id == shooting.id
+            )
+        )
+    await m.answer(
+        f"💛 Выбрано гостем: {count}",
+        reply_markup=inline(
+            [[("✅ Выбор гостя завершён", "photo:selection_done", "success")]]
+        ),
+    )
+
+
+@r.message(PhotoUploadFlow.selecting)
+async def require_guest_selected_photo(m):
+    await m.answer("Пришлите выбранную гостем фотографию или нажмите «Выбор гостя завершён».")
+
+
+@r.callback_query(PhotoUploadFlow.selecting, F.data == "photo:selection_done")
+async def finish_guest_selection(c: CallbackQuery, state):
+    if c.message is None:
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    data = await state.get_data()
+    shooting_id = data.get("shooting_id")
+    async with Session() as s:
+        u = await get_user(s, c.from_user.id)
+        shooting = await s.get(Shooting, shooting_id, with_for_update=True)
+        booking = await s.get(Booking, shooting.booking_id) if shooting else None
+        if booking is None or booking.photographer_id != u.id or shooting.status != "UPLOADING":
+            await state.clear()
+            return await c.answer("Загрузка уже закрыта.", show_alert=True)
+        selected_count = await s.scalar(
+            select(func.count(GuestSelectedPhoto.id)).where(
+                GuestSelectedPhoto.shooting_id == shooting.id
+            )
+        ) or 0
+        await audit(
+            s,
+            u,
+            "guest_selection_completed",
+            "shooting",
+            shooting.id,
+            f"selected_by_guest={selected_count}",
         )
         await s.commit()
     await state.clear()
     await c.answer()
     await c.message.answer(
-        f"💰 Готово к продаже. Загружено фотографий: {count}."
+        f"💰 Готово к продаже. Выбрано гостем: {selected_count}.\n\n"
+        "Работу можно отправить в Академию: выбранные гостем кадры будут отмечены отдельно.",
+        reply_markup=inline(
+            [[("🎓 Отправить работу в Академию", f"academy:send-review:{shooting_id}", "primary")]]
+        ),
     )
 
 

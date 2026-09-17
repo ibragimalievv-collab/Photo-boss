@@ -43,6 +43,12 @@ async def init_db():
                     "DOUBLE PRECISION NOT NULL DEFAULT 0"
                 )
             )
+            await connection.execute(
+                text(
+                    "ALTER TABLE sales ADD COLUMN IF NOT EXISTS receipt_file_id "
+                    "VARCHAR(300)"
+                )
+            )
             column_type = await connection.scalar(
                 text(
                     """

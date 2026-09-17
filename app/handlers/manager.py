@@ -43,7 +43,9 @@ async def new_booking(m, state):
         return await m.answer("Нет активных отелей. Сначала добавьте отель.")
     await state.set_state(BookingFlow.hotel)
     await m.answer(
-        "➕ Новая запись\n\nВыберите отель:",
+        "➕ Новая запись
+
+Выберите отель:",
         reply_markup=inline([[(hotel.name, f"booking:hotel:{hotel.id}")] for hotel in hotels]),
     )
 
@@ -315,8 +317,12 @@ async def remind_guest(c: CallbackQuery):
         await s.commit()
     await c.answer()
     await c.message.answer(
-        f"🔔 Напоминание гостю\n\n"
-        f"Телефон: {client.phone or 'не указан'}\n\n"
+        f"🔔 Напоминание гостю
+
+"
+        f"Телефон: {client.phone or 'не указан'}
+
+"
         f"Здравствуйте, {client.name}! Напоминаем о фотосъёмке "
         f"{booking.shoot_date:%d.%m.%Y} в {booking.shoot_time:%H:%M}, "
         f"отель «{hotel.name}». Будем вас ждать!"
@@ -380,7 +386,6 @@ async def finish_reschedule(m, state, current_roles):
         reply_markup=reply(menu(current_roles)),
     )
 
-
 @r.message(F.text == "💰 Продажи")
 async def sales(m):
     async with Session() as s:
@@ -404,7 +409,8 @@ async def sales(m):
                 f"Продажа #{sale.id}: {sale.sold_photos} фото = {sale.amount:.2f} ₽, "
                 f"начислено сотруднику {employee.name if employee else 'сотрудник удалён'}"
             )
-        await m.answer("\n".join(lines) or "Продаж нет.")
+        await m.answer("
+".join(lines) or "Продаж нет.")
 
 
 @r.message(F.text == "🏆 Премия")
