@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime, time
+from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
@@ -9,6 +10,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     Text,
     Time,
@@ -137,6 +139,34 @@ class Sale(Base):
     commission: Mapped[float] = mapped_column(Float, default=0)
     payment_status: Mapped[str] = mapped_column(String(20), default="UNPAID")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class Receipt(Base):
+    __tablename__ = "receipts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    booking_id: Mapped[int] = mapped_column(ForeignKey("bookings.id"), index=True)
+    uploaded_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    purpose: Mapped[str] = mapped_column(String(20))
+    file_id: Mapped[str] = mapped_column(String(300))
+    file_unique_id: Mapped[str] = mapped_column(String(300), unique=True)
+    image_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    operation_key: Mapped[str | None] = mapped_column(String(64), index=True)
+    # Unique claims also protect against two owners approving copies concurrently.
+    approved_image_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
+    approved_operation_key: Mapped[str | None] = mapped_column(String(64), unique=True)
+    expected_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    verified_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    analysis: Mapped[str | None] = mapped_column(Text)
+    reviewed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (
+        CheckConstraint("purpose IN ('DEPOSIT', 'PAYMENT')"),
+        CheckConstraint("status IN ('PENDING', 'APPROVED', 'REJECTED')"),
+        CheckConstraint("expected_amount > 0"),
+        CheckConstraint("verified_amount IS NULL OR verified_amount > 0"),
+    )
 
 
 class Compensation(Base):

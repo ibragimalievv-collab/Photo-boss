@@ -50,7 +50,9 @@ def menu(roles):
             "📜 Аудит",
         ]
     if set(ROLES) & roles:
-        items += ["📚 Академия", "🎓 Обучение", "🧾 Продажа", "❌ Отменить"]
+        items += ["📚 Академия", "🎓 Обучение", "🧾 Продажа", "🧾 Чеки и оплата", "❌ Отменить"]
+    if "OWNER" in roles:
+        items += ["🔎 Проверить чеки"]
     return list(dict.fromkeys(items))
 
 

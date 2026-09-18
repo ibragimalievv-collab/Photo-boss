@@ -2,6 +2,7 @@ from sqlalchemy import func, select
 
 from ..models import Booking, Client, Hotel, Package, Photo, Sale, Shooting, User
 from .commissions import photographer_percent
+from .receipts import payment_totals
 
 STATUS_NAMES = {
     "NEW": "Новая",
@@ -50,6 +51,7 @@ async def booking_card(session, booking: Booking):
         .join(Shooting, Shooting.id == Photo.shooting_id)
         .where(Shooting.booking_id == booking.id)
     )
+    _, paid, outstanding = await payment_totals(session, booking.id)
     return (
         f"📋 Запись #{booking.id}\n"
         f"Статус: {STATUS_NAMES.get(booking.status, 'Статус обновляется')}\n"
@@ -61,8 +63,10 @@ async def booking_card(session, booking: Booking):
         f"📅 Дата: {booking.shoot_date:%d.%m.%Y}\n"
         f"🕐 Время: {booking.shoot_time:%H:%M}\n"
         f"📦 Пакет: {package.name if package else 'не найден'}\n"
-        f"💳 Бронь: {booking.deposit:.2f} ₽\n"
+        f"💳 Бронь: {booking.deposit:.2f} ₽ (заявлено)\n"
         f"💰 Продажа: {sale_total or 0:.2f} ₽\n"
+        f"✅ Поступление подтверждено владельцем: {paid:.2f} ₽\n"
+        f"Осталось оплатить по продажам: {outstanding:.2f} ₽\n"
         f"🖼 Кадры: сфотографировано {uploaded_photos or 0}, куплено {sold_photos or 0}\n"
         f"📈 Ставка фотографа: {photographer_percent(uploaded_photos or 0):g}% "
         "от продаж этой съёмки\n"

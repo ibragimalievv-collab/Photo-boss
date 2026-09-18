@@ -8,7 +8,17 @@ from sqlalchemy import func, select
 from ..access import StaffFilter
 from ..db import Session
 from ..keyboards import inline, reply
-from ..models import Booking, Client, Hotel, Package, Sale, Shooting, User, UserRole
+from ..models import (
+    Booking,
+    Client,
+    Hotel,
+    Package,
+    Receipt,
+    Sale,
+    Shooting,
+    User,
+    UserRole,
+)
 from ..services.bookings import booking_card
 from ..services.core import audit, get_user, menu
 
@@ -219,6 +229,10 @@ async def booking_photographer(c: CallbackQuery, state, current_roles):
         f"✅ Запись #{booking.id} создана на {booking.shoot_date:%d.%m.%Y} в {booking.shoot_time:%H:%M}.",
         reply_markup=reply(menu(current_roles)),
     )
+    if booking.deposit > 0:
+        from .receipts import request_photo
+
+        await request_photo(c.message, state, booking.id, "DEPOSIT")
 
 
 @r.message(F.text == "📋 Мои записи")
@@ -246,6 +260,7 @@ async def bookings(m):
                         ],
                         [("📅 Перенесена", f"booking:reschedule:{booking.id}", "primary")],
                         [("🔔 Напомнить гостю", f"booking:remind:{booking.id}", "primary")],
+                        [("📷 Чек брони", f"receipt:upload:DEPOSIT:{booking.id}")],
                     ]
                 ),
             )
@@ -283,6 +298,12 @@ async def set_booking_decision(c: CallbackQuery):
             await s.scalars(select(Shooting).where(Shooting.booking_id == booking.id))
         ).one_or_none()
         if action == "confirm":
+            if booking.deposit > 0 and not await s.scalar(select(Receipt.id).where(
+                Receipt.booking_id == booking.id,
+                Receipt.purpose == "DEPOSIT",
+                Receipt.status.in_(("PENDING", "APPROVED")),
+            ).limit(1)):
+                return await c.answer("Сначала прикрепите фото чека брони.", show_alert=True)
             booking.status = "CONFIRMED"
             if shooting:
                 shooting.status = "ASSIGNED"

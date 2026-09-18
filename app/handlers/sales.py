@@ -20,6 +20,7 @@ from ..models import (
 )
 from ..services.commissions import photographer_percent
 from ..services.core import audit, get_user, roles_of, setting
+from ..services.receipts import refresh_payment_statuses
 
 r = Router()
 r.message.filter(StaffFilter("PHOTOGRAPHER", "MANAGER"), F.text)
@@ -205,7 +206,9 @@ async def save(m, state):
         if not creator_roles & {"OWNER", "ADMIN", "MANAGER", "PHOTOGRAPHER"}:
             await state.clear()
             return await m.answer("Нет доступа.")
-        booking = await session.get(Booking, data.get("booking"))
+        booking = await session.scalar(select(Booking).where(
+            Booking.id == data.get("booking")
+        ).with_for_update())
         credited = await session.get(User, data.get("credited"))
         role = data.get("role")
         if (
@@ -321,11 +324,15 @@ async def save(m, state):
             sale.id,
             f"credited={credited.id};role={role}",
         )
+        await refresh_payment_statuses(session, booking.id)
         await session.commit()
     await state.clear()
     await m.answer(
         f"Продажа #{sale.id} сохранена. Кадров в съёмке: {uploaded}; "
         f"куплено сейчас: {count}, всего куплено: {already_sold + count}.\n"
         f"Сумма: {amount:.2f} ₽; ставка: {percent.normalize():f}%; "
-        f"комиссия {commission:.2f} ₽.\nЗасчитано: {credited.name}."
+        f"комиссия {commission:.2f} ₽.\nЗасчитано: {credited.name}.\n"
+        "Для учёта поступления денег прикрепите чек оплаты съёмки. "
+        "Подтверждённая бронь учитывается в расчёте остатка.",
+        reply_markup=inline([[("📷 Чек оплаты съёмки", f"receipt:upload:PAYMENT:{booking.id}")]]),
     )

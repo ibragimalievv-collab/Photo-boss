@@ -4,6 +4,7 @@ No real token, Telegram request or production database is used.
 
 import asyncio
 import hashlib
+import json
 import os
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -25,15 +26,18 @@ os.environ["BOT_TOKEN"] = "123456:TEST_ONLY_DO_NOT_USE_FOR_TELEGRAM"
 os.environ["ADMIN_TELEGRAM_IDS"] = "5000000001"
 os.environ["PHOTOGRAPHER_PERCENT"] = "11"
 os.environ["MANAGER_PERCENT"] = "16"
+os.environ["OPENAI_API_KEY"] = ""
 
 from app import db as db_module
 from app import main as main_module
 from app.config import Config
 from app.db import Base, Session, engine, init_db
 from app.handlers import photographer as photographer_module
+from app.handlers import receipts as receipts_module
 from app.handlers.admin import DateLookup, E
 from app.handlers.manager import BookingFlow
 from app.handlers.photographer import PhotoUploadFlow, ShiftFlow
+from app.handlers.receipts import ReceiptFlow
 from app.handlers.sales import S
 from app.main import create_dispatcher
 from app.models import (
@@ -45,6 +49,7 @@ from app.models import (
     Package,
     PayrollEntry,
     Photo,
+    Receipt,
     Sale,
     ShiftCheckIn,
     ShiftCheckOut,
@@ -55,9 +60,276 @@ from app.models import (
     UserRole,
 )
 from app.services.core import bootstrap, get_user, menu, roles_of
+from app.services.receipts import payment_totals, warnings_for
 from app.services.training import TRAINING_CATEGORIES, training_day
 
 OWNER, ADMIN, MANAGER, PHOTO_A, PHOTO_B, STRANGER = range(5000000001, 5000000007)
+
+
+@pytest.fixture
+def receipt_api(monkeypatch):
+    async def download(bot, photo):
+        return b"test jpeg " + photo.file_id.encode()
+
+    async def extract(content):
+        return {"status": "not_configured"}
+
+    monkeypatch.setattr(receipts_module, "download_receipt", download)
+    monkeypatch.setattr(receipts_module, "extract_receipt", extract)
+
+
+async def approve_receipt(receipt_id, amount):
+    await callback(OWNER, f"receipt:amount:{receipt_id}")
+    await message(OWNER, str(amount))
+    await callback(OWNER, f"receipt:approve:{receipt_id}")
+
+
+async def attach_receipt(purpose, file_id, user=MANAGER):
+    await callback(user, f"receipt:upload:{purpose}:1")
+    await photo(user, file_id)
+    async with Session() as session:
+        return await session.scalar(select(Receipt).order_by(Receipt.id.desc()).limit(1))
+
+
+def test_receipt_deposit_and_payment_are_counted_once_and_owner_only(receipt_api):
+    async def scenario():
+        await prepare_sale(PHOTO_A)
+        await message(PHOTO_A, "2")  # 800 rubles
+        async with Session() as session:
+            booking = await session.get(Booking, 1)
+            booking.deposit = 200
+            await session.commit()
+        deposit = await attach_receipt("DEPOSIT", "deposit")
+        assert deposit.expected_amount == 200
+        assert deposit.status == "PENDING"
+        for user in [MANAGER, ADMIN, PHOTO_B, STRANGER]:
+            await callback(user, f"receipt:review:{deposit.id}")
+            await callback(user, f"receipt:reject:{deposit.id}")
+            await callback(user, f"receipt:amount:{deposit.id}")
+            await callback(user, f"receipt:approve:{deposit.id}")
+            assert not any(isinstance(call, SendPhoto) and call.chat_id == user
+                           for call in telegram.calls)
+        async with Session() as session:
+            assert (await session.get(Receipt, deposit.id)).status == "PENDING"
+            assert (await session.get(Sale, 1)).payment_status == "UNPAID"
+        await message(OWNER, "🔎 Проверить чеки")
+        await callback(OWNER, f"receipt:review:{deposit.id}")
+        assert any(isinstance(call, SendPhoto) and call.photo == "deposit"
+                   for call in telegram.calls)
+        await approve_receipt(deposit.id, 200)
+        async with Session() as session:
+            assert (await session.get(Sale, 1)).payment_status == "PARTIAL"
+            assert await payment_totals(session, 1) == (800, 200, 600)
+        payment = await attach_receipt("PAYMENT", "payment")
+        assert payment.expected_amount == 600
+        await approve_receipt(payment.id, 600)
+        await callback(OWNER, f"receipt:approve:{payment.id}")
+        await callback(OWNER, f"receipt:reject:{payment.id}")
+        async with Session() as session:
+            assert await payment_totals(session, 1) == (800, 800, 0)
+            assert (await session.get(Sale, 1)).payment_status == "PAID"
+            assert await session.scalar(select(func.count(AuditLog.id)).where(
+                AuditLog.action == "receipt_approved"
+            )) == 2
+        await callback(MANAGER, "receipt:upload:PAYMENT:1")
+        assert "не требуется" in telegram.calls[-1].text
+
+    run(scenario())
+
+
+def test_receipt_deposit_is_shared_across_multiple_sales(receipt_api):
+    async def scenario():
+        async with Session() as session:
+            booking = await session.get(Booking, 1)
+            booking.deposit = 1000
+            await session.commit()
+        deposit = await attach_receipt("DEPOSIT", "large-deposit")
+        await approve_receipt(deposit.id, 1000)
+        await prepare_sale(PHOTO_A)
+        await message(PHOTO_A, "2")
+        await prepare_sale(PHOTO_A)
+        await message(PHOTO_A, "1")
+        async with Session() as session:
+            sales = (await session.scalars(select(Sale).order_by(Sale.id))).all()
+            assert [sale.payment_status for sale in sales] == ["PAID", "PARTIAL"]
+            assert await payment_totals(session, 1) == (1200, 1000, 200)
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("duplicate_kind", ["file", "hash", "operation"])
+def test_receipt_copy_cannot_confirm_same_payment_twice(receipt_api, monkeypatch, duplicate_kind):
+    fields = {"is_receipt": True, "amount": "200", "currency": "RUB",
+              "date": "2026-09-18", "bank": "Bank", "recipient": "Recipient",
+              "operation_id": "bank-operation-1", "payment_status": "Выполнен", "concerns": []}
+
+    async def same_download(*args):
+        return b"same receipt bytes"
+
+    async def same_operation(*args):
+        return {"status": "extracted", "fields": fields}
+
+    if duplicate_kind == "hash":
+        monkeypatch.setattr(receipts_module, "download_receipt", same_download)
+    if duplicate_kind == "operation":
+        monkeypatch.setattr(receipts_module, "extract_receipt", same_operation)
+
+    async def scenario():
+        await prepare_sale(PHOTO_A)
+        await message(PHOTO_A, "2")
+        first = await attach_receipt("PAYMENT", "receipt-original")
+        await approve_receipt(first.id, 200)
+        second_file = "receipt-original" if duplicate_kind == "file" else "receipt-copy"
+        second = await attach_receipt("PAYMENT", second_file)
+        if duplicate_kind == "file":
+            assert "уже загружали" in telegram.calls[-1].text
+            assert second.id == first.id
+        else:
+            assert "похожий" in telegram.calls[-1].text
+            await approve_receipt(second.id, 200)
+            assert "уже учтён" in telegram.calls[-1].text
+        async with Session() as session:
+            assert await payment_totals(session, 1) == (800, 200, 600)
+
+    run(scenario())
+
+
+def test_receipt_failed_analysis_and_rejection_preserve_attachment(receipt_api, monkeypatch):
+    async def unavailable(*args):
+        raise TimeoutError
+
+    monkeypatch.setattr(receipts_module, "download_receipt", unavailable)
+
+    async def scenario():
+        await prepare_sale(PHOTO_A)
+        await message(PHOTO_A, "2")
+        receipt = await attach_receipt("PAYMENT", "offline-receipt")
+        assert receipt.file_id == "offline-receipt"
+        assert receipt.status == "PENDING"
+        assert json.loads(receipt.analysis)["status"] == "download_failed"
+        await callback(OWNER, f"receipt:reject:{receipt.id}")
+        async with Session() as session:
+            assert (await session.get(Receipt, receipt.id)).status == "REJECTED"
+            assert (await session.get(Sale, 1)).payment_status == "UNPAID"
+        replacement = await attach_receipt("PAYMENT", "replacement")
+        assert replacement.id != receipt.id
+        assert replacement.status == "PENDING"
+
+    run(scenario())
+
+
+def test_receipt_incomplete_analysis_can_be_retried_after_restart(receipt_api):
+    async def scenario():
+        await prepare_sale(PHOTO_A)
+        await message(PHOTO_A, "2")
+        receipt = await attach_receipt("PAYMENT", "interrupted")
+        async with Session() as session:
+            saved = await session.get(Receipt, receipt.id)
+            saved.analysis = None
+            await session.commit()
+        await approve_receipt(receipt.id, 800)
+        assert "Дождитесь анализа" in telegram.calls[-1].text
+        await callback(OWNER, f"receipt:analyze:{receipt.id}")
+        assert "ручная проверка" in telegram.calls[-1].text
+        await approve_receipt(receipt.id, 800)
+        async with Session() as session:
+            assert (await session.get(Sale, 1)).payment_status == "PAID"
+
+    run(scenario())
+
+
+def test_receipt_upload_enforces_booking_access_and_pending_limit(receipt_api):
+    async def scenario():
+        await prepare_sale(MANAGER)
+        await message(MANAGER, "2")
+        await callback(PHOTO_A, "receipt:upload:PAYMENT:1")
+        assert "Нет доступа" in telegram.calls[-1].text
+        # Forging FSM data still cannot bypass authorization at upload time.
+        await state_for(PHOTO_A).set_state(ReceiptFlow.photo)
+        await state_for(PHOTO_A).set_data({"receipt_booking": 1, "receipt_purpose": "PAYMENT"})
+        await photo(PHOTO_A, "unauthorized")
+        receipt = await attach_receipt("PAYMENT", "first-pending")
+        await attach_receipt("PAYMENT", "second-pending", PHOTO_B)
+        assert "уже ожидает" in telegram.calls[-1].text
+        async with Session() as session:
+            assert (await session.scalars(select(Receipt.id))).all() == [receipt.id]
+
+    run(scenario())
+
+
+def test_receipt_analysis_flags_mismatched_missing_and_old_fields():
+    flags = warnings_for({"is_receipt": False, "amount": "100", "currency": "USD",
+                          "date": "2020-01-01"}, 800, date(2026, 9, 18))
+    assert any("отличается" in flag for flag in flags)
+    assert any("старше" in flag for flag in flags)
+    assert any("Получатель" in flag for flag in flags)
+    assert any("RUB" in flag for flag in flags)
+    flags = warnings_for({"amount": "NaN", "date": "2030-01-01"}, 800, date(2026, 9, 18))
+    assert "Сумма не распознана." in flags
+    assert "В чеке будущая дата." in flags
+
+
+@pytest.mark.parametrize("result_kind", ["success", "bad_schema", "refusal", "incomplete", "http_error", "no_key"])
+def test_receipt_vision_response_contract_and_failures(monkeypatch, result_kind):
+    from types import SimpleNamespace
+
+    from app.services import receipts as service
+
+    captured = []
+    fields = {"is_receipt": True, "amount": "800.00", "currency": "RUB",
+              "date": "2026-09-18", "bank": "Bank", "recipient": "Recipient",
+              "operation_id": "operation-1", "payment_status": "Выполнен", "concerns": []}
+
+    class Response:
+        status = 429 if result_kind == "http_error" else 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def json(self):
+            content = [{"type": "output_text", "text": json.dumps(
+                {"fake": "wrong schema"} if result_kind == "bad_schema" else fields
+            )}]
+            if result_kind == "refusal":
+                content = [{"type": "refusal", "refusal": "refused"}]
+            return {"status": "incomplete" if result_kind == "incomplete" else "completed",
+                    "output": [{"type": "message", "content": content}]}
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def post(self, url, *, headers, json):
+            captured.append((url, headers, json))
+            return Response()
+
+    monkeypatch.setattr(service, "config", SimpleNamespace(
+        openai_api_key="" if result_kind == "no_key" else "test-key",
+        receipt_analysis_model="gpt-4.1-mini",
+    ))
+    monkeypatch.setattr(service.aiohttp, "ClientSession", Client)
+    result = run(service.extract_receipt(b"test-image"))
+    if result_kind == "no_key":
+        assert result == {"status": "not_configured"}
+        assert captured == []
+        return
+    assert result["status"] == ("extracted" if result_kind == "success" else "unavailable")
+    url, headers, payload = captured[0]
+    assert url == "https://api.openai.com/v1/responses"
+    assert headers == {"Authorization": "Bearer test-key"}
+    assert payload["store"] is False
+    assert payload["text"]["format"]["strict"] is True
+    assert payload["input"][0]["content"][1]["image_url"].startswith("data:image/jpeg;base64,")
+    assert os.environ["BOT_TOKEN"] not in json.dumps(payload)
 
 
 class FakeTelegramSession(BaseSession):
@@ -770,7 +1042,15 @@ def test_shift_end_requires_location_and_workplace_photo():
     run(scenario())
 
 
-def test_new_booking_button_creates_complete_booking():
+def test_new_booking_button_creates_complete_booking(monkeypatch):
+    async def fake_download(*args):
+        return b"fake receipt bytes"
+
+    async def fake_extract(*args):
+        return {"status": "not_configured"}
+
+    monkeypatch.setattr(receipts_module, "download_receipt", fake_download)
+    monkeypatch.setattr(receipts_module, "extract_receipt", fake_extract)
     async def scenario():
         async with Session() as session:
             hotel = (await session.scalars(select(Hotel))).first()
@@ -794,7 +1074,7 @@ def test_new_booking_button_creates_complete_booking():
         assert await state_for(MANAGER).get_state() == BookingFlow.package.state
         await callback(MANAGER, f"booking:package:{package.id}")
         await callback(MANAGER, f"booking:photographer:{photographer.id}")
-        assert await state_for(MANAGER).get_state() is None
+        assert await state_for(MANAGER).get_state() == ReceiptFlow.photo.state
 
         async with Session() as session:
             assert await session.scalar(select(func.count(Booking.id))) == before + 1
@@ -811,6 +1091,21 @@ def test_new_booking_button_creates_complete_booking():
             assert await session.scalar(
                 select(func.count(Shooting.id)).where(Shooting.booking_id == booking.id)
             ) == 1
+
+        await callback(MANAGER, f"booking:confirm:{booking.id}")
+        assert "фото чека" in telegram.calls[-1].text
+        await photo(MANAGER, "deposit-new-booking")
+        assert await state_for(MANAGER).get_state() is None
+        async with Session() as session:
+            receipt = (await session.scalars(select(Receipt))).one()
+            assert receipt.booking_id == booking.id
+            assert receipt.status == "PENDING"
+            assert receipt.expected_amount == 1000
+            assert not await session.scalar(select(func.count(Photo.id)))
+        await callback(MANAGER, f"booking:confirm:{booking.id}")
+        async with Session() as session:
+            booking = await session.get(Booking, booking.id)
+            assert booking.status == "CONFIRMED"
 
     run(scenario())
 

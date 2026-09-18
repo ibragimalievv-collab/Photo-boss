@@ -1,6 +1,6 @@
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -48,6 +48,8 @@ class Config:
     database_connect_delay: float
     telegram_api_base: str | None
     training_timezone: str
+    openai_api_key: str = field(default="", repr=False)
+    receipt_analysis_model: str = "gpt-4.1-mini"
 
     @classmethod
     def from_env(cls):
@@ -107,6 +109,11 @@ class Config:
             training_timezone=(
                 os.getenv("TRAINING_TIMEZONE", "Europe/Moscow").strip()
                 or "Europe/Moscow"
+            ),
+            openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
+            receipt_analysis_model=(
+                os.getenv("RECEIPT_ANALYSIS_MODEL", "gpt-4.1-mini").strip()
+                or "gpt-4.1-mini"
             ),
         )
 
