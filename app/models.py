@@ -291,3 +291,69 @@ class TrainingSubmission(Base):
         ),
         CheckConstraint("pose_index BETWEEN 1 AND 5", name="ck_training_pose_index"),
     )
+
+
+class AcademyLessonProgress(Base):
+    __tablename__ = "academy_lesson_progress"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    topic_slug: Mapped[str] = mapped_column(String(50))
+    completed_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "topic_slug", name="uq_academy_lesson_progress_user_topic"
+        ),
+    )
+
+
+class AcademyReview(Base):
+    __tablename__ = "academy_reviews"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    photo_id: Mapped[int | None] = mapped_column(
+        ForeignKey("photos.id", ondelete="SET NULL"), nullable=True, unique=True, index=True
+    )
+    reviewer_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    file_id: Mapped[str] = mapped_column(String(300))
+    composition_score: Mapped[int] = mapped_column(Integer)
+    light_score: Mapped[int] = mapped_column(Integer)
+    pose_score: Mapped[int] = mapped_column(Integer)
+    emotion_score: Mapped[int] = mapped_column(Integer)
+    color_score: Mapped[int] = mapped_column(Integer)
+    quality_score: Mapped[int] = mapped_column(Integer, index=True)
+    strengths: Mapped[str] = mapped_column(Text, default="")
+    issues: Mapped[str] = mapped_column(Text, default="")
+    recommendation: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    __table_args__ = (
+        CheckConstraint(
+            "composition_score BETWEEN 1 AND 10",
+            name="ck_academy_review_composition_score",
+        ),
+        CheckConstraint(
+            "light_score BETWEEN 1 AND 10",
+            name="ck_academy_review_light_score",
+        ),
+        CheckConstraint(
+            "pose_score BETWEEN 1 AND 10",
+            name="ck_academy_review_pose_score",
+        ),
+        CheckConstraint(
+            "emotion_score BETWEEN 1 AND 10",
+            name="ck_academy_review_emotion_score",
+        ),
+        CheckConstraint(
+            "color_score BETWEEN 1 AND 10",
+            name="ck_academy_review_color_score",
+        ),
+        CheckConstraint(
+            "quality_score BETWEEN 1 AND 10",
+            name="ck_academy_review_quality_score",
+        ),
+    )
