@@ -291,3 +291,105 @@ class TrainingSubmission(Base):
         ),
         CheckConstraint("pose_index BETWEEN 1 AND 5", name="ck_training_pose_index"),
     )
+
+
+# =========================
+# Photo Boss Academy
+# =========================
+
+class AcademyLesson(Base):
+    __tablename__ = "academy_lessons"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(String(180))
+    body: Mapped[str] = mapped_column(Text)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class AcademyLessonProgress(Base):
+    __tablename__ = "academy_lesson_progress"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    lesson_id: Mapped[int] = mapped_column(ForeignKey("academy_lessons.id", ondelete="CASCADE"), index=True)
+    completed_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (UniqueConstraint("user_id", "lesson_id", name="uq_academy_lesson_user"),)
+
+
+class AcademyPracticeTask(Base):
+    __tablename__ = "academy_practice_tasks"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(String(180))
+    description: Mapped[str] = mapped_column(Text)
+    strong_example_text: Mapped[str] = mapped_column(Text)
+    common_mistake_text: Mapped[str] = mapped_column(Text)
+    repeat_tip: Mapped[str] = mapped_column(Text)
+    points: Mapped[int] = mapped_column(Integer, default=100)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class AcademyReview(Base):
+    __tablename__ = "academy_reviews"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    photographer_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    telegram_file_id: Mapped[str] = mapped_column(String(300))
+    source_type: Mapped[str] = mapped_column(String(30), default="work", index=True)
+    source_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    composition_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    light_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    emotion_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pose_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    overall_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    good_points_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AcademyError(Base):
+    __tablename__ = "academy_errors"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    photographer_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    review_id: Mapped[int] = mapped_column(ForeignKey("academy_reviews.id", ondelete="CASCADE"), index=True)
+    category: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(String(180))
+    recommendation: Mapped[str] = mapped_column(Text)
+    resolved: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+
+class AcademyPracticeSubmission(Base):
+    __tablename__ = "academy_practice_submissions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("academy_practice_tasks.id", ondelete="CASCADE"), index=True)
+    photographer_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    pose_index: Mapped[int] = mapped_column(Integer)
+    telegram_file_id: Mapped[str] = mapped_column(String(300))
+    review_id: Mapped[int | None] = mapped_column(ForeignKey("academy_reviews.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    __table_args__ = (
+        UniqueConstraint("task_id", "photographer_id", "pose_index", name="uq_academy_task_user_pose"),
+        CheckConstraint("pose_index BETWEEN 1 AND 5", name="ck_academy_pose_index"),
+    )
+
+
+class AcademyBestWork(Base):
+    __tablename__ = "academy_best_works"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str] = mapped_column(String(40), index=True)
+    telegram_file_id: Mapped[str] = mapped_column(String(300))
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    added_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+
+class AcademyAchievement(Base):
+    __tablename__ = "academy_achievements"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    photographer_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    code: Mapped[str] = mapped_column(String(80), index=True)
+    unlocked_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (UniqueConstraint("photographer_id", "code", name="uq_academy_achievement_user"),)
