@@ -4,9 +4,9 @@ import os
 
 from aiohttp import web
 
+from .config import config
 from .db import engine, init_db, wait_for_database
 from .main import clear_ready_file, create_bot, create_dispatcher, mark_ready
-from .config import config
 
 logger = logging.getLogger(__name__)
 
