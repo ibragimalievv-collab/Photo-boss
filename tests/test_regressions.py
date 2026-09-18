@@ -527,6 +527,7 @@ def test_ready_file_lifecycle(monkeypatch, tmp_path):
 def test_menu_merges_roles_without_duplicates():
     items = menu({"ADMIN", "MANAGER", "PHOTOGRAPHER"})
     assert len(items) == len(set(items))
+    assert "📚 Академия" in items
     assert "🎓 Обучение" in items
     assert "🧾 Продажа" in items
     assert "📋 Мои записи" in items
