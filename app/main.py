@@ -58,6 +58,8 @@ async def main():
         config.validate()
         await wait_for_database()
         await init_db()
+        async with Session() as session:
+            await seed_academy(session)
         dispatcher = create_dispatcher()
         bot = create_bot()
         try:
