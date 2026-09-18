@@ -1,13 +1,11 @@
 import json
 import logging
 from datetime import timedelta
-from html import escape
 from io import BytesIO
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery
 from sqlalchemy import func, select
 
 from ..access import StaffFilter
