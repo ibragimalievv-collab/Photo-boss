@@ -11,7 +11,8 @@ from aiogram.fsm.storage.memory import SimpleEventIsolation
 from .config import config
 from .db import Session, engine, init_db, wait_for_database
 from .handlers import academy, admin, common, manager, photographer, sales, training
-from .services.academy import seed_academy\nfrom .ui import CompactUiMiddleware, enable_compact_ui
+from .services.academy import seed_academy
+from .ui import CompactUiMiddleware, enable_compact_ui
 
 logger = logging.getLogger(__name__)
 READY_FILE = Path(os.getenv("HEALTHCHECK_FILE", "/tmp/photo-boss.ready"))
