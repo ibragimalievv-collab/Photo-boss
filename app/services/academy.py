@@ -106,8 +106,8 @@ def _extract_text(payload: dict[str, Any]) -> str:
 
 
 def _clean_json(text: str) -> dict[str, Any]:
-    text = re.sub(r"^\`\`\`(?:json)?\\s*", "", text.strip(), flags=re.IGNORECASE)
-    text = re.sub(r"\\s*\`\`\`$", "", text)
+    text = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
     data = json.loads(text)
     for key in ("composition", "light", "emotion", "pose", "overall"):
         data[key] = max(0, min(10, round(float(data.get(key, 0)))))
