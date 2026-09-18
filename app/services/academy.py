@@ -106,11 +106,11 @@ def _extract_text(payload: dict[str, Any]) -> str:
 
 
 def _clean_json(text: str) -> dict[str, Any]:
-    text = re.sub(r"^\`\`\`(?:json)?\\s*", "", text.strip(), flags=re.I)
+    text = re.sub(r"^\`\`\`(?:json)?\\s*", "", text.strip(), flags=re.IGNORECASE)
     text = re.sub(r"\\s*\`\`\`$", "", text)
     data = json.loads(text)
     for key in ("composition", "light", "emotion", "pose", "overall"):
-        data[key] = max(0, min(10, int(round(float(data.get(key, 0))))))
+        data[key] = max(0, min(10, round(float(data.get(key, 0)))))
     data["good"] = [str(x)[:220] for x in (data.get("good") or [])][:4]
     errors = []
     for item in (data.get("errors") or [])[:5]:
@@ -153,15 +153,14 @@ async def analyze_photo(photo_bytes: bytes) -> dict[str, Any] | None:
     }
     timeout = aiohttp.ClientTimeout(total=60)
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as http:
-            async with http.post(
-                "https://api.openai.com/v1/responses", headers=headers, json=payload
-            ) as response:
-                body = await response.text()
-                if response.status >= 400:
-                    logger.warning("Academy AI error %s: %s", response.status, body[:300])
-                    return None
-                return _clean_json(_extract_text(json.loads(body)))
+        async with aiohttp.ClientSession(timeout=timeout) as http, http.post(
+            "https://api.openai.com/v1/responses", headers=headers, json=payload
+        ) as response:
+            body = await response.text()
+            if response.status >= 400:
+                logger.warning("Academy AI error %s: %s", response.status, body[:300])
+                return None
+            return _clean_json(_extract_text(json.loads(body)))
     except (aiohttp.ClientError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
         logger.warning("Academy AI analysis failed: %s", type(exc).__name__)
         return None
