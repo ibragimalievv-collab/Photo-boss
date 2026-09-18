@@ -8,7 +8,7 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 
 from ..access import StaffFilter
 from ..db import Session
