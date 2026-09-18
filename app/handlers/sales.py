@@ -18,6 +18,7 @@ from ..models import (
     User,
     UserRole,
 )
+from ..services.commissions import photographer_percent
 from ..services.core import audit, get_user, roles_of, setting
 
 r = Router()
@@ -30,11 +31,6 @@ class S(StatesGroup):
     credited = State()
     role = State()
     photos = State()
-
-
-PHOTO_TIER_THRESHOLD = 150
-PHOTO_PERCENT_STANDARD = Decimal(10)
-PHOTO_PERCENT_HIGH = Decimal(15)
 
 
 @r.message(F.text == "🧾 Продажа")
@@ -262,20 +258,10 @@ async def save(m, state):
         default = (
             config.manager_percent if role == "MANAGER" else config.photographer_percent
         )
+        # Booking has one Shooting. Count every recorded frame in that shoot,
+        # including unsold frames; never use the sale quantity or daily total.
         percent_value = (
-            (
-                PHOTO_PERCENT_HIGH
-                if await session.scalar(
-                    select(func.count(Photo.id))
-                    .join(Shooting, Shooting.id == Photo.shooting_id)
-                    .join(Booking, Booking.id == Shooting.booking_id)
-                    .where(
-                        Booking.id == booking.id,
-                    )
-                )
-                >= PHOTO_TIER_THRESHOLD
-                else PHOTO_PERCENT_STANDARD
-            )
+            photographer_percent(uploaded)
             if role == "PHOTOGRAPHER"
             else (
                 compensations[0].sales_percent
@@ -307,38 +293,23 @@ async def save(m, state):
         session.add(sale)
         await session.flush()
         if role == "PHOTOGRAPHER":
-            photographed = await session.scalar(
-                select(func.count(Photo.id))
-                .join(Shooting, Shooting.id == Photo.shooting_id)
-                .join(Booking, Booking.id == Shooting.booking_id)
-                .where(
-                    Booking.id == booking.id,
-                )
-            )
-            day_sales = (
+            shooting_sales = (
                 await session.scalars(
                     select(Sale)
-                    .join(Booking, Booking.id == Sale.booking_id)
                     .where(
                         Sale.credited_user_id == credited.id,
                         Sale.commission_role == "PHOTOGRAPHER",
-                        Booking.id == booking.id,
+                        Sale.booking_id == booking.id,
                     )
                 )
             ).all()
-            tier_percent = (
-                PHOTO_PERCENT_HIGH
-                if photographed >= PHOTO_TIER_THRESHOLD
-                else PHOTO_PERCENT_STANDARD
-            )
-            for item in day_sales:
-                item.percent = float(tier_percent)
+            for item in shooting_sales:
+                item.percent = float(percent)
                 item.commission = float(
-                    (Decimal(str(item.amount)) * tier_percent / 100).quantize(
+                    (Decimal(str(item.amount)) * percent / 100).quantize(
                         Decimal("0.01"), rounding=ROUND_HALF_UP
                     )
                 )
-            percent = tier_percent
             commission = Decimal(str(sale.commission)).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP
             )
@@ -353,7 +324,8 @@ async def save(m, state):
         await session.commit()
     await state.clear()
     await m.answer(
-        f"Продажа #{sale.id} сохранена. Фотографии: всего {uploaded}, "
-        f"куплено {already_sold + count}.\nСумма: {amount:.2f} ₽; "
+        f"Продажа #{sale.id} сохранена. Кадров в съёмке: {uploaded}; "
+        f"куплено сейчас: {count}, всего куплено: {already_sold + count}.\n"
+        f"Сумма: {amount:.2f} ₽; ставка: {percent.normalize():f}%; "
         f"комиссия {commission:.2f} ₽.\nЗасчитано: {credited.name}."
     )

@@ -1,6 +1,7 @@
 from sqlalchemy import func, select
 
 from ..models import Booking, Client, Hotel, Package, Photo, Sale, Shooting, User
+from .commissions import photographer_percent
 
 STATUS_NAMES = {
     "NEW": "Новая",
@@ -63,6 +64,8 @@ async def booking_card(session, booking: Booking):
         f"💳 Бронь: {booking.deposit:.2f} ₽\n"
         f"💰 Продажа: {sale_total or 0:.2f} ₽\n"
         f"🖼 Кадры: сфотографировано {uploaded_photos or 0}, куплено {sold_photos or 0}\n"
+        f"📈 Ставка фотографа: {photographer_percent(uploaded_photos or 0):g}% "
+        "от продаж этой съёмки\n"
         f"📋 Менеджер: {manager.name if manager else 'не найден'}\n"
         f"📸 Фотограф: {photographer.name if photographer else 'не назначен'}"
     )

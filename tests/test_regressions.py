@@ -958,23 +958,131 @@ def test_owner_can_search_any_date(section, search_callback, expected):
     run(scenario())
 
 
-def test_photographer_gets_fifteen_percent_for_150_photos_in_one_shoot():
+@pytest.mark.parametrize(
+    ("shoot_photos", "sold_photos", "expected_percent", "expected_commission"),
+    [(149, 2, 10, 80), (150, 2, 15, 120), (151, 2, 15, 120), (150, 150, 15, 9000)],
+)
+def test_photographer_tier_uses_all_shoot_photos_not_purchased_quantity(
+    shoot_photos, sold_photos, expected_percent, expected_commission
+):
     async def scenario():
         await prepare_sale(PHOTO_A)
         async with Session() as session:
             shooting = (await session.scalars(select(Shooting))).one()
+            shooting.status = "UPLOADING"
             session.add_all(
                 [
                     Photo(shooting_id=shooting.id, file_id=f"tier-photo-{index}")
-                    for index in range(11, 151)
+                    for index in range(11, shoot_photos + 1)
                 ]
             )
             await session.commit()
-        await message(PHOTO_A, "150")
+        upload_state = state_for(PHOTO_B)
+        await upload_state.set_state(PhotoUploadFlow.uploading)
+        await upload_state.set_data({"shooting_id": shooting.id})
+        await callback(PHOTO_B, "photo:upload_done")
+        assert f"Ставка фотографа: {expected_percent}%" in telegram.calls[-1].text
+        await message(PHOTO_B, "📸 Мои съёмки")
+        assert f"Ставка фотографа: {expected_percent}%" in telegram.calls[-1].text
+
+        await message(PHOTO_A, str(sold_photos))
+        assert f"Кадров в съёмке: {shoot_photos}" in telegram.calls[-1].text
+        assert f"куплено сейчас: {sold_photos}" in telegram.calls[-1].text
+        assert f"ставка: {expected_percent}%" in telegram.calls[-1].text
         async with Session() as session:
             sale = (await session.scalars(select(Sale))).one()
-            assert sale.percent == 15
-            assert sale.commission == 9000
+            assert sale.amount == sold_photos * 400
+            assert sale.percent == expected_percent
+            assert sale.commission == expected_commission
+
+    run(scenario())
+
+
+def test_shoots_on_same_day_do_not_share_photo_counts_or_reprice_each_other():
+    async def scenario():
+        await prepare_sale(PHOTO_A)
+        async with Session() as session:
+            first = (await session.scalars(select(Booking))).one()
+            first_shoot = (await session.scalars(select(Shooting))).one()
+            second = Booking(
+                hotel_id=first.hotel_id,
+                client_id=first.client_id,
+                room="102",
+                shoot_date=first.shoot_date,
+                shoot_time=time(14),
+                package_id=first.package_id,
+                manager_id=first.manager_id,
+                photographer_id=first.photographer_id,
+            )
+            session.add(second)
+            await session.flush()
+            second_shoot = Shooting(booking_id=second.id)
+            session.add(second_shoot)
+            await session.flush()
+            session.add_all(
+                Photo(shooting_id=first_shoot.id, file_id=f"first-{index}")
+                for index in range(11, 76)
+            )
+            session.add_all(
+                Photo(shooting_id=second_shoot.id, file_id=f"second-{index}")
+                for index in range(1, 76)
+            )
+            await session.commit()
+
+        async def sell(booking_id):
+            state = state_for(PHOTO_A)
+            await state.set_state(S.photos)
+            await state.set_data(
+                {"booking": booking_id, "credited": first.photographer_id,
+                 "role": "PHOTOGRAPHER"}
+            )
+            await message(PHOTO_A, "2")
+
+        # 75 + 75 frames on the same day still give 10% for each shoot.
+        await sell(first.id)
+        await sell(second.id)
+        async with Session() as session:
+            sales = (await session.scalars(select(Sale).order_by(Sale.id))).all()
+            assert [(sale.percent, sale.commission) for sale in sales] == [(10, 80)] * 2
+            session.add_all(
+                Photo(shooting_id=second_shoot.id, file_id=f"second-{index}")
+                for index in range(76, 151)
+            )
+            await session.commit()
+
+        # Reaching 150 in the second shoot affects only its sales.
+        await sell(second.id)
+        await sell(first.id)
+        async with Session() as session:
+            sales = (await session.scalars(select(Sale).order_by(Sale.id))).all()
+            assert [sale.percent for sale in sales] == [10, 15, 15, 10]
+            assert [sale.commission for sale in sales] == [80, 120, 120, 80]
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("personal_percent", [None, 23])
+def test_shoot_photo_tier_does_not_override_manager_percent(personal_percent):
+    async def scenario():
+        await prepare_sale(PHOTO_A, role="MANAGER")
+        async with Session() as session:
+            credited = await get_user(session, PHOTO_B)
+            session.add(UserRole(user_id=credited.id, role="MANAGER"))
+            if personal_percent is not None:
+                session.add(Compensation(
+                    user_id=credited.id, role="MANAGER", sales_percent=personal_percent
+                ))
+            shooting = (await session.scalars(select(Shooting))).one()
+            session.add_all(
+                Photo(shooting_id=shooting.id, file_id=f"manager-{index}")
+                for index in range(11, 151)
+            )
+            await session.commit()
+        await message(PHOTO_A, "2")
+        async with Session() as session:
+            sale = (await session.scalars(select(Sale))).one()
+            assert sale.percent == (personal_percent or 16)
+            assert sale.commission == (184 if personal_percent else 128)
 
     run(scenario())
 

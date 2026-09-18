@@ -18,6 +18,7 @@ from ..models import (
     Shooting,
 )
 from ..services.bookings import booking_card
+from ..services.commissions import photographer_percent
 from ..services.core import ROLES, audit, get_user, has, menu, roles_of
 from ..services.shifts import LATE_FINE, is_late, shift_now
 
@@ -490,7 +491,9 @@ async def finish_photo_upload(c: CallbackQuery, state):
     await state.clear()
     await c.answer()
     await c.message.answer(
-        f"💰 Готово к продаже. Загружено фотографий: {count}."
+        f"💰 Готово к продаже. Загружено фотографий: {count}.\n"
+        f"Ставка фотографа: {photographer_percent(count):g}% от продаж этой съёмки. "
+        "Количество купленных фотографий на ставку не влияет."
     )
 
 
