@@ -9,9 +9,9 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.fsm.storage.memory import SimpleEventIsolation
 
 from .config import config
-from .db import engine, init_db, wait_for_database
-from .handlers import admin, common, manager, photographer, sales, training
-from .ui import CompactUiMiddleware, enable_compact_ui
+from .db import Session, engine, init_db, wait_for_database
+from .handlers import academy, admin, common, manager, photographer, sales, training
+from .services.academy import seed_academy\nfrom .ui import CompactUiMiddleware, enable_compact_ui
 
 logger = logging.getLogger(__name__)
 READY_FILE = Path(os.getenv("HEALTHCHECK_FILE", "/tmp/photo-boss.ready"))
@@ -22,7 +22,7 @@ def create_dispatcher():
     dispatcher.update.outer_middleware(CompactUiMiddleware())
     # Admin filtering must precede the manager's identically named Sales button.
     dispatcher.include_routers(
-        common.r, admin.r, photographer.r, manager.r, sales.r, training.r
+        common.r, admin.r, photographer.r, manager.r, sales.r, academy.r, training.r
     )
     return dispatcher
 
