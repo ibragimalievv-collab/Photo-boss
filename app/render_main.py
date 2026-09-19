@@ -1,8 +1,8 @@
 import logging
 import os
 
-from aiohttp import web
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
 
 from .config import config
 from .db import engine, init_db, wait_for_database
