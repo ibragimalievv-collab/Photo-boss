@@ -50,6 +50,7 @@ class Config:
     training_timezone: str
     openai_api_key: str = field(default="", repr=False)
     receipt_analysis_model: str = "gpt-4.1-mini"
+    redis_url: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(cls):
@@ -115,6 +116,7 @@ class Config:
                 os.getenv("RECEIPT_ANALYSIS_MODEL", "gpt-4.1-mini").strip()
                 or "gpt-4.1-mini"
             ),
+            redis_url=os.getenv("REDIS_URL", "").strip() or None,
         )
 
     def validate(self):

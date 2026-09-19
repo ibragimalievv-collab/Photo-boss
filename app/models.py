@@ -265,6 +265,59 @@ class Notification(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class BookingReminder(Base):
+    __tablename__ = "booking_reminders"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    booking_id: Mapped[int] = mapped_column(
+        ForeignKey("bookings.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    reminder_kind: Mapped[str] = mapped_column(String(10))
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (
+        UniqueConstraint(
+            "booking_id", "user_id", "reminder_kind", name="uq_booking_reminder"
+        ),
+        CheckConstraint("reminder_kind IN ('24H', '2H')"),
+    )
+
+
+class RepeatSaleLead(Base):
+    __tablename__ = "repeat_sale_leads"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    booking_id: Mapped[int] = mapped_column(
+        ForeignKey("bookings.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    manager_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="NEW", index=True)
+    offer_text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    contacted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (
+        CheckConstraint("status IN ('NEW', 'CONTACTED', 'DECLINED')"),
+    )
+
+
+class BankReconciliation(Base):
+    __tablename__ = "bank_reconciliations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    receipt_id: Mapped[int] = mapped_column(
+        ForeignKey("receipts.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(50), default="MANUAL")
+    bank_reference: Mapped[str] = mapped_column(String(150), unique=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    status: Mapped[str] = mapped_column(String(20), default="MATCHED", index=True)
+    matched_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    matched_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (
+        CheckConstraint("amount > 0"),
+        CheckConstraint("status IN ('MATCHED', 'MISMATCH')"),
+    )
+
+
 class Setting(Base):
     __tablename__ = "settings"
     key: Mapped[str] = mapped_column(String(100), primary_key=True)

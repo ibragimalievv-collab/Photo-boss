@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import logging
 import os
 
@@ -6,7 +8,13 @@ from aiohttp import web
 
 from .config import config
 from .db import engine, init_db, wait_for_database
-from .main import clear_ready_file, create_bot, create_dispatcher, mark_ready
+from .main import (
+    clear_ready_file,
+    create_bot,
+    create_dispatcher,
+    mark_ready,
+    operations_loop,
+)
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
@@ -41,10 +49,17 @@ async def on_startup(app):
     logger.info("Telegram bot @%s is authenticated", me.username)
     logger.info("Telegram webhook configured: %s", url)
     mark_ready(me.username)
+    app["operations_task"] = asyncio.create_task(operations_loop(bot))
 
 
 async def on_cleanup(app):
     clear_ready_file()
+    task = app.get("operations_task")
+    if task:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    await app["dispatcher"].storage.close()
     await app["bot"].session.close()
     await engine.dispose()
 

@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 from pathlib import Path
@@ -9,12 +10,13 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.fsm.storage.memory import SimpleEventIsolation
 
 from .config import config
-from .db import engine, init_db, wait_for_database
+from .db import Session, engine, init_db, wait_for_database
 from .handlers import (
     academy,
     admin,
     common,
     manager,
+    operations,
     photographer,
     receipts,
     sales,
@@ -26,12 +28,48 @@ logger = logging.getLogger(__name__)
 READY_FILE = Path(os.getenv("HEALTHCHECK_FILE", "/tmp/photo-boss.ready"))
 
 
+async def operations_loop(bot, interval=300):
+    from .services.operations import maybe_send_daily_backup, run_operations_once
+
+    while True:
+        try:
+            async with Session() as session:
+                result = await run_operations_once(session, bot)
+                result["backups"] = await maybe_send_daily_backup(session, bot)
+                await session.commit()
+            if any(result.values()):
+                logger.info("Operations cycle: %s", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Operations cycle failed")
+            for tg_id in config.admin_ids:
+                with contextlib.suppress(Exception):
+                    await bot.send_message(
+                        tg_id,
+                        "🚨 Photo Boss: фоновый процесс завершился с ошибкой. "
+                        "Проверьте логи Render; следующая попытка будет автоматически.",
+                    )
+        await asyncio.sleep(interval)
+
+
 def create_dispatcher():
-    dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
+    if config.redis_url:
+        from aiogram.fsm.storage.redis import RedisStorage
+
+        storage = RedisStorage.from_url(
+            config.redis_url, state_ttl=86400, data_ttl=86400
+        )
+        dispatcher = Dispatcher(
+            storage=storage, events_isolation=storage.create_isolation()
+        )
+    else:
+        dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
     dispatcher.update.outer_middleware(CompactUiMiddleware())
     # Admin filtering must precede the manager's identically named Sales button.
     dispatcher.include_routers(
-        common.r, receipts.r, admin.r, photographer.r, manager.r, sales.r, academy.r, training.r
+        common.r, receipts.r, admin.r, photographer.r, manager.r, sales.r,
+        operations.r, academy.r, training.r
     )
     return dispatcher
 
@@ -68,6 +106,7 @@ async def main():
         await init_db()
         dispatcher = create_dispatcher()
         bot = create_bot()
+        operations_task = asyncio.create_task(operations_loop(bot))
         try:
             me = await bot.me()
             logger.info("Telegram bot @%s is authenticated", me.username)
@@ -78,6 +117,9 @@ async def main():
                 close_bot_session=False,
             )
         finally:
+            operations_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await operations_task
             await bot.session.close()
     finally:
         clear_ready_file()
