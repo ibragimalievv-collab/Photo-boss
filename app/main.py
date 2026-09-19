@@ -13,7 +13,15 @@ from aiogram.fsm.storage.memory import SimpleEventIsolation
 from .config import config
 from .db import Session, engine, init_db, wait_for_database
 from .handlers import (
-    academy, admin, common, manager, operations, photographer, receipts, sales, training,
+    academy,
+    admin,
+    common,
+    manager,
+    operations,
+    photographer,
+    receipts,
+    sales,
+    training,
 )
 from .ui import CompactUiMiddleware, enable_compact_ui
 

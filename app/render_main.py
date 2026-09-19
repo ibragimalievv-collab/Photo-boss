@@ -12,7 +12,13 @@ from sqlalchemy import text
 from .config import config
 from .db import engine, init_db, wait_for_database
 from .launch_policy import app_url, install_launch_policies, reset_chat_menu
-from .main import clear_ready_file, create_bot, create_dispatcher, mark_ready, operations_loop
+from .main import (
+    clear_ready_file,
+    create_bot,
+    create_dispatcher,
+    mark_ready,
+    operations_loop,
+)
 from .miniapp_api import install_miniapp
 from .miniapp_security import webhook_secret
 from .services.academy import ACADEMY_LESSONS
@@ -29,6 +35,7 @@ async def health(request):
             async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
     except Exception:
+        logger.exception("Database readiness check failed")
         ready = False
     return web.json_response({"service": "photo-boss", "status": "ok" if ready else "not_ready",
                               "release": RELEASE, "app": "/app/"}, status=200 if ready else 503,

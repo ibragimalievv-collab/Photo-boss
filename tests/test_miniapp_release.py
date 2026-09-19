@@ -26,8 +26,13 @@ from sqlalchemy.pool import StaticPool
 
 from app.miniapp_api import MiniApp
 from app.miniapp_security import (
-    AccessError, financial_period, parse_shift, role_permissions,
-    utc_bounds, validate_init_data, webhook_secret,
+    AccessError,
+    financial_period,
+    parse_shift,
+    role_permissions,
+    utc_bounds,
+    validate_init_data,
+    webhook_secret,
 )
 
 TOKEN = "123456789:unit-test-only-not-a-real-token"
@@ -96,7 +101,8 @@ def test_admin_plus_staff_remains_today_only():
 def test_day_boundaries_and_shift_timezone():
     zone = ZoneInfo("Europe/Moscow")
     assert utc_bounds(date(2026, 9, 20), date(2026, 9, 20), zone) == (
-        datetime(2026, 9, 19, 21), datetime(2026, 9, 20, 21))
+        datetime(2026, 9, 19, 21, tzinfo=timezone.utc).replace(tzinfo=None),
+        datetime(2026, 9, 20, 21, tzinfo=timezone.utc).replace(tzinfo=None))
     payload = {"userId": "3", "hotelId": "1", "date": "2026-09-20", "start": "09:00", "end": "19:00"}
     assert parse_shift(payload, zone, date(2026, 9, 20))[2].hour == 6
 
@@ -335,6 +341,7 @@ def test_javascript_syntax_and_no_live_demo_import():
 
 def test_runtime_menu_hides_training_duplicate_and_admin_audit():
     from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+
     from app.launch_policy import safe_menu
     markup = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📚 Академия"), KeyboardButton(text="🎓 Обучение")],
                                          [KeyboardButton(text="📜 Аудит")]])

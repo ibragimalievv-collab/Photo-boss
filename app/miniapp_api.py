@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -17,8 +17,15 @@ from aiohttp import web
 from sqlalchemy import text
 
 from .miniapp_security import (
-    STAFF_ROLES, THEMES, AccessError, financial_period, parse_shift,
-    require_owner, require_schedule_editor, role_permissions, utc_bounds,
+    STAFF_ROLES,
+    THEMES,
+    AccessError,
+    financial_period,
+    parse_shift,
+    require_owner,
+    require_schedule_editor,
+    role_permissions,
+    utc_bounds,
     validate_init_data,
 )
 
@@ -134,9 +141,9 @@ class MiniApp:
                     raise AccessError("Слишком большой запрос.", 413)
             value = json.loads(raw)
             if not isinstance(value, dict):
-                raise ValueError
+                raise TypeError("JSON body must be an object")
             return value
-        except (ValueError, UnicodeDecodeError) as exc:
+        except (ValueError, TypeError, UnicodeDecodeError) as exc:
             if isinstance(exc, AccessError):
                 raise
             raise AccessError("Ожидается корректный JSON-объект.", 400) from exc

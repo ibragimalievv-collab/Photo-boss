@@ -14,8 +14,12 @@ from urllib.parse import urlsplit
 from aiogram import BaseMiddleware
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import (
-    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp,
-    ReplyKeyboardMarkup, WebAppInfo,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MenuButtonWebApp,
+    ReplyKeyboardMarkup,
+    WebAppInfo,
 )
 from sqlalchemy import select
 
@@ -185,7 +189,8 @@ class LaunchPolicy(BaseMiddleware):
         actor = {"id": user.id, "roles": list(roles), "permissions": role_permissions(roles)}
         async with engine.connect() as conn:
             result = await api.finance_data(conn, actor, today, today, "today")
-        money = lambda amount: f"{amount / 100:,.2f}".replace(",", " ") + " ₽"
+        def money(amount):
+            return f"{amount / 100:,.2f}".replace(",", " ") + " ₽"
         text_value = (f"📊 Отчёт за сегодня · {today:%d.%m.%Y}\n\n"
                       f"Подтверждённая касса: {money(result['cashReceived'])}\n"
                       f"Продажи: {money(result['sales'])}\n"
