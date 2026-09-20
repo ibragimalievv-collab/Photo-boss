@@ -216,19 +216,15 @@ class People:
                 raise AccessError("Назначать администратора может только владелец.")
             if payload["revision"] != before["revision"]:
                 raise AccessError("Карточка уже изменена. Закройте форму и откройте её заново.", 409)
+            if payload["active"] != before["active"]:
+                raise AccessError(
+                    "Для изменения статуса используйте «Уволить» или «Восстановить».",
+                    409,
+                )
             await self.verify_hotels(conn, payload["hotelIds"])
-            terminated_at = None if payload["active"] else datetime.now(timezone.utc).replace(tzinfo=None)
             await conn.execute(
-                text(
-                    "UPDATE users SET name=:name,active=:active,terminated_at=:terminated "
-                    "WHERE id=:id"
-                ),
-                {
-                    "id": uid,
-                    "name": payload["name"],
-                    "active": payload["active"],
-                    "terminated": terminated_at,
-                },
+                text("UPDATE users SET name=:name WHERE id=:id"),
+                {"id": uid, "name": payload["name"]},
             )
             await self.assignments(conn, uid, payload)
             after = await self.card(conn, uid)
