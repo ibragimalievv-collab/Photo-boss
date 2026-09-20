@@ -12,6 +12,7 @@ from ..models import (
     Booking,
     PayrollEntry,
     Photo,
+    PhotoStorage,
     Sale,
     ShiftCheckIn,
     ShiftCheckOut,
@@ -20,6 +21,11 @@ from ..models import (
 from ..services.bookings import booking_card
 from ..services.commissions import photographer_percent
 from ..services.core import ROLES, audit, get_user, has, menu, roles_of
+from ..services.photo_storage import (
+    MAX_TELEGRAM_IMAGE_BYTES,
+    ensure_photo_storage,
+    storage_summary,
+)
 from ..services.shifts import LATE_FINE, is_late, shift_now
 
 r = Router()
@@ -108,7 +114,7 @@ async def my_shift(m, state, current_roles):
             return await ask_for_end_location(m, state)
         return await m.answer(
             result,
-            reply_markup=inline([[('🏁 Закончить смену', 'shift:end')]]),
+            reply_markup=inline([[("🏁 Закончить смену", "shift:end")]]),
         )
     if check_in.status == "AWAITING_PHOTO":
         return await ask_for_full_body_photo(m, state)
@@ -416,7 +422,9 @@ async def action(c: CallbackQuery, state):
             await state.set_data({"shooting_id": sid})
             await c.message.answer(
                 "📤 Загрузите сюда все готовые фотографии этой съёмки. "
-                "Можно отправлять по одной или альбомом. Когда закончите, нажмите кнопку ниже.",
+                "Можно отправлять по одной или альбомом. JPEG, PNG и WebP до 20 МБ на файл. "
+                "Photo Boss автоматически перенесёт их в папку этой съёмки на Яндекс.Диске. "
+                "Когда закончите, нажмите кнопку ниже.",
                 reply_markup=inline(
                     [[("✅ Завершить загрузку", "photo:upload_done", "success")]]
                 ),
@@ -434,7 +442,19 @@ async def action(c: CallbackQuery, state):
 async def upload_sale_photo(m, state):
     data = await state.get_data()
     shooting_id = data.get("shooting_id")
-    file_id = m.photo[-1].file_id if m.photo else m.document.file_id
+    attachment = m.photo[-1] if m.photo else m.document
+    source_kind = "PHOTO" if m.photo else "DOCUMENT"
+    file_id = attachment.file_id
+    file_unique_id = attachment.file_unique_id
+
+    if source_kind == "DOCUMENT":
+        if attachment.file_size and attachment.file_size > MAX_TELEGRAM_IMAGE_BYTES:
+            return await m.answer(
+                "Файл больше 20 МБ. Для синхронизации с Диском уменьшите его "
+                "или отправьте как обычную фотографию."
+            )
+        if attachment.mime_type not in {"image/jpeg", "image/png", "image/webp"}:
+            return await m.answer("Как файл можно отправлять только JPEG, PNG или WebP.")
     async with Session() as s:
         u = await get_user(s, m.from_user.id)
         shooting = await s.get(Shooting, shooting_id)
@@ -442,17 +462,53 @@ async def upload_sale_photo(m, state):
         if booking is None or booking.photographer_id != u.id or shooting.status != "UPLOADING":
             await state.clear()
             return await m.answer("Эта загрузка уже закрыта. Откройте «📸 Мои съёмки».")
-        exists = await s.scalar(
-            select(Photo.id).where(Photo.shooting_id == shooting.id, Photo.file_id == file_id)
+
+        existing_storage = await s.scalar(
+            select(PhotoStorage).where(
+                PhotoStorage.shooting_id == shooting.id,
+                PhotoStorage.telegram_unique_id == file_unique_id,
+            )
         )
-        if exists is None:
-            s.add(Photo(shooting_id=shooting.id, file_id=file_id))
-            await s.commit()
+        created_photo = False
+        if existing_storage is not None:
+            photo = await s.get(Photo, existing_storage.photo_id)
+        else:
+            photo = await s.scalar(
+                select(Photo).where(
+                    Photo.shooting_id == shooting.id,
+                    Photo.file_id == file_id,
+                )
+            )
+            if photo is None:
+                photo = Photo(shooting_id=shooting.id, file_id=file_id)
+                s.add(photo)
+                await s.flush()
+                created_photo = True
+            storage, storage_created = await ensure_photo_storage(
+                s,
+                photo_id=photo.id,
+                shooting_id=shooting.id,
+                file_id=file_id,
+                file_unique_id=file_unique_id,
+                source_kind=source_kind,
+            )
+            if (
+                created_photo
+                and not storage_created
+                and storage is not None
+                and storage.photo_id != photo.id
+            ):
+                await s.delete(photo)
+                photo = await s.get(Photo, storage.photo_id)
+        await s.commit()
         count = await s.scalar(
             select(func.count(Photo.id)).where(Photo.shooting_id == shooting.id)
         )
+        sync = await storage_summary(s, shooting.id)
     await m.answer(
-        f"✅ Загружено фотографий: {count}",
+        f"✅ Кадров в съёмке: {count}. "
+        f"Яндекс.Диск: {sync['stored']} сохранено, {sync['pending']} в очереди"
+        + (f", {sync['failed']} требуют повтора." if sync["failed"] else "."),
         reply_markup=inline(
             [[("✅ Завершить загрузку", "photo:upload_done", "success")]]
         ),
@@ -461,7 +517,7 @@ async def upload_sale_photo(m, state):
 
 @r.message(PhotoUploadFlow.uploading)
 async def require_sale_photo(m):
-    await m.answer("Отправьте фотографию или файл с фотографией.")
+    await m.answer("Отправьте JPEG, PNG или WebP как фотографию или файл до 20 МБ.")
 
 
 @r.callback_query(PhotoUploadFlow.uploading, F.data == "photo:upload_done")
@@ -482,10 +538,19 @@ async def finish_photo_upload(c: CallbackQuery, state):
         )
         if not count:
             return await c.answer("Сначала загрузите фотографии.", show_alert=True)
+        sync = await storage_summary(s, shooting.id)
         shooting.status = "READY_FOR_SALE"
         booking.status = "READY_FOR_SALE"
         await audit(
-            s, u, "photos_ready_for_sale", "shooting", shooting.id, f"photos={count}"
+            s,
+            u,
+            "photos_ready_for_sale",
+            "shooting",
+            shooting.id,
+            (
+                f"photos={count};disk_stored={sync['stored']};"
+                f"disk_pending={sync['pending']};disk_failed={sync['failed']}"
+            ),
         )
         await s.commit()
     await state.clear()
@@ -493,7 +558,11 @@ async def finish_photo_upload(c: CallbackQuery, state):
     await c.message.answer(
         f"💰 Готово к продаже. Загружено фотографий: {count}.\n"
         f"Ставка фотографа: {photographer_percent(count):g}% от продаж этой съёмки. "
-        "Количество купленных фотографий на ставку не влияет."
+        "Количество купленных фотографий на ставку не влияет.\n"
+        f"☁️ Яндекс.Диск: {sync['stored']} сохранено, {sync['pending']} ещё синхронизируются"
+        + (f", ошибок: {sync['failed']}." if sync["failed"] else ".")
+        + "\nАкадемия уже видит эти кадры; автоматический ИИ-разбор включим отдельно "
+          "после проверки хранения и лимита расходов."
     )
 
 
