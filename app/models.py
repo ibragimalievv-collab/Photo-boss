@@ -64,6 +64,23 @@ class WorkRuleAcceptance(Base):
     )
 
 
+class WorkChatAttachment(Base):
+    __tablename__ = "work_chat_attachments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    uploader_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    storage_path: Mapped[str] = mapped_column(String(500), unique=True)
+    original_name: Mapped[str] = mapped_column(String(255))
+    mime_type: Mapped[str] = mapped_column(String(100))
+    byte_size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    __table_args__ = (
+        CheckConstraint("byte_size > 0"),
+    )
+
+
 class WorkChatMessage(Base):
     __tablename__ = "work_chat_messages"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -73,10 +90,17 @@ class WorkChatMessage(Base):
     recipient_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
     )
-    body: Mapped[str] = mapped_column(Text)
+    attachment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("work_chat_attachments.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    body: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
     __table_args__ = (
-        CheckConstraint("length(body) BETWEEN 1 AND 2000"),
+        CheckConstraint("length(body) BETWEEN 0 AND 2000"),
+        CheckConstraint("length(body) > 0 OR attachment_id IS NOT NULL"),
         CheckConstraint("recipient_id IS NULL OR recipient_id <> sender_id"),
     )
 
