@@ -61,7 +61,7 @@ from app.models import (
     UserRole,
 )
 from app.services.core import bootstrap, get_user, menu, roles_of
-from app.services.receipts import payment_totals, warnings_for
+from app.services.receipts import payment_totals, refresh_payment_statuses, warnings_for
 from app.services.sale_workflow import finalize_photographer_commissions
 from app.services.training import TRAINING_CATEGORIES, training_day
 
@@ -510,6 +510,8 @@ async def prepare_sale(creator, *, role="PHOTOGRAPHER", sold_photos=2):
             commission=amount * percent / 100,
         )
         session.add(sale)
+        await session.flush()
+        await refresh_payment_statuses(session, booking.id)
         await session.commit()
         return sale.id
 
