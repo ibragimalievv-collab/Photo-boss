@@ -1,7 +1,9 @@
 """Offline checks for shooting photo storage sync."""
 import pytest
+
 import app.services.photo_storage as storage
 from app.yandex_disk import ROOT, safe_path
+
 
 @pytest.mark.parametrize("payload,expected", [
     (b"\xff\xd8\xff" + b"x" * 100, ("jpg", "image/jpeg")),
