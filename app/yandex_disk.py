@@ -115,17 +115,19 @@ class YandexDisk:
             raise YandexDiskError("Yandex.Disk did not return a valid download target")
         timeout = aiohttp.ClientTimeout(total=45)
         payload = bytearray()
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(href) as response:
-                if response.status != 200:
-                    raise YandexDiskError(f"Yandex.Disk download HTTP {response.status}")
-                length = response.headers.get("Content-Length")
-                if length and length.isdigit() and int(length) > max_bytes:
+        async with (
+            aiohttp.ClientSession(timeout=timeout) as session,
+            session.get(href) as response,
+        ):
+            if response.status != 200:
+                raise YandexDiskError(f"Yandex.Disk download HTTP {response.status}")
+            length = response.headers.get("Content-Length")
+            if length and length.isdigit() and int(length) > max_bytes:
+                raise YandexDiskError("Yandex.Disk file exceeds download limit")
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                payload.extend(chunk)
+                if len(payload) > max_bytes:
                     raise YandexDiskError("Yandex.Disk file exceeds download limit")
-                async for chunk in response.content.iter_chunked(64 * 1024):
-                    payload.extend(chunk)
-                    if len(payload) > max_bytes:
-                        raise YandexDiskError("Yandex.Disk file exceeds download limit")
         return bytes(payload)
 
     async def delete(self, path: str):
