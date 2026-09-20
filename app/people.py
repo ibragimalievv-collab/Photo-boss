@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from .miniapp_security import AccessError
+from .work_rules import WORK_RULES_TEXT, WORK_RULES_VERSION
 
 ASSIGNABLE = {"ADMIN", "MANAGER", "PHOTOGRAPHER"}
 DOCUMENT_VERSION = "2026-09-20-draft-1"
@@ -35,6 +36,9 @@ Photo Boss предназначен для организации съёмок, 
 5. Статус этого документа
 Это проект для согласования, а не действующий договор об оказании услуг, согласие на обработку персональных данных или подтверждение найма. Подписание сейчас отключено. В окончательной версии будут указаны заказчик, применимое право и порядок электронного подтверждения. Пользователь сможет сохранить принятую редакцию и дату подтверждения.
 """
+
+DOCUMENT_VERSION = WORK_RULES_VERSION
+GENERAL_RULES = WORK_RULES_TEXT
 
 
 def positive_id(value, *, maximum=2**31 - 1):
@@ -196,12 +200,13 @@ class People:
 
     async def documents(self, request):
         return web.json_response({"version": DOCUMENT_VERSION, "status": "draft", "canSign": False,
+            "canAcceptWorkRules": True,
             "general": GENERAL_RULES, "sha256": hashlib.sha256(GENERAL_RULES.encode()).hexdigest(),
             "servicesContract": "Не подготовлен: нужны реквизиты заказчика, страна, статус исполнителя, условия и способ подписания.",
             "dataConsent": "Отдельный документ при необходимости. Пользовательские правила не заменяют согласие на обработку данных.",
-            "chat": "Не подключён. Правила доступа и хранения должны быть утверждены до первой переписки.",
-            "storage": "Интеграция Яндекс.Диска в этом выпуске не подключена.",
-            "aiReview": "Автоматический ИИ-разбор в этом выпуске не подключён."})
+            "chat": "Рабочий чат подключён. Общий чат и личные рабочие диалоги доступны после принятия общих правил; сообщения хранятся до 365 дней.",
+            "storage": "Яндекс.Диск подключён к рабочему контуру Photo Boss.",
+            "aiReview": "Автоматический ИИ-разбор в этом выпуске ещё не подключён."})
 
     async def static(self, request):
         name = request.match_info["asset"]

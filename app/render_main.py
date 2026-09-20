@@ -25,11 +25,12 @@ from .miniapp_security import webhook_secret
 from .people import install_people
 from .services.academy import ACADEMY_LESSONS
 from .services.photo_storage import storage_loop
+from .work_chat import cleanup_expired_chat, cleanup_loop, install_work_chat
 from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.6-shooting-storage"
+RELEASE = "miniapp-3.7-work-chat"
 
 
 async def health(request):
@@ -82,8 +83,12 @@ async def on_startup(app):
     storage_status = await app["yandex_disk"].verify(write_test=True)
     if not storage_status["connected"] or not storage_status["writeVerified"]:
         logger.warning("Yandex.Disk storage is degraded; Telegram workflows remain available")
+    deleted = await cleanup_expired_chat(engine)
+    if deleted:
+        logger.info("Expired work-chat messages removed on startup: %s", deleted)
     app["operations_task"] = asyncio.create_task(operations_loop(bot))
     app["storage_task"] = asyncio.create_task(storage_loop(bot, app["yandex_disk"]))
+    app["chat_cleanup_task"] = asyncio.create_task(cleanup_loop(engine))
     app["ready"] = True
     mark_ready(me.username)
     logger.info("Release %s ready; live Mini App enabled; demo data disabled", RELEASE)
@@ -92,7 +97,7 @@ async def on_startup(app):
 async def on_cleanup(app):
     clear_ready_file()
     app["ready"] = False
-    for key in ("operations_task", "storage_task"):
+    for key in ("operations_task", "storage_task", "chat_cleanup_task"):
         task = app.get(key)
         if task:
             task.cancel()
@@ -114,6 +119,7 @@ def main():
     miniapp = install_miniapp(app, engine=engine, bot=bot, lessons=ACADEMY_LESSONS, tz_name=config.training_timezone)
     install_attendance(app, miniapp)
     install_people(app, miniapp)
+    install_work_chat(app, miniapp)
     install_yandex_disk(app)
     SimpleRequestHandler(
         dispatcher=dispatcher, bot=bot, secret_token=webhook_secret(config.bot_token),
