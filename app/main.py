@@ -23,8 +23,8 @@ from .handlers import (
     sales,
     training,
 )
-from .ui import CompactUiMiddleware, enable_compact_ui
 from .services.photo_storage import storage_loop
+from .ui import CompactUiMiddleware, enable_compact_ui
 from .yandex_disk import YandexDisk, configured_from_env
 
 logger = logging.getLogger(__name__)
