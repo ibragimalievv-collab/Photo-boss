@@ -46,6 +46,7 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
         with self.engine.inner.begin() as conn:
             conn.execute(text("ALTER TABLE users ADD COLUMN created_at DATETIME"))
             conn.execute(text("ALTER TABLE users ADD COLUMN terminated_at DATETIME"))
+            conn.execute(text("ALTER TABLE shootings ADD COLUMN status TEXT"))
             conn.execute(text("CREATE UNIQUE INDEX unique_tg_id ON users(tg_id)"))
 
     async def asyncTearDown(self):
