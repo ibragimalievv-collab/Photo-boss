@@ -281,7 +281,7 @@ async def employee_fire_confirm(callback, current_user, current_roles):
         if not target.active:
             return await callback.answer("Сотрудник уже уволен.", show_alert=True)
         target.active = False
-        target.terminated_at = utc_now()
+        target.terminated_at = datetime.now(UTC).replace(tzinfo=None)
         actor = await get_user(session, callback.from_user.id)
         await audit(session, actor, "employee_fired", "user", target.id)
         await session.commit()
