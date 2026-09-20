@@ -11,6 +11,7 @@ from ..db import Session
 from ..keyboards import inline
 from ..models import BankReconciliation, Booking, Client, Receipt, RepeatSaleLead, User
 from ..services.core import audit
+from ..services.bookings import notify_photographer_assignment
 from ..services.operations import (
     backup_payload,
     owner_kpis,
@@ -115,10 +116,18 @@ async def smart_assign(callback, current_user, current_roles):
         if booking is None or user is None or not user.active:
             return await callback.answer("Запись или фотограф недоступны.", show_alert=True)
         booking.photographer_id = user.id
-        if booking.status in {"NEW", "CONFIRMED", "PENDING_CONFIRMATION"}:
+        if booking.status in {"NEW", "CONFIRMED", "PENDING_CONFIRMATION", "RESCHEDULED"}:
             booking.status = "ASSIGNED"
+        shooting = await session.scalar(
+            select(Shooting).where(Shooting.booking_id == booking.id)
+        )
+        if shooting and shooting.status in {
+            "PENDING_CONFIRMATION", "CONFIRMED", "ASSIGNED"
+        }:
+            shooting.status = "ASSIGNED"
         await audit(session, current_user, "smart_assignment", "booking", booking.id, f"photographer={user.id}")
         await session.commit()
+        await notify_photographer_assignment(callback.bot, session, booking)
     await callback.answer("Фотограф назначен.")
     await callback.message.answer(f"✅ На запись #{booking_id} назначен {user.name}.")
 
