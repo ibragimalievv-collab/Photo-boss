@@ -609,6 +609,18 @@ async def finish_photo_upload(c: CallbackQuery, state):
         )
         if not count:
             return await c.answer("Сначала загрузите всю съёмку.", show_alert=True)
+        declared = await s.scalar(
+            select(func.max(Sale.declared_photo_count)).where(
+                Sale.booking_id == booking.id,
+                Sale.declared_photo_count.is_not(None),
+            )
+        )
+        if declared and count < declared:
+            return await c.answer(
+                f"По продаже указано {declared} кадров, а загружено {count}. "
+                "Загрузите оставшиеся кадры перед завершением.",
+                show_alert=True,
+            )
         sync = await storage_summary(s, shooting.id)
         shooting.full_upload_completed_at = datetime.now(UTC).replace(tzinfo=None)
         commission_state = await finalize_photographer_commissions(s, booking)
