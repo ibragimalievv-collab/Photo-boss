@@ -43,7 +43,7 @@ def main():
                 for theme in ('premium', 'light', 'photo'):
                     page = browser.new_page(viewport={'width': width, 'height': 844})
                     errors, sent = [], []
-                    page.on('pageerror', errors.append)
+                    page.on('pageerror', lambda event, bucket=errors: bucket.append(str(event)))
                     me = {'user': {'id': 1, 'name': 'Test', 'roles': [role]},
                           'permissions': {'manageSchedule': role in ('OWNER', 'ADMIN')}}
                     data = {'items': [{'id': 3, 'name': '<script>bad()</script>', 'telegramId': 1003,
