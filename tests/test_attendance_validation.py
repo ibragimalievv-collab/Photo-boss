@@ -55,3 +55,15 @@ def test_status_is_honest_about_roles_and_geofencing(roles, eligible):
     assert result["geoPolicy"] == "coordinates_only"
     assert result["start"] is None and result["end"] is None
     assert result["fine"] == 0
+
+
+def test_shift_photo_ui_uses_live_camera_only():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "attendance_ui" / "attendance.js").read_text()
+    assert "getUserMedia" in source
+    assert "data-att=\"camera\"" in source
+    assert "<video id=\"attCameraVideo\"" in source
+    assert 'type=\"file\"' not in source
+    assert "capture=" not in source
+    assert "Выбор из галереи отключён" in source
