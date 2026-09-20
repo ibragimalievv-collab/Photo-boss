@@ -1,4 +1,6 @@
 """Yandex.Disk storage safety checks. No provider network is used."""
+import asyncio
+
 import pytest
 
 from app.yandex_disk import ROOT, YandexDisk, safe_path
@@ -30,8 +32,7 @@ def test_public_status_never_contains_credentials():
     assert payload["root"] == ROOT
 
 
-@pytest.mark.asyncio
-async def test_verify_write_sequence_without_network(monkeypatch):
+def test_verify_write_sequence_without_network(monkeypatch):
     storage = YandexDisk("token")
     calls = []
 
@@ -49,7 +50,7 @@ async def test_verify_write_sequence_without_network(monkeypatch):
     monkeypatch.setattr(storage, "ensure_dir", ensure)
     monkeypatch.setattr(storage, "upload_bytes", upload)
     monkeypatch.setattr(storage, "delete", delete)
-    result = await storage.verify(write_test=True)
+    result = asyncio.run(storage.verify(write_test=True))
     assert result["connected"] is True
     assert result["writeVerified"] is True
     assert calls[0] == ("dir", ROOT)
