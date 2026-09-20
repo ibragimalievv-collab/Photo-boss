@@ -26,7 +26,12 @@ from ..models import (
     User,
     UserRole,
 )
-from ..services.bookings import STATUS_NAMES, booking_card
+from ..services.bookings import (
+    STATUS_NAMES,
+    booking_card,
+    notify_photographer_cancelled,
+    notify_photographer_rescheduled,
+)
 from ..services.core import audit, get_user, has, roles_of
 from ..services.training import training_day
 
@@ -40,6 +45,7 @@ AUDIT_ACTION_NAMES = {
     "booking_confirmed": "Съёмка подтверждена",
     "booking_rejected": "Съёмка отклонена",
     "booking_rescheduled": "Съёмка перенесена",
+    "booking_cancelled": "Съёмка отменена",
     "guest_reminder_prepared": "Подготовлено напоминание гостю",
     "sale_created": "Оформлена продажа",
     "premium_added": "Начислена премия",
@@ -75,6 +81,12 @@ class PremiumFlow(StatesGroup):
 
 class DateLookup(StatesGroup):
     value = State()
+
+
+class AdminShootFlow(StatesGroup):
+    reschedule_date = State()
+    reschedule_time = State()
+    cancel_reason = State()
 
 
 ROLE_NAMES = {
@@ -784,7 +796,168 @@ async def allshoot_view(c):
             return await c.answer("Съёмка не найдена.", show_alert=True)
         card = await booking_card(s, booking)
     await c.answer()
-    await c.message.answer(card)
+    buttons = []
+    if booking.status not in {"REJECTED", "CANCELLED", "READY_FOR_SALE"}:
+        if booking.status in {"NEW", "PENDING_CONFIRMATION", "CONFIRMED", "ASSIGNED", "RESCHEDULED"}:
+            buttons.append([
+                ("📅 Перенести съёмку", f"admin:shoot:reschedule:{booking.id}", "primary")
+            ])
+        buttons.append([
+            ("❌ Отменить съёмку", f"admin:shoot:cancel:{booking.id}", "danger")
+        ])
+    await c.message.answer(card, reply_markup=inline(buttons) if buttons else None)
+
+
+@r.callback_query(F.data.startswith("admin:shoot:reschedule:"))
+async def admin_start_reschedule(c, state):
+    try:
+        booking_id = int(c.data.rsplit(":", 1)[1])
+    except (TypeError, ValueError):
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as s:
+        booking = await s.get(Booking, booking_id)
+    if booking is None:
+        return await c.answer("Съёмка не найдена.", show_alert=True)
+    if booking.status not in {"NEW", "PENDING_CONFIRMATION", "CONFIRMED", "ASSIGNED", "RESCHEDULED"}:
+        return await c.answer("Эту съёмку уже нельзя переносить.", show_alert=True)
+    await state.set_state(AdminShootFlow.reschedule_date)
+    await state.set_data({"admin_reschedule_booking_id": booking_id})
+    await c.answer()
+    await c.message.answer("Введите новую дату съёмки в формате ДД.ММ.ГГГГ:")
+
+
+@r.message(AdminShootFlow.reschedule_date, F.text)
+async def admin_reschedule_date(m, state):
+    try:
+        day, month, year = map(int, m.text.strip().split("."))
+        value = date(year, month, day)
+    except (TypeError, ValueError):
+        return await m.answer("Неверная дата. Пример: 21.09.2026")
+    await state.update_data(admin_reschedule_date=value.isoformat())
+    await state.set_state(AdminShootFlow.reschedule_time)
+    await m.answer("Введите новое время в формате ЧЧ:ММ:")
+
+
+@r.message(AdminShootFlow.reschedule_time, F.text)
+async def admin_finish_reschedule(m, state, current_user):
+    try:
+        new_time = time.fromisoformat(m.text.strip())
+    except ValueError:
+        return await m.answer("Неверное время. Пример: 16:30")
+    data = await state.get_data()
+    booking_id = data.get("admin_reschedule_booking_id")
+    async with Session() as s:
+        booking = await s.get(Booking, booking_id, with_for_update=True)
+        if booking is None:
+            await state.clear()
+            return await m.answer("Съёмка не найдена.")
+        if booking.status not in {"NEW", "PENDING_CONFIRMATION", "CONFIRMED", "ASSIGNED", "RESCHEDULED"}:
+            await state.clear()
+            return await m.answer("Съёмку уже нельзя переносить.")
+        booking.shoot_date = date.fromisoformat(data["admin_reschedule_date"])
+        booking.shoot_time = new_time
+        booking.status = "RESCHEDULED"
+        shooting = await s.scalar(
+            select(Shooting).where(Shooting.booking_id == booking.id)
+        )
+        if shooting:
+            shooting.status = "ASSIGNED" if booking.photographer_id else "CONFIRMED"
+        await audit(
+            s,
+            current_user,
+            "booking_rescheduled",
+            "booking",
+            booking.id,
+            f"date={booking.shoot_date.isoformat()};time={booking.shoot_time.isoformat()}",
+        )
+        await s.commit()
+        await notify_photographer_rescheduled(m.bot, s, booking)
+    await state.clear()
+    await m.answer(
+        f"📅 Съёмка #{booking.id} перенесена на "
+        f"{booking.shoot_date:%d.%m.%Y} в {booking.shoot_time:%H:%M}."
+    )
+
+
+@r.callback_query(F.data.startswith("admin:shoot:cancel:"))
+async def admin_start_cancel(c, state):
+    try:
+        booking_id = int(c.data.rsplit(":", 1)[1])
+    except (TypeError, ValueError):
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as s:
+        booking = await s.get(Booking, booking_id)
+    if booking is None:
+        return await c.answer("Съёмка не найдена.", show_alert=True)
+    if booking.status in {"REJECTED", "CANCELLED", "READY_FOR_SALE"}:
+        return await c.answer("Эту съёмку уже нельзя отменить.", show_alert=True)
+    await state.set_state(AdminShootFlow.cancel_reason)
+    await state.set_data({"admin_cancel_booking_id": booking_id})
+    await c.answer()
+    await c.message.answer(
+        f"❌ Отмена съёмки #{booking_id}\n\n"
+        "Напишите причину отмены. Она сохранится в истории и будет отправлена фотографу."
+    )
+
+
+@r.message(AdminShootFlow.cancel_reason, F.text)
+async def admin_cancel_reason(m, state):
+    reason = (m.text or "").strip()
+    if not 3 <= len(reason) <= 500:
+        return await m.answer("Причина должна быть от 3 до 500 символов.")
+    data = await state.get_data()
+    booking_id = data.get("admin_cancel_booking_id")
+    await state.update_data(admin_cancel_reason=reason)
+    await m.answer(
+        f"Подтвердить отмену съёмки #{booking_id}?\n\nПричина: {reason}",
+        reply_markup=inline([
+            [("❌ Да, отменить съёмку", f"admin:shoot:cancel_confirm:{booking_id}", "danger")],
+            [("Нет, оставить", f"admin:shoot:view:{booking_id}")],
+        ]),
+    )
+
+
+@r.callback_query(F.data.startswith("admin:shoot:cancel_confirm:"))
+async def admin_cancel_confirm(c, state, current_user):
+    try:
+        booking_id = int(c.data.rsplit(":", 1)[1])
+    except (TypeError, ValueError):
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    data = await state.get_data()
+    reason = (data.get("admin_cancel_reason") or "").strip()
+    if data.get("admin_cancel_booking_id") != booking_id or not 3 <= len(reason) <= 500:
+        return await c.answer("Начните отмену заново.", show_alert=True)
+    async with Session() as s:
+        booking = await s.get(Booking, booking_id, with_for_update=True)
+        if booking is None:
+            await state.clear()
+            return await c.answer("Съёмка не найдена.", show_alert=True)
+        if booking.status in {"REJECTED", "CANCELLED", "READY_FOR_SALE"}:
+            await state.clear()
+            return await c.answer("Съёмка уже закрыта.", show_alert=True)
+        shooting = await s.scalar(
+            select(Shooting).where(Shooting.booking_id == booking.id)
+        )
+        booking.status = "CANCELLED"
+        booking.cancellation_reason = reason
+        booking.cancelled_at = datetime.now(UTC).replace(tzinfo=None)
+        if shooting:
+            shooting.status = "CANCELLED"
+        await audit(
+            s,
+            current_user,
+            "booking_cancelled",
+            "booking",
+            booking.id,
+            f"reason={reason}",
+        )
+        await s.commit()
+        await notify_photographer_cancelled(c.bot, s, booking)
+    await state.clear()
+    await c.answer("Съёмка отменена.")
+    await c.message.answer(
+        f"❌ Съёмка #{booking.id} отменена.\nПричина: {reason}"
+    )
 
 
 @r.message(F.text == "💰 Продажи")
