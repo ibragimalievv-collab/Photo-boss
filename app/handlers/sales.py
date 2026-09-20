@@ -560,7 +560,7 @@ async def finalize_sale(c, state, current_user, current_roles):
             session, booking.id
         )
         if percent is None:
-            photographer_percent_value = Decimal("0")
+            photographer_percent_value = Decimal(0)
             photographer_commission = Decimal("0")
             finalized_at = None
         else:
