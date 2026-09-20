@@ -5,16 +5,15 @@ import asyncio
 import hashlib
 import io
 import logging
-
-import aiohttp
 from datetime import UTC, datetime, timedelta
 
+import aiohttp
 from aiogram.exceptions import TelegramAPIError
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from ..db import Session
-from ..models import Photo, PhotoStorage
+from ..models import PhotoStorage
 from ..yandex_disk import ROOT, YandexDisk
 
 logger = logging.getLogger(__name__)
