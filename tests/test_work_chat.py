@@ -5,8 +5,8 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 
 import pytest
-import test_miniapp_release as baseline
 from sqlalchemy import text
+import test_miniapp_release as baseline
 
 from app.miniapp_security import AccessError
 from app.work_chat import (
