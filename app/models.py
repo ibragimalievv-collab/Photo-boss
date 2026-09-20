@@ -48,6 +48,39 @@ class UserRole(Base):
     __table_args__ = (UniqueConstraint("user_id", "role"),)
 
 
+class WorkRuleAcceptance(Base):
+    __tablename__ = "work_rule_acceptances"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[str] = mapped_column(String(80))
+    text_sha256: Mapped[str] = mapped_column(String(64))
+    accepted_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "version", name="uq_work_rule_acceptance_user_version"
+        ),
+    )
+
+
+class WorkChatMessage(Base):
+    __tablename__ = "work_chat_messages"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sender_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    recipient_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    __table_args__ = (
+        CheckConstraint("char_length(body) BETWEEN 1 AND 2000"),
+        CheckConstraint("recipient_id IS NULL OR recipient_id <> sender_id"),
+    )
+
+
 class Hotel(Base):
     __tablename__ = "hotels"
     id: Mapped[int] = mapped_column(primary_key=True)
