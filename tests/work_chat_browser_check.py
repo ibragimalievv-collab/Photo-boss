@@ -106,14 +106,16 @@ def main():
                 assert page.locator("#pbChatMessages img").count() == 0
                 page.locator('textarea[name="body"]').fill("Тест рабочего чата")
                 page.locator(".pb-chat-send").click()
+                page.wait_for_function("!document.querySelector('.pb-chat-send').disabled")
                 assert sent and sent[-1]["body"] == "Тест рабочего чата"
                 page.locator('input[name="file"]').set_input_files({
                     "name": "report.pdf",
                     "mimeType": "application/pdf",
                     "buffer": b"%PDF-1.7 fixture",
                 })
+                page.get_by_text("report.pdf", exact=False).wait_for()
                 page.locator(".pb-chat-send").click()
-                page.wait_for_timeout(800)
+                page.wait_for_function("!document.querySelector('.pb-chat-send').disabled")
                 visible_error = page.locator(".pb-chat-error:not([hidden])")
                 assert visible_error.count() == 0, visible_error.first.inner_text() if visible_error.count() else ""
                 assert not errors, errors
