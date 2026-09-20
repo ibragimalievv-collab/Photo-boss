@@ -49,6 +49,13 @@ async def init_db():
                     "DOUBLE PRECISION NOT NULL DEFAULT 0"
                 )
             )
+            await connection.execute(text(
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT"
+            ))
+            await connection.execute(text(
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS "
+                "cancelled_at TIMESTAMP WITHOUT TIME ZONE"
+            ))
             await connection.execute(
                 text(
                     "ALTER TABLE work_chat_messages ADD COLUMN IF NOT EXISTS "

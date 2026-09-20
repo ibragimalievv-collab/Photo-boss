@@ -13,6 +13,7 @@ STATUS_NAMES = {
     "ASSIGNED": "Назначена фотографу",
     "RESCHEDULED": "Перенесена",
     "REJECTED": "Отказ",
+    "CANCELLED": "Отменена",
     "PICKED_UP": "Фотограф забрал съёмку",
     "SHOT": "Съёмка отснята",
     "UPLOADING": "Загрузка готовых фотографий",
@@ -74,6 +75,11 @@ async def booking_card(session, booking: Booking):
         "от продаж этой съёмки\n"
         f"📋 Менеджер: {manager.name if manager else 'не найден'}\n"
         f"📸 Фотограф: {photographer.name if photographer else 'не назначен'}"
+        + (
+            f"\n❌ Причина отмены: {booking.cancellation_reason}"
+            if booking.status == "CANCELLED" and booking.cancellation_reason
+            else ""
+        )
     )
 
 
@@ -118,6 +124,42 @@ async def notify_manager_ready_for_sale(bot, session, booking: Booking):
             reply_markup=inline(
                 [[("💰 Оформить продажу", f"sale:start:{booking.id}", "success")]]
             ),
+            disable_notification=False,
+        )
+        return True
+    except TelegramAPIError:
+        return False
+
+
+async def notify_photographer_rescheduled(bot, session, booking: Booking):
+    if not booking.photographer_id:
+        return False
+    photographer = await session.get(User, booking.photographer_id)
+    if photographer is None or not photographer.active:
+        return False
+    try:
+        await bot.send_message(
+            photographer.tg_id,
+            f"📅 Фотосессия #{booking.id} перенесена.\n"
+            f"Новая дата и время: {booking.shoot_date:%d.%m.%Y} · {booking.shoot_time:%H:%M}.",
+            disable_notification=False,
+        )
+        return True
+    except TelegramAPIError:
+        return False
+
+
+async def notify_photographer_cancelled(bot, session, booking: Booking):
+    if not booking.photographer_id:
+        return False
+    photographer = await session.get(User, booking.photographer_id)
+    if photographer is None or not photographer.active:
+        return False
+    try:
+        await bot.send_message(
+            photographer.tg_id,
+            f"❌ Фотосессия #{booking.id} отменена.\n"
+            f"Причина: {booking.cancellation_reason or 'не указана'}",
             disable_notification=False,
         )
         return True

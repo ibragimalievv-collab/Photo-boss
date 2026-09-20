@@ -171,6 +171,8 @@ class Booking(Base):
         ForeignKey("users.id"), nullable=True
     )
     status: Mapped[str] = mapped_column(String(40), default="NEW")
+    cancellation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
