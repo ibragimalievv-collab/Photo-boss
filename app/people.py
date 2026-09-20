@@ -10,6 +10,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from aiogram.exceptions import TelegramAPIError
 from aiohttp import web
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -97,6 +98,7 @@ class People:
     def __init__(self, miniapp):
         self.api = miniapp
         self.engine = miniapp.engine
+        self.bot = miniapp.bot
 
     async def current_editor(self, conn, actor_id, target_id=None):
         # Lock in a stable order. Re-read active/roles inside the mutation transaction.
@@ -111,14 +113,30 @@ class People:
         return roles
 
     async def card(self, conn, uid):
-        users = await self.api.rows(conn, "SELECT id,tg_id,name,active FROM users WHERE id=:id", id=uid)
+        users = await self.api.rows(
+            conn,
+            "SELECT id,tg_id,name,active,terminated_at FROM users WHERE id=:id",
+            id=uid,
+        )
         if not users:
             raise AccessError("Сотрудник не найден.", 404)
         u = users[0]
         roles = await self.api.rows(conn, "SELECT role FROM user_roles WHERE user_id=:id ORDER BY role", id=uid)
         hotels = await self.api.rows(conn, "SELECT hotel_id FROM hotel_employees WHERE user_id=:id ORDER BY hotel_id", id=uid)
-        result = {"id": u["id"], "telegramId": u["tg_id"], "name": u["name"], "active": bool(u["active"]),
-                  "roles": sorted({r["role"] for r in roles}), "hotelIds": sorted({r["hotel_id"] for r in hotels})}
+        result = {
+            "id": u["id"],
+            "telegramId": u["tg_id"],
+            "name": u["name"],
+            "active": bool(u["active"]),
+            "terminatedAt": (
+                u["terminated_at"].isoformat()
+                if u["terminated_at"] is not None
+                and hasattr(u["terminated_at"], "isoformat")
+                else (str(u["terminated_at"]) if u["terminated_at"] else None)
+            ),
+            "roles": sorted({r["role"] for r in roles}),
+            "hotelIds": sorted({r["hotel_id"] for r in hotels}),
+        }
         result["revision"] = revision(result)
         return result
 
@@ -126,15 +144,26 @@ class People:
         actor = request["miniapp_actor"]
         check_editor(actor["roles"])
         after = positive_id(request.query["after"]) if "after" in request.query else 0
+        archived = request.query.get("archived") == "1"
         async with self.engine.begin() as conn:
             roles = await self.current_editor(conn, actor["id"])
-            ids = await self.api.rows(conn, "SELECT id FROM users WHERE id>:after ORDER BY id LIMIT 101", after=after)
+            ids = await self.api.rows(
+                conn,
+                """SELECT id FROM users
+                   WHERE id>:after AND active=:active
+                   ORDER BY id LIMIT 101""",
+                after=after,
+                active=not archived,
+            )
             items = [await self.card(conn, r["id"]) for r in ids[:100]]
-            hotels = await self.api.rows(conn, "SELECT id,name FROM hotels WHERE active=TRUE ORDER BY name,id")
+            hotels = await self.api.rows(
+                conn, "SELECT id,name FROM hotels WHERE active=TRUE ORDER BY name,id"
+            )
         for item in items:
             item["editable"] = item["id"] != actor["id"] and "OWNER" not in item["roles"] and ("OWNER" in roles or "ADMIN" not in item["roles"])
         return web.json_response({"items": items, "hotels": [dict(h) for h in hotels],
                                   "canAssignAdmin": "OWNER" in roles,
+                                  "archived": archived,
                                   "next": ids[99]["id"] if len(ids) > 100 else None})
 
     async def verify_hotels(self, conn, ids):
@@ -187,15 +216,107 @@ class People:
                 raise AccessError("Назначать администратора может только владелец.")
             if payload["revision"] != before["revision"]:
                 raise AccessError("Карточка уже изменена. Закройте форму и откройте её заново.", 409)
+            if payload["active"] != before["active"]:
+                raise AccessError(
+                    "Для изменения статуса используйте «Уволить» или «Восстановить».",
+                    409,
+                )
             await self.verify_hotels(conn, payload["hotelIds"])
-            await conn.execute(text("UPDATE users SET name=:name,active=:active WHERE id=:id"),
-                               {"id": uid, "name": payload["name"], "active": payload["active"]})
+            await conn.execute(
+                text("UPDATE users SET name=:name WHERE id=:id"),
+                {"id": uid, "name": payload["name"]},
+            )
             await self.assignments(conn, uid, payload)
             after = await self.card(conn, uid)
             if before["revision"] != after["revision"]:
                 fields = ("name", "active", "roles", "hotelIds")
                 await self.api.audit_write(conn, actor, "miniapp_employee_updated", "user", uid,
                     json.dumps({"before": {k: before[k] for k in fields}, "after": {k: after[k] for k in fields}}, ensure_ascii=False))
+        return web.json_response({"employee": after})
+
+    async def fire(self, request):
+        actor = request["miniapp_actor"]
+        check_editor(actor["roles"])
+        uid = positive_id(request.match_info["id"])
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        async with self.engine.begin() as conn:
+            roles = await self.current_editor(conn, actor["id"], uid)
+            before = await self.card(conn, uid)
+            check_editor(roles, before["roles"], self_edit=uid == actor["id"])
+            if not before["active"]:
+                raise AccessError("Сотрудник уже находится в уволенных.", 409)
+            assigned = await self.api.rows(
+                conn,
+                """SELECT id FROM bookings
+                   WHERE photographer_id=:uid
+                     AND status IN (
+                       'NEW','PENDING_CONFIRMATION','CONFIRMED','ASSIGNED','RESCHEDULED'
+                     )
+                   ORDER BY id FOR UPDATE""",
+                uid=uid,
+            )
+            await conn.execute(
+                text("UPDATE users SET active=FALSE,terminated_at=:now WHERE id=:id"),
+                {"id": uid, "now": now},
+            )
+            for row in assigned:
+                await conn.execute(
+                    text(
+                        "UPDATE bookings SET photographer_id=NULL,status='CONFIRMED' "
+                        "WHERE id=:id"
+                    ),
+                    {"id": row["id"]},
+                )
+                await conn.execute(
+                    text(
+                        """UPDATE shootings SET status='CONFIRMED'
+                           WHERE booking_id=:id
+                             AND status IN ('ASSIGNED','PENDING_CONFIRMATION')"""
+                    ),
+                    {"id": row["id"]},
+                )
+            await self.api.audit_write(
+                conn, actor, "employee_fired", "user", uid,
+                json.dumps({"source": "miniapp"}, ensure_ascii=False),
+            )
+            after = await self.card(conn, uid)
+        try:
+            await self.bot.send_message(
+                after["telegramId"],
+                "⛔ Ваш рабочий доступ к Photo Boss отключён.",
+                disable_notification=False,
+            )
+        except TelegramAPIError:
+            pass
+        return web.json_response({"employee": after})
+
+    async def restore(self, request):
+        actor = request["miniapp_actor"]
+        check_editor(actor["roles"])
+        uid = positive_id(request.match_info["id"])
+        async with self.engine.begin() as conn:
+            roles = await self.current_editor(conn, actor["id"], uid)
+            before = await self.card(conn, uid)
+            check_editor(roles, before["roles"], self_edit=uid == actor["id"])
+            if before["active"]:
+                raise AccessError("Сотрудник уже работает.", 409)
+            await conn.execute(
+                text("UPDATE users SET active=TRUE,terminated_at=NULL WHERE id=:id"),
+                {"id": uid},
+            )
+            await self.api.audit_write(
+                conn, actor, "employee_restored", "user", uid,
+                json.dumps({"source": "miniapp"}, ensure_ascii=False),
+            )
+            after = await self.card(conn, uid)
+        try:
+            await self.bot.send_message(
+                after["telegramId"],
+                "♻️ Доступ к Photo Boss восстановлен. Откройте бот и нажмите /start.",
+                disable_notification=False,
+            )
+        except TelegramAPIError:
+            pass
         return web.json_response({"employee": after})
 
     async def documents(self, request):
@@ -221,6 +342,8 @@ def install_people(app, miniapp):
     app.router.add_get("/api/miniapp/people", service.listing)
     app.router.add_post("/api/miniapp/people", service.create)
     app.router.add_put("/api/miniapp/people/{id}", service.update)
+    app.router.add_post("/api/miniapp/people/{id}/fire", service.fire)
+    app.router.add_post("/api/miniapp/people/{id}/restore", service.restore)
     app.router.add_get("/api/miniapp/documents", service.documents)
     app.router.add_get("/people/{asset}", service.static)
     return service

@@ -1,5 +1,7 @@
+from aiogram.exceptions import TelegramAPIError
 from sqlalchemy import func, select
 
+from ..keyboards import inline
 from ..models import Booking, Client, Hotel, Package, Photo, Sale, Shooting, User
 from .commissions import photographer_percent
 from .receipts import payment_totals
@@ -73,3 +75,51 @@ async def booking_card(session, booking: Booking):
         f"📋 Менеджер: {manager.name if manager else 'не найден'}\n"
         f"📸 Фотограф: {photographer.name if photographer else 'не назначен'}"
     )
+
+
+async def notify_photographer_assignment(bot, session, booking: Booking):
+    if not booking.photographer_id:
+        return False
+    photographer = await session.get(User, booking.photographer_id)
+    shooting = await session.scalar(
+        select(Shooting).where(Shooting.booking_id == booking.id)
+    )
+    hotel = await session.get(Hotel, booking.hotel_id)
+    if photographer is None or not photographer.active or shooting is None:
+        return False
+    try:
+        await bot.send_message(
+            photographer.tg_id,
+            f"📸 Вам назначена фотосессия #{booking.id}\n"
+            f"🏨 {hotel.name if hotel else 'Отель'}\n"
+            f"📅 {booking.shoot_date:%d.%m.%Y} · {booking.shoot_time:%H:%M}\n"
+            f"👥 Гостей: {booking.guest_count}\n\n"
+            "Когда примете съёмку, нажмите «Забрать съёмку».",
+            reply_markup=inline(
+                [[("📥 Забрать съёмку", f"photo:pickup:{shooting.id}", "primary")]]
+            ),
+            disable_notification=False,
+        )
+        return True
+    except TelegramAPIError:
+        return False
+
+
+async def notify_manager_ready_for_sale(bot, session, booking: Booking):
+    manager = await session.get(User, booking.manager_id)
+    if manager is None or not manager.active:
+        return False
+    try:
+        await bot.send_message(
+            manager.tg_id,
+            f"💰 Съёмка #{booking.id} готова к продаже.\n"
+            "Сначала загрузите чек продажи, затем укажите количество кадров "
+            "и количество проданных кадров, после чего загрузите выбранные фотографии.",
+            reply_markup=inline(
+                [[("💰 Оформить продажу", f"sale:start:{booking.id}", "success")]]
+            ),
+            disable_notification=False,
+        )
+        return True
+    except TelegramAPIError:
+        return False

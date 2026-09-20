@@ -125,6 +125,34 @@ async def init_db():
                 )
             )
             await connection.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS "
+                "terminated_at TIMESTAMP WITHOUT TIME ZONE"
+            ))
+            await connection.execute(text(
+                "ALTER TABLE shootings ADD COLUMN IF NOT EXISTS "
+                "ready_for_sale_at TIMESTAMP WITHOUT TIME ZONE"
+            ))
+            await connection.execute(text(
+                "ALTER TABLE shootings ADD COLUMN IF NOT EXISTS "
+                "full_upload_completed_at TIMESTAMP WITHOUT TIME ZONE"
+            ))
+            await connection.execute(text(
+                "ALTER TABLE sales ADD COLUMN IF NOT EXISTS "
+                "declared_photo_count INTEGER"
+            ))
+            await connection.execute(text(
+                "ALTER TABLE sales ADD COLUMN IF NOT EXISTS "
+                "source_draft_id INTEGER"
+            ))
+            await connection.execute(text(
+                "ALTER TABLE sales ADD COLUMN IF NOT EXISTS "
+                "commission_finalized_at TIMESTAMP WITHOUT TIME ZONE"
+            ))
+            await connection.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_sales_source_draft_id "
+                "ON sales(source_draft_id) WHERE source_draft_id IS NOT NULL"
+            ))
+            await connection.execute(text(
                 "ALTER TABLE training_assignments ADD COLUMN IF NOT EXISTS "
                 "ai_score INTEGER"
             ))

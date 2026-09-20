@@ -47,11 +47,17 @@ def handler(page_state, role, sent):
                 "text": "Общие правила\nВладелец имеет доступ к рабочим чатам.",
                 "accepted": page_state["accepted"], "retentionDays": 365,
             })
+        if path == "/api/miniapp/chat/unread":
+            return r.fulfill(json={
+                "total": 3, "general": 1, "people": {"2": 2},
+            })
         if path == "/api/miniapp/chat/people":
             return r.fulfill(json={
-                "general": {"id": "general", "name": "Общий чат"},
-                "people": [{"id": 2, "name": "<script>bad()</script>", "roles": ["PHOTOGRAPHER"]}],
+                "general": {"id": "general", "name": "Общий чат", "unread": 1},
+                "people": [{"id": 2, "name": "<script>bad()</script>",
+                            "roles": ["PHOTOGRAPHER"], "unread": 2}],
                 "ownerControl": role == "OWNER",
+                "totalUnread": 3,
             })
         if path == "/api/miniapp/chat/messages":
             if r.request.method == "POST":
@@ -66,7 +72,7 @@ def handler(page_state, role, sent):
                 "id": 1, "senderId": 2, "recipientId": None,
                 "body": "<img src=x onerror=alert(1)>", "createdAt": "2026-09-20T10:59:00",
                 "senderName": "Employee", "attachment": None,
-            }]})
+            }], "unread": {"total": 2, "general": 0, "people": {"2": 2}}})
         if path == "/api/miniapp/chat/attachments" and r.request.method == "POST":
             return r.fulfill(status=201, json={"message": {
                 "id": 9, "senderId": 1, "recipientId": None, "body": "",
@@ -99,8 +105,18 @@ def main():
                 page.on("pageerror", lambda event, bucket=errors: bucket.append(str(event)))
                 page.route("**/*", handler(state, role, sent))
                 page.goto(BASE)
+                page.locator("[data-open-chat]").wait_for()
+                page.locator(".pb-chat-trigger .pb-chat-unread").wait_for()
+                assert page.locator(".pb-chat-trigger .pb-chat-unread").inner_text() == "3"
+                page.locator("[data-open-chat]").wait_for()
+                page.wait_for_timeout(100)
+                assert "3" in page.locator("[data-open-chat]").inner_text()
                 page.locator("[data-open-chat]").click()
                 page.get_by_text("Принять общие правила и открыть чат", exact=True).click()
+                page.locator('[data-chat="general"] .pb-chat-unread').wait_for()
+                assert page.locator('[data-peer="2"] .pb-chat-unread').inner_text() == "2"
+                page.get_by_text("Общий чат", exact=True).first.wait_for()
+                assert page.locator(".pb-chat-unread").count() >= 2
                 page.get_by_text("Общий чат", exact=True).first.click()
                 page.locator("#pbChatMessages").wait_for()
                 assert page.locator("#pbChatMessages img").count() == 0

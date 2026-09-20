@@ -7,12 +7,16 @@ dialog.setAttribute('aria-labelledby','pbChatTitle');
 document.body.append(dialog);
 const css=document.createElement('link');css.rel='stylesheet';css.href='/work-chat/chat.css';document.head.append(css);
 
-let me=null, people=null, current={kind:'general',peer:null,title:'Общий чат'}, timer=null, last=0, busy=false, previousFocus=null;
+let me=null, people=null, current={kind:'general',peer:null,title:'Общий чат'}, timer=null, unreadTimer=null, last=0, busy=false, previousFocus=null;
 const objectUrls=new Set();
 const MAX_ATTACHMENT_BYTES=20*1024*1024;
 
 function clearObjectUrls(){for(const url of objectUrls)URL.revokeObjectURL(url);objectUrls.clear();}
 function stopPoll(){if(timer){clearInterval(timer);timer=null;}}
+function unreadBadge(n){return n>0?`<span class="pb-chat-unread">${n>99?'99+':n}</span>`:'';}
+function setUnreadBadge(n){const btn=document.querySelector('[data-open-chat]');if(!btn)return;btn.innerHTML=`<span>Чат</span>${unreadBadge(Number(n)||0)}`;btn.setAttribute('aria-label',n>0?`Рабочий чат, непрочитанных: ${n}`:'Рабочий чат');}
+async function refreshUnread(){if(!me)return;try{const data=await api('/chat/unread');setUnreadBadge(data.total||0);}catch(e){if(e.status===428)setUnreadBadge(0);}}
+function startUnreadPoll(){if(unreadTimer)clearInterval(unreadTimer);refreshUnread();unreadTimer=setInterval(()=>{if(document.visibilityState==='visible')refreshUnread();},10000);}
 function close(){stopPoll();clearObjectUrls();dialog.close();previousFocus?.focus?.();}
 function shell(title,html){clearObjectUrls();dialog.innerHTML=`<header class="pb-chat-head"><button class="pb-chat-back" data-chat="home" aria-label="Назад">‹</button><h2 id="pbChatTitle">${esc(title)}</h2><button class="pb-chat-close" data-chat="close" aria-label="Закрыть">×</button></header><div class="pb-chat-body">${html}</div>`;if(!dialog.open){previousFocus=document.activeElement;dialog.showModal();}}
 function showError(message){const el=dialog.querySelector('[data-chat-error]');if(el){el.textContent=message;el.hidden=false;}else shell('Рабочий чат',`<p class="pb-chat-error" role="alert">${esc(message)}</p><button class="pb-chat-btn" data-chat="home">Повторить</button>`);}
@@ -54,8 +58,9 @@ async function home(){
  try{
   if(!await ensureRules())return;
   people=await api('/chat/people');
-  const rows=people.people.map(p=>`<button class="pb-chat-person" data-peer="${p.id}"><span class="pb-chat-avatar">${esc(p.name.slice(0,2).toUpperCase())}</span><span><strong>${esc(p.name)}</strong><small>${esc(roles(p.roles))}</small></span></button>`).join('');
-  shell('Рабочий чат',`<button class="pb-chat-person featured" data-chat="general"><span class="pb-chat-avatar">👥</span><span><strong>Общий чат</strong><small>Для всей команды</small></span></button><div class="pb-chat-section-title">Личные рабочие диалоги</div><div class="pb-chat-list">${rows||'<p class="pb-chat-muted">Других активных сотрудников пока нет.</p>'}</div>${people.ownerControl?'<button class="pb-chat-btn owner" data-chat="owner">Контроль диалогов сотрудников</button>':''}<button class="pb-chat-link" data-chat="rules">Общие правила</button>`);
+  setUnreadBadge(people.totalUnread||0);
+  const rows=people.people.map(p=>`<button class="pb-chat-person" data-peer="${p.id}"><span class="pb-chat-avatar">${esc(p.name.slice(0,2).toUpperCase())}</span><span class="pb-chat-person-copy"><strong>${esc(p.name)}</strong><small>${esc(roles(p.roles))}</small></span>${unreadBadge(p.unread||0)}</button>`).join('');
+  shell('Рабочий чат',`<button class="pb-chat-person featured" data-chat="general"><span class="pb-chat-avatar">👥</span><span class="pb-chat-person-copy"><strong>Общий чат</strong><small>Для всей команды</small></span>${unreadBadge(people.general?.unread||0)}</button><div class="pb-chat-section-title">Личные рабочие диалоги</div><div class="pb-chat-list">${rows||'<p class="pb-chat-muted">Других активных сотрудников пока нет.</p>'}</div>${people.ownerControl?'<button class="pb-chat-btn owner" data-chat="owner">Контроль диалогов сотрудников</button>':''}<button class="pb-chat-link" data-chat="rules">Общие правила</button>`);
  }catch(e){showError(e.message);}
 }
 function attachmentMarkup(a){
@@ -88,6 +93,7 @@ async function poll(){
    const peer=current.kind==='general'?'general':current.peer;
    const data=await api(`/chat/messages?peer=${peer}&after=${last}`);
    await renderMessages(data.messages);
+   if(data.unread)setUnreadBadge(data.unread.total||0);
   }
  }catch(e){showError(e.message);}finally{busy=false;}
 }
@@ -156,9 +162,11 @@ dialog.addEventListener('submit',async e=>{
 });
 function inject(){
  const top=document.querySelector('#topbar');if(!top||top.querySelector('[data-open-chat]'))return;
- const btn=document.createElement('button');btn.className='pb-chat-trigger';btn.dataset.openChat='1';btn.textContent='Чат';btn.setAttribute('aria-label','Рабочий чат');
+ const btn=document.createElement('button');btn.className='pb-chat-trigger';btn.dataset.openChat='1';btn.innerHTML='<span>Чат</span>';btn.setAttribute('aria-label','Рабочий чат');
  btn.addEventListener('click',home);top.append(btn);
 }
-async function boot(){try{me=await api('/me');inject();}catch{me=null;}}
+async function boot(){try{me=await api('/me');inject();startUnreadPoll();}catch{me=null;}}
 const observer=new MutationObserver(()=>{if(me)inject();else if(document.querySelector('#topbar')?.children.length)boot();});
 observer.observe(document.querySelector('#topbar'),{childList:true});boot();
+
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')refreshUnread();});

@@ -19,7 +19,7 @@ from ..models import (
     User,
     UserRole,
 )
-from ..services.bookings import booking_card
+from ..services.bookings import booking_card, notify_photographer_assignment
 from ..services.core import audit, get_user, menu
 
 r = Router()
@@ -317,6 +317,8 @@ async def set_booking_decision(c: CallbackQuery):
             answer = "❌ Съёмка отказана."
         await audit(s, manager, audit_action, "booking", booking.id)
         await s.commit()
+        if action == "confirm" and booking.photographer_id:
+            await notify_photographer_assignment(c.bot, s, booking)
     await c.answer()
     await c.message.answer(answer)
 

@@ -78,6 +78,10 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
             conn.execute(text("""CREATE TABLE work_chat_messages(
                 id INTEGER PRIMARY KEY,sender_id INTEGER,recipient_id INTEGER,
                 attachment_id INTEGER,body TEXT,created_at DATETIME)"""))
+            conn.execute(text("""CREATE TABLE work_chat_read_states(
+                id INTEGER PRIMARY KEY,user_id INTEGER,scope_key TEXT,
+                last_read_message_id INTEGER,updated_at DATETIME,
+                UNIQUE(user_id,scope_key))"""))
 
     async def asyncTearDown(self):
         await baseline.MiniAppTests.asyncTearDown(self)
@@ -89,6 +93,7 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
             ("/chat/rules", "GET"): self.chat.rules,
             ("/chat/rules/accept", "POST"): self.chat.accept_rules,
             ("/chat/people", "GET"): self.chat.people,
+            ("/chat/unread", "GET"): self.chat.unread,
             ("/chat/messages", "GET"): self.chat.messages,
             ("/chat/messages", "POST"): self.chat.send,
             ("/chat/owner/threads", "GET"): self.chat.owner_threads,
@@ -142,6 +147,73 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
         _, controlled = await self.call("/chat/owner/messages?a=3&b=4&after=0", uid=1001)
         assert [m["body"] for m in controlled["messages"]] == ["Личный рабочий вопрос"]
         assert controlled["readOnly"] is True
+
+    async def test_unread_counts_clear_only_when_thread_is_opened(self):
+        for uid in (1003, 1004, 1005):
+            await self.accept(uid)
+        await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": 4, "body": "Личное непрочитанное"},
+        )
+        await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": None, "body": "Общее непрочитанное"},
+        )
+        _, unread = await self.call("/chat/unread", uid=1004)
+        assert unread["total"] == 2
+        assert unread["general"] == 1
+        assert unread["people"]["3"] == 1
+
+        _, listing = await self.call("/chat/people", uid=1004)
+        peer = next(item for item in listing["people"] if item["id"] == 3)
+        assert peer["unread"] == 1
+        assert listing["general"]["unread"] == 1
+        assert listing["totalUnread"] == 2
+
+        await self.call("/chat/messages?peer=3&after=0", uid=1004)
+        _, after_private = await self.call("/chat/unread", uid=1004)
+        assert after_private["total"] == 1
+        assert after_private["people"].get("3", 0) == 0
+        assert after_private["general"] == 1
+
+        await self.call("/chat/messages?peer=general&after=0", uid=1004)
+        _, after_all = await self.call("/chat/unread", uid=1004)
+        assert after_all["total"] == 0
+
+    async def test_unread_counts_clear_per_conversation_when_opened(self):
+        for uid in (1003, 1004, 1005):
+            await self.accept(uid)
+        await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": 4, "body": "Личное 1"},
+        )
+        await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": 4, "body": "Личное 2"},
+        )
+        await self.call(
+            "/chat/messages", uid=1005, method="POST",
+            body={"peerId": None, "body": "Общее"},
+        )
+        status, unread = await self.call("/chat/unread", uid=1004)
+        assert status == 200
+        assert unread["people"]["3"] == 2
+        assert unread["general"] == 1
+        assert unread["total"] == 3
+
+        status, data = await self.call(
+            "/chat/messages?peer=3&after=0", uid=1004
+        )
+        assert status == 200
+        assert len(data["messages"]) == 2
+        assert data["unread"]["people"].get("3", 0) == 0
+        assert data["unread"]["general"] == 1
+
+        status, data = await self.call(
+            "/chat/messages?peer=general&after=0", uid=1004
+        )
+        assert status == 200
+        assert data["unread"]["total"] == 0
 
     async def test_admin_cannot_monitor_other_people(self):
         await self.accept(1002)

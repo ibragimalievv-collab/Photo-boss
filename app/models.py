@@ -33,6 +33,7 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(150))
     username: Mapped[str | None] = mapped_column(String(150), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    terminated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     roles = relationship(
         "UserRole", back_populates="user", cascade="all, delete-orphan"
@@ -61,6 +62,23 @@ class WorkRuleAcceptance(Base):
         UniqueConstraint(
             "user_id", "version", name="uq_work_rule_acceptance_user_version"
         ),
+    )
+
+
+class WorkChatReadState(Base):
+    __tablename__ = "work_chat_read_states"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    scope_key: Mapped[str] = mapped_column(String(64))
+    last_read_message_id: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "scope_key", name="uq_work_chat_read_state_user_scope"
+        ),
+        CheckConstraint("last_read_message_id >= 0"),
     )
 
 
@@ -166,6 +184,8 @@ class Shooting(Base):
     arrived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ready_for_sale_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    full_upload_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="ASSIGNED")
     lat: Mapped[float | None] = mapped_column(Float, nullable=True)
     lon: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -213,6 +233,54 @@ class PhotoStorage(Base):
     )
 
 
+class SaleDraft(Base):
+    __tablename__ = "sale_drafts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    booking_id: Mapped[int] = mapped_column(
+        ForeignKey("bookings.id", ondelete="CASCADE"), index=True
+    )
+    created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="AWAITING_RECEIPT", index=True)
+    receipt_file_id: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    receipt_file_unique_id: Mapped[str | None] = mapped_column(String(300), nullable=True, index=True)
+    receipt_image_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    receipt_operation_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    receipt_analysis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    declared_photo_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sold_photos: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expected_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('AWAITING_RECEIPT','AWAITING_COUNTS','AWAITING_SELECTED','COMPLETED','CANCELLED')"
+        ),
+        CheckConstraint("declared_photo_count IS NULL OR declared_photo_count > 0"),
+        CheckConstraint("sold_photos IS NULL OR sold_photos > 0"),
+        CheckConstraint("expected_amount IS NULL OR expected_amount > 0"),
+    )
+
+
+class SaleDraftPhoto(Base):
+    __tablename__ = "sale_draft_photos"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    draft_id: Mapped[int] = mapped_column(
+        ForeignKey("sale_drafts.id", ondelete="CASCADE"), index=True
+    )
+    telegram_file_id: Mapped[str] = mapped_column(String(300))
+    telegram_unique_id: Mapped[str] = mapped_column(String(300))
+    storage_path: Mapped[str] = mapped_column(String(500), unique=True)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    byte_size: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    __table_args__ = (
+        UniqueConstraint(
+            "draft_id", "telegram_unique_id", name="uq_sale_draft_photo_telegram"
+        ),
+        CheckConstraint("byte_size > 0"),
+    )
+
+
 class Sale(Base):
     __tablename__ = "sales"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -223,9 +291,14 @@ class Sale(Base):
     credited_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     commission_role: Mapped[str] = mapped_column(String(30), default="PHOTOGRAPHER")
     sold_photos: Mapped[int] = mapped_column(Integer)
+    declared_photo_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_draft_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sale_drafts.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
     amount: Mapped[float] = mapped_column(Float)
     percent: Mapped[float] = mapped_column(Float, default=0)
     commission: Mapped[float] = mapped_column(Float, default=0)
+    commission_finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     payment_status: Mapped[str] = mapped_column(String(20), default="UNPAID")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
