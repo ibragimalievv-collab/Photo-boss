@@ -5,6 +5,8 @@ the app-folder namespace and provider upload URLs are never logged or returned.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import re
@@ -59,18 +61,20 @@ class YandexDisk:
 
     async def _json(self, method: str, endpoint: str, *, params=None, ok=(200,)):
         timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.request(method, API + endpoint, headers=self.headers, params=params) as response:
-                try:
-                    data = await response.json(content_type=None)
-                except Exception:
-                    data = {}
-                if response.status not in ok:
-                    code = data.get("error") if isinstance(data, dict) else None
-                    message = data.get("message") if isinstance(data, dict) else None
-                    detail = ": ".join(x for x in (code, message) if isinstance(x, str) and x)[:300]
-                    raise YandexDiskError(f"Yandex.Disk HTTP {response.status}" + (f": {detail}" if detail else ""))
-                return data
+        async with (
+            aiohttp.ClientSession(timeout=timeout) as session,
+            session.request(method, API + endpoint, headers=self.headers, params=params) as response,
+        ):
+            try:
+                data = await response.json(content_type=None)
+            except (aiohttp.ContentTypeError, json.JSONDecodeError, UnicodeDecodeError):
+                data = {}
+            if response.status not in ok:
+                code = data.get("error") if isinstance(data, dict) else None
+                message = data.get("message") if isinstance(data, dict) else None
+                detail = ": ".join(x for x in (code, message) if isinstance(x, str) and x)[:300]
+                raise YandexDiskError(f"Yandex.Disk HTTP {response.status}" + (f": {detail}" if detail else ""))
+            return data
 
     async def metadata(self, path: str):
         return await self._json("GET", "/resources", params={"path": safe_path(path)})
@@ -95,10 +99,12 @@ class YandexDisk:
         if not isinstance(href, str) or not href.startswith("https://") or method not in {"PUT", "POST"}:
             raise YandexDiskError("Yandex.Disk did not return a valid upload target")
         timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.request(method, href, data=payload, headers={"Content-Type": content_type}) as response:
-                if response.status not in (200, 201, 202):
-                    raise YandexDiskError(f"Yandex.Disk upload HTTP {response.status}")
+        async with (
+            aiohttp.ClientSession(timeout=timeout) as session,
+            session.request(method, href, data=payload, headers={"Content-Type": content_type}) as response,
+        ):
+            if response.status not in (200, 201, 202):
+                raise YandexDiskError(f"Yandex.Disk upload HTTP {response.status}")
         return await self.metadata(path)
 
     async def delete(self, path: str):
@@ -139,7 +145,7 @@ class YandexDisk:
                 "Yandex.Disk app-folder verified: connected=%s write=%s root=%s",
                 self.state["connected"], self.state["writeVerified"], ROOT,
             )
-        except Exception as exc:
+        except (YandexDiskError, aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             self.state["error"] = str(exc)[:300]
             logger.warning("Yandex.Disk verification failed: %s", self.state["error"])
         return self.public_status()
