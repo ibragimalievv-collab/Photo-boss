@@ -71,6 +71,10 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
             conn.execute(text("""CREATE TABLE work_rule_acceptances(
                 id INTEGER PRIMARY KEY,user_id INTEGER,version TEXT,text_sha256 TEXT,
                 accepted_at DATETIME,UNIQUE(user_id,version))"""))
+            conn.execute(text("""CREATE TABLE work_chat_read_states(
+                id INTEGER PRIMARY KEY,user_id INTEGER,scope_key TEXT,
+                last_read_message_id INTEGER,updated_at DATETIME,
+                UNIQUE(user_id,scope_key))"""))
             conn.execute(text("""CREATE TABLE work_chat_attachments(
                 id INTEGER PRIMARY KEY,uploader_id INTEGER,storage_path TEXT,
                 original_name TEXT,mime_type TEXT,byte_size INTEGER,sha256 TEXT,
@@ -179,6 +183,41 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
         await self.call("/chat/messages?peer=general&after=0", uid=1004)
         _, after_all = await self.call("/chat/unread", uid=1004)
         assert after_all["total"] == 0
+
+    async def test_unread_counts_clear_per_conversation_when_opened(self):
+        for uid in (1003, 1004, 1005):
+            await self.accept(uid)
+        await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": 4, "body": "Личное 1"},
+        )
+        await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": 4, "body": "Личное 2"},
+        )
+        await self.call(
+            "/chat/messages", uid=1005, method="POST",
+            body={"peerId": None, "body": "Общее"},
+        )
+        status, unread = await self.call("/chat/unread", uid=1004)
+        assert status == 200
+        assert unread["people"]["3"] == 2
+        assert unread["general"] == 1
+        assert unread["total"] == 3
+
+        status, data = await self.call(
+            "/chat/messages?peer=3&after=0", uid=1004
+        )
+        assert status == 200
+        assert len(data["messages"]) == 2
+        assert data["unread"]["people"].get("3", 0) == 0
+        assert data["unread"]["general"] == 1
+
+        status, data = await self.call(
+            "/chat/messages?peer=general&after=0", uid=1004
+        )
+        assert status == 200
+        assert data["unread"]["total"] == 0
 
     async def test_admin_cannot_monitor_other_people(self):
         await self.accept(1002)
