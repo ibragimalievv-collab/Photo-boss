@@ -19,6 +19,8 @@ jobs:
       BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
       ADMIN_TELEGRAM_IDS: "5000000001"
       POSTGRES_PASSWORD: ci-only-password
+      MANAGER_PERCENT: "16"
+      PHOTOGRAPHER_PERCENT: "11"
     steps:
       - uses: actions/checkout@v4
 
