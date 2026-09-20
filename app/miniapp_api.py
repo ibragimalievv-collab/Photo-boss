@@ -6,11 +6,13 @@ existing bot workflows. Plans are not presented as confirmed attendance.
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from aiohttp import web
@@ -28,6 +30,7 @@ from .miniapp_security import (
     utc_bounds,
     validate_init_data,
 )
+from .services.academy_growth import personal_tip
 
 logger = logging.getLogger(__name__)
 PREFIX = "/api/miniapp"
@@ -52,6 +55,7 @@ ACTIONS = {
     "employee_restored": "Восстановил доступ сотруднику",
     "employee_role_removed": "Снял роль сотрудника",
     "academy_lesson_completed": "Завершил урок Академии",
+    "academy_location_created": "Добавил учебную локацию",
     "miniapp_theme_changed": "Изменил оформление приложения",
     "miniapp_opened": "Открыл приложение",
     "miniapp_shift_created": "Назначил смену",
@@ -420,11 +424,26 @@ class MiniApp:
         return web.json_response({"items": items, "next": rows[29]["id"] if len(rows)>30 else None})
 
     async def academy(self, request):
-        uid = request["miniapp_actor"]["id"]
+        actor = request["miniapp_actor"]
+        uid = actor["id"]
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
         async with self.engine.connect() as conn:
             completed = await self.rows(conn, "SELECT topic_slug FROM academy_lesson_progress WHERE user_id=:uid", uid=uid)
             practices = await self.rows(conn, "SELECT id,category_slug,status FROM training_assignments WHERE user_id=:uid ORDER BY id DESC LIMIT 30", uid=uid)
             reviews = await self.rows(conn, "SELECT id,quality_score,issues,recommendation FROM academy_reviews WHERE user_id=:uid ORDER BY id DESC LIMIT 30", uid=uid)
+            certificate = await self.rows(conn, "SELECT certificate_no,verification_code,final_score,issued_at FROM academy_certificates WHERE user_id=:uid AND revoked_at IS NULL", uid=uid)
+            locations = await self.rows(conn, "SELECT id,name,description,shot_plan FROM academy_locations WHERE active=TRUE ORDER BY name")
+            tip_rows = await self.rows(conn, "SELECT ai_analysis FROM training_assignments WHERE user_id=:uid AND ai_analysis IS NOT NULL ORDER BY id DESC LIMIT 10", uid=uid)
+            team = []
+            if "OWNER" in actor["roles"]:
+                team = await self.rows(conn, """SELECT u.id,u.name,
+                    (SELECT COUNT(*) FROM academy_lesson_progress alp WHERE alp.user_id=u.id) AS lessons,
+                    (SELECT COUNT(*) FROM training_assignments ta WHERE ta.user_id=u.id AND ta.status='COMPLETED') AS practices,
+                    (SELECT AVG(ta.ai_score) FROM training_assignments ta WHERE ta.user_id=u.id AND ta.status='COMPLETED') AS quality,
+                    (SELECT COALESCE(SUM(s.amount),0) FROM sales s WHERE s.credited_user_id=u.id AND s.created_at>=:cutoff) AS sales,
+                    (SELECT COUNT(*) FROM sales s WHERE s.credited_user_id=u.id AND s.created_at>=:cutoff) AS sales_count
+                    FROM users u JOIN user_roles ur ON ur.user_id=u.id AND ur.role='PHOTOGRAPHER'
+                    WHERE u.active=TRUE ORDER BY u.name""", cutoff=cutoff)
         known = {l["slug"] for l in self.lessons}
         done = [r["topic_slug"] for r in completed if r["topic_slug"] in known]
         done_set = set(done)
@@ -444,11 +463,55 @@ class MiniApp:
         current = next((b for b in blocks if not b["locked"] and
                         (b["lessonsDone"] < b["lessonsTotal"] or not b["practiceDone"])),
                        blocks[-1] if blocks else None)
+        tip = personal_tip([SimpleNamespace(ai_analysis=r["ai_analysis"]) for r in tip_rows])
+        cert = certificate[0] if certificate else None
         return web.json_response({"lessons": lessons, "blocks": blocks,
             "currentBlock": current["number"] if current else None,
             "carryOver": True, "completed": done, "points": len(done)*10,
             "practices": [{"id": p["id"], "category": p["category_slug"], "status": p["status"]} for p in practices],
-            "reviews": [{"id": r["id"], "score": r["quality_score"], "issues": r["issues"], "recommendation": r["recommendation"]} for r in reviews]})
+            "reviews": [{"id": r["id"], "score": r["quality_score"], "issues": r["issues"], "recommendation": r["recommendation"]} for r in reviews],
+            "personalTip": tip,
+            "certificate": ({"number": cert["certificate_no"], "score": cert["final_score"],
+                "issuedAt": as_utc(cert["issued_at"]).isoformat(),
+                "url": f"{request.scheme}://{request.host}/certificate/{cert['verification_code']}"} if cert else None),
+            "locations": [{"id": row["id"], "name": row["name"], "description": row["description"],
+                "shotPlan": json.loads(row["shot_plan"] or "[]")} for row in locations],
+            "team": [{"id": row["id"], "name": row["name"], "lessons": int(row["lessons"] or 0),
+                "practices": int(row["practices"] or 0), "quality": round(float(row["quality"]), 1) if row["quality"] is not None else None,
+                "sales": cents(row["sales"]), "salesCount": int(row["sales_count"] or 0)} for row in team]})
+
+    async def certificate_page(self, request):
+        code = request.match_info.get("code", "")
+        if len(code) > 64 or not code:
+            raise web.HTTPNotFound()
+        async with self.engine.connect() as conn:
+            rows = await self.rows(conn, """SELECT c.certificate_no,c.final_score,c.issued_at,c.revoked_at,u.name
+                FROM academy_certificates c JOIN users u ON u.id=c.user_id
+                WHERE c.verification_code=:code""", code=code)
+        if not rows:
+            raise web.HTTPNotFound()
+        row = rows[0]
+        valid = row["revoked_at"] is None
+        name = html.escape(row["name"])
+        number = html.escape(row["certificate_no"])
+        issued = as_utc(row["issued_at"]).date().isoformat()
+        status = "VALID / ДЕЙСТВИТЕЛЕН" if valid else "REVOKED / ОТОЗВАН"
+        page = f"""<!doctype html><html lang='en'><meta charset='utf-8'>
+        <meta name='viewport' content='width=device-width,initial-scale=1'>
+        <title>Photo Boss International Certificate</title>
+        <style>body{{margin:0;background:#090909;color:#eee;font:16px Arial;display:grid;min-height:100vh;place-items:center}}
+        main{{max-width:820px;margin:24px;padding:48px;border:2px solid #c9a94b;background:#111;text-align:center}}
+        h1{{color:#d8bb61;letter-spacing:.08em}}h2{{font-size:34px}}.status{{padding:12px;border:1px solid #d8bb61}}
+        small{{color:#aaa}}@media print{{body{{background:white;color:black}}main{{background:white}}}}</style>
+        <main><small>PHOTO BOSS ACADEMY</small><h1>INTERNATIONAL CERTIFICATE</h1>
+        <p>Certificate of completion / Сертификат об окончании</p><h2>{name}</h2>
+        <p>has completed the 28-day Photo Boss Academy program and passed the final practical assessment.<br>
+        завершил(а) 28-дневную программу Photo Boss Academy и прошёл(а) итоговую практическую аттестацию.</p>
+        <p>Final score / Итоговая оценка: <b>{row['final_score']}/100</b></p>
+        <p>Certificate No: <b>{number}</b><br>Issued / Выдан: {issued}</p>
+        <p class='status'>{status}</p><small>Private professional certificate issued by Photo Boss. Not a state-accredited diploma.<br>
+        Частный профессиональный сертификат Photo Boss. Не является дипломом государственной аккредитации.</small></main></html>"""
+        return web.Response(text=page, content_type="text/html")
 
     async def complete_lesson(self, request):
         actor, slug = request["miniapp_actor"], request.match_info["slug"]
@@ -473,6 +536,39 @@ class MiniApp:
             if changed:
                 await self.audit_write(conn, actor, "academy_lesson_completed", "academy_lesson", None, lesson["title"])
         return web.json_response({"ok": True})
+
+    async def create_academy_location(self, request):
+        actor = request["miniapp_actor"]
+        require_owner(actor["roles"])
+        body = await self.body(request)
+        if set(body) != {"name", "description", "shotPlan", "hotelId"}:
+            raise AccessError("Заполните карточку локации полностью.", 400)
+        name, description, shot_plan = body["name"], body["description"], body["shotPlan"]
+        hotel_id = body["hotelId"]
+        if not isinstance(name, str) or not 2 <= len(name.strip()) <= 150:
+            raise AccessError("Название локации должно содержать 2–150 символов.", 400)
+        if not isinstance(description, str) or len(description) > 2000:
+            raise AccessError("Описание локации слишком длинное.", 400)
+        if (not isinstance(shot_plan, list) or len(shot_plan) != 5 or
+                any(not isinstance(item, str) or not 3 <= len(item.strip()) <= 300
+                    for item in shot_plan)):
+            raise AccessError("Для локации нужны ровно пять понятных схем кадров.", 400)
+        if hotel_id is not None and (type(hotel_id) is not int or hotel_id <= 0):
+            raise AccessError("Некорректный отель.", 400)
+        async with self.engine.begin() as conn:
+            if hotel_id is not None and not await self.rows(
+                conn, "SELECT id FROM hotels WHERE id=:id AND active=TRUE", id=hotel_id
+            ):
+                raise AccessError("Отель не найден.", 404)
+            rows = await self.rows(conn, """INSERT INTO academy_locations
+                (hotel_id,name,description,shot_plan,active,created_at)
+                VALUES (:hotel,:name,:description,:plan,TRUE,:now) RETURNING id""",
+                hotel=hotel_id, name=name.strip(), description=description.strip(),
+                plan=json.dumps([item.strip() for item in shot_plan], ensure_ascii=False),
+                now=datetime.now(timezone.utc).replace(tzinfo=None))
+            await self.audit_write(conn, actor, "academy_location_created",
+                                   "academy_location", rows[0]["id"], name.strip())
+        return web.json_response({"id": rows[0]["id"]}, status=201)
 
     async def handoff(self, request):
         actor = request["miniapp_actor"]
@@ -507,12 +603,14 @@ class MiniApp:
         app.middlewares.append(self.middleware)
         app.router.add_get("/app/", self.static_file)
         app.router.add_get("/app/{asset:.*}", self.static_file)
+        app.router.add_get("/certificate/{code}", self.certificate_page)
         routes = [("GET", "/me", self.me), ("POST", "/session", self.session_open), ("PUT", "/preferences", self.preferences),
             ("GET", "/dashboard", self.dashboard), ("GET", "/bookings", self.bookings),
             ("GET", "/finance", self.finance), ("GET", "/schedule", self.schedule),
             ("POST", "/schedule", self.create_shift), ("DELETE", "/schedule/{id}", self.cancel_shift),
             ("GET", "/audit", self.audit), ("GET", "/academy", self.academy),
             ("POST", "/academy/lessons/{slug}", self.complete_lesson),
+            ("POST", "/academy/locations", self.create_academy_location),
             ("POST", "/handoff", self.handoff)]
         for method, path, handler in routes:
             app.router.add_route(method, PREFIX + path, handler)

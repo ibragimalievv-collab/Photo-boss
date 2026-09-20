@@ -199,8 +199,10 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                 "CREATE TABLE shift_check_outs(id INTEGER PRIMARY KEY,user_id INTEGER,shift_date DATE,ended_at DATETIME)",
                 "CREATE TABLE audit_logs(id INTEGER PRIMARY KEY,user_id INTEGER,action TEXT,entity TEXT,entity_id INTEGER,details TEXT,created_at DATETIME)",
                 "CREATE TABLE academy_lesson_progress(id INTEGER PRIMARY KEY,user_id INTEGER,topic_slug TEXT,completed_at DATETIME,UNIQUE(user_id,topic_slug))",
-                "CREATE TABLE training_assignments(id INTEGER PRIMARY KEY,user_id INTEGER,category_slug TEXT,status TEXT)",
+                "CREATE TABLE training_assignments(id INTEGER PRIMARY KEY,user_id INTEGER,category_slug TEXT,status TEXT,ai_score INTEGER,ai_analysis TEXT)",
                 "CREATE TABLE academy_reviews(id INTEGER PRIMARY KEY,user_id INTEGER,quality_score INTEGER,issues TEXT,recommendation TEXT)",
+                "CREATE TABLE academy_certificates(id INTEGER PRIMARY KEY,user_id INTEGER,certificate_no TEXT,verification_code TEXT,final_score INTEGER,issued_at DATETIME,revoked_at DATETIME)",
+                "CREATE TABLE academy_locations(id INTEGER PRIMARY KEY,hotel_id INTEGER,name TEXT,description TEXT,shot_plan TEXT,active BOOLEAN,created_at DATETIME)",
             ]
             for ddl in ddls:
                 connection.execute(text(ddl))
@@ -230,6 +232,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                  ("/bookings", "GET"): service.bookings, ("/dashboard", "GET"): service.dashboard,
                  ("/schedule", "GET"): service.schedule, ("/schedule", "POST"): service.create_shift,
                  ("/audit", "GET"): service.audit, ("/academy", "GET"): service.academy,
+                 ("/academy/locations", "POST"): service.create_academy_location,
                  ("/handoff", "POST"): service.handoff}
         handler = table.get((route, method))
         if route.startswith("/academy/lessons/"):
@@ -299,12 +302,33 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         assert (await self.call("/academy/lessons/next", uid=1003, method="POST"))[0] == 409
         with self.engine.inner.begin() as connection:
             connection.execute(text(
-                "INSERT INTO training_assignments VALUES (1,3,'woman','COMPLETED')"
+                "INSERT INTO training_assignments VALUES (1,3,'woman','COMPLETED',90,NULL)"
             ))
         assert (await self.call("/academy/lessons/next", uid=1003, method="POST"))[0] == 200
         _, academy, _ = await self.call("/academy", uid=1003)
         assert academy["blocks"][0]["practiceDone"] is True
         assert academy["lessons"][1]["locked"] is False
+
+    async def test_owner_creates_location_profile_and_team_metrics_are_private(self):
+        body = {"name": "Lobby", "description": "Window light", "hotelId": 1,
+                "shotPlan": [f"Shot {index}" for index in range(1, 6)]}
+        assert (await self.call("/academy/locations", uid=1003, method="POST", body=body))[0] == 403
+        assert (await self.call("/academy/locations", method="POST", body=body))[0] == 201
+        _, owner, _ = await self.call("/academy")
+        _, photographer, _ = await self.call("/academy", uid=1003)
+        assert owner["locations"][0]["name"] == "Lobby"
+        assert owner["team"] and photographer["team"] == []
+
+    async def test_public_certificate_page_verifies_database_record(self):
+        with self.engine.inner.begin() as connection:
+            connection.execute(text("""INSERT INTO academy_certificates
+                VALUES (1,3,'PBIC-2026-000003-ABCD','verify-code',92,:now,NULL)"""),
+                {"now": datetime.now(timezone.utc).replace(tzinfo=None)})
+        request = SimpleNamespace(match_info={"code": "verify-code"})
+        response = await self.service.certificate_page(request)
+        assert response.status == 200
+        assert "INTERNATIONAL CERTIFICATE" in response.text
+        assert "PBIC-2026-000003-ABCD" in response.text
 
     async def test_schedule_conflicts_cancellation_and_scope(self):
         day = str(self.service.today() + timedelta(days=1))

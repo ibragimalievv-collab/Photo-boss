@@ -9,6 +9,8 @@ from sqlalchemy import func, select
 
 from ..config import config
 from ..models import (
+    AcademyCertificate,
+    AcademyReminder,
     AcademyReview,
     Booking,
     BookingReminder,
@@ -22,6 +24,8 @@ from ..models import (
     User,
     UserRole,
 )
+from .academy import ACADEMY_LESSONS
+from .academy_growth import academy_counts, ensure_certificate
 
 ACTIVE_BOOKING_STATUSES = {
     "PENDING_CONFIRMATION", "CONFIRMED", "ASSIGNED", "PICKED_UP",
@@ -91,8 +95,66 @@ async def run_operations_once(session, bot, now=None):
             )
             sent += 1
     leads = await create_repeat_sale_leads(session, now)
+    academy_reminders = await send_academy_reminders(session, bot, now)
+    certificates = await issue_academy_certificates(session)
     await session.commit()
-    return {"reminders": sent, "repeat_sale_leads": leads}
+    return {"reminders": sent, "repeat_sale_leads": leads,
+            "academy_reminders": academy_reminders,
+            "academy_certificates": certificates}
+
+
+async def send_academy_reminders(session, bot, now=None):
+    now = now or datetime.now(UTC)
+    local_now = now.astimezone(ZoneInfo(config.training_timezone))
+    if local_now.hour != 10:
+        return 0
+    users = (await session.scalars(
+        select(User).join(UserRole, UserRole.user_id == User.id).where(
+            User.active.is_(True), UserRole.role == "PHOTOGRAPHER"
+        ).order_by(User.id)
+    )).unique().all()
+    sent = 0
+    for user in users:
+        lessons, practices, _score = await academy_counts(session, user.id)
+        if lessons >= len(ACADEMY_LESSONS) and practices >= 7:
+            continue
+        exists = await session.scalar(select(AcademyReminder.id).where(
+            AcademyReminder.user_id == user.id,
+            AcademyReminder.reminder_date == local_now.date(),
+            AcademyReminder.kind == "DAILY_LESSON",
+        ))
+        if exists:
+            continue
+        try:
+            await bot.send_message(
+                user.tg_id,
+                "📚 Photo Boss Academy\n\n"
+                f"Ваш прогресс: {lessons}/28 уроков и {practices}/7 практик. "
+                "Незавершённый урок не сгорает — продолжите с текущего шага.",
+            )
+        except TelegramAPIError:
+            continue
+        session.add(AcademyReminder(
+            user_id=user.id, reminder_date=local_now.date()
+        ))
+        sent += 1
+    return sent
+
+
+async def issue_academy_certificates(session):
+    user_ids = (await session.scalars(
+        select(User.id).join(UserRole, UserRole.user_id == User.id).where(
+            User.active.is_(True), UserRole.role == "PHOTOGRAPHER"
+        )
+    )).all()
+    issued = 0
+    for user_id in set(user_ids):
+        exists = await session.scalar(select(AcademyCertificate.id).where(
+            AcademyCertificate.user_id == user_id
+        ))
+        if exists is None and await ensure_certificate(session, user_id) is not None:
+            issued += 1
+    return issued
 
 
 def photographer_score(*, same_hotel, bookings_today, quality, distance_minutes=0):
