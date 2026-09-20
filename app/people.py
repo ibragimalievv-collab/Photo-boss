@@ -199,7 +199,7 @@ class People:
         return web.json_response({"employee": after})
 
     async def documents(self, request):
-        return web.json_response({"version": DOCUMENT_VERSION, "status": "pilot", "canSign": False,
+        return web.json_response({"version": DOCUMENT_VERSION, "status": "draft", "canSign": False,
             "canAcceptWorkRules": True,
             "general": GENERAL_RULES, "sha256": hashlib.sha256(GENERAL_RULES.encode()).hexdigest(),
             "servicesContract": "Не подготовлен: нужны реквизиты заказчика, страна, статус исполнителя, условия и способ подписания.",
