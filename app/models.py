@@ -411,6 +411,9 @@ class TrainingAssignment(Base):
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE", index=True)
     assigned_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ai_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ai_analysis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
     submissions = relationship(
         "TrainingSubmission",
         back_populates="assignment",
@@ -419,6 +422,10 @@ class TrainingAssignment(Base):
     )
     __table_args__ = (
         UniqueConstraint("user_id", "assigned_date", name="uq_training_user_day"),
+        CheckConstraint(
+            "ai_score IS NULL OR ai_score BETWEEN 0 AND 100",
+            name="ck_training_ai_score",
+        ),
     )
 
 

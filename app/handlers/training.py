@@ -1,3 +1,5 @@
+import io
+import json
 import logging
 from datetime import UTC, datetime
 
@@ -7,11 +9,18 @@ from aiogram.types import CallbackQuery, FSInputFile
 from sqlalchemy import select
 
 from ..access import StaffFilter
+from ..config import config
 from ..db import Session
 from ..keyboards import inline
 from ..models import TrainingAssignment, TrainingSubmission, User, UserRole
 from ..services.core import ROLES, audit, get_user
-from ..services.training import CATEGORY_BY_SLUG, category_rows, training_day
+from ..services.training import (
+    CATEGORY_BY_SLUG,
+    category_rows,
+    shot_instruction,
+    training_day,
+)
+from ..services.training_ai import MAX_IMAGE_BYTES, analyze_training_set, review_text
 
 r = Router()
 r.message.filter(StaffFilter(*ROLES))
@@ -62,7 +71,9 @@ async def send_pose(message, assignment, pose_index):
         FSInputFile(path),
         caption=(
             f"{category.title}\n\n"
-            f"Поза {pose_index}/5. Повторите этот кадр и пришлите свою фотографию сюда."
+            f"Поза {pose_index}/5\n{shot_instruction(category, pose_index)}\n\n"
+            "Повторите принцип кадра и пришлите свою фотографию сюда. "
+            "Следующий кадр обязан отличаться ракурсом."
         ),
     )
 
@@ -76,12 +87,101 @@ async def send_reference_set(message, assignment):
     for pose_index, path in enumerate(category.image_paths, start=1):
         await message.answer_photo(
             FSInputFile(path),
-            caption=f"{category.title}\n\nЭталон {pose_index}/5",
+            caption=(f"{category.title}\n\nЭталон {pose_index}/5\n"
+                     f"{shot_instruction(category, pose_index)} {pose_index}/5"),
         )
     await message.answer(
         "Все 5 эталонов показаны. Теперь пришлите сюда 5 своих повторов "
-        "по порядку — от первого кадра к пятому."
+        "по порядку — от первого кадра к пятому. Одинаковый ракурс дважды "
+        "не засчитывается: меняйте точку, высоту, план или действие."
     )
+
+
+class TrainingBuffer(io.BytesIO):
+    def write(self, data):
+        if self.tell() + len(data) > MAX_IMAGE_BYTES:
+            raise ValueError("Слишком большое фото")
+        return super().write(data)
+
+
+async def download_training_photo(bot, file_id):
+    buffer = TrainingBuffer()
+    await bot.download(file_id, destination=buffer, timeout=25)
+    content = buffer.getvalue()
+    if not content.startswith(b"\xff\xd8\xff"):
+        raise ValueError("Ожидалось JPEG-фото")
+    return content
+
+
+async def ai_review_assignment(bot, assignment_id):
+    """Return True when AI produced a final trainee-facing decision."""
+    if not config.openai_api_key:
+        return False
+    async with Session() as session:
+        assignment = await session.get(TrainingAssignment, assignment_id)
+        submissions = (await session.scalars(
+            select(TrainingSubmission).where(
+                TrainingSubmission.assignment_id == assignment_id
+            ).order_by(TrainingSubmission.pose_index)
+        )).all()
+        trainee = await session.get(User, assignment.user_id) if assignment else None
+    if assignment is None or trainee is None or len(submissions) != 5:
+        return False
+    category = CATEGORY_BY_SLUG.get(assignment.category_slug)
+    if category is None:
+        return False
+    try:
+        uploaded = [await download_training_photo(bot, item.submitted_file_id) for item in submissions]
+        references = [path.read_bytes() for path in category.image_paths]
+        result = await analyze_training_set(category, references, uploaded)
+    except (OSError, TelegramAPIError, ValueError):
+        logger.warning("Could not prepare Academy assignment %s for AI", assignment_id)
+        return False
+    if result.get("status") != "completed":
+        return False
+    review = result["review"]
+    async with Session() as session:
+        locked = await session.get(TrainingAssignment, assignment_id, with_for_update=True)
+        if locked is None or locked.status != "PENDING_REVIEW":
+            return True
+        locked.ai_score = review["score"]
+        locked.ai_analysis = json.dumps(result, ensure_ascii=False)
+        locked.review_source = "AI"
+        if review["decision"] == "ACCEPT":
+            locked.status = "COMPLETED"
+            locked.completed_at = datetime.now(UTC).replace(tzinfo=None)
+        elif review["decision"] == "REVISION" and review["reshoot_indexes"]:
+            rows = (await session.scalars(select(TrainingSubmission).where(
+                TrainingSubmission.assignment_id == assignment_id,
+                TrainingSubmission.pose_index.in_(set(review["reshoot_indexes"])),
+            ))).all()
+            for row in rows:
+                await session.delete(row)
+            locked.status = "ACTIVE"
+        else:
+            await session.commit()
+            return False
+        await session.commit()
+    await bot.send_message(trainee.tg_id, review_text(result))
+    if review["decision"] == "ACCEPT":
+        await bot.send_message(
+            trainee.tg_id,
+            "✅ ИИ принял практику по единому стандарту Photo Boss. Новый набор откроется завтра.",
+        )
+    else:
+        indexes = sorted(set(review["reshoot_indexes"]))
+        await bot.send_message(
+            trainee.tg_id,
+            "🔁 Переснимите кадры: " + ", ".join(map(str, indexes)) + ". После загрузки ИИ проверит набор снова.",
+        )
+        if indexes:
+            await bot.send_photo(
+                trainee.tg_id,
+                FSInputFile(category.image_paths[indexes[0] - 1]),
+                caption=(f"Кадр {indexes[0]}/5\n"
+                         f"{shot_instruction(category, indexes[0])}"),
+            )
+    return True
 
 
 async def notify_owners(bot, assignment_id, trainee_name, category_title):
@@ -124,7 +224,10 @@ async def training_menu(message):
                     "До решения другой набор выбрать нельзя."
                 )
             await message.answer(
-                "🎓 У вас уже есть обязательное задание\n\n"
+                ("⚠️ Просроченное обязательное задание\n\n"
+                 if unfinished.assigned_date < training_day()
+                 else "🎓 У вас уже есть обязательное задание\n\n")
+                +
                 f"Категория: {category.title if category else unfinished.category_slug}\n"
                 f"Загружено: {len(indexes)}/5. Сменить категорию до завершения нельзя."
             )
@@ -261,8 +364,14 @@ async def training_submission(message):
         await session.commit()
     if submitted_all:
         await message.answer(
-            "📥 Все 5 повторов приняты и отправлены владельцу на проверку. "
-            "Другой набор откроется только после одобрения."
+            "📥 Все 5 повторов загружены. ИИ проверяет технику, свет, позу, "
+            "эмоцию, композицию и разные ракурсы."
+        )
+        if await ai_review_assignment(message.bot, assignment.id):
+            return
+        await message.answer(
+            "⏳ Автоматическая проверка сейчас недоступна или требует решения человека. "
+            "Набор передан владельцу."
         )
         return await notify_owners(
             message.bot, assignment.id, user.name, category.title
@@ -312,6 +421,11 @@ async def training_review(callback: CallbackQuery, current_roles):
     await callback.message.answer(
         f"👀 Проверка обучения\nСотрудник: {trainee.name}\nКатегория: {category.title}"
     )
+    if assignment.ai_analysis:
+        try:
+            await callback.message.answer(review_text(json.loads(assignment.ai_analysis)))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.warning("Invalid stored AI review for assignment %s", assignment.id)
     for submission in submissions:
         pose = submission.pose_index
         await callback.message.answer_photo(
@@ -357,6 +471,7 @@ async def training_approve(callback: CallbackQuery, current_roles):
         trainee = await session.get(User, assignment.user_id)
         assignment.status = "COMPLETED"
         assignment.completed_at = datetime.now(UTC).replace(tzinfo=None)
+        assignment.review_source = "OWNER"
         await audit(
             session,
             await get_user(session, callback.from_user.id),
@@ -408,6 +523,7 @@ async def training_reject(callback: CallbackQuery, current_roles):
         category = CATEGORY_BY_SLUG.get(assignment.category_slug)
         await session.delete(submission)
         assignment.status = "ACTIVE"
+        assignment.review_source = "OWNER"
         await audit(
             session,
             await get_user(session, callback.from_user.id),

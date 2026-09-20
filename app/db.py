@@ -1,17 +1,23 @@
 import asyncio
 import logging
+import os
 from importlib import import_module
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 from .config import config
 
 logger = logging.getLogger(__name__)
 
 engine_options = {"pool_pre_ping": True, "pool_recycle": 300}
+if os.getenv("CI", "").lower() == "true":
+    # Regression tests create a fresh event loop for each scenario. Avoid
+    # handing an asyncpg connection created by one loop to another loop.
+    engine_options["poolclass"] = NullPool
 if config.database_url.startswith("postgresql+asyncpg:"):
     engine_options["connect_args"] = {
         "timeout": 10,
@@ -43,6 +49,18 @@ async def init_db():
                     "DOUBLE PRECISION NOT NULL DEFAULT 0"
                 )
             )
+            await connection.execute(text(
+                "ALTER TABLE training_assignments ADD COLUMN IF NOT EXISTS "
+                "ai_score INTEGER"
+            ))
+            await connection.execute(text(
+                "ALTER TABLE training_assignments ADD COLUMN IF NOT EXISTS "
+                "ai_analysis TEXT"
+            ))
+            await connection.execute(text(
+                "ALTER TABLE training_assignments ADD COLUMN IF NOT EXISTS "
+                "review_source VARCHAR(20)"
+            ))
             column_type = await connection.scalar(
                 text(
                     """
