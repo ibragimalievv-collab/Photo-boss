@@ -21,11 +21,16 @@ from ..models import (
 )
 from ..services.academy import (
     ACADEMY_LESSONS,
+    BLOCK_BY_NUMBER,
     LESSON_BY_SLUG,
     REVIEW_TEMPLATES,
+    block_lessons,
+    block_practice_done,
+    lesson_is_unlocked,
     level_for,
     next_level,
     strongest_and_weakest,
+    unlocked_block,
 )
 from ..services.core import ROLES, audit, get_user
 from ..services.training import CATEGORY_BY_SLUG, category_rows
@@ -137,6 +142,21 @@ async def photographer_counts(session, user_id):
     return shootings, avg_check, lessons, practice, strong_reviews, points
 
 
+async def academy_program_state(session, user_id):
+    completed = set((await session.scalars(
+        select(AcademyLessonProgress.topic_slug).where(
+            AcademyLessonProgress.user_id == user_id
+        )
+    )).all())
+    accepted = set((await session.scalars(
+        select(TrainingAssignment.category_slug).where(
+            TrainingAssignment.user_id == user_id,
+            TrainingAssignment.status == "COMPLETED",
+        )
+    )).all())
+    return completed, accepted, unlocked_block(completed, accepted)
+
+
 @r.message(F.text == "📚 Академия")
 async def academy_menu(message, current_roles):
     await academy_home(message, current_roles)
@@ -211,25 +231,39 @@ async def academy_profile(callback: CallbackQuery):
 async def academy_theory(callback: CallbackQuery):
     async with Session() as session:
         user = await get_user(session, callback.from_user.id)
-        completed = set(
-            (
-                await session.scalars(
-                    select(AcademyLessonProgress.topic_slug).where(
-                        AcademyLessonProgress.user_id == user.id
-                    )
-                )
-            ).all()
+        completed, accepted, available_block = await academy_program_state(
+            session, user.id
         )
     rows = []
     for lesson in ACADEMY_LESSONS:
-        mark = "✅" if lesson.slug in completed else "▫️"
-        rows.append([(f"{mark} {lesson.title}", f"academy:lesson:{lesson.slug}")])
+        if lesson.slug in completed:
+            mark = "✅"
+        elif lesson.block <= available_block:
+            mark = "▫️"
+        else:
+            mark = "🔒"
+        rows.append([(
+            f"{mark} День {lesson.day}. {lesson.title}",
+            f"academy:lesson:{lesson.slug}",
+        )])
     rows.append([("⬅️ Академия", "academy:home")])
+    current = BLOCK_BY_NUMBER[available_block]
+    current_done = sum(
+        lesson.slug in completed for lesson in block_lessons(available_block)
+    )
+    practice_line = (
+        "Практика принята."
+        if block_practice_done(available_block, accepted)
+        else f"После 4 уроков: {current.practice_title}."
+    )
     await callback.answer()
     if callback.message:
         await callback.message.answer(
-            f"🎓 Обучение\n\nКороткие блоки по 2–5 минут перед сменой.\n"
-            f"Пройдено: {len(completed)}/{len(ACADEMY_LESSONS)}",
+            f"🎓 Программа на 28 дней\n\n"
+            f"Текущий блок {available_block}/7: {current.title}\n"
+            f"В блоке: {current_done}/4 уроков. {practice_line}\n\n"
+            f"Пройдено всего: {len(completed)}/{len(ACADEMY_LESSONS)}.\n"
+            "Пропущенный урок не сгорает и остаётся текущим.",
             reply_markup=inline(rows),
         )
 
@@ -240,10 +274,18 @@ async def academy_lesson(callback: CallbackQuery):
     lesson = LESSON_BY_SLUG.get(slug)
     if lesson is None:
         return await callback.answer("Урок не найден.", show_alert=True)
+    async with Session() as session:
+        user = await get_user(session, callback.from_user.id)
+        completed, accepted, _ = await academy_program_state(session, user.id)
+    if not lesson_is_unlocked(lesson.slug, completed, accepted):
+        return await callback.answer(
+            "Сначала пройдите предыдущие четыре урока и сдайте практику.",
+            show_alert=True,
+        )
     await callback.answer()
     if callback.message:
         await callback.message.answer(
-            f"{lesson.title}\n\n{lesson.body}",
+            f"День {lesson.day} · Блок {lesson.block}\n{lesson.title}\n\n{lesson.body}",
             reply_markup=inline(
                 [
                     [("✅ Урок изучен", f"academy:lesson_done:{slug}")],
@@ -262,6 +304,11 @@ async def academy_lesson_done(callback: CallbackQuery):
     created = False
     async with Session() as session:
         user = await get_user(session, callback.from_user.id)
+        completed, accepted, _ = await academy_program_state(session, user.id)
+        if not lesson_is_unlocked(slug, completed, accepted):
+            return await callback.answer(
+                "Предыдущий блок ещё не завершён.", show_alert=True
+            )
         exists = await session.scalar(
             select(AcademyLessonProgress.id).where(
                 AcademyLessonProgress.user_id == user.id,
@@ -283,13 +330,30 @@ async def academy_lesson_done(callback: CallbackQuery):
 
 @r.callback_query(F.data == "academy:practice")
 async def academy_practice(callback: CallbackQuery):
+    async with Session() as session:
+        user = await get_user(session, callback.from_user.id)
+        completed, _accepted, available_block = await academy_program_state(
+            session, user.id
+        )
+    block = BLOCK_BY_NUMBER[available_block]
+    lessons_done = all(
+        lesson.slug in completed for lesson in block_lessons(available_block)
+    )
     await callback.answer()
     if callback.message:
         await callback.message.answer(
             "📸 Практика\n\n"
-            "Выберите категорию. Бот покажет 5 эталонных кадров. "
-            "Повторите их и загрузите свои 5 фотографий — они уйдут на проверку.",
-            reply_markup=inline([*category_rows(), [("⬅️ Академия", "academy:home")]]),
+            f"Текущий блок {available_block}: {block.title}\n"
+            f"Обязательное задание: {block.practice_title}\n\n"
+            + ("Сначала завершите четыре урока этого блока.\n\n" if not lessons_done else "")
+            + "Бот покажет 5 эталонных кадров. Повторите принцип и загрузите "
+            "свои 5 фотографий. ИИ проверит их по 100-балльному стандарту; "
+            "проходной балл — 85.",
+            reply_markup=inline([
+                *(category_rows(allowed_slugs=block.practice_categories)
+                  if lessons_done else []),
+                [("⬅️ Академия", "academy:home")],
+            ]),
         )
 
 

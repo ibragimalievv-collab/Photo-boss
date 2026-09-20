@@ -92,11 +92,13 @@ def training_day(value=None):
     return value.astimezone(timezone).date()
 
 
-def category_rows(excluded_slug=None):
+def category_rows(excluded_slug=None, allowed_slugs=None):
+    allowed = set(allowed_slugs) if allowed_slugs is not None else None
     buttons = [
         (category.title, f"training:{category.slug}")
         for category in TRAINING_CATEGORIES
         if category.slug != excluded_slug
+        and (allowed is None or category.slug in allowed)
     ]
     return [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
 

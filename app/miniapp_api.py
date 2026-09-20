@@ -74,12 +74,32 @@ def first_role(roles):
 
 
 class MiniApp:
-    def __init__(self, engine, bot, lessons, *, tz_name="Europe/Moscow", static_dir=None):
+    def __init__(self, engine, bot, lessons, *, blocks=None, tz_name="Europe/Moscow", static_dir=None):
         self.engine, self.bot = engine, bot
         self.tz = ZoneInfo(tz_name)
         self.lessons = [{"slug": l.slug, "title": l.title, "body": l.body,
-                         "duration": "Короткий урок"} for l in lessons]
+                         "duration": "Короткий урок", "day": getattr(l, "day", index),
+                         "block": getattr(l, "block", 1)}
+                        for index, l in enumerate(lessons, start=1)]
+        self.blocks = [{"number": b.number, "title": b.title,
+                        "practiceCategories": list(b.practice_categories),
+                        "practiceTitle": b.practice_title} for b in (blocks or [])]
+        if self.lessons and not self.blocks:
+            self.blocks = [{"number": 1, "title": "Учебный блок",
+                            "practiceCategories": [], "practiceTitle": ""}]
         self.static_dir = Path(static_dir or Path(__file__).parent / "webapp")
+
+    def academy_state(self, completed, accepted_categories):
+        unlocked = 1
+        for block in self.blocks[:-1]:
+            lesson_slugs = {l["slug"] for l in self.lessons if l["block"] == block["number"]}
+            practice_done = not block["practiceCategories"] or bool(
+                set(block["practiceCategories"]) & accepted_categories
+            )
+            if not lesson_slugs.issubset(completed) or not practice_done:
+                break
+            unlocked = block["number"] + 1
+        return min(unlocked, len(self.blocks) or 1)
 
     def today(self):
         return datetime.now(self.tz).date()
@@ -407,7 +427,26 @@ class MiniApp:
             reviews = await self.rows(conn, "SELECT id,quality_score,issues,recommendation FROM academy_reviews WHERE user_id=:uid ORDER BY id DESC LIMIT 30", uid=uid)
         known = {l["slug"] for l in self.lessons}
         done = [r["topic_slug"] for r in completed if r["topic_slug"] in known]
-        return web.json_response({"lessons": self.lessons, "completed": done, "points": len(done)*10,
+        done_set = set(done)
+        accepted = {p["category_slug"] for p in practices if p["status"] == "COMPLETED"}
+        unlocked = self.academy_state(done_set, accepted)
+        lessons = [dict(lesson, locked=lesson["block"] > unlocked) for lesson in self.lessons]
+        blocks = []
+        for block in self.blocks:
+            slugs = {l["slug"] for l in self.lessons if l["block"] == block["number"]}
+            lesson_done = len(slugs & done_set)
+            practice_done = not block["practiceCategories"] or bool(
+                set(block["practiceCategories"]) & accepted
+            )
+            blocks.append(dict(block, locked=block["number"] > unlocked,
+                               lessonsDone=lesson_done, lessonsTotal=len(slugs),
+                               practiceDone=practice_done))
+        current = next((b for b in blocks if not b["locked"] and
+                        (b["lessonsDone"] < b["lessonsTotal"] or not b["practiceDone"])),
+                       blocks[-1] if blocks else None)
+        return web.json_response({"lessons": lessons, "blocks": blocks,
+            "currentBlock": current["number"] if current else None,
+            "carryOver": True, "completed": done, "points": len(done)*10,
             "practices": [{"id": p["id"], "category": p["category_slug"], "status": p["status"]} for p in practices],
             "reviews": [{"id": r["id"], "score": r["quality_score"], "issues": r["issues"], "recommendation": r["recommendation"]} for r in reviews]})
 
@@ -417,6 +456,17 @@ class MiniApp:
         if lesson is None:
             raise AccessError("Урок не найден.", 404)
         async with self.engine.begin() as conn:
+            completed = {r["topic_slug"] for r in await self.rows(
+                conn, "SELECT topic_slug FROM academy_lesson_progress WHERE user_id=:uid",
+                uid=actor["id"])}
+            practices = await self.rows(
+                conn, "SELECT category_slug,status FROM training_assignments WHERE user_id=:uid",
+                uid=actor["id"])
+            accepted = {p["category_slug"] for p in practices if p["status"] == "COMPLETED"}
+            if lesson["block"] > self.academy_state(completed, accepted):
+                raise AccessError(
+                    "Сначала завершите предыдущие четыре урока и сдайте практику.", 409
+                )
             changed = await self.rows(conn, """INSERT INTO academy_lesson_progress (user_id,topic_slug,completed_at)
                 VALUES (:uid,:slug,:now) ON CONFLICT (user_id,topic_slug) DO NOTHING RETURNING id""",
                 uid=actor["id"], slug=slug, now=datetime.now(timezone.utc).replace(tzinfo=None))
@@ -468,7 +518,7 @@ class MiniApp:
             app.router.add_route(method, PREFIX + path, handler)
 
 
-def install_miniapp(app, *, engine, bot, lessons, tz_name="Europe/Moscow"):
-    miniapp = MiniApp(engine, bot, lessons, tz_name=tz_name)
+def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/Moscow"):
+    miniapp = MiniApp(engine, bot, lessons, blocks=blocks, tz_name=tz_name)
     miniapp.register(app)
     return miniapp
