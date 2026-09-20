@@ -108,10 +108,15 @@ def main():
                 page.locator("[data-open-chat]").wait_for()
                 page.locator(".pb-chat-trigger .pb-chat-unread").wait_for()
                 assert page.locator(".pb-chat-trigger .pb-chat-unread").inner_text() == "3"
+                page.locator("[data-open-chat]").wait_for()
+                page.wait_for_timeout(100)
+                assert "3" in page.locator("[data-open-chat]").inner_text()
                 page.locator("[data-open-chat]").click()
                 page.get_by_text("Принять общие правила и открыть чат", exact=True).click()
                 page.locator('[data-chat="general"] .pb-chat-unread').wait_for()
                 assert page.locator('[data-peer="2"] .pb-chat-unread').inner_text() == "2"
+                page.get_by_text("Общий чат", exact=True).first.wait_for()
+                assert page.locator(".pb-chat-unread").count() >= 2
                 page.get_by_text("Общий чат", exact=True).first.click()
                 page.locator("#pbChatMessages").wait_for()
                 assert page.locator("#pbChatMessages img").count() == 0
