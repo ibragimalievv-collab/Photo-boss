@@ -71,10 +71,6 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
             conn.execute(text("""CREATE TABLE work_rule_acceptances(
                 id INTEGER PRIMARY KEY,user_id INTEGER,version TEXT,text_sha256 TEXT,
                 accepted_at DATETIME,UNIQUE(user_id,version))"""))
-            conn.execute(text("""CREATE TABLE work_chat_read_states(
-                id INTEGER PRIMARY KEY,user_id INTEGER,scope_key TEXT,
-                last_read_message_id INTEGER,updated_at DATETIME,
-                UNIQUE(user_id,scope_key))"""))
             conn.execute(text("""CREATE TABLE work_chat_attachments(
                 id INTEGER PRIMARY KEY,uploader_id INTEGER,storage_path TEXT,
                 original_name TEXT,mime_type TEXT,byte_size INTEGER,sha256 TEXT,
