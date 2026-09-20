@@ -368,8 +368,12 @@ async def shoots(m):
                 buttons = [[("⏹ Окончить фотосессию", f"photo:finish:{sh.id}", "primary")]]
             elif sh.status == "SHOT":
                 buttons = [[("✅ Готово к продаже", f"photo:ready:{sh.id}", "success")]]
-            elif sh.status == "READY_FOR_SALE" and sh.full_upload_completed_at is None:
-                buttons = [[("☁️ Загрузить всю съёмку", f"photo:full_upload:{sh.id}", "primary")]]
+            elif sh.status == "READY_FOR_SALE":
+                buttons = [[("💰 Оформить продажу", f"sale:start:{b.id}", "success")]]
+                if sh.full_upload_completed_at is None:
+                    buttons.append(
+                        [("☁️ Загрузить всю съёмку", f"photo:full_upload:{sh.id}", "primary")]
+                    )
             text = await booking_card(s, b)
             if sh.status == "READY_FOR_SALE":
                 text += (
@@ -446,7 +450,10 @@ async def action(c: CallbackQuery, state):
             "Для продажи достаточно загрузить выбранные фотографии. "
             "Всю съёмку можно загрузить позже. До полной загрузки процент фотографа "
             "не фиксируется.",
-            [[("☁️ Загрузить всю съёмку", f"photo:full_upload:{sid}", "primary")]],
+            [
+                [("💰 Оформить продажу", f"sale:start:{b.id}", "success")],
+                [("☁️ Загрузить всю съёмку", f"photo:full_upload:{sid}", "primary")],
+            ],
         ),
     }
     text, buttons = labels[act]
