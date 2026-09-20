@@ -60,7 +60,50 @@ class WorkChat:
     def __init__(self, miniapp):
         self.api = miniapp
         self.engine = miniapp.engine
+        self.bot = miniapp.bot
         self.static_dir = Path(__file__).parent / "work_chat_ui"
+
+    def notification_markup(self):
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="💬 Открыть Photo Boss",
+            web_app=WebAppInfo(url=app_url("home")),
+        )]])
+
+    async def _notify_one(self, tg_id, text_value):
+        try:
+            await self.bot.send_message(
+                tg_id,
+                text_value,
+                reply_markup=self.notification_markup(),
+                protect_content=True,
+                disable_notification=False,
+            )
+            return True
+        except TelegramAPIError as exc:
+            logger.info(
+                "Work-chat Telegram notification unavailable for tg_id=%s (%s)",
+                tg_id, type(exc).__name__,
+            )
+            return False
+
+    async def notify(self, tg_ids, *, sender_name, general):
+        targets = list(dict.fromkeys(
+            tg for tg in tg_ids if isinstance(tg, int) and tg > 0
+        ))
+        if not targets:
+            return
+        text_value = (
+            f"💬 Photo Boss · Новое сообщение в общем чате\nОт: {sender_name}"
+            if general
+            else f"💬 Photo Boss · Новое рабочее сообщение\nОт: {sender_name}"
+        )
+        semaphore = asyncio.Semaphore(4)
+
+        async def send(tg_id):
+            async with semaphore:
+                return await self._notify_one(tg_id, text_value)
+
+        await asyncio.gather(*(send(tg_id) for tg_id in targets))
 
     async def acceptance(self, conn, user_id):
         rows = await self.api.rows(
