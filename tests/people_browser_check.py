@@ -25,11 +25,17 @@ def fixture_handler(me, data, sent, theme):
             return r.fulfill(json={'general': 'Проект. Владелец имеет доступ ко всем рабочим чатам, включая диалоги.',
                 'version': 'draft-test', 'servicesContract': 'Не подготовлен', 'dataConsent': 'Отдельный документ.'})
         files = {'/people/people.js': ROOT/'app/people_ui/people.js', '/people/people.css': ROOT/'app/people_ui/people.css',
-                 '/app/js/api.js': ROOT/'app/webapp/js/api.js', '/app/js/domain.js': ROOT/'app/webapp/js/domain.js'}
+                 '/app/js/api.js': ROOT/'app/webapp/js/api.js', '/app/js/domain.js': ROOT/'app/webapp/js/domain.js',
+                 '/app/css/styles.css': ROOT/'app/webapp/css/styles.css'}
         if path in files:
             return r.fulfill(body=files[path].read_text(), content_type='text/css' if path.endswith('.css') else 'text/javascript')
         if path == '/':
-            return r.fulfill(content_type='text/html',body=f'<!doctype html><html lang="ru" data-theme="{theme}"><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><header id="topbar"><b>Photo Boss</b></header><script>window.Telegram={{WebApp:{{initData:"fixture-only"}}}}</script><script type="module" src="/people/people.js"></script></body></html>')
+            return r.fulfill(content_type='text/html',body=f'''<!doctype html><html lang="ru" data-theme="{theme}"><head>
+                <meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/app/css/styles.css"></head>
+                <body><header id="topbar" class="topbar"><button class="brand-link"><span class="brand-mark">PB</span>
+                <span><span class="brand-name">Photo<span>Boss</span></span><small class="brand-caption">WORKSPACE</small></span></button>
+                <div class="row"><button class="icon-button" aria-label="Тема">◐</button><button class="avatar-btn">PB</button></div></header>
+                <script>window.Telegram={{WebApp:{{initData:"fixture-only"}}}}</script><script type="module" src="/people/people.js"></script></body></html>''')
         raise AssertionError('Unexpected request '+r.request.url)
     return route
 
@@ -51,6 +57,8 @@ def main():
                             'hotels': [{'id': 1, 'name': 'Test hotel'}], 'canAssignAdmin': role == 'OWNER', 'next': None}
                     page.route('**/*', fixture_handler(me, data, sent, theme))
                     page.goto(BASE)
+                    page.locator('[data-open-people]').wait_for()
+                    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth+2')
                     page.locator('[data-open-people]').click()
                     if role in ('OWNER','ADMIN'):
                         page.locator('[data-people="add"]').click()
@@ -63,6 +71,7 @@ def main():
                         page.locator('#pbPeopleRows').wait_for()
                         assert sent and sent[0]['name']=='Test employee'
                         assert page.locator('#pbPeopleRows script').count()==0
+                        page.screenshot(path=str(OUT/f'staff-{role}-{width}-{theme}.png'))
                         page.locator('[data-people="documents"]').click()
                     page.get_by_text('Не подписано. Подписание отключено.', exact=True).wait_for()
                     assert page.locator('.pb-people-rules').evaluate('(e)=>parseFloat(getComputedStyle(e).fontSize)') >= 16
