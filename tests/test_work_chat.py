@@ -1,8 +1,22 @@
-"""Work-chat input and disclosure checks."""
+"""Work-chat policy and authenticated API checks."""
+import json
+import unittest
+from datetime import UTC, datetime, timedelta
+from urllib.parse import urlsplit
+
 import pytest
+import test_miniapp_release as baseline
+from sqlalchemy import text
 
 from app.miniapp_security import AccessError
-from app.work_chat import MAX_MESSAGE, RETENTION_DAYS, clean_message, positive_id
+from app.work_chat import (
+    MAX_MESSAGE,
+    RETENTION_DAYS,
+    WorkChat,
+    clean_message,
+    cleanup_expired_chat,
+    positive_id,
+)
 from app.work_rules import WORK_RULES_TEXT, WORK_RULES_VERSION, work_rules_hash
 
 
@@ -27,3 +41,130 @@ def test_rules_are_explicit_and_whole_document_acceptance():
     assert str(RETENTION_DAYS) in WORK_RULES_TEXT
     assert len(work_rules_hash()) == 64
     assert WORK_RULES_VERSION
+
+
+class WorkChatTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        await baseline.MiniAppTests.asyncSetUp(self)
+        self.chat = WorkChat(self.service)
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("""CREATE TABLE work_rule_acceptances(
+                id INTEGER PRIMARY KEY,user_id INTEGER,version TEXT,text_sha256 TEXT,
+                accepted_at DATETIME,UNIQUE(user_id,version))"""))
+            conn.execute(text("""CREATE TABLE work_chat_messages(
+                id INTEGER PRIMARY KEY,sender_id INTEGER,recipient_id INTEGER,
+                body TEXT,created_at DATETIME)"""))
+
+    async def asyncTearDown(self):
+        await baseline.MiniAppTests.asyncTearDown(self)
+
+    async def call(self, path, *, uid=1001, method="GET", body=None, token=None):
+        request = baseline.Request("/api/miniapp" + path, uid, method, body, token)
+        route = urlsplit(path).path
+        handlers = {
+            ("/chat/rules", "GET"): self.chat.rules,
+            ("/chat/rules/accept", "POST"): self.chat.accept_rules,
+            ("/chat/people", "GET"): self.chat.people,
+            ("/chat/messages", "GET"): self.chat.messages,
+            ("/chat/messages", "POST"): self.chat.send,
+            ("/chat/owner/threads", "GET"): self.chat.owner_threads,
+            ("/chat/owner/messages", "GET"): self.chat.owner_messages,
+        }
+        handler = handlers[(route, method)]
+        response = await self.service.middleware(request, handler)
+        return response.status, json.loads(response.text)
+
+    async def accept(self, uid):
+        status, rules = await self.call("/chat/rules", uid=uid)
+        assert status == 200
+        return await self.call(
+            "/chat/rules/accept", uid=uid, method="POST",
+            body={"version": rules["version"], "sha256": rules["sha256"]},
+        )
+
+    async def test_rules_gate_all_chat_data(self):
+        assert (await self.call("/chat/rules", uid=1003))[0] == 200
+        for path,method,body in [
+            ("/chat/people","GET",None),
+            ("/chat/messages?peer=general&after=0","GET",None),
+            ("/chat/messages","POST",{"peerId": None, "body": "hello"}),
+        ]:
+            assert (await self.call(path, uid=1003, method=method, body=body))[0] == 428
+        assert (await self.accept(1003))[0] == 200
+        assert (await self.call("/chat/people", uid=1003))[0] == 200
+
+    async def test_general_and_private_visibility(self):
+        for uid in (1001,1003,1004,1005):
+            await self.accept(uid)
+        assert (await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": None, "body": "Общая рабочая новость"},
+        ))[0] == 201
+        _, general = await self.call("/chat/messages?peer=general&after=0", uid=1005)
+        assert [m["body"] for m in general["messages"]] == ["Общая рабочая новость"]
+
+        assert (await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": 4, "body": "Личный рабочий вопрос"},
+        ))[0] == 201
+        _, own = await self.call("/chat/messages?peer=3&after=0", uid=1004)
+        assert [m["body"] for m in own["messages"]] == ["Личный рабочий вопрос"]
+        _, outsider = await self.call("/chat/messages?peer=3&after=0", uid=1005)
+        assert outsider["messages"] == []
+
+        _, threads = await self.call("/chat/owner/threads", uid=1001)
+        assert threads["threads"][0]["a"]["id"] == 3
+        assert threads["threads"][0]["b"]["id"] == 4
+        _, controlled = await self.call("/chat/owner/messages?a=3&b=4&after=0", uid=1001)
+        assert [m["body"] for m in controlled["messages"]] == ["Личный рабочий вопрос"]
+        assert controlled["readOnly"] is True
+
+    async def test_admin_cannot_monitor_other_people(self):
+        await self.accept(1002)
+        assert (await self.call("/chat/owner/threads", uid=1002))[0] == 403
+        assert (await self.call("/chat/owner/messages?a=3&b=4&after=0", uid=1002))[0] == 403
+
+    async def test_inactive_account_cannot_use_chat(self):
+        assert (await self.call("/chat/rules", uid=1006))[0] == 403
+
+    async def test_rate_limit_is_server_side(self):
+        await self.accept(1003)
+        now = datetime.now(UTC).replace(tzinfo=None)
+        with self.engine.inner.begin() as conn:
+            for i in range(30):
+                conn.execute(text(
+                    "INSERT INTO work_chat_messages(sender_id,recipient_id,body,created_at) "
+                    "VALUES (3,NULL,:body,:created)"
+                ), {"body": f"m{i}", "created": now})
+        status, _ = await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": None, "body": "31"},
+        )
+        assert status == 429
+
+    async def test_retention_cleanup_removes_only_expired(self):
+        now = datetime.now(UTC).replace(tzinfo=None)
+        with self.engine.inner.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO work_chat_messages(sender_id,recipient_id,body,created_at) "
+                "VALUES (3,NULL,'old',:old),(3,NULL,'new',:new)"
+            ), {"old": now - timedelta(days=RETENTION_DAYS + 1), "new": now})
+        assert await cleanup_expired_chat(self.engine) == 1
+        with self.engine.inner.connect() as conn:
+            assert conn.execute(text("SELECT body FROM work_chat_messages")).scalar() == "new"
+
+    async def test_owner_control_view_is_audited_without_message_text(self):
+        for uid in (1001,1003,1004):
+            await self.accept(uid)
+        await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": 4, "body": "Содержимое не должно попасть в аудит"},
+        )
+        await self.call("/chat/owner/messages?a=3&b=4&after=0", uid=1001)
+        with self.engine.inner.connect() as conn:
+            row = conn.execute(text(
+                "SELECT action,details FROM audit_logs "
+                "WHERE action='work_chat_owner_thread_opened' ORDER BY id DESC LIMIT 1"
+            )).first()
+        assert row[0] == "work_chat_owner_thread_opened"
+        assert "Содержимое" not in row[1]
