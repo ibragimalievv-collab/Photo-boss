@@ -131,7 +131,7 @@ def employee_actions(user, roles, actor_id, actor_roles):
                 rows.append([("⛔ Уволить", f"employee:fire:{user.id}")])
             elif roles:
                 rows.append([("♻️ Восстановить", f"employee:restore:{user.id}")])
-    rows.append([("⬅️ К списку", "employee:list")])
+    rows.append([("⬅️ К списку", "employee:list" if user.active else "employee:archive")])
     return inline(rows)
 
 
@@ -147,29 +147,33 @@ async def send_employee_card(message, user_id, actor_id, actor_roles):
     )
 
 
-async def send_employee_list(message):
+async def send_employee_list(message, *, archived=False):
     async with Session() as session:
         users = (
             await session.scalars(
                 select(User)
-                .where(User.roles.any())
-                .order_by(User.active.desc(), User.name, User.id)
+                .where(User.roles.any(), User.active.is_(not archived))
+                .order_by(User.name, User.id)
                 .limit(50)
             )
         ).all()
-    buttons = [
-        [
-            (
-                f"{'✅' if user.active else '⛔'} {user.name[:40]}",
-                f"employee:view:{user.id}",
-            )
-        ]
-        for user in users
-    ]
-    buttons.append([("➕ Добавить сотрудника", "employee:add")])
+    buttons = [[(user.name[:40], f"employee:view:{user.id}")] for user in users]
+    if archived:
+        buttons.append([("⬅️ Действующие сотрудники", "employee:list")])
+    else:
+        buttons.append([("➕ Добавить сотрудника", "employee:add")])
+        buttons.append([("🗂 Уволенные сотрудники", "employee:archive")])
     await message.answer(
-        f"👥 Сотрудники: {len(users)}\n\n"
-        "Выберите сотрудника, чтобы изменить роли, уволить или восстановить.",
+        (
+            f"🗂 Уволенные сотрудники: {len(users)}\n\n"
+            if archived
+            else f"👥 Действующие сотрудники: {len(users)}\n\n"
+        )
+        + (
+            "История сохранена. Сотрудника можно восстановить."
+            if archived
+            else "Уволенные сотрудники находятся в отдельном разделе."
+        ),
         reply_markup=inline(buttons),
     )
 
@@ -206,6 +210,14 @@ async def employees_button(callback):
         return await callback.answer("Некорректная кнопка.", show_alert=True)
     await callback.answer()
     await send_employee_list(callback.message)
+
+
+@r.callback_query(F.data == "employee:archive")
+async def employees_archive(callback):
+    if callback.message is None:
+        return await callback.answer("Некорректная кнопка.", show_alert=True)
+    await callback.answer()
+    await send_employee_list(callback.message, archived=True)
 
 
 @r.callback_query(F.data.startswith("employee:view:"))
@@ -269,6 +281,7 @@ async def employee_fire_confirm(callback, current_user, current_roles):
         if not target.active:
             return await callback.answer("Сотрудник уже уволен.", show_alert=True)
         target.active = False
+        target.terminated_at = utc_now()
         actor = await get_user(session, callback.from_user.id)
         await audit(session, actor, "employee_fired", "user", target.id)
         await session.commit()
@@ -303,6 +316,7 @@ async def employee_restore(callback, current_roles):
         if target.active:
             return await callback.answer("Сотрудник уже работает.", show_alert=True)
         target.active = True
+        target.terminated_at = None
         actor = await get_user(session, callback.from_user.id)
         await audit(session, actor, "employee_restored", "user", target.id)
         await session.commit()
