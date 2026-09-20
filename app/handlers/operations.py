@@ -9,9 +9,17 @@ from sqlalchemy import select
 from ..access import StaffFilter
 from ..db import Session
 from ..keyboards import inline
-from ..models import BankReconciliation, Booking, Client, Receipt, RepeatSaleLead, Shooting, User
-from ..services.core import audit
+from ..models import (
+    BankReconciliation,
+    Booking,
+    Client,
+    Receipt,
+    RepeatSaleLead,
+    Shooting,
+    User,
+)
 from ..services.bookings import notify_photographer_assignment
+from ..services.core import audit
 from ..services.operations import (
     backup_payload,
     owner_kpis,
