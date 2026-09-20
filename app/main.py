@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.fsm.storage.memory import SimpleEventIsolation
@@ -22,6 +23,7 @@ from .handlers import (
     sales,
     training,
 )
+from .release_policy import install_legacy_guards, make_miniapp_router
 from .ui import CompactUiMiddleware, enable_compact_ui
 
 logger = logging.getLogger(__name__)
@@ -66,10 +68,12 @@ def create_dispatcher():
     else:
         dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
     dispatcher.update.outer_middleware(CompactUiMiddleware())
-    # Admin filtering must precede the manager's identically named Sales button.
+    install_legacy_guards(admin.r, sales.r)
+    # Admin filtering precedes the manager's identically named Sales button.
+    # The launcher also catches old Training shortcuts before the legacy router.
     dispatcher.include_routers(
-        common.r, receipts.r, admin.r, photographer.r, manager.r, sales.r,
-        operations.r, academy.r, training.r
+        common.r, make_miniapp_router(), receipts.r, admin.r, photographer.r,
+        manager.r, sales.r, operations.r, academy.r, training.r
     )
     return dispatcher
 
@@ -80,7 +84,11 @@ def create_bot():
         session = AiohttpSession(
             api=TelegramAPIServer.from_base(config.telegram_api_base, is_local=True)
         )
-    bot = Bot(config.bot_token, session=session)
+    bot = Bot(
+        config.bot_token,
+        session=session,
+        default=DefaultBotProperties(protect_content=True),
+    )
     enable_compact_ui(bot)
     return bot
 
