@@ -5,6 +5,8 @@ import asyncio
 import hashlib
 import io
 import logging
+
+import aiohttp
 from datetime import UTC, datetime, timedelta
 
 from aiogram.exceptions import TelegramAPIError
@@ -65,19 +67,18 @@ async def ensure_photo_storage(
         status="PENDING",
         attempts=0,
     )
-    session.add(row)
     try:
-        await session.flush()
+        async with session.begin_nested():
+            session.add(row)
+            await session.flush()
     except IntegrityError:
-        await session.rollback()
-        async with Session() as recovery:
-            found = await recovery.scalar(
-                select(PhotoStorage).where(
-                    PhotoStorage.shooting_id == shooting_id,
-                    PhotoStorage.telegram_unique_id == file_unique_id,
-                )
+        found = await session.scalar(
+            select(PhotoStorage).where(
+                PhotoStorage.shooting_id == shooting_id,
+                PhotoStorage.telegram_unique_id == file_unique_id,
             )
-            return found, False
+        )
+        return found, False
     return row, True
 
 
@@ -201,7 +202,14 @@ async def sync_one(bot, storage: YandexDisk) -> bool:
             "Photo stored on Yandex.Disk: photo=%s shooting=%s bytes=%s",
             job["photo_id"], job["shooting_id"], len(data),
         )
-    except (TelegramAPIError, OSError, ValueError, RuntimeError, asyncio.TimeoutError) as exc:
+    except (
+        TelegramAPIError,
+        aiohttp.ClientError,
+        OSError,
+        ValueError,
+        RuntimeError,
+        asyncio.TimeoutError,
+    ) as exc:
         await _finish_failure(job["id"], exc)
     return True
 
