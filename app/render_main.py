@@ -24,11 +24,12 @@ from .miniapp_api import install_miniapp
 from .miniapp_security import webhook_secret
 from .people import install_people
 from .services.academy import ACADEMY_LESSONS
+from .services.photo_storage import storage_loop
 from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.5-yandex-storage"
+RELEASE = "miniapp-3.6-shooting-storage"
 
 
 async def health(request):
@@ -82,6 +83,7 @@ async def on_startup(app):
     if not storage_status["connected"] or not storage_status["writeVerified"]:
         logger.warning("Yandex.Disk storage is degraded; Telegram workflows remain available")
     app["operations_task"] = asyncio.create_task(operations_loop(bot))
+    app["storage_task"] = asyncio.create_task(storage_loop(bot, app["yandex_disk"]))
     app["ready"] = True
     mark_ready(me.username)
     logger.info("Release %s ready; live Mini App enabled; demo data disabled", RELEASE)
@@ -90,11 +92,12 @@ async def on_startup(app):
 async def on_cleanup(app):
     clear_ready_file()
     app["ready"] = False
-    task = app.get("operations_task")
-    if task:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+    for key in ("operations_task", "storage_task"):
+        task = app.get(key)
+        if task:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
     await app["dispatcher"].storage.close()
     await app["bot"].session.close()
     await engine.dispose()

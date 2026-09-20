@@ -23,7 +23,9 @@ from .handlers import (
     sales,
     training,
 )
+from .services.photo_storage import storage_loop
 from .ui import CompactUiMiddleware, enable_compact_ui
+from .yandex_disk import YandexDisk, configured_from_env
 
 logger = logging.getLogger(__name__)
 READY_FILE = Path(os.getenv("HEALTHCHECK_FILE", "/tmp/photo-boss.ready"))
@@ -96,7 +98,12 @@ async def main():
         dispatcher = create_dispatcher()
         bot = create_bot()
         install_launch_policies(dispatcher, bot)
+        token, client_id = configured_from_env()
+        storage = YandexDisk(token, client_id)
+        if token:
+            await storage.verify(write_test=True)
         operations_task = asyncio.create_task(operations_loop(bot))
+        storage_task = asyncio.create_task(storage_loop(bot, storage)) if token else None
         try:
             me = await bot.me()
             logger.info("Telegram bot @%s is authenticated", me.username)
@@ -108,6 +115,10 @@ async def main():
             operations_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await operations_task
+            if storage_task:
+                storage_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await storage_task
             await dispatcher.storage.close()
             await bot.session.close()
     finally:
