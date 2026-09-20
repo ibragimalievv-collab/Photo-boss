@@ -134,6 +134,7 @@ class PhotoStorage(Base):
         ForeignKey("shootings.id", ondelete="CASCADE"), index=True
     )
     telegram_file_id: Mapped[str] = mapped_column(String(300))
+    telegram_unique_id: Mapped[str] = mapped_column(String(300), index=True)
     source_kind: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
@@ -146,6 +147,9 @@ class PhotoStorage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     __table_args__ = (
+        UniqueConstraint(
+            "shooting_id", "telegram_unique_id", name="uq_photo_storage_shooting_unique_file"
+        ),
         CheckConstraint("source_kind IN ('PHOTO', 'DOCUMENT')"),
         CheckConstraint("status IN ('PENDING', 'UPLOADING', 'STORED', 'FAILED')"),
         CheckConstraint("attempts >= 0"),
