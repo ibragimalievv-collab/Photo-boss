@@ -22,6 +22,7 @@ from ..models import (
     PayrollEntry,
     Sale,
     Setting,
+    Shooting,
     User,
     UserRole,
 )
@@ -280,6 +281,35 @@ async def employee_fire_confirm(callback, current_user, current_roles):
             )
         if not target.active:
             return await callback.answer("Сотрудник уже уволен.", show_alert=True)
+        if "PHOTOGRAPHER" in roles:
+            future = (
+                await session.scalars(
+                    select(Booking)
+                    .where(
+                        Booking.photographer_id == target.id,
+                        Booking.status.in_(
+                            (
+                                "NEW",
+                                "PENDING_CONFIRMATION",
+                                "CONFIRMED",
+                                "ASSIGNED",
+                                "RESCHEDULED",
+                            )
+                        ),
+                    )
+                    .with_for_update()
+                )
+            ).all()
+            for booking in future:
+                booking.photographer_id = None
+                booking.status = "CONFIRMED"
+                shooting = await session.scalar(
+                    select(Shooting).where(Shooting.booking_id == booking.id)
+                )
+                if shooting and shooting.status in {
+                    "ASSIGNED", "PENDING_CONFIRMATION"
+                }:
+                    shooting.status = "CONFIRMED"
         target.active = False
         target.terminated_at = datetime.now(UTC).replace(tzinfo=None)
         actor = await get_user(session, callback.from_user.id)
