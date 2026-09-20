@@ -65,6 +65,23 @@ class WorkRuleAcceptance(Base):
     )
 
 
+class WorkChatReadState(Base):
+    __tablename__ = "work_chat_read_states"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    scope_key: Mapped[str] = mapped_column(String(64))
+    last_read_message_id: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "scope_key", name="uq_work_chat_read_state_user_scope"
+        ),
+        CheckConstraint("last_read_message_id >= 0"),
+    )
+
+
 class WorkChatAttachment(Base):
     __tablename__ = "work_chat_attachments"
     id: Mapped[int] = mapped_column(primary_key=True)
