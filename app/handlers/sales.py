@@ -3,6 +3,7 @@ import json
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 
+import aiohttp
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.state import State, StatesGroup
@@ -248,7 +249,13 @@ async def sale_receipt(m, state, current_user):
         digest = hashlib.sha256(content).hexdigest()
         analysis = await extract_receipt(content)
         op_key = operation_key(analysis.get("fields", {}))
-    except (OSError, ValueError):
+    except (
+        TelegramAPIError,
+        aiohttp.ClientError,
+        OSError,
+        TimeoutError,
+        ValueError,
+    ):
         return await m.answer("Не удалось прочитать чек. Пришлите фотографию ещё раз.")
 
     async with Session() as session:
