@@ -132,7 +132,8 @@ class Attendance:
     async def location(self, request):
         body = await self.payload(request)
         lat, lon, accuracy = coordinates(body)
-        now = self.now(); day = now.astimezone(self.api.tz).date()
+        now = self.now()
+        day = now.astimezone(self.api.tz).date()
         table = 'shift_check_ins' if body['purpose'] == 'start' else 'shift_check_outs'
         async with self.api.engine.begin() as conn:
             actor = await self.locked_actor(conn, request)
@@ -173,7 +174,8 @@ class Attendance:
     async def photo(self, request):
         body = await self.payload(request, photo=True)
         raw = photo_bytes(body)
-        now = self.now(); day = now.astimezone(self.api.tz).date()
+        now = self.now()
+        day = now.astimezone(self.api.tz).date()
         is_start = body['purpose'] == 'start'
         table, field, final, at = ('shift_check_ins', 'full_body_file_id', 'STARTED', 'started_at') if is_start else ('shift_check_outs', 'workplace_file_id', 'FINISHED', 'ended_at')
         async with self.api.engine.begin() as conn:
