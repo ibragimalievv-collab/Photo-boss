@@ -1,4 +1,13 @@
-from app.services.academy import level_for, next_level, strongest_and_weakest
+from app.services.academy import (
+    ACADEMY_BLOCKS,
+    ACADEMY_LESSONS,
+    block_lessons,
+    lesson_is_unlocked,
+    level_for,
+    next_level,
+    strongest_and_weakest,
+    unlocked_block,
+)
 from app.services.training import TRAINING_CATEGORIES, shot_instruction
 from app.services.training_ai import validate
 
@@ -38,6 +47,22 @@ def test_every_training_category_has_five_different_shot_instructions():
         assert len(category.shot_plan) == 5
         assert len(set(category.shot_plan)) == 5
         assert all(shot_instruction(category, index) for index in range(1, 6))
+
+
+def test_month_program_has_seven_blocks_and_twenty_eight_days():
+    assert len(ACADEMY_BLOCKS) == 7
+    assert len(ACADEMY_LESSONS) == 28
+    assert [lesson.day for lesson in ACADEMY_LESSONS] == list(range(1, 29))
+    assert all(len(block_lessons(block.number)) == 4 for block in ACADEMY_BLOCKS)
+
+
+def test_next_block_requires_four_lessons_and_accepted_practice():
+    first = {lesson.slug for lesson in block_lessons(1)}
+    second_slug = block_lessons(2)[0].slug
+    assert unlocked_block(first, set()) == 1
+    assert not lesson_is_unlocked(second_slug, first, set())
+    assert unlocked_block(first, {"woman"}) == 2
+    assert lesson_is_unlocked(second_slug, first, {"woman"})
 
 
 def test_ai_acceptance_requires_photo_boss_threshold_and_no_reshoot():
