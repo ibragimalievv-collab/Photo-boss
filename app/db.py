@@ -43,6 +43,18 @@ async def init_db():
                     "DOUBLE PRECISION NOT NULL DEFAULT 0"
                 )
             )
+            await connection.execute(text(
+                "ALTER TABLE training_assignments ADD COLUMN IF NOT EXISTS "
+                "ai_score INTEGER"
+            ))
+            await connection.execute(text(
+                "ALTER TABLE training_assignments ADD COLUMN IF NOT EXISTS "
+                "ai_analysis TEXT"
+            ))
+            await connection.execute(text(
+                "ALTER TABLE training_assignments ADD COLUMN IF NOT EXISTS "
+                "review_source VARCHAR(20)"
+            ))
             column_type = await connection.scalar(
                 text(
                     """

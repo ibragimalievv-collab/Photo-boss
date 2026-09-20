@@ -50,6 +50,7 @@ class Config:
     training_timezone: str
     openai_api_key: str = field(default="", repr=False)
     receipt_analysis_model: str = "gpt-4.1-mini"
+    academy_analysis_model: str = "gpt-4.1-mini"
     redis_url: str | None = field(default=None, repr=False)
 
     @classmethod
@@ -114,6 +115,10 @@ class Config:
             openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
             receipt_analysis_model=(
                 os.getenv("RECEIPT_ANALYSIS_MODEL", "gpt-4.1-mini").strip()
+                or "gpt-4.1-mini"
+            ),
+            academy_analysis_model=(
+                os.getenv("ACADEMY_ANALYSIS_MODEL", "gpt-4.1-mini").strip()
                 or "gpt-4.1-mini"
             ),
             redis_url=os.getenv("REDIS_URL", "").strip() or None,
