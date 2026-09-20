@@ -60,13 +60,20 @@ def handler(page_state, role, sent):
                 return r.fulfill(status=201, json={"message": {
                     "id": 2, "senderId": 1, "recipientId": body["peerId"],
                     "body": body["body"], "createdAt": "2026-09-20T11:00:00",
-                    "senderName": "Test",
+                    "senderName": "Test", "attachment": None,
                 }})
             return r.fulfill(json={"messages": [{
                 "id": 1, "senderId": 2, "recipientId": None,
                 "body": "<img src=x onerror=alert(1)>", "createdAt": "2026-09-20T10:59:00",
-                "senderName": "Employee",
+                "senderName": "Employee", "attachment": None,
             }]})
+        if path == "/api/miniapp/chat/attachments" and r.request.method == "POST":
+            return r.fulfill(status=201, json={"message": {
+                "id": 9, "senderId": 1, "recipientId": None, "body": "",
+                "createdAt": "2026-09-20T11:01:00", "senderName": "Test",
+                "attachment": {"id": 7, "name": "report.pdf",
+                    "mimeType": "application/pdf", "size": 1234, "isImage": False},
+            }})
         if path == "/api/miniapp/chat/owner/threads":
             return r.fulfill(json={"threads": [{
                 "a": {"id": 2, "name": "Employee A"}, "b": {"id": 3, "name": "Employee B"},
@@ -100,6 +107,14 @@ def main():
                 page.locator('textarea[name="body"]').fill("Тест рабочего чата")
                 page.locator(".pb-chat-send").click()
                 assert sent and sent[-1]["body"] == "Тест рабочего чата"
+                page.locator('input[name="file"]').set_input_files({
+                    "name": "report.pdf",
+                    "mimeType": "application/pdf",
+                    "buffer": b"%PDF-1.7 fixture",
+                })
+                page.locator(".pb-chat-send").click()
+                page.get_by_text("report.pdf", exact=True).wait_for()
+                assert page.locator(".pb-chat-file").count() == 1
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 2")
                 page.locator('[data-chat="home"]').click()
                 page.locator('[data-peer="2"]').click()
