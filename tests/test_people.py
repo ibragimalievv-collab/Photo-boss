@@ -4,15 +4,15 @@ import unittest
 from urllib.parse import urlsplit
 
 import pytest
+import test_miniapp_release as baseline
 from sqlalchemy import text
 
 from app.miniapp_security import AccessError
 from app.people import GENERAL_RULES, People, check_editor, positive_id, staff_payload
-from test_miniapp_release import MiniAppTests, Request
 
 
 def payload(**changes):
-    return dict(name="New employee", telegramId="2001", roles=["PHOTOGRAPHER"], hotelIds=[1]) | changes
+    return {"name": "New employee", "telegramId": "2001", "roles": ["PHOTOGRAPHER"], "hotelIds": [1]} | changes
 
 
 @pytest.mark.parametrize("bad", [True, 0, -1, 1.2, [], {}, "-1", "1e3", "１", "", 2**52])
@@ -21,9 +21,9 @@ def test_id_validation(bad):
         positive_id(bad, maximum=2**52-1)
 
 
-@pytest.mark.parametrize("changes", [dict(name=""), dict(name="x\ny"), dict(name="a"*151), dict(roles=[]),
-    dict(roles=["OWNER"]), dict(roles=["PHOTOGRAPHER","PHOTOGRAPHER"]), dict(roles=[[]]),
-    dict(hotelIds=[True]), dict(hotelIds=[1,1]), dict(extra="role_override"), dict(telegramId=True)])
+@pytest.mark.parametrize("changes", [{"name": ""}, {"name": "x\ny"}, {"name": "a"*151}, {"roles": []},
+    {"roles": ["OWNER"]}, {"roles": ["PHOTOGRAPHER","PHOTOGRAPHER"]}, {"roles": [[]]},
+    {"hotelIds": [True]}, {"hotelIds": [1,1]}, {"extra": "role_override"}, {"telegramId": True}])
 def test_invalid_payload(changes):
     with pytest.raises(AccessError):
         staff_payload(payload(**changes))
@@ -41,17 +41,17 @@ def test_policy_and_plain_document():
 
 class StaffTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        await MiniAppTests.asyncSetUp(self)
+        await baseline.MiniAppTests.asyncSetUp(self)
         self.people = People(self.service)
         with self.engine.inner.begin() as conn:
             conn.execute(text("ALTER TABLE users ADD COLUMN created_at DATETIME"))
             conn.execute(text("CREATE UNIQUE INDEX unique_tg_id ON users(tg_id)"))
 
     async def asyncTearDown(self):
-        await MiniAppTests.asyncTearDown(self)
+        await baseline.MiniAppTests.asyncTearDown(self)
 
     async def call(self,path='/people',uid=1001,method='GET',body=None,token=None):
-        req=Request('/api/miniapp'+path,uid,method,body,token)
+        req=baseline.Request('/api/miniapp'+path,uid,method,body,token)
         route=urlsplit(path).path
         fn=self.people.documents if route=='/documents' else self.people.listing
         if method=='POST':fn=self.people.create
