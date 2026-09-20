@@ -10,12 +10,15 @@ from sqlalchemy import text
 
 from app.miniapp_security import AccessError
 from app.work_chat import (
+    MAX_ATTACHMENT_BYTES,
     MAX_MESSAGE,
     RETENTION_DAYS,
     WorkChat,
+    attachment_kind,
     clean_message,
     cleanup_expired_chat,
     positive_id,
+    safe_filename,
 )
 from app.work_rules import WORK_RULES_TEXT, WORK_RULES_VERSION, work_rules_hash
 
@@ -32,6 +35,23 @@ def test_message_cleaning_and_limits():
     for bad in ("", "   ", "x" * (MAX_MESSAGE + 1), "ok\x00bad"):
         with pytest.raises(AccessError):
             clean_message(bad)
+
+
+def test_attachment_validation_and_magic_detection():
+    assert MAX_ATTACHMENT_BYTES == 20 * 1024 * 1024
+    assert safe_filename("../folder\\guest photo.jpg") == "guest photo.jpg"
+    assert attachment_kind("x.jpg", b"\xff\xd8\xff" + b"x" * 20) == (
+        "image/jpeg", "jpg", True
+    )
+    assert attachment_kind("x.pdf", b"%PDF-1.7\nbody") == (
+        "application/pdf", "pdf", False
+    )
+    assert attachment_kind("notes.zip", b"PK\x03\x04data") == (
+        "application/octet-stream", "bin", False
+    )
+    for name in ("bad.exe", "page.html", "script.js", "vector.svg"):
+        with pytest.raises(AccessError):
+            attachment_kind(name, b"payload")
 
 
 def test_rules_are_explicit_and_whole_document_acceptance():
@@ -51,9 +71,13 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
             conn.execute(text("""CREATE TABLE work_rule_acceptances(
                 id INTEGER PRIMARY KEY,user_id INTEGER,version TEXT,text_sha256 TEXT,
                 accepted_at DATETIME,UNIQUE(user_id,version))"""))
+            conn.execute(text("""CREATE TABLE work_chat_attachments(
+                id INTEGER PRIMARY KEY,uploader_id INTEGER,storage_path TEXT,
+                original_name TEXT,mime_type TEXT,byte_size INTEGER,sha256 TEXT,
+                created_at DATETIME)"""))
             conn.execute(text("""CREATE TABLE work_chat_messages(
                 id INTEGER PRIMARY KEY,sender_id INTEGER,recipient_id INTEGER,
-                body TEXT,created_at DATETIME)"""))
+                attachment_id INTEGER,body TEXT,created_at DATETIME)"""))
 
     async def asyncTearDown(self):
         await baseline.MiniAppTests.asyncTearDown(self)
