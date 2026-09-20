@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -13,6 +13,7 @@ from sqlalchemy import text
 from .miniapp_security import AccessError
 from .work_rules import WORK_RULES_TEXT, WORK_RULES_VERSION, work_rules_hash
 
+logger = logging.getLogger(__name__)
 RETENTION_DAYS = 365
 MAX_MESSAGE = 2000
 RATE_LIMIT_PER_MINUTE = 30
@@ -272,7 +273,7 @@ class WorkChat:
         a_id, b_id = positive_id(request.query.get("a")), positive_id(request.query.get("b"))
         if a_id == b_id or actor["id"] in {a_id, b_id}:
             raise AccessError("Некорректный диалог.", 400)
-        after = positive_id(request.query["after"]) if "after" in request.query else 0
+        after = cursor_id(request.query.get("after"))
         async with self.engine.begin() as conn:
             await self.require_rules(conn, actor)
             people = await self.api.rows(
@@ -324,7 +325,14 @@ async def cleanup_expired_chat(engine):
 
 async def cleanup_loop(engine):
     while True:
-        await cleanup_expired_chat(engine)
+        try:
+            deleted = await cleanup_expired_chat(engine)
+            if deleted:
+                logger.info("Expired work-chat messages removed: %s", deleted)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Work-chat retention cleanup failed")
         await asyncio.sleep(24 * 60 * 60)
 
 
