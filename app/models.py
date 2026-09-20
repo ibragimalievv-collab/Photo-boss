@@ -76,7 +76,7 @@ class WorkChatMessage(Base):
     body: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
     __table_args__ = (
-        CheckConstraint("char_length(body) BETWEEN 1 AND 2000"),
+        CheckConstraint("length(body) BETWEEN 1 AND 2000"),
         CheckConstraint("recipient_id IS NULL OR recipient_id <> sender_id"),
     )
 
