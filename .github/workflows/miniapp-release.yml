@@ -26,7 +26,7 @@ jobs:
           POSTGRES_DB: miniapp_ci
         ports: ['5432:5432']
         options: >-
-          --health-cmd 'pg_isready -U ci -d miniapp_ci'
+          --health-cmd "pg_isready -U ci -d miniapp_ci"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
@@ -45,7 +45,9 @@ jobs:
           python -m pip install -r requirements-dev.txt playwright
           python -m playwright install --with-deps chromium
       - name: Actual release syntax and server tests
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p qa-release
           python -m compileall -q app tests
           for file in app/webapp/js/*.js; do node --check "$file"; done
@@ -55,9 +57,11 @@ jobs:
       - name: Save exact tested source without secrets
         if: always()
         run: |
-          mkdir -p qa-release
-          git rev-parse HEAD > qa-release/commit.txt
-          git archive --format=zip HEAD > qa-release/source.zip
+          if [ -d .git ]; then
+            mkdir -p qa-release
+            git rev-parse HEAD > qa-release/commit.txt
+            git archive --format=zip HEAD > qa-release/source.zip
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
