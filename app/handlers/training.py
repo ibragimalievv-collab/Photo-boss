@@ -88,7 +88,8 @@ async def send_reference_set(message, assignment):
         await message.answer_photo(
             FSInputFile(path),
             caption=(f"{category.title}\n\nЭталон {pose_index}/5\n"
-                     f"{shot_instruction(category, pose_index)}"),
+                     f"{shot_instruction(category, pose_index)}\n\n"
+                     f"{pose_index}/5"),
         )
     await message.answer(
         "Все 5 эталонов показаны. Теперь пришлите сюда 5 своих повторов "
