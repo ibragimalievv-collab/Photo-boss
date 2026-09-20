@@ -7,10 +7,13 @@ import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiohttp import web
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from .launch_policy import app_url
 from .miniapp_security import AccessError
 from .work_rules import WORK_RULES_TEXT, WORK_RULES_VERSION, work_rules_hash
 
