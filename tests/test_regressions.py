@@ -44,7 +44,6 @@ from app.models import (
     AuditLog,
     Booking,
     Client,
-    Compensation,
     Hotel,
     Package,
     PayrollEntry,
