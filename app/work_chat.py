@@ -245,14 +245,31 @@ class WorkChat:
             raise AccessError("Нельзя отправить сообщение самому себе.", 400)
         now = datetime.now(UTC).replace(tzinfo=None)
         minute_ago = now - timedelta(minutes=1)
+        notification_ids = []
         async with self.engine.begin() as conn:
             await self.require_rules(conn, actor)
             if peer_id is not None:
                 target = await self.api.rows(
-                    conn, "SELECT id FROM users WHERE id=:id AND active=TRUE", id=peer_id
+                    conn,
+                    "SELECT id,tg_id FROM users WHERE id=:id AND active=TRUE",
+                    id=peer_id,
                 )
                 if not target:
                     raise AccessError("Сотрудник сейчас недоступен.", 409)
+                notification_ids = [target[0]["tg_id"]]
+            else:
+                targets = await self.api.rows(
+                    conn,
+                    """SELECT DISTINCT u.tg_id
+                       FROM users u
+                       JOIN user_roles ur ON ur.user_id=u.id
+                       WHERE u.active=TRUE AND u.id<>:sender
+                         AND ur.role IN ('OWNER','ADMIN','MANAGER','PHOTOGRAPHER')
+                       ORDER BY u.tg_id
+                       LIMIT 200""",
+                    sender=actor["id"],
+                )
+                notification_ids = [row["tg_id"] for row in targets]
             count = await self.api.rows(
                 conn,
                 """SELECT COUNT(*) AS n FROM work_chat_messages
@@ -268,6 +285,11 @@ class WorkChat:
                    RETURNING id,created_at""",
                 sender=actor["id"], recipient=peer_id, body=message, created=now,
             )
+        await self.notify(
+            notification_ids,
+            sender_name=actor["name"],
+            general=peer_id is None,
+        )
         return web.json_response({
             "message": {"id": rows[0]["id"], "senderId": actor["id"],
                         "recipientId": peer_id, "body": message,
