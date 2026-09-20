@@ -38,6 +38,7 @@ jobs:
         run: |
           python -m compileall -q app tests
           ruff check app tests
+          node --check app/attendance_ui/attendance.js
           python -m pytest -q
 
       - name: Build and start the complete Docker stack

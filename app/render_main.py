@@ -27,7 +27,7 @@ from .services.academy import ACADEMY_LESSONS
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.3-people-pilot"
+RELEASE = "miniapp-3.4-camera-only"
 
 
 async def health(request):
