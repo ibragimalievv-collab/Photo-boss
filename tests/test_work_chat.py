@@ -124,6 +124,37 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
         assert (await self.call("/chat/owner/threads", uid=1002))[0] == 403
         assert (await self.call("/chat/owner/messages?a=3&b=4&after=0", uid=1002))[0] == 403
 
+    async def test_private_message_sends_telegram_push_without_body_preview(self):
+        for uid in (1003, 1004):
+            await self.accept(uid)
+        self.bot.send_message.reset_mock()
+        status, _ = await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": 4, "body": "Секретный рабочий текст"},
+        )
+        assert status == 201
+        assert self.bot.send_message.await_count == 1
+        call = self.bot.send_message.await_args
+        assert call.args[0] == 1004
+        assert "Секретный рабочий текст" not in call.args[1]
+        assert "User 3" in call.args[1]
+        assert call.kwargs["disable_notification"] is False
+        assert call.kwargs["protect_content"] is True
+        assert call.kwargs["reply_markup"] is not None
+
+    async def test_general_message_notifies_other_active_staff_not_sender(self):
+        await self.accept(1003)
+        self.bot.send_message.reset_mock()
+        status, _ = await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": None, "body": "Общая новость"},
+        )
+        assert status == 201
+        recipients = {call.args[0] for call in self.bot.send_message.await_args_list}
+        assert 1003 not in recipients
+        assert {1001, 1002, 1004, 1005}.issubset(recipients)
+        assert all("Общая новость" not in call.args[1] for call in self.bot.send_message.await_args_list)
+
     async def test_inactive_account_cannot_use_chat(self):
         assert (await self.call("/chat/rules", uid=1006))[0] == 403
 
