@@ -18,14 +18,14 @@ from ..models import (
     ShiftCheckOut,
     Shooting,
 )
-from ..services.bookings import booking_card
-from ..services.commissions import photographer_percent
+from ..services.bookings import booking_card, notify_manager_ready_for_sale
 from ..services.core import ROLES, audit, get_user, has, menu, roles_of
 from ..services.photo_storage import (
     MAX_TELEGRAM_IMAGE_BYTES,
     ensure_photo_storage,
     storage_summary,
 )
+from ..services.sale_workflow import finalize_photographer_commissions
 from ..services.shifts import LATE_FINE, is_late, shift_now
 
 r = Router()
@@ -359,27 +359,31 @@ async def shoots(m):
         if not rows:
             return await m.answer("Съёмок нет.")
         for b, sh in rows:
-            await m.answer(
-                await booking_card(s, b),
-                reply_markup=inline(
-                    [
-                        [
-                            ("📥 Забрал съёмку", f"photo:pickup:{sh.id}", "primary"),
-                        ],
-                        [
-                            ("📸 Отснял съёмку", f"photo:shot:{sh.id}", "primary"),
-                        ],
-                        [
-                            ("💰 Готово к продаже", f"photo:ready:{sh.id}", "success"),
-                        ],
-                    ]
-                ),
-            )
+            buttons = []
+            if sh.status == "ASSIGNED":
+                buttons = [[("📥 Забрать съёмку", f"photo:pickup:{sh.id}", "primary")]]
+            elif sh.status == "PICKED_UP":
+                buttons = [[("▶️ Начать фотосессию", f"photo:start:{sh.id}", "primary")]]
+            elif sh.status == "SHOOTING":
+                buttons = [[("⏹ Окончить фотосессию", f"photo:finish:{sh.id}", "primary")]]
+            elif sh.status == "SHOT":
+                buttons = [[("✅ Готово к продаже", f"photo:ready:{sh.id}", "success")]]
+            elif sh.status == "READY_FOR_SALE" and sh.full_upload_completed_at is None:
+                buttons = [[("☁️ Загрузить всю съёмку", f"photo:full_upload:{sh.id}", "primary")]]
+            text = await booking_card(s, b)
+            if sh.status == "READY_FOR_SALE":
+                text += (
+                    "\n\n☁️ Полная съёмка: загружена."
+                    if sh.full_upload_completed_at
+                    else "\n\n☁️ Полная съёмка: можно загрузить позже. "
+                         "Ставка фотографа будет определена только после полной загрузки."
+                )
+            await m.answer(text, reply_markup=inline(buttons) if buttons else None)
 
 
 @r.callback_query(
     F.data.startswith(
-        ("photo:pickup:", "photo:shot:", "photo:ready:")
+        ("photo:pickup:", "photo:start:", "photo:finish:", "photo:ready:")
     )
 )
 async def action(c: CallbackQuery, state):
@@ -392,8 +396,9 @@ async def action(c: CallbackQuery, state):
         return await c.answer("Некорректная кнопка.")
     transitions = {
         "pickup": ("ASSIGNED", "PICKED_UP", "accepted_at"),
-        "shot": ("PICKED_UP", "SHOT", "completed_at"),
-        "ready": ("SHOT", "UPLOADING", "completed_at"),
+        "start": ("PICKED_UP", "SHOOTING", "started_at"),
+        "finish": ("SHOOTING", "SHOT", "completed_at"),
+        "ready": ("SHOT", "READY_FOR_SALE", "ready_for_sale_at"),
     }
     async with Session() as s:
         u = await get_user(s, c.from_user.id)
@@ -412,30 +417,77 @@ async def action(c: CallbackQuery, state):
             return await c.answer(
                 "Этот шаг уже выполнен или предыдущий ещё не завершён."
             )
+        now = datetime.now(UTC).replace(tzinfo=None)
         sh.status = target
-        setattr(sh, timestamp, datetime.now(UTC).replace(tzinfo=None))
+        setattr(sh, timestamp, now)
         b.status = target
         await audit(s, u, f"shooting_{act}", "shooting", sid)
         await s.commit()
         if act == "ready":
-            await state.set_state(PhotoUploadFlow.uploading)
-            await state.set_data({"shooting_id": sid})
-            await c.message.answer(
-                "📤 Загрузите сюда все готовые фотографии этой съёмки. "
-                "Можно отправлять по одной или альбомом. JPEG, PNG и WebP до 20 МБ на файл. "
-                "Photo Boss автоматически перенесёт их в папку этой съёмки на Яндекс.Диске. "
-                "Когда закончите, нажмите кнопку ниже.",
-                reply_markup=inline(
-                    [[("✅ Завершить загрузку", "photo:upload_done", "success")]]
-                ),
-            )
-        else:
-            labels = {
-                "pickup": "📥 Съёмка забрана.",
-                "shot": "📸 Съёмка закончена.",
-            }
-            await c.message.answer(labels[act])
-        await c.answer()
+            await notify_manager_ready_for_sale(c.bot, s, b)
+    await state.clear()
+    await c.answer()
+    labels = {
+        "pickup": (
+            "📥 Съёмка принята. Когда будете готовы начать, нажмите кнопку.",
+            [[("▶️ Начать фотосессию", f"photo:start:{sid}", "primary")]],
+        ),
+        "start": (
+            "▶️ Фотосессия начата.",
+            [[("⏹ Окончить фотосессию", f"photo:finish:{sid}", "primary")]],
+        ),
+        "finish": (
+            "⏹ Фотосессия окончена. Обработайте выбранные кадры. "
+            "Когда материалы готовы для клиента, нажмите «Готово к продаже».",
+            [[("✅ Готово к продаже", f"photo:ready:{sid}", "success")]],
+        ),
+        "ready": (
+            "💰 Съёмка готова к продаже. Менеджеру отправлено уведомление.\n\n"
+            "Для продажи достаточно загрузить выбранные фотографии. "
+            "Всю съёмку можно загрузить позже. До полной загрузки процент фотографа "
+            "не фиксируется.",
+            [[("☁️ Загрузить всю съёмку", f"photo:full_upload:{sid}", "primary")]],
+        ),
+    }
+    text, buttons = labels[act]
+    await c.message.answer(text, reply_markup=inline(buttons))
+
+
+@r.callback_query(F.data.startswith("photo:full_upload:"))
+async def start_full_upload(c: CallbackQuery, state):
+    if c.message is None:
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    try:
+        sid = int(c.data.rsplit(":", 1)[1])
+        if not 0 < sid <= 2**31 - 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return await c.answer("Некорректная кнопка.", show_alert=True)
+    async with Session() as s:
+        u = await get_user(s, c.from_user.id)
+        sh = await s.get(Shooting, sid)
+        booking = await s.get(Booking, sh.booking_id) if sh else None
+        if (
+            sh is None
+            or booking is None
+            or booking.photographer_id != u.id
+            or sh.status != "READY_FOR_SALE"
+        ):
+            return await c.answer("Съёмка недоступна для загрузки.", show_alert=True)
+        if sh.full_upload_completed_at is not None:
+            return await c.answer("Вся съёмка уже отмечена как загруженная.", show_alert=True)
+    await state.set_state(PhotoUploadFlow.uploading)
+    await state.set_data({"shooting_id": sid})
+    await c.answer()
+    await c.message.answer(
+        "☁️ Загружайте все кадры этой съёмки. Можно отправлять по одному или альбомом. "
+        "JPEG, PNG и WebP до 20 МБ на файл.\n\n"
+        "Процент фотографа будет рассчитан только после кнопки "
+        "«Вся съёмка загружена».",
+        reply_markup=inline(
+            [[("✅ Вся съёмка загружена", "photo:upload_done", "success")]]
+        ),
+    )
 
 
 @r.message(PhotoUploadFlow.uploading, F.photo | F.document)
@@ -450,8 +502,7 @@ async def upload_sale_photo(m, state):
     if source_kind == "DOCUMENT":
         if attachment.file_size and attachment.file_size > MAX_TELEGRAM_IMAGE_BYTES:
             return await m.answer(
-                "Файл больше 20 МБ. Для синхронизации с Диском уменьшите его "
-                "или отправьте как обычную фотографию."
+                "Файл больше 20 МБ. Уменьшите его или отправьте как обычную фотографию."
             )
         if attachment.mime_type not in {"image/jpeg", "image/png", "image/webp"}:
             return await m.answer("Как файл можно отправлять только JPEG, PNG или WebP.")
@@ -459,9 +510,14 @@ async def upload_sale_photo(m, state):
         u = await get_user(s, m.from_user.id)
         shooting = await s.get(Shooting, shooting_id)
         booking = await s.get(Booking, shooting.booking_id) if shooting else None
-        if booking is None or booking.photographer_id != u.id or shooting.status != "UPLOADING":
+        if (
+            booking is None
+            or booking.photographer_id != u.id
+            or shooting.status != "READY_FOR_SALE"
+            or shooting.full_upload_completed_at is not None
+        ):
             await state.clear()
-            return await m.answer("Эта загрузка уже закрыта. Откройте «📸 Мои съёмки».")
+            return await m.answer("Эта полная загрузка уже закрыта.")
 
         existing_storage = await s.scalar(
             select(PhotoStorage).where(
@@ -506,18 +562,21 @@ async def upload_sale_photo(m, state):
         )
         sync = await storage_summary(s, shooting.id)
     await m.answer(
-        f"✅ Кадров в съёмке: {count}. "
+        f"✅ В полной съёмке сейчас: {count} кадров. "
         f"Яндекс.Диск: {sync['stored']} сохранено, {sync['pending']} в очереди"
         + (f", {sync['failed']} требуют повтора." if sync["failed"] else "."),
         reply_markup=inline(
-            [[("✅ Завершить загрузку", "photo:upload_done", "success")]]
+            [[("✅ Вся съёмка загружена", "photo:upload_done", "success")]]
         ),
     )
 
 
 @r.message(PhotoUploadFlow.uploading)
 async def require_sale_photo(m):
-    await m.answer("Отправьте JPEG, PNG или WebP как фотографию или файл до 20 МБ.")
+    await m.answer(
+        "Отправьте JPEG, PNG или WebP как фотографию или файл до 20 МБ, "
+        "либо нажмите «Вся съёмка загружена»."
+    )
 
 
 @r.callback_query(PhotoUploadFlow.uploading, F.data == "photo:upload_done")
@@ -530,39 +589,44 @@ async def finish_photo_upload(c: CallbackQuery, state):
         u = await get_user(s, c.from_user.id)
         shooting = await s.get(Shooting, shooting_id, with_for_update=True)
         booking = await s.get(Booking, shooting.booking_id) if shooting else None
-        if booking is None or booking.photographer_id != u.id or shooting.status != "UPLOADING":
+        if (
+            booking is None
+            or booking.photographer_id != u.id
+            or shooting.status != "READY_FOR_SALE"
+            or shooting.full_upload_completed_at is not None
+        ):
             await state.clear()
             return await c.answer("Загрузка уже закрыта.", show_alert=True)
         count = await s.scalar(
             select(func.count(Photo.id)).where(Photo.shooting_id == shooting.id)
         )
         if not count:
-            return await c.answer("Сначала загрузите фотографии.", show_alert=True)
+            return await c.answer("Сначала загрузите всю съёмку.", show_alert=True)
         sync = await storage_summary(s, shooting.id)
-        shooting.status = "READY_FOR_SALE"
-        booking.status = "READY_FOR_SALE"
+        shooting.full_upload_completed_at = datetime.now(UTC).replace(tzinfo=None)
+        commission_state = await finalize_photographer_commissions(s, booking)
         await audit(
             s,
             u,
-            "photos_ready_for_sale",
+            "full_shoot_upload_completed",
             "shooting",
             shooting.id,
             (
-                f"photos={count};disk_stored={sync['stored']};"
+                f"photos={count};percent={commission_state['percent']};"
+                f"sales_updated={commission_state['sales']};"
                 f"disk_pending={sync['pending']};disk_failed={sync['failed']}"
             ),
         )
         await s.commit()
     await state.clear()
     await c.answer()
+    percent = commission_state["percent"]
     await c.message.answer(
-        f"💰 Готово к продаже. Загружено фотографий: {count}.\n"
-        f"Ставка фотографа: {photographer_percent(count):g}% от продаж этой съёмки. "
-        "Количество купленных фотографий на ставку не влияет.\n"
+        f"✅ Полная съёмка отмечена загруженной: {count} кадров.\n"
+        f"📈 Ставка фотографа за эту съёмку зафиксирована: {percent:g}%.\n"
+        f"Обновлено продаж: {commission_state['sales']}.\n"
         f"☁️ Яндекс.Диск: {sync['stored']} сохранено, {sync['pending']} ещё синхронизируются"
         + (f", ошибок: {sync['failed']}." if sync["failed"] else ".")
-        + "\nАкадемия уже видит эти кадры; автоматический ИИ-разбор включим отдельно "
-          "после проверки хранения и лимита расходов."
     )
 
 
