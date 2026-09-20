@@ -562,6 +562,55 @@ class AcademyLessonProgress(Base):
     )
 
 
+class AcademyReminder(Base):
+    __tablename__ = "academy_reminders"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    reminder_date: Mapped[date] = mapped_column(Date, index=True)
+    kind: Mapped[str] = mapped_column(String(30), default="DAILY_LESSON")
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "reminder_date", "kind", name="uq_academy_reminder"
+        ),
+    )
+
+
+class AcademyCertificate(Base):
+    __tablename__ = "academy_certificates"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    certificate_no: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    verification_code: Mapped[str] = mapped_column(
+        String(64), unique=True, index=True
+    )
+    final_score: Mapped[int] = mapped_column(Integer)
+    issued_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (
+        CheckConstraint(
+            "final_score BETWEEN 85 AND 100", name="ck_academy_certificate_score"
+        ),
+    )
+
+
+class AcademyLocation(Base):
+    __tablename__ = "academy_locations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    hotel_id: Mapped[int | None] = mapped_column(
+        ForeignKey("hotels.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(150))
+    description: Mapped[str] = mapped_column(Text, default="")
+    shot_plan: Mapped[str] = mapped_column(Text, default="[]")
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class AcademyReview(Base):
     __tablename__ = "academy_reviews"
     id: Mapped[int] = mapped_column(primary_key=True)

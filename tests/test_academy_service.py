@@ -8,6 +8,7 @@ from app.services.academy import (
     strongest_and_weakest,
     unlocked_block,
 )
+from app.services.academy_growth import personal_tip
 from app.services.training import TRAINING_CATEGORIES, shot_instruction
 from app.services.training_ai import validate
 
@@ -63,6 +64,17 @@ def test_next_block_requires_four_lessons_and_accepted_practice():
     assert not lesson_is_unlocked(second_slug, first, set())
     assert unlocked_block(first, {"woman"}) == 2
     assert lesson_is_unlocked(second_slug, first, {"woman"})
+
+
+def test_personal_tip_uses_weakest_ai_criterion():
+    import json
+    from types import SimpleNamespace
+
+    review = {"criteria": {"focus": 18, "light": 8, "composition": 14,
+                            "pose": 16, "emotion": 15, "variety": 14}}
+    tip = personal_tip([SimpleNamespace(ai_analysis=json.dumps(review))])
+    assert tip["criterion"] == "light"
+    assert "Свет" in tip["text"]
 
 
 def test_ai_acceptance_requires_photo_boss_threshold_and_no_reshoot():
