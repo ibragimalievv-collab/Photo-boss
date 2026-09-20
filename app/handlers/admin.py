@@ -912,9 +912,17 @@ async def admin_cancel_reason(m, state):
         f"Подтвердить отмену съёмки #{booking_id}?\n\nПричина: {reason}",
         reply_markup=inline([
             [("❌ Да, отменить съёмку", f"admin:shoot:cancel_confirm:{booking_id}", "danger")],
-            [("Нет, оставить", f"admin:shoot:view:{booking_id}")],
+            [("Нет, оставить", f"admin:shoot:cancel_abort:{booking_id}")],
         ]),
     )
+
+
+@r.callback_query(F.data.startswith("admin:shoot:cancel_abort:"))
+async def admin_cancel_abort(c, state):
+    await state.clear()
+    await c.answer("Отмена отменена.")
+    if c.message:
+        await c.message.answer("Съёмка оставлена без изменений.")
 
 
 @r.callback_query(F.data.startswith("admin:shoot:cancel_confirm:"))
