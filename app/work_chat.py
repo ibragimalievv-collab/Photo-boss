@@ -222,6 +222,90 @@ class WorkChat:
             )
         return web.json_response({"ok": True, "acceptedAt": now.isoformat()})
 
+    @staticmethod
+    def scope_key(peer_id):
+        return "general" if peer_id is None else f"peer:{peer_id}"
+
+    async def mark_read(self, conn, user_id, peer_id, message_id):
+        if not message_id:
+            return
+        await conn.execute(
+            text(
+                """INSERT INTO work_chat_read_states
+                   (user_id,scope_key,last_read_message_id,updated_at)
+                   VALUES (:uid,:scope,:mid,:now)
+                   ON CONFLICT (user_id,scope_key)
+                   DO UPDATE SET
+                     last_read_message_id=CASE
+                       WHEN excluded.last_read_message_id >
+                            work_chat_read_states.last_read_message_id
+                       THEN excluded.last_read_message_id
+                       ELSE work_chat_read_states.last_read_message_id
+                     END,
+                     updated_at=excluded.updated_at"""
+            ),
+            {
+                "uid": user_id,
+                "scope": self.scope_key(peer_id),
+                "mid": message_id,
+                "now": datetime.now(UTC).replace(tzinfo=None),
+            },
+        )
+
+    async def unread_counts(self, conn, user_id):
+        general_state = await self.api.rows(
+            conn,
+            """SELECT last_read_message_id
+               FROM work_chat_read_states
+               WHERE user_id=:uid AND scope_key='general'""",
+            uid=user_id,
+        )
+        general_last = (
+            int(general_state[0]["last_read_message_id"])
+            if general_state
+            else 0
+        )
+        general_rows = await self.api.rows(
+            conn,
+            """SELECT COUNT(*) AS n
+               FROM work_chat_messages
+               WHERE recipient_id IS NULL
+                 AND sender_id<>:uid
+                 AND id>:last""",
+            uid=user_id,
+            last=general_last,
+        )
+        general = int(general_rows[0]["n"] or 0)
+        private_rows = await self.api.rows(
+            conn,
+            """SELECT m.sender_id AS peer_id,COUNT(*) AS n
+               FROM work_chat_messages m
+               JOIN users u ON u.id=m.sender_id AND u.active=TRUE
+               LEFT JOIN work_chat_read_states r
+                 ON r.user_id=:uid
+                AND r.scope_key=('peer:' || CAST(m.sender_id AS TEXT))
+               WHERE m.recipient_id=:uid
+                 AND m.id>COALESCE(r.last_read_message_id,0)
+               GROUP BY m.sender_id""",
+            uid=user_id,
+        )
+        people = {
+            int(row["peer_id"]): int(row["n"] or 0)
+            for row in private_rows
+        }
+        return {
+            "total": general + sum(people.values()),
+            "general": general,
+            "people": people,
+        }
+
+    async def unread(self, request):
+        actor = request["miniapp_actor"]
+        async with self.engine.connect() as conn:
+            await self.require_rules(conn, actor)
+            counts = await self.unread_counts(conn, actor["id"])
+        return web.json_response(counts)
+
     async def people(self, request):
         actor = request["miniapp_actor"]
         async with self.engine.connect() as conn:
@@ -238,20 +322,27 @@ class WorkChat:
                 """SELECT user_id,role FROM user_roles
                    WHERE user_id IN (SELECT id FROM users WHERE active=TRUE)""",
             )
+            unread = await self.unread_counts(conn, actor["id"])
         role_map = {}
         for row in roles:
             role_map.setdefault(row["user_id"], []).append(row["role"])
         return web.json_response({
-            "general": {"id": "general", "name": "Общий чат"},
+            "general": {
+                "id": "general",
+                "name": "Общий чат",
+                "unread": unread["general"],
+            },
             "people": [
                 {
                     "id": row["id"],
                     "name": row["name"],
                     "roles": sorted(role_map.get(row["id"], [])),
+                    "unread": unread["people"].get(row["id"], 0),
                 }
                 for row in users
             ],
             "ownerControl": "OWNER" in actor["roles"],
+            "totalUnread": unread["total"],
         })
 
     async def notification_targets(self, conn, actor, peer_id):
@@ -340,7 +431,7 @@ class WorkChat:
         after = cursor_id(request.query.get("after"))
         if peer_id == actor["id"]:
             raise AccessError("Нельзя открыть диалог с самим собой.", 400)
-        async with self.engine.connect() as conn:
+        async with self.engine.begin() as conn:
             await self.require_rules(conn, actor)
             if peer_id is not None:
                 person = await self.api.rows(
@@ -351,7 +442,18 @@ class WorkChat:
             rows = await self._messages(
                 conn, actor_id=actor["id"], peer_id=peer_id, after=after
             )
-        return web.json_response({"messages": self.pack_messages(rows)})
+            if rows:
+                await self.mark_read(
+                    conn,
+                    actor["id"],
+                    peer_id,
+                    max(int(row["id"]) for row in rows),
+                )
+            unread = await self.unread_counts(conn, actor["id"])
+        return web.json_response({
+            "messages": self.pack_messages(rows),
+            "unread": unread,
+        })
 
     async def send(self, request):
         actor = request["miniapp_actor"]
@@ -728,6 +830,7 @@ def install_work_chat(app, miniapp):
     app.router.add_get("/api/miniapp/chat/rules", service.rules)
     app.router.add_post("/api/miniapp/chat/rules/accept", service.accept_rules)
     app.router.add_get("/api/miniapp/chat/people", service.people)
+    app.router.add_get("/api/miniapp/chat/unread", service.unread)
     app.router.add_get("/api/miniapp/chat/messages", service.messages)
     app.router.add_post("/api/miniapp/chat/messages", service.send)
     app.router.add_post("/api/miniapp/chat/attachments", service.upload_attachment)
