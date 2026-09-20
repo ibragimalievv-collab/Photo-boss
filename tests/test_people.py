@@ -86,10 +86,16 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_protected_roles_and_self(self):
         assert (await self.edit(uid=2,actor=1002,name='Self'))[0]==403
-        assert (await self.edit(uid=1,name='Owner'))[0]==403
-        assert (await self.edit(uid=1,actor=1002,name='Owner'))[0]==403
+        # Valid assignable roles reach the owner-account guard rather than failing payload validation.
+        assert (await self.edit(uid=1,name='Owner',roles=['PHOTOGRAPHER']))[0]==403
+        assert (await self.edit(uid=1,actor=1002,name='Owner',roles=['PHOTOGRAPHER']))[0]==403
+        assert (await self.edit(roles=['OWNER']))[0]==400
         assert (await self.edit(actor=1002,roles=['ADMIN']))[0]==403
         assert (await self.call(uid=1002,method='POST',body=payload(roles=['ADMIN'])))[0]==403
+        with self.engine.inner.connect() as c:
+            assert c.execute(text("SELECT name FROM users WHERE id=1")).scalar()=='User 1'
+            assert c.execute(text("SELECT role FROM user_roles WHERE user_id=1")).scalar()=='OWNER'
+            assert c.execute(text("SELECT role FROM user_roles WHERE user_id=3")).scalar()=='PHOTOGRAPHER'
         assert (await self.edit(uid=2,name='Admin updated'))[0]==200
 
     async def test_update_and_revision(self):
