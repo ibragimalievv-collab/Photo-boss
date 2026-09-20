@@ -22,11 +22,12 @@ from .main import (
 )
 from .miniapp_api import install_miniapp
 from .miniapp_security import webhook_secret
+from .people import install_people
 from .services.academy import ACADEMY_LESSONS
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.2-attendance"
+RELEASE = "miniapp-3.3-people-pilot"
 
 
 async def health(request):
@@ -99,6 +100,7 @@ def main():
     app.router.add_get("/health", health)
     miniapp = install_miniapp(app, engine=engine, bot=bot, lessons=ACADEMY_LESSONS, tz_name=config.training_timezone)
     install_attendance(app, miniapp)
+    install_people(app, miniapp)
     SimpleRequestHandler(
         dispatcher=dispatcher, bot=bot, secret_token=webhook_secret(config.bot_token),
         handle_in_background=False,
