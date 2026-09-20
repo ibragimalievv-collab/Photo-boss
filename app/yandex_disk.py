@@ -121,14 +121,7 @@ class YandexDisk:
             return self.public_status()
         marker = SYSTEM + "/connection-check.txt"
         try:
-            await self.metadata(ROOT.rsplit("/", 1)[0] + "/") if False else None
-            # app:/ itself is outside safe_path(ROOT); metadata ROOT will be available after creation.
-            try:
-                await self.ensure_dir(ROOT)
-            except YandexDiskError as exc:
-                # If the app folder root itself is exposed but nested creation is forbidden,
-                # surface the provider error without leaking OAuth material.
-                raise exc
+            await self.ensure_dir(ROOT)
             await self.ensure_dir(SYSTEM)
             self.state["connected"] = True
             if write_test:
