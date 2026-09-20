@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.fsm.storage.memory import SimpleEventIsolation
@@ -30,7 +31,6 @@ READY_FILE = Path(os.getenv("HEALTHCHECK_FILE", "/tmp/photo-boss.ready"))
 
 async def operations_loop(bot, interval=300):
     from .services.operations import maybe_send_daily_backup, run_operations_once
-
     while True:
         try:
             async with Session() as session:
@@ -46,8 +46,7 @@ async def operations_loop(bot, interval=300):
             for tg_id in config.admin_ids:
                 with contextlib.suppress(Exception):
                     await bot.send_message(
-                        tg_id,
-                        "🚨 Photo Boss: фоновый процесс завершился с ошибкой. "
+                        tg_id, "🚨 Photo Boss: фоновый процесс завершился с ошибкой. "
                         "Проверьте логи Render; следующая попытка будет автоматически.",
                     )
         await asyncio.sleep(interval)
@@ -56,20 +55,14 @@ async def operations_loop(bot, interval=300):
 def create_dispatcher():
     if config.redis_url:
         from aiogram.fsm.storage.redis import RedisStorage
-
-        storage = RedisStorage.from_url(
-            config.redis_url, state_ttl=86400, data_ttl=86400
-        )
-        dispatcher = Dispatcher(
-            storage=storage, events_isolation=storage.create_isolation()
-        )
+        storage = RedisStorage.from_url(config.redis_url, state_ttl=86400, data_ttl=86400)
+        dispatcher = Dispatcher(storage=storage, events_isolation=storage.create_isolation())
     else:
         dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
     dispatcher.update.outer_middleware(CompactUiMiddleware())
-    # Admin filtering must precede the manager's identically named Sales button.
     dispatcher.include_routers(
         common.r, receipts.r, admin.r, photographer.r, manager.r, sales.r,
-        operations.r, academy.r, training.r
+        operations.r, academy.r, training.r,
     )
     return dispatcher
 
@@ -77,10 +70,8 @@ def create_dispatcher():
 def create_bot():
     session = None
     if config.telegram_api_base:
-        session = AiohttpSession(
-            api=TelegramAPIServer.from_base(config.telegram_api_base, is_local=True)
-        )
-    bot = Bot(config.bot_token, session=session)
+        session = AiohttpSession(api=TelegramAPIServer.from_base(config.telegram_api_base, is_local=True))
+    bot = Bot(config.bot_token, session=session, default=DefaultBotProperties(protect_content=True))
     enable_compact_ui(bot)
     return bot
 
@@ -95,10 +86,8 @@ def mark_ready(username):
 
 
 async def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    from .launch_policy import install_launch_policies
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     clear_ready_file()
     try:
         config.validate()
@@ -106,20 +95,20 @@ async def main():
         await init_db()
         dispatcher = create_dispatcher()
         bot = create_bot()
+        install_launch_policies(dispatcher, bot)
         operations_task = asyncio.create_task(operations_loop(bot))
         try:
             me = await bot.me()
             logger.info("Telegram bot @%s is authenticated", me.username)
             mark_ready(me.username)
             await dispatcher.start_polling(
-                bot,
-                allowed_updates=dispatcher.resolve_used_update_types(),
-                close_bot_session=False,
+                bot, allowed_updates=dispatcher.resolve_used_update_types(), close_bot_session=False,
             )
         finally:
             operations_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await operations_task
+            await dispatcher.storage.close()
             await bot.session.close()
     finally:
         clear_ready_file()
