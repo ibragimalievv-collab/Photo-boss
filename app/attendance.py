@@ -194,7 +194,8 @@ class Attendance:
             file_id = await self.send_photo(actor, raw, body['purpose'])
             if self.now().astimezone(self.api.tz).date() != day:
                 raise AccessError('Рабочая дата изменилась. Обновите экран.', 409)
-            from .services.shifts import is_late, LATE_FINE
+            from .services.shifts import LATE_FINE, is_late
+
             late = bool(is_start and is_late(now))
             fine = LATE_FINE if late else 0
             extra = ',late=:late,fine_amount=:fine' if is_start else ''
