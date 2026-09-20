@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -42,7 +43,7 @@ from ..services.sale_workflow import final_photographer_percent
 from ..yandex_disk import ROOT, YandexDisk, YandexDiskError, configured_from_env
 
 r = Router()
-r.message.filter(StaffFilter("PHOTOGRAPHER", "MANAGER"), F.text)
+r.message.filter(StaffFilter("PHOTOGRAPHER", "MANAGER"))
 r.callback_query.filter(StaffFilter("PHOTOGRAPHER", "MANAGER"))
 
 
@@ -400,7 +401,7 @@ async def sale_sold_frames(m, state, current_user):
             Decimal("0.00"),
         )
         draft.sold_photos = sold
-        draft.expected_amount = amount if expected_payment <= 0 else expected_payment
+        draft.expected_amount = expected_payment if expected_payment > 0 else None
         draft.status = "AWAITING_SELECTED"
         await session.commit()
     await state.set_state(S.selected)
@@ -548,8 +549,8 @@ async def finalize_sale(c, state, current_user, current_roles):
         package = await session.get(Package, booking.package_id)
         if package is None:
             return await c.answer("Пакет не найден.", show_alert=True)
-        amount = Decimal(str(draft.expected_amount))
-        # expected_amount may be net of an already approved deposit; the sale itself
+        amount = money(draft.expected_amount or 0)
+        # expected_amount is the still-unpaid part after approved deposits; the sale itself
         # must always use sold_photos * package price.
         sale_amount = (
             Decimal(draft.sold_photos)
@@ -694,5 +695,5 @@ async def finalize_sale(c, state, current_user, current_roles):
                 ),
                 disable_notification=False,
             )
-        except Exception:
+        except TelegramAPIError:
             pass
