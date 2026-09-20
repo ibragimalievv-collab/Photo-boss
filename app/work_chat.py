@@ -9,6 +9,7 @@ from pathlib import Path
 
 from aiohttp import web
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from .miniapp_security import AccessError
 from .work_rules import WORK_RULES_TEXT, WORK_RULES_VERSION, work_rules_hash
@@ -331,7 +332,7 @@ async def cleanup_loop(engine):
                 logger.info("Expired work-chat messages removed: %s", deleted)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except (OSError, SQLAlchemyError):
             logger.exception("Work-chat retention cleanup failed")
         await asyncio.sleep(24 * 60 * 60)
 
