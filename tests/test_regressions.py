@@ -51,6 +51,8 @@ from app.models import (
     Photo,
     Receipt,
     Sale,
+    SaleDraft,
+    SaleDraftPhoto,
     ShiftCheckIn,
     ShiftCheckOut,
     Shooting,
@@ -61,6 +63,7 @@ from app.models import (
 )
 from app.services.core import bootstrap, get_user, menu, roles_of
 from app.services.receipts import payment_totals, warnings_for
+from app.services.sale_workflow import finalize_photographer_commissions
 from app.services.training import TRAINING_CATEGORIES, training_day
 
 OWNER, ADMIN, MANAGER, PHOTO_A, PHOTO_B, STRANGER = range(5000000001, 5000000007)
@@ -147,7 +150,7 @@ def test_receipt_deposit_is_shared_across_multiple_sales(receipt_api):
         await approve_receipt(deposit.id, 1000)
         await prepare_sale(PHOTO_A)
         await message(PHOTO_A, "2")
-        await prepare_sale(PHOTO_A)
+        await prepare_sale(PHOTO_A, sold_photos=1)
         await message(PHOTO_A, "1")
         async with Session() as session:
             sales = (await session.scalars(select(Sale).order_by(Sale.id))).all()
@@ -484,28 +487,32 @@ def isolated_database():
     run(engine.dispose())
 
 
-async def prepare_sale(creator, *, role="PHOTOGRAPHER"):
+async def prepare_sale(creator, *, role="PHOTOGRAPHER", sold_photos=2):
+    """Seed a completed sale for finance/receipt regressions.
+
+    Interactive sale-flow behavior is covered separately below.
+    """
     async with Session() as session:
-        credited = await get_user(session, PHOTO_B)
-        booking = (await session.execute(select(Booking))).scalar_one()
-        shooting = (
-            await session.scalars(
-                select(Shooting).where(Shooting.booking_id == booking.id)
-            )
-        ).one()
-        if not await session.scalar(
-            select(func.count(Photo.id)).where(Photo.shooting_id == shooting.id)
-        ):
-            session.add_all(
-                [
-                    Photo(shooting_id=shooting.id, file_id=f"ready-sale-{index}")
-                    for index in range(1, 11)
-                ]
-            )
-            await session.commit()
-    state = state_for(creator)
-    await state.set_data({"booking": booking.id, "credited": credited.id, "role": role})
-    await state.set_state(S.photos)
+        booking = (await session.scalars(select(Booking))).one()
+        photographer = await get_user(session, PHOTO_B)
+        manager = await get_user(session, MANAGER)
+        creator_user = await get_user(session, creator)
+        credited = manager if role == "MANAGER" else photographer
+        percent = 16 if role == "MANAGER" else 10
+        amount = sold_photos * 400
+        sale = Sale(
+            booking_id=booking.id,
+            created_by_id=creator_user.id,
+            credited_user_id=credited.id,
+            commission_role=role,
+            sold_photos=sold_photos,
+            amount=amount,
+            percent=percent,
+            commission=amount * percent / 100,
+        )
+        session.add(sale)
+        await session.commit()
+        return sale.id
 
 
 def test_start_is_idempotent_and_does_not_grant_staff_to_strangers():
@@ -600,122 +607,155 @@ def test_manager_and_photographer_screens_and_admin_sales_route():
     run(scenario())
 
 
-@pytest.mark.parametrize("count", ["0", "-5", "text", "1.5", "2147483648"])
-def test_invalid_sale_quantity_is_rejected(count):
+@pytest.mark.parametrize("count", ["0", "-5", "text", "1.5", "10001"])
+def test_invalid_new_sale_quantity_is_rejected(count):
     async def scenario():
-        await prepare_sale(PHOTO_A)
-        await message(PHOTO_A, count)
         async with Session() as session:
-            assert (
-                await session.execute(select(func.count(Sale.id)))
-            ).scalar_one() == 0
+            booking = (await session.scalars(select(Booking))).one()
+            booking.status = "READY_FOR_SALE"
+            shooting = (await session.scalars(select(Shooting))).one()
+            shooting.status = "READY_FOR_SALE"
+            manager = await get_user(session, MANAGER)
+            draft = SaleDraft(
+                booking_id=booking.id,
+                created_by_id=manager.id,
+                status="AWAITING_COUNTS",
+                declared_photo_count=10,
+            )
+            session.add(draft)
+            await session.commit()
+            draft_id = draft.id
+        state = state_for(MANAGER)
+        await state.set_state(S.sold)
+        await state.set_data({"sale_draft_id": draft_id})
+        await message(MANAGER, count)
+        async with Session() as session:
+            assert await session.scalar(select(func.count(Sale.id))) == 0
 
     run(scenario())
 
 
-@pytest.mark.parametrize("creator", [PHOTO_A, MANAGER, ADMIN, OWNER])
-def test_sale_credits_other_photographer_and_uses_photo_count_tier(creator):
+def test_sale_requires_selected_photos_and_defers_photographer_percent():
     async def scenario():
         async with Session() as session:
+            booking = (await session.scalars(select(Booking))).one()
+            booking.status = "READY_FOR_SALE"
+            shooting = (await session.scalars(select(Shooting))).one()
+            shooting.status = "READY_FOR_SALE"
+            manager = await get_user(session, MANAGER)
+            draft = SaleDraft(
+                booking_id=booking.id,
+                created_by_id=manager.id,
+                status="AWAITING_SELECTED",
+                receipt_file_id="sale-check",
+                receipt_file_unique_id="sale-check-unique",
+                receipt_image_sha256="a" * 64,
+                receipt_analysis=json.dumps({"status": "extracted"}),
+                declared_photo_count=150,
+                sold_photos=2,
+                expected_amount=800,
+            )
+            session.add(draft)
+            await session.flush()
+            session.add(
+                SaleDraftPhoto(
+                    draft_id=draft.id,
+                    telegram_file_id="selected-1",
+                    telegram_unique_id="selected-1-unique",
+                    storage_path="app:/PhotoBoss/sales/test/1.jpg",
+                    sha256="b" * 64,
+                    byte_size=100,
+                )
+            )
+            await session.commit()
+            draft_id = draft.id
+
+        await callback(MANAGER, f"sale:finalize:{draft_id}")
+        async with Session() as session:
+            assert await session.scalar(select(func.count(Sale.id))) == 0
+
+        async with Session() as session:
+            session.add(
+                SaleDraftPhoto(
+                    draft_id=draft_id,
+                    telegram_file_id="selected-2",
+                    telegram_unique_id="selected-2-unique",
+                    storage_path="app:/PhotoBoss/sales/test/2.jpg",
+                    sha256="c" * 64,
+                    byte_size=100,
+                )
+            )
+            await session.commit()
+
+        await callback(MANAGER, f"sale:finalize:{draft_id}")
+        async with Session() as session:
+            sale = (await session.scalars(select(Sale))).one()
+            assert sale.sold_photos == 2
+            assert sale.declared_photo_count == 150
+            assert sale.amount == 800
+            assert sale.percent == 0
+            assert sale.commission == 0
+            assert sale.commission_finalized_at is None
+            receipt = (await session.scalars(select(Receipt))).one()
+            assert receipt.file_id == "sale-check"
+            assert receipt.status == "PENDING"
             shooting = (await session.scalars(select(Shooting))).one()
             session.add_all(
-                [
-                    Photo(shooting_id=shooting.id, file_id=f"sale-source-{index}")
-                    for index in range(1, 11)
-                ]
+                Photo(shooting_id=shooting.id, file_id=f"full-{index}")
+                for index in range(1, 151)
             )
-            await session.commit()
-        # Exercise the complete FSM, not just its final function.
-        for text in ["🧾 Продажа", "1", str(PHOTO_B), "PHOTOGRAPHER", "2"]:
-            await message(creator, text)
-        async with Session() as session:
-            sale = (await session.execute(select(Sale))).scalar_one()
-            assert sale.created_by_id == (await get_user(session, creator)).id
-            assert sale.credited_user_id == (await get_user(session, PHOTO_B)).id
-            assert sale.amount == 800
-            assert sale.percent == 10
-            assert sale.commission == 80
-            assert (
-                await session.execute(
-                    select(func.count(AuditLog.id)).where(
-                        AuditLog.action == "sale_created"
-                    )
-                )
-            ).scalar_one() == 1
-        await message(PHOTO_B, "📊 Моя статистика")
-        assert "Продажи засчитаны: 800.00" in telegram.calls[-1].text
-        if creator == PHOTO_A:
-            await message(PHOTO_A, "📊 Моя статистика")
-            assert "Продажи засчитаны: 0.00" in telegram.calls[-1].text
-        assert await state_for(creator).get_state() is None
-
-    run(scenario())
-
-
-def test_photographer_tier_takes_precedence_and_forged_role_is_rejected():
-    async def scenario():
-        async with Session() as session:
-            credited = await get_user(session, PHOTO_B)
-            session.add(
-                Compensation(user_id=credited.id, role="PHOTOGRAPHER", sales_percent=23)
+            shooting.full_upload_completed_at = datetime.now(timezone.utc).replace(
+                tzinfo=None
             )
+            booking = (await session.scalars(select(Booking))).one()
+            result = await finalize_photographer_commissions(session, booking)
             await session.commit()
-        await prepare_sale(PHOTO_A, role="MANAGER")
-        await message(PHOTO_A, "2")
-        async with Session() as session:
-            assert (
-                await session.execute(select(func.count(Sale.id)))
-            ).scalar_one() == 0
-        await prepare_sale(PHOTO_A)
-        await message(PHOTO_A, "2")
-        async with Session() as session:
-            sale = (await session.execute(select(Sale))).scalar_one()
-            assert sale.commission == 80
+            assert result["percent"] == 15
+            sale = (await session.scalars(select(Sale))).one()
+            assert sale.percent == 15
+            assert sale.commission == 120
+            assert sale.commission_finalized_at is not None
 
     run(scenario())
 
 
-def test_disabled_credited_employee_is_rechecked_at_save():
-    async def scenario():
-        await prepare_sale(PHOTO_A)
-        async with Session() as session:
-            user = await get_user(session, PHOTO_B)
-            user.active = False
-            await session.commit()
-        await message(PHOTO_A, "2")
-        async with Session() as session:
-            assert (
-                await session.execute(select(func.count(Sale.id)))
-            ).scalar_one() == 0
-
-    run(scenario())
-
-
-def test_shooting_order_ownership_and_repeated_clicks():
+def test_shooting_order_ownership_start_finish_ready_and_full_upload():
     async def scenario():
         await callback(PHOTO_A, "photo:pickup:1")
-        await callback(PHOTO_B, "photo:ready:1")
         async with Session() as session:
             assert (await session.get(Shooting, 1)).status == "ASSIGNED"
+
         await callback(PHOTO_B, "photo:pickup:1")
         async with Session() as session:
-            first_time = (await session.get(Shooting, 1)).accepted_at
+            shoot = await session.get(Shooting, 1)
+            first_time = shoot.accepted_at
+            assert shoot.status == "PICKED_UP"
+
         await callback(PHOTO_B, "photo:pickup:1")
-        await callback(PHOTO_B, "photo:shot:1")
+        await callback(PHOTO_B, "photo:start:1")
+        async with Session() as session:
+            assert (await session.get(Shooting, 1)).status == "SHOOTING"
+
+        await callback(PHOTO_B, "photo:finish:1")
+        async with Session() as session:
+            assert (await session.get(Shooting, 1)).status == "SHOT"
+
         await callback(PHOTO_B, "photo:ready:1")
-        assert await state_for(PHOTO_B).get_state() == PhotoUploadFlow.uploading.state
-        await photo(PHOTO_B, "sale-ready-photo")
-        await callback(PHOTO_B, "photo:upload_done")
         async with Session() as session:
             shoot = await session.get(Shooting, 1)
             assert shoot.status == "READY_FOR_SALE"
             assert shoot.accepted_at == first_time
-            assert await session.scalar(
-                select(func.count(Photo.id)).where(Photo.shooting_id == shoot.id)
-            ) == 1
-            assert (
-                await session.execute(select(func.count(AuditLog.id)))
-            ).scalar_one() == 4
+            assert shoot.ready_for_sale_at is not None
+
+        await callback(PHOTO_B, "photo:full_upload:1")
+        assert await state_for(PHOTO_B).get_state() == PhotoUploadFlow.uploading.state
+        async with Session() as session:
+            session.add(Photo(shooting_id=1, file_id="full-upload-test"))
+            await session.commit()
+        await callback(PHOTO_B, "photo:upload_done")
+        async with Session() as session:
+            shoot = await session.get(Shooting, 1)
+            assert shoot.full_upload_completed_at is not None
 
     run(scenario())
 
@@ -1254,132 +1294,50 @@ def test_owner_can_search_any_date(section, search_callback, expected):
 
 
 @pytest.mark.parametrize(
-    ("shoot_photos", "sold_photos", "expected_percent", "expected_commission"),
-    [(149, 2, 10, 80), (150, 2, 15, 120), (151, 2, 15, 120), (150, 150, 15, 9000)],
+    ("shoot_photos", "expected_percent"),
+    [(149, 10), (150, 15), (151, 15)],
 )
-def test_photographer_tier_uses_all_shoot_photos_not_purchased_quantity(
-    shoot_photos, sold_photos, expected_percent, expected_commission
+def test_photographer_percent_finalizes_only_from_full_shoot_count(
+    shoot_photos, expected_percent
 ):
     async def scenario():
-        await prepare_sale(PHOTO_A)
         async with Session() as session:
+            booking = (await session.scalars(select(Booking))).one()
             shooting = (await session.scalars(select(Shooting))).one()
-            shooting.status = "UPLOADING"
-            session.add_all(
-                [
-                    Photo(shooting_id=shooting.id, file_id=f"tier-photo-{index}")
-                    for index in range(11, shoot_photos + 1)
-                ]
+            photographer = await get_user(session, PHOTO_B)
+            creator = await get_user(session, MANAGER)
+            session.add(
+                Sale(
+                    booking_id=booking.id,
+                    created_by_id=creator.id,
+                    credited_user_id=photographer.id,
+                    commission_role="PHOTOGRAPHER",
+                    sold_photos=2,
+                    declared_photo_count=shoot_photos,
+                    amount=800,
+                    percent=0,
+                    commission=0,
+                )
             )
+            session.add_all(
+                Photo(shooting_id=shooting.id, file_id=f"tier-{index}")
+                for index in range(1, shoot_photos + 1)
+            )
+            await session.flush()
+            before = (await session.scalars(select(Sale))).one()
+            assert before.percent == 0 and before.commission == 0
+            shooting.full_upload_completed_at = datetime.now(timezone.utc).replace(
+                tzinfo=None
+            )
+            result = await finalize_photographer_commissions(session, booking)
             await session.commit()
-        upload_state = state_for(PHOTO_B)
-        await upload_state.set_state(PhotoUploadFlow.uploading)
-        await upload_state.set_data({"shooting_id": shooting.id})
-        await callback(PHOTO_B, "photo:upload_done")
-        assert f"Ставка фотографа: {expected_percent}%" in telegram.calls[-1].text
-        await message(PHOTO_B, "📸 Мои съёмки")
-        assert f"Ставка фотографа: {expected_percent}%" in telegram.calls[-1].text
-
-        await message(PHOTO_A, str(sold_photos))
-        assert f"Кадров в съёмке: {shoot_photos}" in telegram.calls[-1].text
-        assert f"куплено сейчас: {sold_photos}" in telegram.calls[-1].text
-        assert f"ставка: {expected_percent}%" in telegram.calls[-1].text
-        async with Session() as session:
             sale = (await session.scalars(select(Sale))).one()
-            assert sale.amount == sold_photos * 400
+            assert result["count"] == shoot_photos
             assert sale.percent == expected_percent
-            assert sale.commission == expected_commission
+            assert sale.commission == 800 * expected_percent / 100
 
     run(scenario())
 
-
-def test_shoots_on_same_day_do_not_share_photo_counts_or_reprice_each_other():
-    async def scenario():
-        await prepare_sale(PHOTO_A)
-        async with Session() as session:
-            first = (await session.scalars(select(Booking))).one()
-            first_shoot = (await session.scalars(select(Shooting))).one()
-            second = Booking(
-                hotel_id=first.hotel_id,
-                client_id=first.client_id,
-                room="102",
-                shoot_date=first.shoot_date,
-                shoot_time=time(14),
-                package_id=first.package_id,
-                manager_id=first.manager_id,
-                photographer_id=first.photographer_id,
-            )
-            session.add(second)
-            await session.flush()
-            second_shoot = Shooting(booking_id=second.id)
-            session.add(second_shoot)
-            await session.flush()
-            session.add_all(
-                Photo(shooting_id=first_shoot.id, file_id=f"first-{index}")
-                for index in range(11, 76)
-            )
-            session.add_all(
-                Photo(shooting_id=second_shoot.id, file_id=f"second-{index}")
-                for index in range(1, 76)
-            )
-            await session.commit()
-
-        async def sell(booking_id):
-            state = state_for(PHOTO_A)
-            await state.set_state(S.photos)
-            await state.set_data(
-                {"booking": booking_id, "credited": first.photographer_id,
-                 "role": "PHOTOGRAPHER"}
-            )
-            await message(PHOTO_A, "2")
-
-        # 75 + 75 frames on the same day still give 10% for each shoot.
-        await sell(first.id)
-        await sell(second.id)
-        async with Session() as session:
-            sales = (await session.scalars(select(Sale).order_by(Sale.id))).all()
-            assert [(sale.percent, sale.commission) for sale in sales] == [(10, 80)] * 2
-            session.add_all(
-                Photo(shooting_id=second_shoot.id, file_id=f"second-{index}")
-                for index in range(76, 151)
-            )
-            await session.commit()
-
-        # Reaching 150 in the second shoot affects only its sales.
-        await sell(second.id)
-        await sell(first.id)
-        async with Session() as session:
-            sales = (await session.scalars(select(Sale).order_by(Sale.id))).all()
-            assert [sale.percent for sale in sales] == [10, 15, 15, 10]
-            assert [sale.commission for sale in sales] == [80, 120, 120, 80]
-
-    run(scenario())
-
-
-@pytest.mark.parametrize("personal_percent", [None, 23])
-def test_shoot_photo_tier_does_not_override_manager_percent(personal_percent):
-    async def scenario():
-        await prepare_sale(PHOTO_A, role="MANAGER")
-        async with Session() as session:
-            credited = await get_user(session, PHOTO_B)
-            session.add(UserRole(user_id=credited.id, role="MANAGER"))
-            if personal_percent is not None:
-                session.add(Compensation(
-                    user_id=credited.id, role="MANAGER", sales_percent=personal_percent
-                ))
-            shooting = (await session.scalars(select(Shooting))).one()
-            session.add_all(
-                Photo(shooting_id=shooting.id, file_id=f"manager-{index}")
-                for index in range(11, 151)
-            )
-            await session.commit()
-        await message(PHOTO_A, "2")
-        async with Session() as session:
-            sale = (await session.scalars(select(Sale))).one()
-            assert sale.percent == (personal_percent or 16)
-            assert sale.commission == (184 if personal_percent else 128)
-
-    run(scenario())
 
 
 def test_owner_can_add_named_premium_and_open_employee_profile():
