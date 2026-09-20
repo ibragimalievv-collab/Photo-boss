@@ -62,7 +62,7 @@ def test_shift_photo_ui_uses_live_camera_only():
 
     source = (Path(__file__).resolve().parents[1] / "app" / "attendance_ui" / "attendance.js").read_text()
     assert "getUserMedia" in source
-    assert "data-att=\"camera\"" in source
+    assert "cameraView" in source
     assert "<video id=\"attCameraVideo\"" in source
     assert 'type=\"file\"' not in source
     assert "capture=" not in source
