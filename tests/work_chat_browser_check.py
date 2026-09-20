@@ -38,10 +38,10 @@ def handler(page_state, role, sent):
             )
         if path == "/api/miniapp/me":
             return r.fulfill(json={"user": {"id": 1, "name": "Test", "roles": [role]}})
+        if path == "/api/miniapp/chat/rules/accept":
+            page_state["accepted"] = True
+            return r.fulfill(json={"ok": True})
         if path == "/api/miniapp/chat/rules":
-            if r.request.method == "POST":
-                page_state["accepted"] = True
-                return r.fulfill(json={"ok": True})
             return r.fulfill(json={
                 "version": "fixture-v1", "sha256": "a" * 64,
                 "text": "Общие правила\nВладелец имеет доступ к рабочим чатам.",
