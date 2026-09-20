@@ -245,29 +245,36 @@ class People:
             check_editor(roles, before["roles"], self_edit=uid == actor["id"])
             if not before["active"]:
                 raise AccessError("Сотрудник уже находится в уволенных.", 409)
+            assigned = await self.api.rows(
+                conn,
+                """SELECT id FROM bookings
+                   WHERE photographer_id=:uid
+                     AND status IN (
+                       'NEW','PENDING_CONFIRMATION','CONFIRMED','ASSIGNED','RESCHEDULED'
+                     )
+                   ORDER BY id FOR UPDATE""",
+                uid=uid,
+            )
             await conn.execute(
                 text("UPDATE users SET active=FALSE,terminated_at=:now WHERE id=:id"),
                 {"id": uid, "now": now},
             )
-            await conn.execute(
-                text(
-                    """UPDATE bookings
-                       SET photographer_id=NULL,status='CONFIRMED'
-                       WHERE photographer_id=:uid
-                         AND status IN ('NEW','PENDING_CONFIRMATION','CONFIRMED','ASSIGNED','RESCHEDULED')"""
-                ),
-                {"uid": uid},
-            )
-            await conn.execute(
-                text(
-                    """UPDATE shootings SET status='CONFIRMED'
-                       WHERE booking_id IN (
-                           SELECT id FROM bookings
-                           WHERE photographer_id IS NULL AND status='CONFIRMED'
-                       )
-                         AND status IN ('ASSIGNED','PENDING_CONFIRMATION')"""
+            for row in assigned:
+                await conn.execute(
+                    text(
+                        "UPDATE bookings SET photographer_id=NULL,status='CONFIRMED' "
+                        "WHERE id=:id"
+                    ),
+                    {"id": row["id"]},
                 )
-            )
+                await conn.execute(
+                    text(
+                        """UPDATE shootings SET status='CONFIRMED'
+                           WHERE booking_id=:id
+                             AND status IN ('ASSIGNED','PENDING_CONFIRMATION')"""
+                    ),
+                    {"id": row["id"]},
+                )
             await self.api.audit_write(
                 conn, actor, "employee_fired", "user", uid,
                 json.dumps({"source": "miniapp"}, ensure_ascii=False),
