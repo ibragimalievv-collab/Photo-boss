@@ -43,6 +43,73 @@ async def init_db():
                     "DOUBLE PRECISION NOT NULL DEFAULT 0"
                 )
             )
+            await connection.execute(
+                text(
+                    "ALTER TABLE work_chat_messages ADD COLUMN IF NOT EXISTS "
+                    "attachment_id INTEGER"
+                )
+            )
+            await connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "uq_work_chat_messages_attachment_id "
+                    "ON work_chat_messages(attachment_id) "
+                    "WHERE attachment_id IS NOT NULL"
+                )
+            )
+            await connection.execute(
+                text(
+                    """
+                    DO $
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint
+                            WHERE conname = 'fk_work_chat_message_attachment'
+                              AND conrelid = 'work_chat_messages'::regclass
+                        ) THEN
+                            ALTER TABLE work_chat_messages
+                            ADD CONSTRAINT fk_work_chat_message_attachment
+                            FOREIGN KEY (attachment_id)
+                            REFERENCES work_chat_attachments(id)
+                            ON DELETE SET NULL;
+                        END IF;
+                    END $;
+                    """
+                )
+            )
+            await connection.execute(
+                text(
+                    """
+                    DO $
+                    DECLARE item RECORD;
+                    BEGIN
+                        FOR item IN
+                            SELECT conname FROM pg_constraint
+                            WHERE conrelid = 'work_chat_messages'::regclass
+                              AND contype = 'c'
+                              AND pg_get_constraintdef(oid) ILIKE '%length(body)%'
+                        LOOP
+                            EXECUTE format(
+                                'ALTER TABLE work_chat_messages DROP CONSTRAINT %I',
+                                item.conname
+                            );
+                        END LOOP;
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint
+                            WHERE conname = 'ck_work_chat_message_content'
+                              AND conrelid = 'work_chat_messages'::regclass
+                        ) THEN
+                            ALTER TABLE work_chat_messages
+                            ADD CONSTRAINT ck_work_chat_message_content
+                            CHECK (
+                                length(body) BETWEEN 0 AND 2000
+                                AND (length(body) > 0 OR attachment_id IS NOT NULL)
+                            );
+                        END IF;
+                    END $;
+                    """
+                )
+            )
             column_type = await connection.scalar(
                 text(
                     """
