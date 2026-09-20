@@ -36,7 +36,7 @@ def test_policy_and_plain_document():
             check_editor(roles,target,self_edit=own)
     check_editor(["OWNER"],["ADMIN"])
     assert "включая сообщения между двумя сотрудниками" in GENERAL_RULES
-    assert "Подписание сейчас отключено" in GENERAL_RULES
+    assert "не является договором оказания услуг" in GENERAL_RULES
 
 
 class StaffTests(unittest.IsolatedAsyncioTestCase):
