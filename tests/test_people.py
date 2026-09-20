@@ -45,6 +45,7 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
         self.people = People(self.service)
         with self.engine.inner.begin() as conn:
             conn.execute(text("ALTER TABLE users ADD COLUMN created_at DATETIME"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN terminated_at DATETIME"))
             conn.execute(text("CREATE UNIQUE INDEX unique_tg_id ON users(tg_id)"))
 
     async def asyncTearDown(self):
@@ -54,7 +55,15 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
         req=baseline.Request('/api/miniapp'+path,uid,method,body,token)
         route=urlsplit(path).path
         fn=self.people.documents if route=='/documents' else self.people.listing
-        if method=='POST':fn=self.people.create
+        if method=='POST':
+            if route.endswith('/fire'):
+                fn=self.people.fire
+                req.match_info={'id':route.split('/')[-2]}
+            elif route.endswith('/restore'):
+                fn=self.people.restore
+                req.match_info={'id':route.split('/')[-2]}
+            else:
+                fn=self.people.create
         if method=='PUT':
             fn=self.people.update
             req.match_info={'id':route.rsplit('/',1)[1]}
@@ -107,12 +116,19 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
             detail=c.execute(text("SELECT details FROM audit_logs WHERE action='miniapp_employee_updated'")).scalar()
             assert json.loads(detail)['before']['name']=='User 3'
 
-    async def test_deactivation_does_not_delete_business_records(self):
-        assert (await self.edit(active=False))[0]==200
+    async def test_fire_moves_employee_to_archive_without_deleting_history(self):
+        assert (await self.call('/people/3/fire',method='POST',body={}))[0]==200
         assert (await self.call('/documents',uid=1003))[0]==403
+        _,active=await self.call()
+        assert all(item['id']!=3 for item in active['items'])
+        _,archived=await self.call('/people?archived=1')
+        fired=next(item for item in archived['items'] if item['id']==3)
+        assert fired['active'] is False and fired['terminatedAt']
         with self.engine.inner.connect() as c:
             assert c.execute(text("SELECT COUNT(*) FROM sales WHERE credited_user_id=3")).scalar()==1
-        assert (await self.edit(active=True))[0]==200
+        assert (await self.call('/people/3/restore',method='POST',body={}))[0]==200
+        _,active=await self.call()
+        assert any(item['id']==3 for item in active['items'])
 
     async def test_latest_role_rechecked(self):
         with self.engine.inner.begin() as c:
