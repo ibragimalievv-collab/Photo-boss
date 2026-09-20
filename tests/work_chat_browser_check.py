@@ -113,8 +113,12 @@ def main():
                     "buffer": b"%PDF-1.7 fixture",
                 })
                 page.locator(".pb-chat-send").click()
-                page.get_by_text("report.pdf", exact=True).wait_for()
-                assert page.locator(".pb-chat-file").count() == 1
+                page.wait_for_timeout(800)
+                visible_error = page.locator(".pb-chat-error:not([hidden])")
+                assert visible_error.count() == 0, visible_error.first.inner_text() if visible_error.count() else ""
+                assert not errors, errors
+                page.locator(".pb-chat-file").wait_for(timeout=5000)
+                assert "report.pdf" in page.locator(".pb-chat-file").inner_text()
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 2")
                 page.locator('[data-chat="home"]').click()
                 page.locator('[data-peer="2"]').click()
