@@ -10,8 +10,8 @@ from app.miniapp_security import AccessError
 
 
 def payload(**changes):
-    data = dict(purpose="start", date="2026-09-20", latitude=41.5,
-                longitude=48.1, accuracy=12)
+    data = {"purpose": "start", "date": "2026-09-20", "latitude": 41.5,
+            "longitude": 48.1, "accuracy": 12}
     data.update(changes)
     return data
 
@@ -34,7 +34,7 @@ def test_unknown_accuracy_does_not_invent_precision():
                                   "data:image/jpeg;base64,@@@@", "data:image/jpeg;base64,AA=="])
 def test_invalid_photo_rejected(image):
     with pytest.raises(AccessError):
-        photo_bytes(dict(purpose="start", date="2026-09-20", image=image))
+        photo_bytes({"purpose": "start", "date": "2026-09-20", "image": image})
 
 
 def test_utc_normalization():
