@@ -124,6 +124,34 @@ class Photo(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class PhotoStorage(Base):
+    __tablename__ = "photo_storage"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    photo_id: Mapped[int] = mapped_column(
+        ForeignKey("photos.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    shooting_id: Mapped[int] = mapped_column(
+        ForeignKey("shootings.id", ondelete="CASCADE"), index=True
+    )
+    telegram_file_id: Mapped[str] = mapped_column(String(300))
+    source_kind: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    disk_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    byte_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    stored_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (
+        CheckConstraint("source_kind IN ('PHOTO', 'DOCUMENT')"),
+        CheckConstraint("status IN ('PENDING', 'UPLOADING', 'STORED', 'FAILED')"),
+        CheckConstraint("attempts >= 0"),
+    )
+
+
 class Sale(Base):
     __tablename__ = "sales"
     id: Mapped[int] = mapped_column(primary_key=True)
