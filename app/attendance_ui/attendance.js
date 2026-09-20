@@ -1,0 +1,111 @@
+/* Actual check-in/out. Never simulate saved locations, photos, or shifts. */
+import {api} from '/app/js/api.js';
+import {esc} from '/app/js/domain.js';
+
+export function phase(data) {
+ if (!data?.eligible) return 'CONTROL';
+ if (data.end?.status === 'FINISHED') return 'FINISHED';
+ if (data.start?.status === 'STARTED') return data.end ? 'END_PHOTO' : 'STARTED';
+ return data.start ? 'START_PHOTO' : 'NOT_STARTED';
+}
+
+export function getLocation(tg, browser = navigator, timeout = 16000) {
+ return new Promise((resolve, reject) => {
+  let done = false;
+  const finish = (value, error) => { if (done) return; done=true; clearTimeout(timer); error ? reject(new Error(error)) : resolve(value); };
+  const timer = setTimeout(() => finish(null, 'Не удалось получить координаты вовремя. Включите геолокацию и повторите.'), timeout);
+  const accept = x => {
+   if (!x) return finish(null, 'Доступ к геолокации не предоставлен. Разрешите его в настройках Telegram.');
+   const lat=x.latitude, lon=x.longitude, accuracy=x.horizontal_accuracy ?? x.accuracy ?? null;
+   if (!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180) return finish(null,'Телефон вернул некорректные координаты.');
+   finish({latitude:lat,longitude:lon,accuracy:Number.isFinite(accuracy)?accuracy:null});
+  };
+  const fallback = () => {
+   if (!browser.geolocation) return finish(null,'На этом устройстве геолокация недоступна. Попробуйте Telegram на телефоне.');
+   browser.geolocation.getCurrentPosition(p=>accept(p.coords),e=>finish(null,e.code===1?'Разрешение на геолокацию отклонено. Включите доступ в настройках приложения.':'Координаты недоступны. Включите геолокацию и повторите.'),{enableHighAccuracy:true,timeout:14000,maximumAge:0});
+  };
+  const manager=tg?.LocationManager;
+  if (!manager || !tg?.isVersionAtLeast?.('8.0')) return fallback();
+  const request = () => {
+   if (done) return;
+   if (!manager.isLocationAvailable) return fallback();
+   try { manager.getLocation(accept); } catch { finish(null,'Не удалось запросить геолокацию у Telegram.'); }
+  };
+  try { if (manager.isInited) request(); else manager.init(request); }
+  catch { finish(null,'Не удалось включить геолокацию Telegram.'); }
+ });
+}
+
+export async function shrinkPhoto(file) {
+ if (!file || file.size>20*1024*1024) throw new Error('Выберите фотографию до 20 МБ.');
+ const src=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=()=>rej(new Error('Не удалось прочитать фотографию.'));r.readAsDataURL(file);});
+ const image=await new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=()=>rej(new Error('Не удалось открыть фото. Используйте JPEG, PNG или WebP.'));i.src=src;});
+ const scale=Math.min(1,1280/Math.max(image.width,image.height));
+ const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(image.width*scale));canvas.height=Math.max(1,Math.round(image.height*scale));
+ const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(image,0,0,canvas.width,canvas.height);
+ let result=canvas.toDataURL('image/jpeg',.8);if(result.length>850000)result=canvas.toDataURL('image/jpeg',.5);
+ if(result.length>850000)throw new Error('Фото слишком большое. Сделайте снимок с меньшим разрешением.');
+ return result;
+}
+
+function install() {
+ const root=document.querySelector('#app');if (!root) return;
+ const link=document.createElement('link');link.rel='stylesheet';link.href='/shift/attendance.css';document.head.append(link);
+ const tg=window.Telegram?.WebApp;
+ const dialog=document.createElement('dialog');dialog.id='attendanceDialog';dialog.className='att-dialog';dialog.setAttribute('aria-label','Моя смена');document.body.append(dialog);
+ let data=null, failure='', busy=false, photo=null, purpose='start', generation=0, loading=false;
+ const clock=value=>value?new Intl.DateTimeFormat('ru-RU',{timeZone:data.timezone,hour:'2-digit',minute:'2-digit'}).format(new Date(value)):'—';
+ const labels={CONTROL:'Контроль смен',NOT_STARTED:'Смена не начата',START_PHOTO:'Начало ещё не подтверждено',STARTED:'Вы на смене',END_PHOTO:'Завершение ещё не подтверждено',FINISHED:'Смена завершена'};
+ const button=(label,action,kind='primary')=>`<button type="button" class="btn ${kind}" data-att="${action}" ${busy?'disabled':''}>${label}</button>`;
+ function card() {
+  if (!['','#home','#schedule','#more'].includes(location.hash)) return;
+  if(root.querySelector('#attendanceCard'))return;
+  const panel=document.createElement('section');panel.id='attendanceCard';panel.className='att-card';panel.setAttribute('aria-label','Смена и геолокация');
+  const title=labels[phase(data)]||'Моя смена';
+  panel.innerHTML=`<div class="att-card-copy"><div class="eyebrow">СМЕНА И ГЕОЛОКАЦИЯ</div><h2>${data?title:'Моя смена'}</h2><p>${failure?'Не удалось загрузить статус. Обновите его.':!data?'Загрузка статуса…':data.eligible?data.start?.at?`Начало ${clock(data.start.at)}${data.end?.at?` · Уход ${clock(data.end.at)}`:''}`:'Геолокация и фото при начале и завершении смены.':'Личные отметки фотографов и менеджеров; владелец контролирует график.'}</p></div><div class="att-card-actions">${button(!data?'Обновить':!data.eligible?'Проверить смены':phase(data)==='NOT_STARTED'?'Начать смену':phase(data)==='STARTED'?'Завершить смену':phase(data)==='FINISHED'?'Посмотреть отметки':'Продолжить отметку','open')}</div>`;
+  const head=root.querySelector('.page-head');if(head)head.after(panel);else root.prepend(panel);
+ }
+ function updateCard(){root.querySelector('#attendanceCard')?.remove();card();}
+ function message(text){const el=dialog.querySelector('#attError');if(el){el.textContent=text;el.hidden=false;}}
+ async function refresh(){if(loading)return;loading=true;try{data=await api('/attendance');failure='';}catch(e){failure=e.message;}finally{loading=false;updateCard();}}
+ function draw() {
+  if(!dialog.open)return;
+  const p=phase(data);if(p==='END_PHOTO'||p==='STARTED')purpose='end';else if(p==='START_PHOTO'||p==='NOT_STARTED')purpose='start';
+  const record=purpose==='start'?data?.start:data?.end;
+  const fresh=!!record?.locationFresh;
+  dialog.innerHTML=`<div class="att-dialog-head"><div><div class="eyebrow">PHOTO BOSS · МОЯ СМЕНА</div><h2>${data?labels[p]:'Статус смены'}</h2></div>${button('Закрыть','close','ghost')}</div><div id="attError" class="att-error" role="alert" ${failure?'':'hidden'}>${esc(failure)}</div>${!data?button('Обновить статус','reload'):p==='CONTROL'?`<p>Ваш аккаунт управляет работой команды. Личное начало смены доступно аккаунтам с ролью фотографа или менеджера записи.</p>${button('Открыть график сотрудников','schedule')}`:p==='FINISHED'?`<div class="att-done">✓ Начало: ${clock(data.start.at)}<br>✓ Завершение: ${clock(data.end.at)}<br>Геолокации и фотографии сохранены.</div>${button('Обновить','reload','ghost')}`:`<p>${purpose==='start'?'Чтобы начать смену, отправьте геолокацию и свежее фото в полный рост.':'Чтобы завершить смену, отправьте геолокацию и фото рабочего места.'}</p><div class="att-steps"><div><span class="att-step">1</span><div><strong>Геолокация</strong><p>${fresh?'✓ Координаты сохранены.':record?.locationSaved?'Координаты устарели. Получите их повторно.':'Местоположение запрашивается только по нажатию.'}</p>${button(fresh?'Получить заново':'Проверить геолокацию','location','secondary')} ${button('Настройки доступа','settings','ghost')}</div></div><div><span class="att-step">2</span><div><strong>${purpose==='start'?'Фото в полный рост':'Фото рабочего места'}</strong><p>Фотография сохранится в рабочей системе и вашем чате с ботом.</p><label class="btn secondary att-file ${!fresh?'att-disabled':''}">${photo?'Выбрать другое фото':'Сделать фото'}<input id="attPhoto" type="file" accept="image/jpeg,image/png,image/webp" capture="${purpose==='start'?'user':'environment'}" ${!fresh||busy?'disabled':''}></label>${photo?`<img class="att-preview" alt="Выбранная фотография" src="${photo}">`:''}</div></div></div><p class="att-notice">${esc(data.geoNotice)} Фотография сама по себе не доказывает время съёмки.</p>${purpose==='start'?`<p class="att-notice">Правило действующего бота: начало после ${esc(data.startTime)} — штраф ${data.lateFine} ₽. Подтверждение создаёт настоящую отметку, не учебную.</p>`:''}<button type="button" class="btn primary full-width" data-att="confirm" ${!photo||!fresh||busy?'disabled':''}>${busy?'Сохраняем…':purpose==='start'?'Подтвердить начало смены':'Подтвердить завершение смены'}</button><p class="att-caption">Закрыть экран ≠ подтвердить смену. До успешного сохранения статус не изменится.</p>`}`;
+ }
+ async function open(){generation++;photo=null;if(!dialog.open)dialog.showModal();draw();await refresh();draw();}
+ function close(){if(busy)return;generation++;photo=null;dialog.close();}
+ document.addEventListener('click',async e=>{
+  const target=e.target.closest('button');if(!target)return;
+  if(target.dataset.action==='shift'){e.preventDefault();e.stopImmediatePropagation();await open();return;}
+  if(!target.dataset.att)return;e.preventDefault();e.stopImmediatePropagation();
+  const act=target.dataset.att;
+  if(act==='close')return close();
+  if(act==='open')return open();
+  if(act==='reload'){await refresh();draw();return;}
+  if(act==='schedule'){close();location.hash='schedule';return;}
+  if(act==='settings'){try{if(tg?.LocationManager?.openSettings)tg.LocationManager.openSettings();else message('Разрешите местоположение в настройках разрешений Telegram или браузера.');}catch{message('Откройте настройки разрешений Telegram на телефоне.');}return;}
+  if(busy||!data?.eligible)return;
+  const version=generation;busy=true;draw();
+  try{
+   if(act==='location'){
+    const point=await getLocation(tg);if(version!==generation)return;
+    data=await api('/attendance/location',{method:'POST',body:{purpose,date:data.date,...point}});photo=null;
+   }else if(act==='confirm'){
+    if(!photo)throw new Error('Сначала сделайте фотографию.');
+    data=await api('/attendance/photo',{method:'POST',body:{purpose,date:data.date,image:photo}});photo=null;
+   }
+   failure='';
+  }catch(error){failure=error.message;}
+  finally{busy=false;updateCard();draw();}
+ },true);
+ dialog.addEventListener('cancel',e=>{if(busy)e.preventDefault();else{generation++;photo=null;}});
+ dialog.addEventListener('change',async e=>{if(e.target.id!=='attPhoto')return;const version=generation;busy=true;draw();try{const result=await shrinkPhoto(e.target.files?.[0]);if(version===generation){photo=result;failure='';}}catch(error){failure=error.message;photo=null;}finally{busy=false;draw();}});
+ new MutationObserver(card).observe(root,{childList:true,subtree:false});
+ window.addEventListener('hashchange',()=>{if(!busy&&dialog.open)close();card();});
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!busy){refresh().then(draw);}});
+ refresh();card();
+}
+if(typeof document!=='undefined')install();
