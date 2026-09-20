@@ -24,10 +24,11 @@ from .miniapp_api import install_miniapp
 from .miniapp_security import webhook_secret
 from .people import install_people
 from .services.academy import ACADEMY_LESSONS
+from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.4-camera-only"
+RELEASE = "miniapp-3.5-yandex-storage"
 
 
 async def health(request):
@@ -39,9 +40,15 @@ async def health(request):
     except Exception:
         logger.exception("Database readiness check failed")
         ready = False
+    storage = request.app.get("yandex_disk")
+    storage_state = storage.public_status() if storage is not None else {"configured": False, "connected": False, "writeVerified": False}
     return web.json_response({"service": "photo-boss", "status": "ok" if ready else "not_ready",
-                              "release": RELEASE, "app": "/app/"}, status=200 if ready else 503,
-                             headers={"Cache-Control": "no-store"})
+                              "release": RELEASE, "app": "/app/",
+                              "storage": {"provider": "yandex_disk",
+                                          "configured": bool(storage_state.get("configured")),
+                                          "connected": bool(storage_state.get("connected")),
+                                          "writeVerified": bool(storage_state.get("writeVerified"))}},
+                             status=200 if ready else 503, headers={"Cache-Control": "no-store"})
 
 
 def webhook_url():
@@ -71,6 +78,9 @@ async def on_startup(app):
         logger.info("Mini App menu configured: %s", app_url())
     logger.info("Telegram bot @%s is authenticated", me.username)
     logger.info("Authenticated Telegram webhook configured")
+    storage_status = await app["yandex_disk"].verify(write_test=True)
+    if not storage_status["connected"] or not storage_status["writeVerified"]:
+        logger.warning("Yandex.Disk storage is degraded; Telegram workflows remain available")
     app["operations_task"] = asyncio.create_task(operations_loop(bot))
     app["ready"] = True
     mark_ready(me.username)
@@ -101,6 +111,7 @@ def main():
     miniapp = install_miniapp(app, engine=engine, bot=bot, lessons=ACADEMY_LESSONS, tz_name=config.training_timezone)
     install_attendance(app, miniapp)
     install_people(app, miniapp)
+    install_yandex_disk(app)
     SimpleRequestHandler(
         dispatcher=dispatcher, bot=bot, secret_token=webhook_secret(config.bot_token),
         handle_in_background=False,
