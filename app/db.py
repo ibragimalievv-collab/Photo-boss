@@ -49,6 +49,81 @@ async def init_db():
                     "DOUBLE PRECISION NOT NULL DEFAULT 0"
                 )
             )
+            await connection.execute(
+                text(
+                    "ALTER TABLE work_chat_messages ADD COLUMN IF NOT EXISTS "
+                    "attachment_id INTEGER"
+                )
+            )
+            await connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "uq_work_chat_messages_attachment_id "
+                    "ON work_chat_messages(attachment_id) "
+                    "WHERE attachment_id IS NOT NULL"
+                )
+            )
+            fk_exists = await connection.scalar(
+                text(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM information_schema.table_constraints tc
+                        JOIN information_schema.key_column_usage kcu
+                          ON tc.constraint_name = kcu.constraint_name
+                         AND tc.constraint_schema = kcu.constraint_schema
+                        WHERE tc.table_schema = current_schema()
+                          AND tc.table_name = 'work_chat_messages'
+                          AND tc.constraint_type = 'FOREIGN KEY'
+                          AND kcu.column_name = 'attachment_id'
+                    )
+                    """
+                )
+            )
+            if not fk_exists:
+                await connection.execute(
+                    text(
+                        """
+                        ALTER TABLE work_chat_messages
+                        ADD CONSTRAINT fk_work_chat_message_attachment
+                        FOREIGN KEY (attachment_id)
+                        REFERENCES work_chat_attachments(id)
+                        ON DELETE SET NULL
+                        """
+                    )
+                )
+
+            check_names = (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT conname
+                        FROM pg_constraint
+                        WHERE conrelid = 'work_chat_messages'::regclass
+                          AND contype = 'c'
+                          AND pg_get_constraintdef(oid) ILIKE '%length(body)%'
+                        """
+                    )
+                )
+            ).scalars().all()
+            for name in check_names:
+                if not name or not all(ch.isalnum() or ch == "_" for ch in name):
+                    raise RuntimeError("Unexpected work-chat constraint name")
+                await connection.exec_driver_sql(
+                    f'ALTER TABLE work_chat_messages DROP CONSTRAINT "{name}"'
+                )
+            await connection.execute(
+                text(
+                    """
+                    ALTER TABLE work_chat_messages
+                    ADD CONSTRAINT ck_work_chat_message_content
+                    CHECK (
+                        length(body) BETWEEN 0 AND 2000
+                        AND (length(body) > 0 OR attachment_id IS NOT NULL)
+                    )
+                    """
+                )
+            )
             await connection.execute(text(
                 "ALTER TABLE training_assignments ADD COLUMN IF NOT EXISTS "
                 "ai_score INTEGER"

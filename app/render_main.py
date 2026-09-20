@@ -30,7 +30,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.7-work-chat"
+RELEASE = "miniapp-3.8-work-chat-media"
 
 
 async def health(request):
@@ -83,12 +83,12 @@ async def on_startup(app):
     storage_status = await app["yandex_disk"].verify(write_test=True)
     if not storage_status["connected"] or not storage_status["writeVerified"]:
         logger.warning("Yandex.Disk storage is degraded; Telegram workflows remain available")
-    deleted = await cleanup_expired_chat(engine)
+    deleted = await cleanup_expired_chat(engine, app["yandex_disk"])
     if deleted:
         logger.info("Expired work-chat messages removed on startup: %s", deleted)
     app["operations_task"] = asyncio.create_task(operations_loop(bot))
     app["storage_task"] = asyncio.create_task(storage_loop(bot, app["yandex_disk"]))
-    app["chat_cleanup_task"] = asyncio.create_task(cleanup_loop(engine))
+    app["chat_cleanup_task"] = asyncio.create_task(cleanup_loop(engine, app["yandex_disk"]))
     app["ready"] = True
     mark_ready(me.username)
     logger.info("Release %s ready; live Mini App enabled; demo data disabled", RELEASE)
@@ -112,7 +112,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     dispatcher, bot = create_dispatcher(), create_bot()
     install_launch_policies(dispatcher, bot)
-    app = web.Application(client_max_size=1024*1024)
+    app = web.Application(client_max_size=25*1024*1024)
     app["bot"], app["dispatcher"] = bot, dispatcher
     app.router.add_get("/", health)
     app.router.add_get("/health", health)

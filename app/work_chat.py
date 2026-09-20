@@ -2,22 +2,34 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import json
 import logging
+import secrets
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiohttp import web
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from .launch_policy import app_url
 from .miniapp_security import AccessError
 from .work_rules import WORK_RULES_TEXT, WORK_RULES_VERSION, work_rules_hash
+from .yandex_disk import ROOT, YandexDiskError
 
 logger = logging.getLogger(__name__)
 RETENTION_DAYS = 365
 MAX_MESSAGE = 2000
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 RATE_LIMIT_PER_MINUTE = 30
+BLOCKED_EXTENSIONS = {
+    ".apk", ".app", ".bat", ".cmd", ".com", ".exe", ".hta", ".html", ".htm",
+    ".js", ".jar", ".msi", ".ps1", ".scr", ".sh", ".svg", ".vbs",
+}
 
 
 def positive_id(value):
@@ -42,22 +54,99 @@ def iso(value):
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def clean_message(value):
+def normalize_text(value, *, required=True):
     if not isinstance(value, str):
         raise AccessError("Введите сообщение.", 400)
     value = value.replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not value or len(value) > MAX_MESSAGE:
-        raise AccessError(f"Сообщение должно содержать от 1 до {MAX_MESSAGE} символов.", 400)
+    if required and not value:
+        raise AccessError("Введите сообщение.", 400)
+    if len(value) > MAX_MESSAGE:
+        raise AccessError(f"Сообщение должно быть не длиннее {MAX_MESSAGE} символов.", 400)
     if any(ord(ch) < 32 and ch not in "\n\t" for ch in value):
         raise AccessError("Сообщение содержит недопустимые символы.", 400)
     return value
+
+
+def clean_message(value):
+    return normalize_text(value, required=True)
+
+
+def safe_filename(value):
+    if not isinstance(value, str):
+        value = "file"
+    value = value.replace("\\", "/").split("/")[-1].strip()
+    value = "".join(ch for ch in value if ord(ch) >= 32 and ch not in "\r\n")
+    if not value:
+        value = "file"
+    return value[:255]
+
+
+def attachment_kind(filename, payload):
+    suffix = Path(filename).suffix.lower()
+    if suffix in BLOCKED_EXTENSIONS:
+        raise AccessError("Этот тип файла нельзя отправлять в рабочем чате.", 415)
+    if payload.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", "jpg", True
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", "png", True
+    if len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        return "image/webp", "webp", True
+    if payload.startswith(b"%PDF-"):
+        return "application/pdf", "pdf", False
+    return "application/octet-stream", "bin", False
 
 
 class WorkChat:
     def __init__(self, miniapp):
         self.api = miniapp
         self.engine = miniapp.engine
+        self.bot = miniapp.bot
         self.static_dir = Path(__file__).parent / "work_chat_ui"
+
+    def notification_markup(self):
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="💬 Открыть Photo Boss",
+            web_app=WebAppInfo(url=app_url("home")),
+        )]])
+
+    async def _notify_one(self, tg_id, text_value):
+        try:
+            await self.bot.send_message(
+                tg_id,
+                text_value,
+                reply_markup=self.notification_markup(),
+                protect_content=True,
+                disable_notification=False,
+            )
+            return True
+        except TelegramAPIError as exc:
+            logger.info(
+                "Work-chat Telegram notification unavailable for tg_id=%s (%s)",
+                tg_id, type(exc).__name__,
+            )
+            return False
+
+    async def notify(self, tg_ids, *, sender_name, general, attachment=None):
+        targets = list(dict.fromkeys(
+            tg for tg in tg_ids if isinstance(tg, int) and tg > 0
+        ))
+        if not targets:
+            return
+        noun = {
+            "photo": "фото",
+            "file": "файл",
+        }.get(attachment, "сообщение")
+        if general:
+            text_value = f"💬 Photo Boss · Новое {noun} в общем чате\nОт: {sender_name}"
+        else:
+            text_value = f"💬 Photo Boss · Новое рабочее {noun}\nОт: {sender_name}"
+        semaphore = asyncio.Semaphore(4)
+
+        async def send(tg_id):
+            async with semaphore:
+                return await self._notify_one(tg_id, text_value)
+
+        await asyncio.gather(*(send(tg_id) for tg_id in targets))
 
     async def acceptance(self, conn, user_id):
         rows = await self.api.rows(
@@ -76,7 +165,10 @@ class WorkChat:
 
     async def require_rules(self, conn, actor):
         if await self.acceptance(conn, actor["id"]) is None:
-            raise AccessError("Перед использованием рабочего чата подтвердите общие правила Photo Boss.", 428)
+            raise AccessError(
+                "Перед использованием рабочего чата подтвердите общие правила Photo Boss.",
+                428,
+            )
 
     async def rules(self, request):
         actor = request["miniapp_actor"]
@@ -89,6 +181,7 @@ class WorkChat:
             "accepted": bool(accepted),
             "acceptedAt": iso(accepted["accepted_at"]) if accepted else None,
             "retentionDays": RETENTION_DAYS,
+            "maxAttachmentBytes": MAX_ATTACHMENT_BYTES,
         })
 
     async def accept_rules(self, request):
@@ -97,7 +190,9 @@ class WorkChat:
         if set(body) != {"version", "sha256"}:
             raise AccessError("Откройте правила заново.", 400)
         if body["version"] != WORK_RULES_VERSION or body["sha256"] != work_rules_hash():
-            raise AccessError("Редакция правил изменилась. Прочитайте актуальный текст.", 409)
+            raise AccessError(
+                "Редакция правил изменилась. Прочитайте актуальный текст.", 409
+            )
         now = datetime.now(UTC).replace(tzinfo=None)
         async with self.engine.begin() as conn:
             await conn.execute(
@@ -107,13 +202,23 @@ class WorkChat:
                     ON CONFLICT (user_id,version)
                     DO UPDATE SET text_sha256=excluded.text_sha256,
                                   accepted_at=excluded.accepted_at"""),
-                {"uid": actor["id"], "version": WORK_RULES_VERSION,
-                 "sha": work_rules_hash(), "now": now},
+                {
+                    "uid": actor["id"],
+                    "version": WORK_RULES_VERSION,
+                    "sha": work_rules_hash(),
+                    "now": now,
+                },
             )
             await self.api.audit_write(
-                conn, actor, "work_rules_accepted", "user", actor["id"],
-                json.dumps({"version": WORK_RULES_VERSION, "sha256": work_rules_hash()},
-                           ensure_ascii=False),
+                conn,
+                actor,
+                "work_rules_accepted",
+                "user",
+                actor["id"],
+                json.dumps(
+                    {"version": WORK_RULES_VERSION, "sha256": work_rules_hash()},
+                    ensure_ascii=False,
+                ),
             )
         return web.json_response({"ok": True, "acceptedAt": now.isoformat()})
 
@@ -138,11 +243,50 @@ class WorkChat:
             role_map.setdefault(row["user_id"], []).append(row["role"])
         return web.json_response({
             "general": {"id": "general", "name": "Общий чат"},
-            "people": [{"id": row["id"], "name": row["name"],
-                        "roles": sorted(role_map.get(row["id"], []))}
-                       for row in users],
+            "people": [
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "roles": sorted(role_map.get(row["id"], [])),
+                }
+                for row in users
+            ],
             "ownerControl": "OWNER" in actor["roles"],
         })
+
+    async def notification_targets(self, conn, actor, peer_id):
+        if peer_id is not None:
+            target = await self.api.rows(
+                conn,
+                "SELECT id,tg_id FROM users WHERE id=:id AND active=TRUE",
+                id=peer_id,
+            )
+            if not target:
+                raise AccessError("Сотрудник сейчас недоступен.", 409)
+            return [target[0]["tg_id"]]
+        targets = await self.api.rows(
+            conn,
+            """SELECT DISTINCT u.tg_id
+               FROM users u
+               JOIN user_roles ur ON ur.user_id=u.id
+               WHERE u.active=TRUE AND u.id<>:sender
+                 AND ur.role IN ('OWNER','ADMIN','MANAGER','PHOTOGRAPHER')
+               ORDER BY u.tg_id
+               LIMIT 200""",
+            sender=actor["id"],
+        )
+        return [row["tg_id"] for row in targets]
+
+    async def enforce_rate(self, conn, actor_id, now):
+        count = await self.api.rows(
+            conn,
+            """SELECT COUNT(*) AS n FROM work_chat_messages
+               WHERE sender_id=:uid AND created_at>=:since""",
+            uid=actor_id,
+            since=now - timedelta(minutes=1),
+        )
+        if int(count[0]["n"] or 0) >= RATE_LIMIT_PER_MINUTE:
+            raise AccessError("Слишком много сообщений. Повторите через минуту.", 429)
 
     async def _messages(self, conn, *, actor_id, peer_id=None, after=0):
         params = {"uid": actor_id, "after": after}
@@ -154,23 +298,40 @@ class WorkChat:
                       OR (m.sender_id=:peer AND m.recipient_id=:uid))"""
         return await self.api.rows(
             conn,
-            f"""SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,u.name AS sender_name
+            f"""SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,
+                       u.name AS sender_name,
+                       a.id AS attachment_id,a.original_name,a.mime_type,a.byte_size
                 FROM work_chat_messages m
                 JOIN users u ON u.id=m.sender_id
+                LEFT JOIN work_chat_attachments a ON a.id=m.attachment_id
                 WHERE {clause} AND m.id>:after
                 ORDER BY m.id ASC LIMIT 100""",
             **params,
         )
 
     def pack_messages(self, rows):
-        return [{
-            "id": row["id"],
-            "senderId": row["sender_id"],
-            "recipientId": row["recipient_id"],
-            "body": row["body"],
-            "createdAt": iso(row["created_at"]),
-            "senderName": row["sender_name"],
-        } for row in rows]
+        packed = []
+        for row in rows:
+            attachment = None
+            if row.get("attachment_id"):
+                mime = row["mime_type"] or "application/octet-stream"
+                attachment = {
+                    "id": row["attachment_id"],
+                    "name": row["original_name"],
+                    "mimeType": mime,
+                    "size": row["byte_size"],
+                    "isImage": mime in {"image/jpeg", "image/png", "image/webp"},
+                }
+            packed.append({
+                "id": row["id"],
+                "senderId": row["sender_id"],
+                "recipientId": row["recipient_id"],
+                "body": row["body"] or "",
+                "createdAt": iso(row["created_at"]),
+                "senderName": row["sender_name"],
+                "attachment": attachment,
+            })
+        return packed
 
     async def messages(self, request):
         actor = request["miniapp_actor"]
@@ -182,10 +343,14 @@ class WorkChat:
         async with self.engine.connect() as conn:
             await self.require_rules(conn, actor)
             if peer_id is not None:
-                person = await self.api.rows(conn, "SELECT id,name FROM users WHERE id=:id", id=peer_id)
+                person = await self.api.rows(
+                    conn, "SELECT id FROM users WHERE id=:id", id=peer_id
+                )
                 if not person:
                     raise AccessError("Сотрудник не найден.", 404)
-            rows = await self._messages(conn, actor_id=actor["id"], peer_id=peer_id, after=after)
+            rows = await self._messages(
+                conn, actor_id=actor["id"], peer_id=peer_id, after=after
+            )
         return web.json_response({"messages": self.pack_messages(rows)})
 
     async def send(self, request):
@@ -198,36 +363,211 @@ class WorkChat:
         if peer_id == actor["id"]:
             raise AccessError("Нельзя отправить сообщение самому себе.", 400)
         now = datetime.now(UTC).replace(tzinfo=None)
-        minute_ago = now - timedelta(minutes=1)
         async with self.engine.begin() as conn:
             await self.require_rules(conn, actor)
-            if peer_id is not None:
-                target = await self.api.rows(
-                    conn, "SELECT id FROM users WHERE id=:id AND active=TRUE", id=peer_id
-                )
-                if not target:
-                    raise AccessError("Сотрудник сейчас недоступен.", 409)
-            count = await self.api.rows(
-                conn,
-                """SELECT COUNT(*) AS n FROM work_chat_messages
-                   WHERE sender_id=:uid AND created_at>=:since""",
-                uid=actor["id"], since=minute_ago,
-            )
-            if int(count[0]["n"] or 0) >= RATE_LIMIT_PER_MINUTE:
-                raise AccessError("Слишком много сообщений. Повторите через минуту.", 429)
+            notification_ids = await self.notification_targets(conn, actor, peer_id)
+            await self.enforce_rate(conn, actor["id"], now)
             rows = await self.api.rows(
                 conn,
-                """INSERT INTO work_chat_messages(sender_id,recipient_id,body,created_at)
-                   VALUES (:sender,:recipient,:body,:created)
+                """INSERT INTO work_chat_messages
+                   (sender_id,recipient_id,attachment_id,body,created_at)
+                   VALUES (:sender,:recipient,NULL,:body,:created)
                    RETURNING id,created_at""",
-                sender=actor["id"], recipient=peer_id, body=message, created=now,
+                sender=actor["id"],
+                recipient=peer_id,
+                body=message,
+                created=now,
             )
+        await self.notify(
+            notification_ids,
+            sender_name=actor["name"],
+            general=peer_id is None,
+        )
         return web.json_response({
-            "message": {"id": rows[0]["id"], "senderId": actor["id"],
-                        "recipientId": peer_id, "body": message,
-                        "createdAt": iso(rows[0]["created_at"]),
-                        "senderName": actor["name"]},
+            "message": {
+                "id": rows[0]["id"],
+                "senderId": actor["id"],
+                "recipientId": peer_id,
+                "body": message,
+                "createdAt": iso(rows[0]["created_at"]),
+                "senderName": actor["name"],
+                "attachment": None,
+            },
         }, status=201)
+
+    async def read_upload(self, request):
+        if request.content_length and request.content_length > MAX_ATTACHMENT_BYTES + 128 * 1024:
+            raise AccessError("Файл больше 20 МБ.", 413)
+        if not request.content_type.startswith("multipart/"):
+            raise AccessError("Ожидается файл.", 400)
+        reader = await request.multipart()
+        peer_raw = None
+        caption = ""
+        filename = None
+        payload = None
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "peerId":
+                value = (await part.text()).strip()
+                if len(value) > 20:
+                    raise AccessError("Некорректный диалог.", 400)
+                peer_raw = value
+            elif part.name == "caption":
+                value = await part.text()
+                caption = normalize_text(value, required=False)
+            elif part.name == "file":
+                if payload is not None:
+                    raise AccessError("Отправляйте по одному файлу за сообщение.", 400)
+                filename = safe_filename(part.filename)
+                data = bytearray()
+                while True:
+                    chunk = await part.read_chunk(size=64 * 1024)
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                    if len(data) > MAX_ATTACHMENT_BYTES:
+                        raise AccessError("Файл больше 20 МБ.", 413)
+                payload = bytes(data)
+            else:
+                raise AccessError("Некорректная форма вложения.", 400)
+        if peer_raw is None or payload is None or not payload:
+            raise AccessError("Выберите файл и диалог.", 400)
+        peer_id = None if peer_raw == "general" else positive_id(peer_raw)
+        return peer_id, caption, filename or "file", payload
+
+    async def upload_attachment(self, request):
+        actor = request["miniapp_actor"]
+        peer_id, caption, filename, payload = await self.read_upload(request)
+        if peer_id == actor["id"]:
+            raise AccessError("Нельзя отправить файл самому себе.", 400)
+        mime_type, storage_ext, preview = attachment_kind(filename, payload)
+        storage = request.app["yandex_disk"]
+        if not storage.state.get("connected"):
+            state = await storage.verify(write_test=False)
+            if not state.get("connected"):
+                raise AccessError("Хранилище файлов временно недоступно.", 503)
+        now = datetime.now(UTC).replace(tzinfo=None)
+        month = now.strftime("%Y%m")
+        await storage.ensure_dir(ROOT + "/chat")
+        await storage.ensure_dir(ROOT + "/chat/" + month)
+        storage_path = (
+            ROOT + "/chat/" + month + "/" + secrets.token_hex(16) + "." + storage_ext
+        )
+        digest = hashlib.sha256(payload).hexdigest()
+        try:
+            await storage.upload_bytes(storage_path, payload, content_type=mime_type)
+        except YandexDiskError as exc:
+            logger.warning("Work-chat attachment upload failed (%s)", type(exc).__name__)
+            raise AccessError("Не удалось сохранить файл. Повторите отправку.", 503) from exc
+
+        try:
+            async with self.engine.begin() as conn:
+                await self.require_rules(conn, actor)
+                notification_ids = await self.notification_targets(conn, actor, peer_id)
+                await self.enforce_rate(conn, actor["id"], now)
+                attachment = await self.api.rows(
+                    conn,
+                    """INSERT INTO work_chat_attachments
+                       (uploader_id,storage_path,original_name,mime_type,byte_size,sha256,created_at)
+                       VALUES (:uploader,:path,:name,:mime,:size,:sha,:created)
+                       RETURNING id""",
+                    uploader=actor["id"],
+                    path=storage_path,
+                    name=filename,
+                    mime=mime_type,
+                    size=len(payload),
+                    sha=digest,
+                    created=now,
+                )
+                attachment_id = attachment[0]["id"]
+                rows = await self.api.rows(
+                    conn,
+                    """INSERT INTO work_chat_messages
+                       (sender_id,recipient_id,attachment_id,body,created_at)
+                       VALUES (:sender,:recipient,:attachment,:body,:created)
+                       RETURNING id,created_at""",
+                    sender=actor["id"],
+                    recipient=peer_id,
+                    attachment=attachment_id,
+                    body=caption,
+                    created=now,
+                )
+        except SQLAlchemyError:
+            with contextlib.suppress(YandexDiskError):
+                await storage.delete(storage_path)
+            raise
+
+        await self.notify(
+            notification_ids,
+            sender_name=actor["name"],
+            general=peer_id is None,
+            attachment="photo" if preview else "file",
+        )
+        return web.json_response({
+            "message": {
+                "id": rows[0]["id"],
+                "senderId": actor["id"],
+                "recipientId": peer_id,
+                "body": caption,
+                "createdAt": iso(rows[0]["created_at"]),
+                "senderName": actor["name"],
+                "attachment": {
+                    "id": attachment_id,
+                    "name": filename,
+                    "mimeType": mime_type,
+                    "size": len(payload),
+                    "isImage": preview,
+                },
+            },
+        }, status=201)
+
+    async def attachment(self, request):
+        actor = request["miniapp_actor"]
+        attachment_id = positive_id(request.match_info["id"])
+        async with self.engine.connect() as conn:
+            await self.require_rules(conn, actor)
+            rows = await self.api.rows(
+                conn,
+                """SELECT a.id,a.storage_path,a.original_name,a.mime_type,a.byte_size,
+                          m.sender_id,m.recipient_id
+                   FROM work_chat_attachments a
+                   JOIN work_chat_messages m ON m.attachment_id=a.id
+                   WHERE a.id=:id""",
+                id=attachment_id,
+            )
+        if not rows:
+            raise AccessError("Файл не найден.", 404)
+        row = rows[0]
+        allowed = (
+            row["recipient_id"] is None
+            or actor["id"] in {row["sender_id"], row["recipient_id"]}
+            or "OWNER" in actor["roles"]
+        )
+        if not allowed:
+            raise AccessError("Нет доступа к этому файлу.")
+        storage = request.app["yandex_disk"]
+        try:
+            payload = await storage.download_bytes(
+                row["storage_path"], max_bytes=MAX_ATTACHMENT_BYTES
+            )
+        except YandexDiskError as exc:
+            logger.warning("Work-chat attachment download failed (%s)", type(exc).__name__)
+            raise AccessError("Файл временно недоступен.", 503) from exc
+        preview = row["mime_type"] in {"image/jpeg", "image/png", "image/webp"}
+        headers = {
+            "Content-Disposition": (
+                f'inline; filename="photo-{attachment_id}"'
+                if preview
+                else f'attachment; filename="file-{attachment_id}"'
+            )
+        }
+        return web.Response(
+            body=payload,
+            content_type=row["mime_type"] if preview else "application/octet-stream",
+            headers=headers,
+        )
 
     async def owner_threads(self, request):
         actor = request["miniapp_actor"]
@@ -238,10 +578,12 @@ class WorkChat:
             rows = await self.api.rows(
                 conn,
                 """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,
-                          s.name AS sender_name,r.name AS recipient_name
+                          s.name AS sender_name,r.name AS recipient_name,
+                          a.original_name AS attachment_name
                    FROM work_chat_messages m
                    JOIN users s ON s.id=m.sender_id
                    JOIN users r ON r.id=m.recipient_id
+                   LEFT JOIN work_chat_attachments a ON a.id=m.attachment_id
                    WHERE m.recipient_id IS NOT NULL
                      AND m.sender_id<>:owner AND m.recipient_id<>:owner
                    ORDER BY m.id DESC LIMIT 1000""",
@@ -255,12 +597,25 @@ class WorkChat:
                 continue
             seen.add(pair)
             a_id, b_id = pair
-            a_name = row["sender_name"] if row["sender_id"] == a_id else row["recipient_name"]
-            b_name = row["recipient_name"] if row["recipient_id"] == b_id else row["sender_name"]
+            a_name = (
+                row["sender_name"]
+                if row["sender_id"] == a_id
+                else row["recipient_name"]
+            )
+            b_name = (
+                row["recipient_name"]
+                if row["recipient_id"] == b_id
+                else row["sender_name"]
+            )
+            last = row["body"] or (
+                "📎 " + row["attachment_name"]
+                if row["attachment_name"]
+                else "Сообщение"
+            )
             threads.append({
                 "a": {"id": a_id, "name": a_name},
                 "b": {"id": b_id, "name": b_name},
-                "last": row["body"][:120],
+                "last": last[:120],
                 "createdAt": iso(row["created_at"]),
             })
             if len(threads) >= 100:
@@ -271,31 +626,44 @@ class WorkChat:
         actor = request["miniapp_actor"]
         if "OWNER" not in actor["roles"]:
             raise AccessError("Контроль рабочих диалогов доступен только владельцу.")
-        a_id, b_id = positive_id(request.query.get("a")), positive_id(request.query.get("b"))
+        a_id = positive_id(request.query.get("a"))
+        b_id = positive_id(request.query.get("b"))
         if a_id == b_id or actor["id"] in {a_id, b_id}:
             raise AccessError("Некорректный диалог.", 400)
         after = cursor_id(request.query.get("after"))
         async with self.engine.begin() as conn:
             await self.require_rules(conn, actor)
             people = await self.api.rows(
-                conn, "SELECT id,name FROM users WHERE id IN (:a,:b) ORDER BY id", a=a_id, b=b_id
+                conn,
+                "SELECT id,name FROM users WHERE id IN (:a,:b) ORDER BY id",
+                a=a_id,
+                b=b_id,
             )
             if len(people) != 2:
                 raise AccessError("Диалог не найден.", 404)
             rows = await self.api.rows(
                 conn,
-                """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,u.name AS sender_name
+                """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,
+                          u.name AS sender_name,
+                          a.id AS attachment_id,a.original_name,a.mime_type,a.byte_size
                    FROM work_chat_messages m
                    JOIN users u ON u.id=m.sender_id
+                   LEFT JOIN work_chat_attachments a ON a.id=m.attachment_id
                    WHERE ((m.sender_id=:a AND m.recipient_id=:b)
                       OR (m.sender_id=:b AND m.recipient_id=:a))
                      AND m.id>:after
                    ORDER BY m.id ASC LIMIT 100""",
-                a=a_id, b=b_id, after=after,
+                a=a_id,
+                b=b_id,
+                after=after,
             )
             if after == 0:
                 await self.api.audit_write(
-                    conn, actor, "work_chat_owner_thread_opened", "user", a_id,
+                    conn,
+                    actor,
+                    "work_chat_owner_thread_opened",
+                    "user",
+                    a_id,
                     json.dumps({"participants": [a_id, b_id]}, ensure_ascii=False),
                 )
         return web.json_response({
@@ -314,25 +682,42 @@ class WorkChat:
         )
 
 
-async def cleanup_expired_chat(engine):
+async def cleanup_expired_chat(engine, storage=None):
     cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=RETENTION_DAYS)
+    async with engine.connect() as conn:
+        rows = list((await conn.execute(
+            text("""SELECT a.id,a.storage_path
+                    FROM work_chat_messages m
+                    JOIN work_chat_attachments a ON a.id=m.attachment_id
+                    WHERE m.created_at<:cutoff"""),
+            {"cutoff": cutoff},
+        )).mappings())
+    if storage is not None:
+        for row in rows:
+            with contextlib.suppress(YandexDiskError):
+                await storage.delete(row["storage_path"])
     async with engine.begin() as conn:
         result = await conn.execute(
             text("DELETE FROM work_chat_messages WHERE created_at<:cutoff"),
             {"cutoff": cutoff},
         )
+        for row in rows:
+            await conn.execute(
+                text("DELETE FROM work_chat_attachments WHERE id=:id"),
+                {"id": row["id"]},
+            )
     return int(result.rowcount or 0)
 
 
-async def cleanup_loop(engine):
+async def cleanup_loop(engine, storage=None):
     while True:
         try:
-            deleted = await cleanup_expired_chat(engine)
+            deleted = await cleanup_expired_chat(engine, storage)
             if deleted:
                 logger.info("Expired work-chat messages removed: %s", deleted)
         except asyncio.CancelledError:
             raise
-        except (OSError, SQLAlchemyError):
+        except (OSError, SQLAlchemyError, YandexDiskError):
             logger.exception("Work-chat retention cleanup failed")
         await asyncio.sleep(24 * 60 * 60)
 
@@ -345,6 +730,8 @@ def install_work_chat(app, miniapp):
     app.router.add_get("/api/miniapp/chat/people", service.people)
     app.router.add_get("/api/miniapp/chat/messages", service.messages)
     app.router.add_post("/api/miniapp/chat/messages", service.send)
+    app.router.add_post("/api/miniapp/chat/attachments", service.upload_attachment)
+    app.router.add_get("/api/miniapp/chat/attachments/{id}", service.attachment)
     app.router.add_get("/api/miniapp/chat/owner/threads", service.owner_threads)
     app.router.add_get("/api/miniapp/chat/owner/messages", service.owner_messages)
     app.router.add_get("/work-chat/{asset}", service.static)

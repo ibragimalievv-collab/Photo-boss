@@ -10,12 +10,15 @@ from sqlalchemy import text
 
 from app.miniapp_security import AccessError
 from app.work_chat import (
+    MAX_ATTACHMENT_BYTES,
     MAX_MESSAGE,
     RETENTION_DAYS,
     WorkChat,
+    attachment_kind,
     clean_message,
     cleanup_expired_chat,
     positive_id,
+    safe_filename,
 )
 from app.work_rules import WORK_RULES_TEXT, WORK_RULES_VERSION, work_rules_hash
 
@@ -32,6 +35,23 @@ def test_message_cleaning_and_limits():
     for bad in ("", "   ", "x" * (MAX_MESSAGE + 1), "ok\x00bad"):
         with pytest.raises(AccessError):
             clean_message(bad)
+
+
+def test_attachment_validation_and_magic_detection():
+    assert MAX_ATTACHMENT_BYTES == 20 * 1024 * 1024
+    assert safe_filename("../folder\\guest photo.jpg") == "guest photo.jpg"
+    assert attachment_kind("x.jpg", b"\xff\xd8\xff" + b"x" * 20) == (
+        "image/jpeg", "jpg", True
+    )
+    assert attachment_kind("x.pdf", b"%PDF-1.7\nbody") == (
+        "application/pdf", "pdf", False
+    )
+    assert attachment_kind("notes.zip", b"PK\x03\x04data") == (
+        "application/octet-stream", "bin", False
+    )
+    for name in ("bad.exe", "page.html", "script.js", "vector.svg"):
+        with pytest.raises(AccessError):
+            attachment_kind(name, b"payload")
 
 
 def test_rules_are_explicit_and_whole_document_acceptance():
@@ -51,9 +71,13 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
             conn.execute(text("""CREATE TABLE work_rule_acceptances(
                 id INTEGER PRIMARY KEY,user_id INTEGER,version TEXT,text_sha256 TEXT,
                 accepted_at DATETIME,UNIQUE(user_id,version))"""))
+            conn.execute(text("""CREATE TABLE work_chat_attachments(
+                id INTEGER PRIMARY KEY,uploader_id INTEGER,storage_path TEXT,
+                original_name TEXT,mime_type TEXT,byte_size INTEGER,sha256 TEXT,
+                created_at DATETIME)"""))
             conn.execute(text("""CREATE TABLE work_chat_messages(
                 id INTEGER PRIMARY KEY,sender_id INTEGER,recipient_id INTEGER,
-                body TEXT,created_at DATETIME)"""))
+                attachment_id INTEGER,body TEXT,created_at DATETIME)"""))
 
     async def asyncTearDown(self):
         await baseline.MiniAppTests.asyncTearDown(self)
@@ -123,6 +147,37 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
         await self.accept(1002)
         assert (await self.call("/chat/owner/threads", uid=1002))[0] == 403
         assert (await self.call("/chat/owner/messages?a=3&b=4&after=0", uid=1002))[0] == 403
+
+    async def test_private_message_sends_telegram_push_without_body_preview(self):
+        for uid in (1003, 1004):
+            await self.accept(uid)
+        self.bot.send_message.reset_mock()
+        status, _ = await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": 4, "body": "Секретный рабочий текст"},
+        )
+        assert status == 201
+        assert self.bot.send_message.await_count == 1
+        call = self.bot.send_message.await_args
+        assert call.args[0] == 1004
+        assert "Секретный рабочий текст" not in call.args[1]
+        assert "User 3" in call.args[1]
+        assert call.kwargs["disable_notification"] is False
+        assert call.kwargs["protect_content"] is True
+        assert call.kwargs["reply_markup"] is not None
+
+    async def test_general_message_notifies_other_active_staff_not_sender(self):
+        await self.accept(1003)
+        self.bot.send_message.reset_mock()
+        status, _ = await self.call(
+            "/chat/messages", uid=1003, method="POST",
+            body={"peerId": None, "body": "Общая новость"},
+        )
+        assert status == 201
+        recipients = {call.args[0] for call in self.bot.send_message.await_args_list}
+        assert 1003 not in recipients
+        assert {1001, 1002, 1004, 1005}.issubset(recipients)
+        assert all("Общая новость" not in call.args[1] for call in self.bot.send_message.await_args_list)
 
     async def test_inactive_account_cannot_use_chat(self):
         assert (await self.call("/chat/rules", uid=1006))[0] == 403
