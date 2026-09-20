@@ -9,6 +9,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 from sqlalchemy import text
 
+from .attendance import install_attendance
 from .config import config
 from .db import engine, init_db, wait_for_database
 from .launch_policy import app_url, install_launch_policies, reset_chat_menu
@@ -25,7 +26,7 @@ from .services.academy import ACADEMY_LESSONS
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.1"
+RELEASE = "miniapp-3.2-attendance"
 
 
 async def health(request):
@@ -96,7 +97,8 @@ def main():
     app["bot"], app["dispatcher"] = bot, dispatcher
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
-    install_miniapp(app, engine=engine, bot=bot, lessons=ACADEMY_LESSONS, tz_name=config.training_timezone)
+    miniapp = install_miniapp(app, engine=engine, bot=bot, lessons=ACADEMY_LESSONS, tz_name=config.training_timezone)
+    install_attendance(app, miniapp)
     SimpleRequestHandler(
         dispatcher=dispatcher, bot=bot, secret_token=webhook_secret(config.bot_token),
         handle_in_background=False,
