@@ -23,14 +23,14 @@ from .main import (
 from .miniapp_api import install_miniapp
 from .miniapp_security import webhook_secret
 from .people import install_people
-from .services.academy import ACADEMY_LESSONS
+from .services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
 from .services.photo_storage import storage_loop
 from .work_chat import cleanup_expired_chat, cleanup_loop, install_work_chat
 from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.9-workflow"
+RELEASE = "miniapp-3.9-workflow-academy"
 
 
 async def health(request):
@@ -116,7 +116,8 @@ def main():
     app["bot"], app["dispatcher"] = bot, dispatcher
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
-    miniapp = install_miniapp(app, engine=engine, bot=bot, lessons=ACADEMY_LESSONS, tz_name=config.training_timezone)
+    miniapp = install_miniapp(app, engine=engine, bot=bot, lessons=ACADEMY_LESSONS,
+                              blocks=ACADEMY_BLOCKS, tz_name=config.training_timezone)
     install_attendance(app, miniapp)
     install_people(app, miniapp)
     install_work_chat(app, miniapp)

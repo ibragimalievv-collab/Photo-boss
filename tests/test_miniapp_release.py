@@ -168,7 +168,15 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         self.engine = Engine()
         self.bot = SimpleNamespace(token=TOKEN, send_message=AsyncMock(),
                                    me=AsyncMock(return_value=SimpleNamespace(username="unit_test_bot")))
-        self.service = MiniApp(self.engine, self.bot, [SimpleNamespace(slug="light", title="Light", body="Lesson")],
+        lessons = [
+            SimpleNamespace(slug="light", title="Light", body="Lesson", day=1, block=1),
+            SimpleNamespace(slug="next", title="Next", body="Lesson", day=5, block=2),
+        ]
+        blocks = [
+            SimpleNamespace(number=1, title="First", practice_categories=("woman",), practice_title="Practice"),
+            SimpleNamespace(number=2, title="Second", practice_categories=(), practice_title="Final"),
+        ]
+        self.service = MiniApp(self.engine, self.bot, lessons, blocks=blocks,
                                static_dir=ROOT / "app" / "webapp")
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         with self.engine.inner.begin() as connection:
@@ -284,6 +292,19 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         assert own["completed"] == ["light"] and own["points"] == 10 and not other["completed"]
         _, audit, _ = await self.call("/audit")
         assert sum(x["action"] == "academy_lesson_completed" for x in audit["items"]) == 1
+
+    async def test_next_academy_block_requires_accepted_practice(self):
+        assert (await self.call("/academy/lessons/next", uid=1003, method="POST"))[0] == 409
+        assert (await self.call("/academy/lessons/light", uid=1003, method="POST"))[0] == 200
+        assert (await self.call("/academy/lessons/next", uid=1003, method="POST"))[0] == 409
+        with self.engine.inner.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO training_assignments VALUES (1,3,'woman','COMPLETED')"
+            ))
+        assert (await self.call("/academy/lessons/next", uid=1003, method="POST"))[0] == 200
+        _, academy, _ = await self.call("/academy", uid=1003)
+        assert academy["blocks"][0]["practiceDone"] is True
+        assert academy["lessons"][1]["locked"] is False
 
     async def test_schedule_conflicts_cancellation_and_scope(self):
         day = str(self.service.today() + timedelta(days=1))
