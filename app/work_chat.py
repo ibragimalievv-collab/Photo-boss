@@ -30,6 +30,16 @@ def positive_id(value):
     return result
 
 
+def cursor_id(value):
+    if value in (None, "", 0, "0"):
+        return 0
+    return positive_id(value)
+
+
+def iso(value):
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def clean_message(value):
     if not isinstance(value, str):
         raise AccessError("Введите сообщение.", 400)
@@ -75,7 +85,7 @@ class WorkChat:
             "sha256": work_rules_hash(),
             "text": WORK_RULES_TEXT,
             "accepted": bool(accepted),
-            "acceptedAt": accepted["accepted_at"].isoformat() if accepted else None,
+            "acceptedAt": iso(accepted["accepted_at"]) if accepted else None,
             "retentionDays": RETENTION_DAYS,
         })
 
@@ -156,7 +166,7 @@ class WorkChat:
             "senderId": row["sender_id"],
             "recipientId": row["recipient_id"],
             "body": row["body"],
-            "createdAt": row["created_at"].isoformat(),
+            "createdAt": iso(row["created_at"]),
             "senderName": row["sender_name"],
         } for row in rows]
 
@@ -164,7 +174,7 @@ class WorkChat:
         actor = request["miniapp_actor"]
         peer_raw = request.query.get("peer", "general")
         peer_id = None if peer_raw == "general" else positive_id(peer_raw)
-        after = positive_id(request.query["after"]) if "after" in request.query else 0
+        after = cursor_id(request.query.get("after"))
         if peer_id == actor["id"]:
             raise AccessError("Нельзя открыть диалог с самим собой.", 400)
         async with self.engine.connect() as conn:
@@ -213,7 +223,7 @@ class WorkChat:
         return web.json_response({
             "message": {"id": rows[0]["id"], "senderId": actor["id"],
                         "recipientId": peer_id, "body": message,
-                        "createdAt": rows[0]["created_at"].isoformat(),
+                        "createdAt": iso(rows[0]["created_at"]),
                         "senderName": actor["name"]},
         }, status=201)
 
@@ -249,7 +259,7 @@ class WorkChat:
                 "a": {"id": a_id, "name": a_name},
                 "b": {"id": b_id, "name": b_name},
                 "last": row["body"][:120],
-                "createdAt": row["created_at"].isoformat(),
+                "createdAt": iso(row["created_at"]),
             })
             if len(threads) >= 100:
                 break
