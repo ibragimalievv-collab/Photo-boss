@@ -19,6 +19,8 @@ jobs:
       BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
       ADMIN_TELEGRAM_IDS: "5000000001"
       POSTGRES_PASSWORD: ci-only-password
+      MANAGER_PERCENT: "16"
+      PHOTOGRAPHER_PERCENT: "11"
     steps:
       - uses: actions/checkout@v4
 
@@ -34,14 +36,6 @@ jobs:
           python -m pip check
           pip-audit -r requirements.txt
 
-      - name: Static and regression checks
-        run: |
-          python -m compileall -q app tests
-          ruff check app tests
-          node --check app/attendance_ui/attendance.js
-          node --check app/work_chat_ui/chat.js
-          python -m pytest -q
-
       - name: Build and start the complete Docker stack
         run: |
           cp .env.example .env
@@ -52,6 +46,14 @@ jobs:
             $compose logs --tail=200 bot postgres || true
             exit 1
           fi
+
+      - name: Static and regression checks
+        run: |
+          python -m compileall -q app tests
+          ruff check app tests
+          node --check app/attendance_ui/attendance.js
+          node --check app/work_chat_ui/chat.js
+          python -m pytest -q
 
       - name: Verify PostgreSQL, bot health and restart count
         run: |
