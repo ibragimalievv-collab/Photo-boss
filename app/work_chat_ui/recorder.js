@@ -85,4 +85,4 @@ panel.addEventListener('click',async e=>{
 });
 panel.addEventListener('cancel',e=>{e.preventDefault();if(phase!=='sending')close();});
 window.addEventListener('pagehide',close);
-document.addEventListener('visibilitychange',()=>{if(document.hidden&&phase==='recording')stop();});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)return;if(phase==='recording')stop();else if(['loading','ready','switching'].includes(phase))close();});

@@ -1,4 +1,5 @@
 """Browser fixtures for work chat; no real Telegram, staff or messages."""
+import base64
 import json
 from pathlib import Path
 
@@ -142,6 +143,8 @@ def main():
                 if role == "MANAGER":
                     page.evaluate("document.documentElement.dataset.theme='premium'")
                 page.screenshot(path=str(OUT / f"list-{role}-{width}.png"))
+                if role == "OWNER" and width == 390:
+                    print("QA_PREVIEW list.jpg " + base64.b64encode(page.screenshot(type="jpeg", quality=60)).decode())
                 page.get_by_text("Общий чат", exact=True).first.wait_for()
                 assert page.locator(".pb-chat-unread").count() >= 2
                 page.get_by_text("Общий чат", exact=True).first.click()
@@ -176,6 +179,13 @@ def main():
                 assert "report.pdf" in page.locator(".pb-chat-file").inner_text()
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 2")
                 page.screenshot(path=str(OUT / f"thread-{role}-{width}.png"))
+                if role == "OWNER" and width == 390:
+                    print("QA_PREVIEW thread.jpg " + base64.b64encode(page.screenshot(type="jpeg", quality=60)).decode())
+                if width == 320:
+                    page.set_viewport_size({"width": 320, "height": 500})
+                    expect(page.locator('[data-record="audio"]')).to_be_in_viewport()
+                    assert page.locator('.pb-chat-compose').evaluate('e=>e.getBoundingClientRect().bottom<=innerHeight+2')
+                    page.set_viewport_size({"width": 320, "height": 844})
                 assert page.locator('.pb-chat-dialog').evaluate('(e)=>e.scrollWidth<=e.clientWidth+2')
                 if width == 1200:
                     expect(page.locator('.pb-chat-sidebar')).to_be_visible()

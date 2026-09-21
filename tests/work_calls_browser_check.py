@@ -3,6 +3,7 @@
 Run separately with playwright installed. No production API or Telegram messages.
 """
 import asyncio
+import base64
 import json
 import os
 from pathlib import Path
@@ -176,6 +177,8 @@ async def main():
             output = Path(os.getenv("CALLS_QA_DIR", "/tmp/photo-boss-calls-qa"))
             output.mkdir(parents=True, exist_ok=True)
             await a.screenshot(path=str(output / "group-call.png"))
+            if not RELAY_ONLY:
+                print("QA_PREVIEW call.jpg " + base64.b64encode(await a.screenshot(type="jpeg", quality=60)).decode())
             # Ending a group call releases all three clients' microphones/cameras.
             await a.locator('[data-end-all]').click()
             for page in pages:

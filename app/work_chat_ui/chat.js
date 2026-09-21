@@ -246,8 +246,8 @@ dialog.addEventListener('submit',async e=>{
   let d;
   if(file)d=await uploadFile(file,body);
   else{const peerId=current.kind==='general'?null:current.peer;d=await api('/chat/messages',{method:'POST',body:{peerId,body}});}
-  drafts.delete(key);field.value='';e.target.elements.file.value='';const selected=e.target.querySelector('[data-selected-file]');if(selected){selected.hidden=true;selected.textContent='';}
-  if(current===thread){await renderMessages([d.message],{own:true});updateComposer();}
+  if(drafts.get(key)===field.value)drafts.delete(key);field.value='';e.target.elements.file.value='';const selected=e.target.querySelector('[data-selected-file]');if(selected){selected.hidden=true;selected.textContent='';}
+  if(current===thread){dialog.querySelector('[data-chat-error]').hidden=true;await renderMessages([d.message],{own:true});updateComposer();}
  }catch(err){if(current===thread)showError(err.message);}finally{delete form.dataset.sending;button.disabled=false;field.disabled=false;form.elements.file.disabled=false;for(const b of form.querySelectorAll('[data-record]'))b.disabled=false;if(attach)attach.classList.remove('disabled');if(field.isConnected&&matchMedia('(pointer:fine)').matches)field.focus();}
 });
 function inject(){
@@ -265,3 +265,9 @@ window.addEventListener('pageshow',()=>{sendHeartbeat();refreshPresence();});
 window.addEventListener('offline',()=>{onlinePeople=null;renderPresence();sendHeartbeat(false);});
 window.addEventListener('online',()=>{sendHeartbeat();refreshPresence();});
 document.addEventListener('pb-calls-updated',()=>{if(!dialog.open)return;const toolbar=dialog.querySelector('.pb-call-toolbar');if(toolbar)toolbar.outerHTML=callToolbar(current.peer,current.title);});
+
+// Keep the composer above the software keyboard in mobile WebViews.
+function resizeChatViewport(){const v=window.visualViewport;if(!v||v.scale!==1)return;document.documentElement.style.setProperty('--pb-viewport-height',`${v.height}px`);document.documentElement.style.setProperty('--pb-viewport-top',`${v.offsetTop}px`);}
+window.visualViewport?.addEventListener('resize',resizeChatViewport);
+window.visualViewport?.addEventListener('scroll',resizeChatViewport);
+resizeChatViewport();
