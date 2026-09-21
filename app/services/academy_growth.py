@@ -26,7 +26,8 @@ TIP_BY_CRITERION = {
 async def academy_counts(session, user_id):
     lessons = int(await session.scalar(select(func.count(
         AcademyLessonProgress.id
-    )).where(AcademyLessonProgress.user_id == user_id)) or 0)
+    )).where(AcademyLessonProgress.user_id == user_id,
+             AcademyLessonProgress.topic_slug.in_([lesson.slug for lesson in ACADEMY_LESSONS]))) or 0)
     rows = (await session.scalars(select(TrainingAssignment).where(
         TrainingAssignment.user_id == user_id,
         TrainingAssignment.status == "COMPLETED",

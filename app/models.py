@@ -684,3 +684,34 @@ class AcademyReview(Base):
             name="ck_academy_review_quality_score",
         ),
     )
+
+
+class HRCandidate(Base):
+    __tablename__ = 'hr_candidates'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(150))
+    contact: Mapped[str] = mapped_column(String(300), default='')
+    source: Mapped[str] = mapped_column(String(150), default='')
+    role: Mapped[str] = mapped_column(String(30))
+    stage: Mapped[str] = mapped_column(String(30), default='NEW')
+    interview_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    decision: Mapped[str] = mapped_column(Text, default='')
+    notes: Mapped[str] = mapped_column(Text, default='[]')
+    employee_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True, unique=True)
+    created_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (CheckConstraint("stage IN ('NEW','CONTACTED','INTERVIEW','OFFER','DOCUMENTS','HIRED','REJECTED')"),
+                     CheckConstraint("role IN ('PHOTOGRAPHER','MANAGER')"))
+
+
+class AcademyAssessment(Base):
+    __tablename__ = 'academy_assessments'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    kind: Mapped[str] = mapped_column(String(40), default='entry-v1')
+    score: Mapped[int] = mapped_column(Integer)
+    result: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (CheckConstraint('score BETWEEN 0 AND 100'),)

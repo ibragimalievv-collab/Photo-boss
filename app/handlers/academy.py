@@ -115,7 +115,8 @@ async def photographer_counts(session, user_id):
     lessons = int(
         await session.scalar(
             select(func.count(AcademyLessonProgress.id)).where(
-                AcademyLessonProgress.user_id == user_id
+                AcademyLessonProgress.user_id == user_id,
+                AcademyLessonProgress.topic_slug.in_([lesson.slug for lesson in ACADEMY_LESSONS])
             )
         )
         or 0
@@ -145,7 +146,8 @@ async def photographer_counts(session, user_id):
 async def academy_program_state(session, user_id):
     completed = set((await session.scalars(
         select(AcademyLessonProgress.topic_slug).where(
-            AcademyLessonProgress.user_id == user_id
+            AcademyLessonProgress.user_id == user_id,
+                AcademyLessonProgress.topic_slug.in_([lesson.slug for lesson in ACADEMY_LESSONS])
         )
     )).all())
     accepted = set((await session.scalars(
