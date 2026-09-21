@@ -59,7 +59,7 @@ function unreadBadge(n){return n>0?`<span class="pb-chat-unread">${n>99?'99+':n}
 function setUnreadBadge(n){const btn=document.querySelector('[data-open-chat]');if(!btn)return;btn.innerHTML=`${icon('chat')}<span>Чат</span>${unreadBadge(Number(n)||0)}`;btn.setAttribute('aria-label',n>0?`Рабочий чат, непрочитанных: ${n}`:'Рабочий чат');}
 async function refreshUnread(){if(!me)return;try{const data=await api('/chat/unread');setUnreadBadge(data.total||0);}catch(e){if(e.status===428)setUnreadBadge(0);}}
 function startUnreadPoll(){if(unreadTimer)clearInterval(unreadTimer);refreshUnread();unreadTimer=setInterval(()=>{if(document.visibilityState==='visible')refreshUnread();},10000);}
-function close(){stopPoll();clearObjectUrls();dialog.close();previousFocus?.focus?.();}
+function close(){stopPoll();current={kind:'closed'};clearObjectUrls();dialog.close();previousFocus?.focus?.();}
 function shell(title,html){
  clearObjectUrls();
  const thread=['general','peer','owner-view'].includes(current.kind), split=thread&&people&&current.kind!=='owner-view';
@@ -110,22 +110,24 @@ async function loadImagePreview(img,id){
  try{const blob=await fetchAttachment(id);if(!img.isConnected)return;const url=URL.createObjectURL(blob);objectUrls.add(url);const box=dialog.querySelector('#pbChatMessages'),near=box&&box.scrollHeight-box.scrollTop-box.clientHeight<100;img.onload=()=>{if(near&&img.isConnected)scrollBottom();};img.src=url;img.dataset.loaded='1';}
  catch{img.alt='Фото временно недоступно';img.classList.add('failed');}
 }
-async function ensureRules(){
+async function ensureRules(view){
  const rules=await api('/chat/rules');
+ if(current!==view)return false;
  if(rules.accepted)return true;
  shell('Правила Photo Boss',`<article class="pb-chat-rules">${esc(rules.text)}</article><p class="pb-chat-muted">Подтверждение относится ко всему рабочему пространству. Это не договор оказания услуг и не отдельное согласие на обработку персональных данных.</p><p class="pb-chat-error" data-chat-error hidden></p><button class="pb-chat-btn primary" data-chat-accept data-version="${esc(rules.version)}" data-sha="${esc(rules.sha256)}">Принять общие правила и открыть чат</button>`);
  return false;
 }
 async function home(){
- stopPoll();last=0;current={kind:'home',peer:null,title:'Рабочий чат'};
+ stopPoll();last=0;const view=current={kind:'home',peer:null,title:'Рабочий чат'};
+ shell('Сообщения','<p class="pb-chat-muted" role="status">Загружаем чаты…</p>');
  try{
-  if(!await ensureRules())return;
-  people=await api('/chat/people');
+  if(!await ensureRules(view))return;
+  const data=await api('/chat/people');if(current!==view)return;people=data;
   onlinePeople=new Set(people.people.filter(p=>p.online).map(p=>p.id));presenceAt=Date.now();
   setUnreadBadge(people.totalUnread||0);
   shell('Сообщения',navigation());
   renderPresence();sendHeartbeat();refreshPresence();
- }catch(e){showError(e.message);}
+ }catch(e){if(current===view)showError(e.message);}
 }
 function attachmentMarkup(a){
  if(!a)return '';
@@ -209,21 +211,23 @@ async function openThread(kind,peer=null,title='Общий чат'){
  const thread=current;await poll();if(current===thread&&dialog.open)timer=setInterval(poll,4000);
 }
 async function ownerThreads(){
- stopPoll();last=0;current={kind:'owner',peer:null};
+ stopPoll();last=0;const view=current={kind:'owner',peer:null};
+ shell('Контроль диалогов','<p class="pb-chat-muted" role="status">Загружаем диалоги…</p>');
  try{
-  const d=await api('/chat/owner/threads');
+  const d=await api('/chat/owner/threads');if(current!==view)return;
   const rows=d.threads.map(t=>`<button class="pb-chat-thread" data-owner-a="${t.a.id}" data-owner-b="${t.b.id}" data-owner-title="${esc(t.a.name+' ↔ '+t.b.name)}"><strong>${esc(t.a.name)} ↔ ${esc(t.b.name)}</strong><small>${esc(t.last)} · ${esc(time(t.createdAt))}</small></button>`).join('');
   shell('Контроль диалогов',`<p class="pb-chat-muted">Только рабочие диалоги внутри Photo Boss. Обычный Telegram не подключён.</p><div class="pb-chat-list">${rows||'<p class="pb-chat-muted">Личных диалогов сотрудников пока нет.</p>'}</div>`);
- }catch(e){showError(e.message);}
+ }catch(e){if(current===view)showError(e.message);}
 }
 async function ownerView(a,b,title){
  current={kind:'owner-view',a,b,title};last=0;stopPoll();
  shell(title,`<div class="pb-chat-readonly">Просмотр рабочего диалога</div><div id="pbChatMessages" class="pb-chat-messages" aria-live="polite"></div><p class="pb-chat-error" data-chat-error hidden role="alert"></p>`);
- await poll();timer=setInterval(poll,4000);
+ const view=current;await poll();if(current===view&&dialog.open)timer=setInterval(poll,4000);
 }
 async function showRules(){
- stopPoll();current={kind:'rules',peer:null};
- try{const r=await api('/chat/rules');shell('Общие правила',`<article class="pb-chat-rules">${esc(r.text)}</article><p class="pb-chat-muted">Редакция: ${esc(r.version)} · хранение сообщений до ${r.retentionDays} дней.</p>`);}catch(e){showError(e.message);}
+ stopPoll();const view=current={kind:'rules',peer:null};
+ shell('Общие правила','<p class="pb-chat-muted" role="status">Загружаем правила…</p>');
+ try{const r=await api('/chat/rules');if(current!==view)return;shell('Общие правила',`<article class="pb-chat-rules">${esc(r.text)}</article><p class="pb-chat-muted">Редакция: ${esc(r.version)} · хранение сообщений до ${r.retentionDays} дней.</p>`);}catch(e){if(current===view)showError(e.message);}
 }
 async function uploadFile(file,caption){
  if(file.size>MAX_ATTACHMENT_BYTES)throw new ApiError('Файл больше 20 МБ.',413);
