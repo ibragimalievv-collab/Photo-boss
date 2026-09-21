@@ -12,6 +12,8 @@ const css=document.createElement('link');css.rel='stylesheet';css.href='/work-ch
 
 let me=null, people=null, current={kind:'general',peer:null,title:'Общий чат'}, timer=null, unreadTimer=null, last=0, previousFocus=null;
 const drafts=new Map();
+const deletePanel=document.createElement('dialog');deletePanel.className='pb-record-dialog pb-chat-delete-dialog';deletePanel.setAttribute('aria-labelledby','pbDeleteTitle');document.body.append(deletePanel);
+let pendingDelete=null,deleteFocus=null;
 const objectUrls=new Set();
 const MAX_ATTACHMENT_BYTES=20*1024*1024;
 const presenceSession=crypto.randomUUID();
@@ -136,7 +138,7 @@ async function renderMessages(items,{readonly=false,own=false}={}){
  const box=dialog.querySelector('#pbChatMessages');if(!box)return;
  const nearBottom=box.scrollHeight-box.scrollTop-box.clientHeight<100, first=!box.querySelector('[data-message-id]');let added=0;
  for(const m of items){
-  if(box.querySelector(`[data-message-id="${m.id}"]`))continue;
+  if(current.deletedIds?.has(m.id)||box.querySelector(`[data-message-id="${m.id}"]`))continue;
   box.querySelector('.pb-chat-empty')?.remove();
   const day=messageDay(m.createdAt),previous=box.querySelector('[data-message-id]:last-child');
   if(box.dataset.day!==day){const label=document.createElement('div');label.className='pb-chat-day';label.textContent=day;box.append(label);box.dataset.day=day;}
@@ -144,7 +146,7 @@ async function renderMessages(items,{readonly=false,own=false}={}){
   const el=document.createElement('article');el.className='pb-chat-message '+(mine?'mine':'');el.dataset.messageId=m.id;el.dataset.sender=m.senderId;el.dataset.created=m.createdAt;
   if(previous?.dataset.sender===String(m.senderId)&&messageDay(previous.dataset.created)===day&&new Date(m.createdAt)-new Date(previous.dataset.created)<300000)el.classList.add('is-grouped');
   const clock=new Date(m.createdAt).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
-  el.innerHTML=`${!mine&&(current.kind==='general'||readonly)?`<div class="pb-chat-sender">${esc(m.senderName)}</div>`:''}${attachmentMarkup(m.attachment)}${m.body?`<div class="pb-chat-bubble">${esc(m.body).replace(/\n/g,'<br>')}</div>`:''}<div class="pb-chat-meta"><time datetime="${esc(m.createdAt)}">${esc(clock)}</time>${mine?`<span aria-label="Отправлено" title="Отправлено">${icon('check')}</span>`:''}</div>`;
+  el.innerHTML=`${!mine&&(current.kind==='general'||readonly)?`<div class="pb-chat-sender">${esc(m.senderName)}</div>`:''}${attachmentMarkup(m.attachment)}${m.body?`<div class="pb-chat-bubble">${esc(m.body).replace(/\n/g,'<br>')}</div>`:''}<div class="pb-chat-meta">${mine&&!readonly&&me?.user?.roles?.includes('OWNER')?`<details class="pb-chat-message-actions"><summary aria-label="Действия с сообщением">${icon('more')}</summary><button type="button" data-delete-message="${m.id}">${icon('trash')} Удалить у всех</button></details>`:''}<time datetime="${esc(m.createdAt)}">${esc(clock)}</time>${mine?`<span aria-label="Отправлено" title="Отправлено">${icon('check')}</span>`:''}</div>`;
   box.append(el);last=Math.max(last,m.id);added++;
   for(const img of el.querySelectorAll('[data-preview-id]'))loadImagePreview(img,Number(img.dataset.previewId));
  }
@@ -152,12 +154,44 @@ async function renderMessages(items,{readonly=false,own=false}={}){
  if(added){if(first||nearBottom||own)scrollBottom();else{const jump=dialog.querySelector('[data-jump-bottom]');if(jump)jump.hidden=false;}}
  if(readonly)dialog.querySelector('.pb-chat-compose')?.remove();
 }
+function applyDeletions(ids){
+ const box=dialog.querySelector('#pbChatMessages');if(!box||!ids.length)return;
+ current.deletedIds??=new Set();
+ for(const id of ids){
+  current.deletedIds.add(id);const message=box.querySelector(`[data-message-id="${id}"]`);if(!message)continue;
+  for(const media of message.querySelectorAll('audio,video,img')){media.pause?.();const url=media.getAttribute('src');if(objectUrls.delete(url))URL.revokeObjectURL(url);media.removeAttribute('src');}
+  message.remove();
+ }
+ for(const day of box.querySelectorAll('.pb-chat-day'))if(!day.nextElementSibling?.matches('[data-message-id]'))day.remove();
+ let previous=null;for(const message of box.querySelectorAll('[data-message-id]')){message.classList.toggle('is-grouped',Boolean(previous&&previous.dataset.sender===message.dataset.sender&&messageDay(previous.dataset.created)===messageDay(message.dataset.created)));previous=message;}
+ if(previous)box.dataset.day=messageDay(previous.dataset.created);else delete box.dataset.day;
+ renderMessages([]);
+}
+function askDelete(id){
+ if(!me?.user?.roles?.includes('OWNER'))return;
+ const message=dialog.querySelector(`[data-message-id="${id}"].mine`);if(!message)return;
+ message.querySelector('details')?.removeAttribute('open');deleteFocus=document.activeElement;pendingDelete={id,thread:current};
+ deletePanel.innerHTML=`<div class="pb-record-hero">${icon('trash')}</div><h2 id="pbDeleteTitle">Удалить сообщение?</h2><p class="pb-record-note">Сообщение и вложение исчезнут у всех участников этого чата. Отменить удаление нельзя.</p><p data-delete-error role="alert" hidden></p><div class="pb-record-actions"><button data-delete-cancel autofocus>Отмена</button><button data-delete-confirm class="danger">Удалить у всех</button></div>`;
+ deletePanel.showModal();
+}
+function closeDelete(){deletePanel.close();pendingDelete=null;deleteFocus?.focus?.();}
+deletePanel.addEventListener('cancel',e=>{e.preventDefault();if(!deletePanel.querySelector('[data-delete-confirm]')?.disabled)closeDelete();});
+deletePanel.addEventListener('click',async e=>{
+ if(e.target.closest('[data-delete-cancel]'))return closeDelete();
+ const button=e.target.closest('[data-delete-confirm]');if(!button||!pendingDelete||button.disabled)return;
+ const deleting=pendingDelete;button.disabled=true;deletePanel.querySelector('[data-delete-cancel]').disabled=true;
+ try{await api(`/chat/messages/${deleting.id}`,{method:'DELETE'});if(current===deleting.thread)applyDeletions([deleting.id]);closeDelete();refreshUnread();}
+ catch(err){const error=deletePanel.querySelector('[data-delete-error]');error.hidden=false;error.textContent=err.message;button.disabled=false;deletePanel.querySelector('[data-delete-cancel]').disabled=false;}
+});
+
 async function poll(){
  const thread=current;if(thread.loading||!dialog.open||!['general','peer','owner-view'].includes(thread.kind))return;
  thread.loading=true;
  try{
   const path=thread.kind==='owner-view'?`/chat/owner/messages?a=${thread.a}&b=${thread.b}&after=${last}`:`/chat/messages?peer=${thread.kind==='general'?'general':thread.peer}&after=${last}`;
-  const data=await api(path);if(current!==thread||!dialog.open)return;
+  const data=await api(path+(thread.deletionCursor===undefined?'':`&deletedAfter=${thread.deletionCursor}`));if(current!==thread||!dialog.open)return;
+  if(Number.isInteger(data.deletionCursor))thread.deletionCursor=data.deletionCursor;
+  applyDeletions(data.deletedIds||[]);
   await renderMessages(data.messages,{readonly:thread.kind==='owner-view'});
   if(data.unread)setUnreadBadge(data.unread.total||0);
  }catch(e){if(current===thread)showError(e.message);}finally{thread.loading=false;}
@@ -217,6 +251,7 @@ dialog.addEventListener('input',e=>{
 });
 dialog.addEventListener('keydown',e=>{if(e.target.name==='body'&&e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&!matchMedia('(pointer:coarse)').matches){e.preventDefault();e.target.form.requestSubmit();}});
 dialog.addEventListener('click',async e=>{
+ const remove=e.target.closest('[data-delete-message]');if(remove)return askDelete(Number(remove.dataset.deleteMessage));
  if(e.target.closest('[data-attach]')){dialog.querySelector('input[name=file]').click();return;}
  if(e.target.closest('[data-remove-file]')){dialog.querySelector('input[name=file]').value='';dialog.querySelector('[data-selected-file]').hidden=true;updateComposer();return;}
  if(e.target.closest('[data-jump-bottom]')){scrollBottom();return;}

@@ -25,7 +25,7 @@ from ..services.bookings import (
     notify_photographer_cancelled,
     notify_photographer_rescheduled,
 )
-from ..services.core import audit, get_user, menu
+from ..services.core import audit, get_user, menu, roles_of
 
 r = Router()
 r.message.filter(StaffFilter("MANAGER"), F.text)
@@ -173,7 +173,7 @@ async def booking_time(m, state):
 
 
 @r.callback_query(BookingFlow.package, F.data.startswith("booking:package:"))
-async def booking_package(c: CallbackQuery, state):
+async def booking_package(c: CallbackQuery, state, current_roles):
     try:
         package_id = int(c.data.rsplit(":", 1)[1])
     except (TypeError, ValueError):
@@ -192,6 +192,8 @@ async def booking_package(c: CallbackQuery, state):
         return await c.answer("Пакет недоступен.", show_alert=True)
     await state.update_data(package_id=package_id)
     await state.set_state(BookingFlow.photographer)
+    if not {"OWNER", "ADMIN"} & set(current_roles):
+        return await create_booking(c, state, current_roles, None)
     rows = [[("Назначить позже", "booking:photographer:0")]]
     rows += [[(user.name, f"booking:photographer:{user.id}")] for user in photographers]
     await c.answer()
@@ -204,10 +206,21 @@ async def booking_photographer(c: CallbackQuery, state, current_roles):
         photographer_id = int(c.data.rsplit(":", 1)[1]) or None
     except (TypeError, ValueError):
         return await c.answer("Некорректный фотограф.", show_alert=True)
+    if photographer_id is not None and not {"OWNER", "ADMIN"} & set(current_roles):
+        return await c.answer("Назначать фотографа может только администратор или владелец.", show_alert=True)
+    return await create_booking(c, state, current_roles, photographer_id)
+
+
+async def create_booking(c, state, current_roles, photographer_id):
     data = await state.get_data()
     async with Session() as s:
         manager = await get_user(s, c.from_user.id)
+        actor_roles = await roles_of(s, manager)
+        if not {"OWNER", "ADMIN", "MANAGER"} & actor_roles:
+            return await c.answer("Нет доступа к созданию записи.", show_alert=True)
         if photographer_id is not None:
+            if not {"OWNER", "ADMIN"} & actor_roles:
+                return await c.answer("Назначать фотографа может только администратор или владелец.", show_alert=True)
             photographer = await s.get(User, photographer_id)
             roles = set(await s.scalars(select(UserRole.role).where(UserRole.user_id == photographer_id)))
             if photographer is None or not photographer.active or "PHOTOGRAPHER" not in roles:
@@ -232,7 +245,8 @@ async def booking_photographer(c: CallbackQuery, state, current_roles):
     await state.clear()
     await c.answer()
     await c.message.answer(
-        f"✅ Запись #{booking.id} создана на {booking.shoot_date:%d.%m.%Y} в {booking.shoot_time:%H:%M}.",
+        f"✅ Запись #{booking.id} создана на {booking.shoot_date:%d.%m.%Y} в {booking.shoot_time:%H:%M}."
+        + ("\nФотографа назначит администратор или владелец." if photographer_id is None else ""),
         reply_markup=reply(menu(current_roles)),
     )
     if booking.deposit > 0:

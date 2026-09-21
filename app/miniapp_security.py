@@ -58,6 +58,7 @@ def role_permissions(roles) -> dict:
     owner, admin = "OWNER" in roles, "ADMIN" in roles
     return {"financeScope": "all" if owner else "today" if admin else "self",
             "audit": owner, "manageSchedule": owner or admin,
+            "assignPhotographers": owner or admin,
             "manageBookings": owner or admin or "MANAGER" in roles}
 
 

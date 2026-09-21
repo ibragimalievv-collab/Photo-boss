@@ -35,6 +35,7 @@ function showPanel(html) {
     panel.innerHTML = html;
     if(!panel.open) { lastFocus = document.activeElement; panel.showModal(); }
 }
+function resumeCall(){if(!active)return;if(!panel.open)panel.showModal();for(const video of panel.querySelectorAll('video'))video.play().catch(()=>{});}
 function fail(message) {
     showPanel(`<h2 id="pbCallTitle">Звонок Photo Boss</h2><p role="alert">${esc(message)}</p><button data-call-close>Закрыть</button>`);
 }
@@ -43,7 +44,7 @@ function setBanner() {
     if(banner.parentNode!==parent) parent.append(banner);
     const top=document.querySelector('#topbar');
     let resume=top?.querySelector('[data-top-call]');
-    if(active && top && !resume) {resume=document.createElement('button');resume.className='pb-chat-trigger pb-call-active';resume.dataset.topCall='1';resume.innerHTML=`${icon('phone')} На связи`;resume.onclick=()=>{if(active&&!panel.open)panel.showModal();};top.append(resume);}
+    if(active && top && !resume) {resume=document.createElement('button');resume.className='pb-chat-trigger pb-call-active';resume.dataset.topCall='1';resume.innerHTML=`${icon('phone')} На связи`;resume.onclick=resumeCall;top.append(resume);}
     if(!active) resume?.remove();
     // Do not replace an incoming call's accept control on every background poll.
     const room = !active && available.find(r => !ignored.has(r.id) && r.creatorId !== me?.user?.id && !r.participants.some(p => p.id === me?.user?.id));
@@ -104,12 +105,14 @@ function tile(id, name, stream, local = false) {
         grid.append(card);
     }
     const video = card.querySelector('video'); video.muted = local;
-    if(video.srcObject !== stream) {video.srcObject=stream; video.play().catch(()=>{});}
+    if(video.srcObject!==stream||(stream.getVideoTracks().length&&!video.videoWidth))video.srcObject=stream;
+    // Peers start with empty streams; play again after their tracks arrive.
+    if(stream.getTracks().length)video.play().catch(()=>{});
     return card;
 }
 async function begin({peer=null, room=null, mode='audio', name=''} = {}) {
     if(starting) return;
-    if(active) {panel.showModal(); return;}
+    if(active) {resumeCall(); return;}
     starting=true; let stream=null, result=null;
     stopIncomingRingtone();
     try {
@@ -270,11 +273,11 @@ export async function handleCallClick(e, peer, name) {
     if(start) {await begin({peer,name,mode:start.dataset.startCall});return true;}
     const join=e.target.closest('[data-join-call]');
     if(join) {const room=available.find(r=>r.id===join.dataset.joinCall);if(room) invite(room);else refresh();return true;}
-    if(e.target.closest('[data-resume-call]')) {if(active&&!panel.open)panel.showModal();return true;}
+    if(e.target.closest('[data-resume-call]')) {resumeCall();return true;}
     return false;
 }
 function invite(room) {
-    if(active) {if(!panel.open) panel.showModal();return;}
+    if(active) {resumeCall();return;}
     stopIncomingRingtone();
     showPanel(`<div class="pb-call-invite">${avatar(room.creatorName,room.creatorId)}<p class="pb-call-eyebrow">ВХОДЯЩИЙ ЗВОНОК</p><h2 id="pbCallTitle">${esc(title(room))}</h2><p>${esc(room.creatorName)} приглашает ${room.group?'команду':'вас'} в звонок</p><div class="pb-call-invite-actions"><button data-answer="audio" data-room="${esc(room.id)}">${icon('phone')} Только аудио</button><button data-answer="video" data-room="${esc(room.id)}">${icon('video')} С видео</button><button data-call-close>Позже</button></div><p class="pb-call-note">Микрофон и камера включатся после вашего выбора.</p></div>`);
 }

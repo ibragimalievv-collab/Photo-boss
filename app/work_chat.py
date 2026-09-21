@@ -459,6 +459,63 @@ class WorkChat:
             })
         return packed
 
+    async def deletion_updates(self, conn, actor_id, peer_id, cursor):
+        params = {"uid": actor_id, "peer": peer_id}
+        scope = "recipient_id IS NULL" if peer_id is None else (
+            "((sender_id=:uid AND recipient_id=:peer) "
+            "OR (sender_id=:peer AND recipient_id=:uid))"
+        )
+        if cursor is None:
+            rows = await self.api.rows(conn,
+                f"SELECT COALESCE(MAX(id),0) AS cursor FROM work_chat_deletions WHERE {scope}",
+                **params)
+            return [], int(rows[0]["cursor"])
+        rows = await self.api.rows(conn,
+            f"SELECT id,message_id FROM work_chat_deletions WHERE {scope} "
+            "AND id>:cursor ORDER BY id ASC LIMIT 100",
+            **params, cursor=cursor_id(cursor))
+        return [r["message_id"] for r in rows], int(rows[-1]["id"] if rows else cursor_id(cursor))
+
+    async def delete_message(self, request):
+        actor = request["miniapp_actor"]
+        if "OWNER" not in actor["roles"]:
+            raise AccessError("Удалять свои сообщения может только владелец.")
+        message_id = positive_id(request.match_info["id"])
+        attachment_id = None
+        async with self.engine.begin() as conn:
+            await self.require_rules(conn, actor)
+            # Ownership is enforced by the mutation itself, including concurrent requests.
+            rows = await self.api.rows(conn,
+                "DELETE FROM work_chat_messages WHERE id=:id AND sender_id=:uid "
+                "RETURNING id,sender_id,recipient_id,attachment_id",
+                id=message_id, uid=actor["id"])
+            if not rows:
+                deleted = await self.api.rows(conn,
+                    "SELECT id FROM work_chat_deletions WHERE message_id=:id AND sender_id=:uid",
+                    id=message_id, uid=actor["id"])
+                if not deleted:
+                    raise AccessError("Собственное сообщение не найдено.", 404)
+            else:
+                row = rows[0]
+                attachment_id = row["attachment_id"]
+                await conn.execute(text(
+                    "INSERT INTO work_chat_deletions(message_id,sender_id,recipient_id,deleted_at) "
+                    "VALUES (:id,:uid,:peer,:now)"),
+                    {"id": message_id, "uid": actor["id"], "peer": row["recipient_id"],
+                     "now": datetime.now(UTC).replace(tzinfo=None)})
+                await self.api.audit_write(conn, actor, "work_chat_message_deleted",
+                    "work_chat_message", message_id, "{}")
+        # The attachment endpoint now returns 404. If storage is unavailable,
+        # orphan cleanup retries removing its bytes without restoring access.
+        if attachment_id is not None:
+            storage = request.app.get("yandex_disk")
+            if storage is not None:
+                try:
+                    await asyncio.wait_for(cleanup_orphan_attachments(self.engine, storage, attachment_id), timeout=3)
+                except (TimeoutError, SQLAlchemyError):
+                    logger.warning("Deleted work-chat attachment cleanup will be retried")
+        return web.json_response({"ok": True, "deletedId": message_id})
+
     async def messages(self, request):
         actor = request["miniapp_actor"]
         peer_raw = request.query.get("peer", "general")
@@ -474,6 +531,9 @@ class WorkChat:
                 )
                 if not person:
                     raise AccessError("Сотрудник не найден.", 404)
+            deleted_ids, deletion_cursor = await self.deletion_updates(
+                conn, actor["id"], peer_id, request.query.get("deletedAfter")
+            )
             rows = await self._messages(
                 conn, actor_id=actor["id"], peer_id=peer_id, after=after
             )
@@ -488,6 +548,8 @@ class WorkChat:
         return web.json_response({
             "messages": self.pack_messages(rows),
             "unread": unread,
+            "deletedIds": deleted_ids,
+            "deletionCursor": deletion_cursor,
         })
 
     async def send(self, request):
@@ -783,6 +845,9 @@ class WorkChat:
             )
             if len(people) != 2:
                 raise AccessError("Диалог не найден.", 404)
+            deleted_ids, deletion_cursor = await self.deletion_updates(
+                conn, a_id, b_id, request.query.get("deletedAfter")
+            )
             rows = await self.api.rows(
                 conn,
                 """SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,
@@ -812,6 +877,8 @@ class WorkChat:
             "participants": [{"id": p["id"], "name": p["name"]} for p in people],
             "messages": self.pack_messages(rows),
             "readOnly": True,
+            "deletedIds": deleted_ids,
+            "deletionCursor": deletion_cursor,
         })
 
     async def static(self, request):
@@ -822,6 +889,23 @@ class WorkChat:
             self.static_dir / name,
             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         )
+
+
+async def cleanup_orphan_attachments(engine, storage, attachment_id=None):
+    async with engine.connect() as conn:
+        rows = list((await conn.execute(text(
+            "SELECT a.id,a.storage_path FROM work_chat_attachments a "
+            "WHERE NOT EXISTS (SELECT 1 FROM work_chat_messages m WHERE m.attachment_id=a.id) "
+            + ("AND a.id=:id " if attachment_id is not None else "") + "LIMIT 100"),
+            {"id": attachment_id} if attachment_id is not None else {})).mappings())
+    for row in rows:
+        try:
+            await storage.delete(row["storage_path"])
+        except (YandexDiskError, OSError):
+            logger.warning("Deleted work-chat attachment cleanup will be retried")
+            continue
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM work_chat_attachments WHERE id=:id"), {"id": row["id"]})
 
 
 async def cleanup_expired_chat(engine, storage=None):
@@ -848,6 +932,10 @@ async def cleanup_expired_chat(engine, storage=None):
                 text("DELETE FROM work_chat_attachments WHERE id=:id"),
                 {"id": row["id"]},
             )
+        await conn.execute(text("DELETE FROM work_chat_deletions WHERE deleted_at<:cutoff"),
+            {"cutoff": cutoff})
+    if storage is not None:
+        await cleanup_orphan_attachments(engine, storage)
     return int(result.rowcount or 0)
 
 
@@ -875,6 +963,7 @@ def install_work_chat(app, miniapp):
     app.router.add_get("/api/miniapp/chat/unread", service.unread)
     app.router.add_get("/api/miniapp/chat/messages", service.messages)
     app.router.add_post("/api/miniapp/chat/messages", service.send)
+    app.router.add_delete("/api/miniapp/chat/messages/{id}", service.delete_message)
     app.router.add_post("/api/miniapp/chat/attachments", service.upload_attachment)
     app.router.add_get("/api/miniapp/chat/attachments/{id}", service.attachment)
     app.router.add_get("/api/miniapp/chat/owner/threads", service.owner_threads)

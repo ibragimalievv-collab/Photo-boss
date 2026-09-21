@@ -57,8 +57,8 @@
 .pb-call-invite p{color:#b7cbd9;font-size:13px}
 .pb-call-invite .pb-call-eyebrow{font-size:10px;letter-spacing:.15em;color:#81bcde}
 .pb-call-invite-actions{display:grid;gap:10px;margin:30px 0 12px}
-.pb-call-invite-actions button{display:flex;align-items:center;justify-content:center;gap:10px;min-height:50px;background:#2d9c78;color:#fff}
-.pb-call-invite-actions button[data-answer=video]{background:#258bc7}
+.pb-call-invite-actions button{display:flex;align-items:center;justify-content:center;gap:10px;min-height:50px;background:#25805f;color:#fff}
+.pb-call-invite-actions button[data-answer=video]{background:#207ab0}
 .pb-call-invite-actions button[data-call-close]{background:transparent;color:#b7cbd9}
 .pb-call-banner{position:fixed;top:max(16px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);z-index:5000;box-sizing:border-box;width:min(92vw,430px);padding:16px;border:1px solid #ffffff25;border-radius:22px;background:#192f43f7;color:#fff;box-shadow:0 12px 50px #03172c66;backdrop-filter:blur(20px);font:14px/1.4 system-ui,sans-serif;color-scheme:dark}
 .pb-call-incoming-person{display:flex;align-items:center;gap:12px}
@@ -66,8 +66,8 @@
 .pb-call-incoming-person strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px}
 .pb-call-incoming-person small{display:block;font-size:12px;color:#b2cadb;margin-top:3px}
 .pb-call-incoming-actions{display:flex;gap:10px;margin-top:15px}
-.pb-call-incoming-actions button{display:flex;align-items:center;justify-content:center;gap:8px;flex:1;min-height:44px;padding:9px;border:0;border-radius:12px;background:#ee5264;color:#fff;font:600 13px/1.4 system-ui;cursor:pointer}
-.pb-call-incoming-actions [data-incoming]{background:#2da67a}
+.pb-call-incoming-actions button{display:flex;align-items:center;justify-content:center;gap:8px;flex:1;min-height:44px;padding:9px;border:0;border-radius:12px;background:#d63b51;color:#fff;font:600 13px/1.4 system-ui;cursor:pointer}
+.pb-call-incoming-actions [data-incoming]{background:#25805f}
 .pb-call-incoming-actions .pb-icon{width:19px;height:19px}
 .pb-call-active{background:#278866!important;color:#fff!important;border-color:transparent!important}
 @media(max-width:600px){.pb-call-dialog{width:100%;height:var(--pb-viewport-height,100dvh);margin:0;inset:var(--pb-viewport-top,0px) 0 auto;border:0;border-radius:0;padding:20px 14px max(14px,env(safe-area-inset-bottom));padding-top:max(20px,env(safe-area-inset-top))}.pb-call-dialog h2{font-size:20px}.pb-call-summary{font-size:12px;padding:13px 0 16px}.pb-call-grid{gap:8px}.pb-call-tile{border-radius:15px}.pb-call-avatar{width:65px;height:65px;font-size:24px}.pb-call-controls{gap:4px;margin-top:22px}.pb-call-controls button{width:72px;font-size:10px}.pb-call-controls button>.pb-icon{width:23px;height:23px;padding:14px}.pb-call-actions button{width:34px}.pb-call-actions .pb-icon{width:20px;height:20px}.pb-call-tile>div{padding:24px 10px 10px}.pb-call-tile strong{font-size:12px}.pb-call-tile small{font-size:10px}.pb-call-secondary{margin-top:10px}.pb-call-note{font-size:10px}}

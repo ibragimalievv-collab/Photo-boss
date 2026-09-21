@@ -73,6 +73,12 @@ def handler(page_state, role, sent):
                 "ownerControl": role == "OWNER",
                 "totalUnread": 3,
             })
+        if path.startswith("/api/miniapp/chat/messages/") and r.request.method == "DELETE":
+            if role != "OWNER":
+                return r.fulfill(status=403, json={"error": "Forbidden"})
+            mid = int(path.rsplit('/', 1)[-1])
+            page_state.setdefault('deleted', []).append(mid)
+            return r.fulfill(json={"ok": True, "deletedId": mid})
         if path == "/api/miniapp/chat/messages":
             if r.request.method == "POST":
                 body = json.loads(r.request.post_data)
@@ -86,7 +92,7 @@ def handler(page_state, role, sent):
                 "id": 1, "senderId": 2, "recipientId": None,
                 "body": "<img src=x onerror=alert(1)>", "createdAt": "2026-09-20T10:59:00",
                 "senderName": "Employee", "attachment": None,
-            }], "unread": {"total": 2, "general": 0, "people": {"2": 2}}})
+            }], "deletedIds": page_state.get("deleted", []), "deletionCursor": len(page_state.get("deleted", [])), "unread": {"total": 2, "general": 0, "people": {"2": 2}}})
         if path == "/api/miniapp/chat/attachments" and r.request.method == "POST":
             return r.fulfill(status=201, json={"message": {
                 "id": 9, "senderId": 1, "recipientId": None, "body": "",
@@ -193,6 +199,17 @@ def main():
                     field.press('Enter')
                     expect(field).to_have_value('')
                     assert sent[-1]['body'] == 'Отправлено клавишей Enter'
+                if role == "OWNER":
+                    page.locator('[data-message-id="9"] summary').click()
+                    page.locator('[data-delete-message="9"]').click()
+                    page.locator('[data-delete-cancel]').click()
+                    expect(page.locator('[data-message-id="9"]')).to_be_visible()
+                    page.locator('[data-message-id="9"] summary').click()
+                    page.locator('[data-delete-message="9"]').click()
+                    page.locator('[data-delete-confirm]').click()
+                    expect(page.locator('[data-message-id="9"]')).to_have_count(0)
+                else:
+                    assert page.locator('[data-delete-message]').count() == 0
                 page.locator('[data-chat="home"]').click()
                 page.locator('[data-peer="2"]').click()
                 page.locator("#pbChatMessages").wait_for()

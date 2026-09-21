@@ -19,7 +19,7 @@ from ..models import (
     User,
 )
 from ..services.bookings import notify_photographer_assignment
-from ..services.core import audit
+from ..services.core import audit, roles_of
 from ..services.operations import (
     backup_payload,
     owner_kpis,
@@ -121,7 +121,7 @@ async def smart_assign(callback, current_user, current_roles):
     async with Session() as session:
         booking = await session.get(Booking, booking_id, with_for_update=True)
         user = await session.get(User, user_id)
-        if booking is None or user is None or not user.active:
+        if booking is None or user is None or "PHOTOGRAPHER" not in await roles_of(session, user):
             return await callback.answer("Запись или фотограф недоступны.", show_alert=True)
         booking.photographer_id = user.id
         if booking.status in {"NEW", "CONFIRMED", "PENDING_CONFIRMATION", "RESCHEDULED"}:

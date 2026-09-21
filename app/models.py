@@ -120,7 +120,23 @@ class WorkChatMessage(Base):
         CheckConstraint("length(body) BETWEEN 0 AND 2000"),
         CheckConstraint("length(body) > 0 OR attachment_id IS NOT NULL"),
         CheckConstraint("recipient_id IS NULL OR recipient_id <> sender_id"),
+        {"sqlite_autoincrement": True},
     )
+
+
+class WorkChatDeletion(Base):
+    """Content-free change feed for clients with an already open conversation."""
+    __tablename__ = "work_chat_deletions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    __table_args__ = ({"sqlite_autoincrement": True},)
+    message_id: Mapped[int] = mapped_column(Integer, unique=True)
+    sender_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    recipient_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    deleted_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
 
 
 class Hotel(Base):

@@ -36,7 +36,8 @@ async def main():
 
     fixture.client.server.app['yandex_disk'] = SimpleNamespace(state={'connected': True},
         ensure_dir=AsyncMock(), upload_bytes=AsyncMock(side_effect=upload),
-        download_bytes=AsyncMock(side_effect=download))
+        download_bytes=AsyncMock(side_effect=download),
+        delete=AsyncMock(side_effect=lambda path: files.pop(path, None)))
     errors = []
     contexts = []
     async with async_playwright() as p:
@@ -65,7 +66,7 @@ async def main():
                     content_type="text/css" if path.endswith(".css") else "text/javascript")
 
             pages = []
-            for uid in (3, 4, 5):
+            for uid in (1, 4, 5):
                 context = await browser.new_context(viewport={"width":390,"height":844},
                     permissions=["camera", "microphone"])
                 contexts.append(context)
@@ -122,11 +123,19 @@ async def main():
                         return m&&!m.hidden&&m.currentTime>0;}""", arg=mode, timeout=8000)
                     await b.evaluate("document.querySelectorAll('.pb-chat-media audio,.pb-chat-media video').forEach(m=>m.pause())")
                 assert len(files) == 2
+                deleted_id = await a.locator('.pb-chat-message.mine').first.get_attribute('data-message-id')
+                assert await b.locator('[data-delete-message]').count() == 0
+                await a.locator('.pb-chat-message.mine summary').first.click()
+                await a.locator(f'[data-delete-message="{deleted_id}"]').click()
+                await a.locator('[data-delete-confirm]').click()
+                await a.wait_for_function("!document.querySelector('.pb-chat-delete-dialog').open")
+                await b.locator(f'[data-message-id="{deleted_id}"]').wait_for(state='detached', timeout=12000)
+                assert len(files) == 1
                 # Canceling a fresh recording must release devices without sending a message.
                 await a.locator('[data-record="audio"]').click()
                 await a.locator('[data-record-stop]:not([disabled])').wait_for()
                 await a.locator('[data-record-close]').click()
-                assert len(files) == 2
+                assert len(files) == 1
                 assert await a.evaluate("testStreams.flatMap(s=>s.getTracks()).every(t=>t.readyState==='ended')")
             await a.locator('[data-start-call="video"]').click()
             for page in (b, c):
@@ -143,6 +152,11 @@ async def main():
                         if(!reports.some(x=>x.kind==='audio' && x.bytesReceived>0))return false;
                         if(!reports.some(x=>x.kind==='video' && x.framesDecoded>0))return false;
                     }return true;}""", timeout=30000)
+                # RTP decoding must also produce visible, playing participant videos.
+                await page.wait_for_function("""()=>{
+                    const videos=[...document.querySelectorAll('.pb-call-tile.has-video video')];
+                    return videos.length===3&&videos.every(v=>v.videoWidth>0&&v.readyState>=2&&!v.paused&&getComputedStyle(v).opacity==='1');
+                }""", timeout=10000)
                 assert await page.evaluate("document.documentElement.scrollWidth<=innerWidth+2")
                 if RELAY_ONLY:
                     assert await page.evaluate("""async()=>{
@@ -174,6 +188,8 @@ async def main():
             await a.wait_for_function("testStreams.flatMap(s=>s.getVideoTracks()).some(t=>t.readyState==='live')")
             await a.locator('[data-minimize-call]').click()
             await a.locator('[data-resume-call]').click()
+            await a.wait_for_function("""()=>[...document.querySelectorAll('.pb-call-tile.has-video video')]
+                .every(v=>v.videoWidth>0&&v.readyState>=2&&!v.paused)""", timeout=10000)
             output = Path(os.getenv("CALLS_QA_DIR", "/tmp/photo-boss-calls-qa"))
             output.mkdir(parents=True, exist_ok=True)
             await a.screenshot(path=str(output / "group-call.png"))
@@ -218,7 +234,7 @@ async def main():
             print(json.dumps({"ok":True,"groupParticipants":3,"inboundAudio":True,
                 "inboundVideoFrames":True,"privateAudio":True,"muteCameraToggle":True,
                 "devicesReleased":True,"ringtone":True,"ringtoneStopsOnAnswerDeclineCancel":True,
-                "cameraSwitchAndRecovery":not RELAY_ONLY,"unmirroredVideo":True,"relayOnly":RELAY_ONLY,"voiceAndVideoMessages":not RELAY_ONLY,
+                "ownerDeletionPropagates":not RELAY_ONLY,"cameraSwitchAndRecovery":not RELAY_ONLY,"unmirroredVideo":True,"relayOnly":RELAY_ONLY,"voiceAndVideoMessages":not RELAY_ONLY,
                 "pageErrors":errors,"screenshot":str(output / "group-call.png")}))
         finally:
             if RELAY_ONLY:
