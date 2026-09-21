@@ -28,7 +28,7 @@ def test_idempotency_and_cross_payload_conflict():
     async def run():
         engine,factory,svc=await fixture()
         await svc.configure(Request(OWNER,{'key':'checklist:equipment','title':'Проверить резервную карту','roles':['OWNER'],'active':True}))
-        body={'key':'unique-request-key-1','kind':'checklist','date':'2026-09-21','data':{'itemKey':'checklist:equipment','done':True}}
+        body={'actorId':1,'key':'unique-request-key-1','kind':'checklist','date':'2026-09-21','data':{'itemKey':'checklist:equipment','done':True}}
         for _ in range(2): assert json.loads((await svc.operation(Request(OWNER,body))).text)['status']=='synced'
         with pytest.raises(AccessError) as err:
             await svc.operation(Request(OWNER,body|{'data':body['data']|{'done':False}}))
@@ -43,14 +43,14 @@ def test_idempotency_and_cross_payload_conflict():
 def test_closed_shift_only_and_optimistic_conflicts():
     async def run():
         engine,factory,svc=await fixture()
-        body={'key':'unique-request-key-2','kind':'shift_report','date':'2026-09-21','data':{'note':'Need batteries','expectedSavedAt':None}}
+        body={'actorId':1,'key':'unique-request-key-2','kind':'shift_report','date':'2026-09-21','data':{'note':'Need batteries','expectedSavedAt':None}}
         with pytest.raises(AccessError): await svc.operation(Request(OWNER,body))
         async with factory() as s:
             s.add(ShiftCheckOut(user_id=1,shift_date=date(2026,9,21),status='FINISHED'))
             await s.commit()
         await svc.operation(Request(OWNER,body))
         await svc.operation(Request(OWNER,body))
-        with pytest.raises(AccessError): await svc.operation(Request(OWNER,body|{'key':'unique-request-key-3'}))
+        with pytest.raises(AccessError): await svc.operation(Request(OWNER,body|{'actorId':1,'key':'unique-request-key-3'}))
         async with factory() as s:
             assert (await s.scalar(select(ShiftCheckOut))).report_note=='Need batteries'
         await engine.dispose()
@@ -70,6 +70,6 @@ def test_guest_feedback_private_link_and_one_submission():
         async with factory() as s: assert (await s.scalar(select(GuestFeedback))).rating==5
         async with engine.begin() as conn:
             await conn.execute(text("UPDATE users SET active=FALSE WHERE id=1"))
-        with pytest.raises(AccessError): await svc.operation(Request(OWNER,{'key':'unique-request-key-4','kind':'checklist','date':'2026-09-21','data':{}}))
+        with pytest.raises(AccessError): await svc.operation(Request(OWNER,{'actorId':1,'key':'unique-request-key-4','kind':'checklist','date':'2026-09-21','data':{}}))
         await engine.dispose()
     asyncio.run(run())

@@ -96,7 +96,7 @@ class Development:
 
     async def start(self,request):
         a=request['miniapp_actor'];body=await self.api.body(request)
-        if set(body)!={'clientType'} or body['clientType'] not in {s['type'] for s in ai.SALES_SCENARIOS}: raise AccessError('Выберите сценарий.',400)
+        if set(body)!={'clientType'} or not isinstance(body['clientType'],str) or body['clientType'] not in {s['type'] for s in ai.SALES_SCENARIOS}: raise AccessError('Выберите сценарий.',400)
         if not config.openai_api_key: raise AccessError('AI-тренажёр не подключён. Учебные материалы доступны.',503)
         scenario=next(s for s in ai.SALES_SCENARIOS if s['type']==body['clientType'])
         async with self.api.engine.begin() as conn:

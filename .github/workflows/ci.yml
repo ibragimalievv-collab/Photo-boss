@@ -59,6 +59,7 @@ jobs:
           node --check app/work_chat_ui/ui.js
           node --check app/work_chat_ui/camera.js
           node --check app/webapp/js/practice.js
+          for file in app/webapp/js/*.js; do node --check "$file"; done
           DATABASE_URL='sqlite+aiosqlite:///:memory:' python -m pytest -q
 
       - name: Verify PostgreSQL, bot health and restart count
@@ -98,6 +99,8 @@ jobs:
         run: python tests/work_calls_browser_check.py
       - name: Verify Academy uploads and owner review inside the app
         run: python tests/academy_practice_browser_check.py
+      - name: Verify new mobile screens and offline replay
+        run: python tests/update_browser_check.py
       - name: Save browser evidence
         if: always()
         uses: actions/upload-artifact@v4

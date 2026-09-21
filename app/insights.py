@@ -22,7 +22,7 @@ class Insights:
         period = request.query.get('period', 'week')
         start, end = financial_period(actor['roles'], period, self.api.today(), start=request.query.get('from'), end=request.query.get('to'))
         async with self.api.engine.connect() as conn:
-            result = await compare_periods(self.api, conn, start, end)
+            result = await compare_periods(self.api, conn, start, end, offset_days=7 if period=='week' else None)
         return web.json_response(result)
 
     async def events(self, request):

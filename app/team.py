@@ -55,7 +55,7 @@ class Team:
     async def update(self,request):
         actor=request['miniapp_actor'];check_editor(actor['roles'])
         cid=positive_id(request.match_info['id']);body=await self.api.body(request)
-        if set(body)!={'revision','stage','interviewAt','decision','note'} or type(body['revision']) is not int or body['stage'] not in STAGES:
+        if set(body)!={'revision','stage','interviewAt','decision','note'} or type(body['revision']) is not int or not isinstance(body['stage'],str) or body['stage'] not in STAGES:
             raise AccessError('Обновите карточку кандидата.',400)
         note=field(body,'note',2000);decision=field(body,'decision',2000)
         interview=None
@@ -134,7 +134,7 @@ class Team:
 
     async def progress(self,request):
         a=request['miniapp_actor'];body=await self.api.body(request)
-        if set(body)!={'slug'} or body['slug'] not in {s['slug'] for s in guides(a['roles'])}: raise AccessError('Инструкция недоступна вашей роли.',403)
+        if set(body)!={'slug'} or not isinstance(body['slug'],str) or body['slug'] not in {s['slug'] for s in guides(a['roles'])}: raise AccessError('Инструкция недоступна вашей роли.',403)
         async with self.api.engine.begin() as conn:
             await conn.execute(text('''INSERT INTO academy_lesson_progress(user_id,topic_slug,completed_at) VALUES (:uid,:slug,:now)
                 ON CONFLICT(user_id,topic_slug) DO NOTHING'''),{'uid':a['id'],'slug':body['slug'],'now':utc_now()})
@@ -172,9 +172,11 @@ class Team:
             flo,fhi=utc_bounds(fstart,end,self.api.tz)
             sales=await self.api.rows(conn,'SELECT id,amount,commission,created_at FROM sales WHERE credited_user_id=:uid AND created_at>=:lo AND created_at<:hi',uid=uid,lo=flo,hi=fhi)
             pay=await self.api.rows(conn,'SELECT kind,amount,note,created_at FROM payroll_entries WHERE user_id=:uid AND created_at>=:lo AND created_at<:hi',uid=uid,lo=flo,hi=fhi)
+            ratings=await self.api.rows(conn,'SELECT f.rating FROM guest_feedback f JOIN sales s ON s.id=f.sale_id WHERE s.credited_user_id=:uid AND f.submitted_at>=:lo AND f.submitted_at<:hi AND f.rating IS NOT NULL',uid=uid,lo=lo,hi=hi)
             hotels=await self.api.rows(conn,'SELECT h.id,h.name FROM hotels h JOIN hotel_employees he ON he.hotel_id=h.id WHERE he.user_id=:uid',uid=uid)
         return web.json_response({'profile':profile,'hotels':[dict(h) for h in hotels],'from':str(start),'to':str(end),
-            'discipline':{'late':sum(bool(i['late']) for i in ins),'missed':len(missed),'missedShiftIds':missed,'confirmed':len(confirmed),'checkIns':[{k:str(v) if isinstance(v,datetime) else v for k,v in i.items()}|{'shift_date':str(i['shift_date'])} for i in ins],'closed':sum(o['status']=='FINISHED' for o in outs)},
+            'feedback':{'count':len(ratings),'average':round(sum(r['rating'] for r in ratings)/len(ratings),2) if ratings else None},
+            'discipline':{'trend':[{'date':str(i['shift_date']),'late':bool(i['late']),'confirmed':i['status']=='STARTED'} for i in sorted(ins,key=lambda x:str(x['shift_date']))], 'late':sum(bool(i['late']) for i in ins),'missed':len(missed),'missedShiftIds':missed,'confirmed':len(confirmed),'checkIns':[{k:str(v) if isinstance(v,datetime) else v for k,v in i.items()}|{'shift_date':str(i['shift_date'])} for i in ins],'closed':sum(o['status']=='FINISHED' for o in outs)},
             'finance':{'from':str(fstart),'to':str(end),'revenue':sum(cents(s['amount']) for s in sales),'sales':len(sales),'commission':sum(cents(s['commission']) for s in sales),'adjustments':sum(cents(p['amount']) for p in pay),'entries':[{'kind':p['kind'],'amount':cents(p['amount']),'note':p['note'],'at':str(p['created_at'])} for p in pay]},'onboarding':data})
 
 

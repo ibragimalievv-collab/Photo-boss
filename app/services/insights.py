@@ -59,11 +59,16 @@ async def period_data(api, conn, start, end):
     accrued = sum(cents(s['commission']) for s in sales) + sum(cents(p['amount']) for p in payroll)
     employees, hotels = {}, {}
     names = {h['id']: h['name'] for h in await api.rows(conn, 'SELECT id,name FROM hotels')}
+    user_names = {u['id']: u['name'] for u in await api.rows(conn, 'SELECT id,name FROM users')}
     for s in sales:
         e = employees.setdefault(s['credited_user_id'], {'id': s['credited_user_id'], 'name': s['employee'], 'revenue': 0, 'sales': 0, 'accrued': 0, 'bookings': 0})
         e['revenue'] += cents(s['amount']); e['sales'] += 1; e['accrued'] += cents(s['commission'])
         h = hotels.setdefault(s['hotel_id'], {'id': s['hotel_id'], 'name': names.get(s['hotel_id'], 'Без отеля'), 'revenue': 0, 'sales': 0, 'cash': 0})
         h['revenue'] += cents(s['amount']); h['sales'] += 1
+        if s['manager_id'] is not None:
+            m = employees.setdefault(s['manager_id'], {'id': s['manager_id'], 'name': user_names.get(s['manager_id'], ''), 'revenue': 0, 'sales': 0, 'accrued': 0, 'bookings': 0})
+            m['bookedRevenue'] = m.get('bookedRevenue', 0) + cents(s['amount'])
+            m['bookedSales'] = m.get('bookedSales', 0) + 1
     for r in receipts:
         h = hotels.setdefault(r['hotel_id'], {'id': r['hotel_id'], 'name': names.get(r['hotel_id'], 'Без отеля'), 'revenue': 0, 'sales': 0, 'cash': 0})
         h['cash'] += cents(r['verified_amount'])
@@ -87,10 +92,10 @@ async def period_data(api, conn, start, end):
             'note': 'Остаток после начислений = подтверждённые поступления минус комиссии, премии и удержания. Расходы отелей, налоги и фактические выплаты не учтены: это не чистая прибыль.'}
 
 
-async def compare_periods(api, conn, start, end):
+async def compare_periods(api, conn, start, end, *, offset_days=None):
     duration = (end-start).days+1
-    previous_end = start-timedelta(days=1)
-    previous_start = previous_end-timedelta(days=duration-1)
+    previous_start = start-timedelta(days=offset_days or duration)
+    previous_end = end-timedelta(days=offset_days or duration)
     current = await period_data(api, conn, start, end)
     previous = await period_data(api, conn, previous_start, previous_end)
     changes = {k: change(v, previous['metrics'][k]) for k, v in current['metrics'].items()}
@@ -106,8 +111,10 @@ async def compare_periods(api, conn, start, end):
                               'rate': rate, 'previousRate': old_rate, **changes[key]})
     if c['receiptIssues'] >= 3 and c['receiptIssues'] >= max(1,p['receiptIssues'])*2:
         flags.append({'metric': 'receiptIssues', 'reason': 'Не менее 3 проблемных чеков и рост числа не менее чем вдвое.', **changes['receiptIssues']})
+    if end >= api.today():
+        flags = []  # A partial trading day is not evidence of a sales drop.
     return {**current, 'previous': previous, 'changes': changes, 'flags': flags,
-            'basis': 'Предыдущий период такой же длины. При нулевой базе процент не рассчитывается.'}
+            'basis': 'Предыдущий период такой же длины. При нулевой базе процент не рассчитывается. Если текущий день не завершён, тревожные флаги по сравнению не строятся.'}
 
 
 async def anomalies(api, conn):
@@ -127,6 +134,12 @@ async def anomalies(api, conn):
             expected = 15 if s['frames'] >= 150 else 10
             if Decimal(str(s['percent'])) != expected or abs(cents(s['commission'])-cents(Decimal(str(s['amount']))*expected/100)) > 0:
                 add(f"sale:{s['id']}:commission", 'Комиссия отличается от правила 150 кадров', 'sale', s['id'], {'frames': s['frames'], 'expectedPercent': expected, 'actualPercent': s['percent'], 'commission': cents(s['commission'])}, 'critical')
+    for row in await api.rows(conn, "SELECT id,entity_id,details,created_at FROM audit_logs WHERE entity='sales' AND action='row.update' ORDER BY id DESC LIMIT 500"):
+        data = parsed(row['details'])
+        before, after = data.get('before') or {}, data.get('after') or {}
+        changed = {k: {'before': before.get(k), 'after': after.get(k)} for k in ('amount','credited_user_id','booking_id','sold_photos') if before.get(k) != after.get(k)}
+        if changed:
+            add(f"sale-audit:{row['id']}", 'Изменены существенные данные продажи', 'sale', row['entity_id'], {'auditId': row['id'], 'at': str(row['created_at']), 'changes': changed}, 'critical')
     receipts = await api.rows(conn, 'SELECT * FROM receipts ORDER BY id')
     hashes, operations = {}, {}
     for r in receipts:
@@ -142,6 +155,8 @@ async def anomalies(api, conn):
         add(f"bank:{r['id']}", 'Сумма банковской сверки не совпадает', 'receipt', r['receipt_id'], {'bankAmount': cents(r['amount'])}, 'critical')
     for r in await api.rows(conn, "SELECT id,shooting_id,attempts FROM photo_storage WHERE status='FAILED'"):
         add(f"upload:{r['id']}", 'Не удалось сохранить фото на Яндекс.Диске', 'shooting', r['shooting_id'], {'attempts': r['attempts']})
+    for row in await api.rows(conn, "SELECT id,user_id,shift_date FROM shift_check_ins WHERE late=TRUE AND shift_date=:today", today=api.today()):
+        add(f"late:{row['id']}", 'Опоздание на смену', 'shift_check_in', row['id'], {'employeeId': row['user_id'], 'date': str(row['shift_date'])})
     yesterday = api.today()-timedelta(days=1)
     for r in await api.rows(conn, '''SELECT i.id,i.user_id,i.shift_date FROM shift_check_ins i
         WHERE i.status='STARTED' AND i.shift_date<=:yesterday AND NOT EXISTS

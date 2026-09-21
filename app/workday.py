@@ -53,8 +53,9 @@ class Workday:
     async def operation(self,request):
         """Same key + payload replays the result; different payload is a conflict."""
         a=request['miniapp_actor'];body=await self.api.body(request)
-        if set(body)!={'key','kind','date','data'} or not isinstance(body['key'],str) or not 16<=len(body['key'])<=80 or not isinstance(body['data'],dict): raise AccessError('Некорректная операция.',400)
+        if set(body)!={'key','kind','date','data','actorId'} or not isinstance(body['key'],str) or not 16<=len(body['key'])<=80 or not isinstance(body['data'],dict): raise AccessError('Некорректная операция.',400)
         if body['kind'] not in ('checklist','shift_report'): raise AccessError('Этот тип операции не поддерживает синхронизацию.',400)
+        if type(body['actorId']) is not int or body['actorId'] != a['id']: raise AccessError('Аккаунт изменился. Операция принадлежит другому сотруднику.',403)
         digest=hashlib.sha256(json.dumps(body,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
         async with self.api.engine.begin() as conn:
             users=await self.api.rows(conn,'SELECT id,active FROM users WHERE id=:uid FOR UPDATE',uid=a['id'])
@@ -69,7 +70,7 @@ class Workday:
             if not self.api.today()-timedelta(days=7)<=day<=self.api.today(): raise AccessError('Дата требует ручной проверки; операция не применена.',409)
             data=body['data']
             if body['kind']=='checklist':
-                if set(data)!={'itemKey','done'} or type(data['done']) is not bool or data['itemKey'] not in {i['key'] for i in await self.checklist(conn,roles)}: raise AccessError('Пункт больше не доступен вашей роли.',409)
+                if set(data)!={'itemKey','done'} or type(data['done']) is not bool or not isinstance(data['itemKey'],str) or data['itemKey'] not in {i['key'] for i in await self.checklist(conn,roles)}: raise AccessError('Пункт больше не доступен вашей роли.',409)
                 await conn.execute(text('''INSERT INTO work_checklist_completions(user_id,shift_date,item_key,done,updated_at) VALUES (:uid,:day,:item,:done,:now)
                     ON CONFLICT(user_id,shift_date,item_key) DO UPDATE SET done=excluded.done,updated_at=excluded.updated_at'''),{'uid':a['id'],'day':day,'item':data['itemKey'],'done':data['done'],'now':utc_now()})
             else:

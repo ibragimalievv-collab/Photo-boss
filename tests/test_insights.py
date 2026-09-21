@@ -123,3 +123,20 @@ def test_upgrade_preserves_legacy_notifications():
             assert (await conn.execute(text('SELECT text,kind FROM notifications'))).one()==('legacy','legacy')
         await engine.dispose()
     asyncio.run(run())
+
+
+def test_partial_week_compares_same_weekdays_and_does_not_raise_drop_flags(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.services import insights
+    async def run():
+        current = {'metrics': {'revenue': 0, 'sales': 0, 'bookings': 0, 'attendance': 0, 'cancellations': 0, 'late': 0, 'receiptIssues': 0}}
+        previous = {'metrics': dict(current['metrics'], revenue=10000, sales=10)}
+        provider = AsyncMock(side_effect=[current, previous])
+        monkeypatch.setattr(insights, 'period_data', provider)
+        api = SimpleNamespace(today=lambda: date(2026, 9, 21))
+        result = await insights.compare_periods(api, None, date(2026, 9, 21), date(2026, 9, 21), offset_days=7)
+        assert provider.call_args_list[1].args[2:] == (date(2026, 9, 14), date(2026, 9, 14))
+        assert result['changes']['revenue']['percent'] == -100
+        assert result['flags'] == []
+    asyncio.run(run())
