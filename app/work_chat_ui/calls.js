@@ -35,7 +35,7 @@ function showPanel(html) {
     panel.innerHTML = html;
     if(!panel.open) { lastFocus = document.activeElement; panel.showModal(); }
 }
-function resumeCall(){if(!active)return;if(!panel.open)panel.showModal();for(const video of panel.querySelectorAll('video'))video.play().catch(()=>{});}
+function resumeCall(){if(!active)return;if(!panel.open)panel.showModal();for(const media of panel.querySelectorAll('video,audio'))media.play().catch(()=>{});}
 function fail(message) {
     showPanel(`<h2 id="pbCallTitle">Звонок Photo Boss</h2><p role="alert">${esc(message)}</p><button data-call-close>Закрыть</button>`);
 }
@@ -104,7 +104,19 @@ function tile(id, name, stream, local = false) {
         card.innerHTML=`<video autoplay playsinline></video><span class="pb-call-avatar">${esc(initials(name))}</span><div><strong>${esc(name)}</strong><small data-peer-state>Подключение…</small></div>`;
         grid.append(card);
     }
-    const video = card.querySelector('video'); video.muted = local;
+    // An offered but inactive video receiver can keep a combined media element
+    // waiting for its first frame. Play sound independently so audio-only and
+    // mixed calls remain audible while cameras are off or switching.
+    const video = card.querySelector('video'); video.muted = true;
+    if(!local){
+        let audio=card.querySelector('audio');
+        if(!audio){audio=document.createElement('audio');audio.autoplay=true;card.append(audio);}
+        const tracks=stream.getAudioTracks();
+        if(tracks.length){
+            if(!audio.srcObject||tracks.some(t=>!audio.srcObject.getTracks().includes(t)))audio.srcObject=new MediaStream(tracks);
+            audio.play().catch(()=>{});
+        }
+    }
     if(video.srcObject!==stream||(stream.getVideoTracks().length&&!video.videoWidth))video.srcObject=stream;
     // Peers start with empty streams; play again after their tracks arrive.
     if(stream.getTracks().length)video.play().catch(()=>{});
@@ -251,7 +263,7 @@ async function hangup(endForAll=false,message='') {
     // Release devices immediately, even if the network is down.
     active=null;c.closed=true; clearInterval(syncTimer);
     c.stream.getTracks().forEach(t=>t.stop()); for(const p of c.peers.values())p.pc.close();
-    panel.querySelectorAll('video').forEach(v=>{v.pause();v.srcObject=null;});
+    panel.querySelectorAll('video,audio').forEach(v=>{v.pause();v.srcObject=null;});
     window.Telegram?.WebApp?.disableClosingConfirmation?.();
     if(message) fail(message); else {panel.close();lastFocus?.focus?.();}
     try {await callApi('/leave',{callId:c.room.id,session:c.session,endForAll});} catch { /* Server heartbeat removes stale sessions. */ }
@@ -316,7 +328,7 @@ panel.addEventListener('click',async e=>{
         active.audio=!active.audio;active.stream.getAudioTracks().forEach(t=>{t.enabled=active.audio;});
         updateControls(active);updateTiles(active);sync();
     }
-    if(e.target.closest('[data-play-audio]')) panel.querySelectorAll('video').forEach(v=>v.play().catch(()=>status('Нажмите «Включить звук» ещё раз.')));
+    if(e.target.closest('[data-play-audio]')) panel.querySelectorAll('video,audio').forEach(v=>v.play().catch(()=>status('Нажмите «Включить звук» ещё раз.')));
     if(e.target.closest('[data-minimize-call],[data-call-close]')) panel.close();
 });
 panel.addEventListener('cancel',e=>{e.preventDefault();panel.close();});

@@ -177,6 +177,10 @@ async def main():
                     const videos=[...document.querySelectorAll('.pb-call-tile.has-video video')];
                     return videos.length===3&&videos.every(v=>v.videoWidth>0&&v.readyState>=2&&!v.paused&&getComputedStyle(v).opacity==='1');
                 }""", timeout=10000)
+                await page.wait_for_function("""()=>{
+                    const players=[...document.querySelectorAll('.pb-call-tile audio')];
+                    return players.length===2&&players.every(v=>!v.muted&&!v.paused&&v.currentTime>0&&v.readyState>=2);
+                }""", timeout=10000)
                 assert await page.evaluate("document.documentElement.scrollWidth<=innerWidth+2")
                 if RELAY_ONLY:
                     assert await page.evaluate("""async()=>{
@@ -238,8 +242,18 @@ async def main():
                     const stats=[...(await pcs[0].getStats()).values()];
                     return stats.some(x=>x.type==='inbound-rtp'&&x.kind==='audio'&&x.bytesReceived>0);
                 }""")
-                await page.wait_for_function("""()=>[...document.querySelectorAll('.pb-call-tile video')]
-                    .filter(v=>!v.muted).some(v=>!v.paused&&v.currentTime>0&&v.readyState>=2)""", timeout=10000)
+                await page.wait_for_function("""()=>[...document.querySelectorAll('.pb-call-tile audio')]
+                    .some(v=>!v.muted&&!v.paused&&v.currentTime>0&&v.readyState>=2)""", timeout=10000)
+            # Enable video in an audio call, then turn it off without losing sound.
+            await a.locator('[data-camera]').click()
+            await b.wait_for_function("""()=>[...document.querySelectorAll('.pb-call-tile.has-video video')]
+                .some(v=>v.videoWidth>0&&!v.paused&&v.readyState>=2)""", timeout=15000)
+            await a.locator('[data-camera]').click()
+            audio_time = await b.locator('.pb-call-tile audio').evaluate('e=>e.currentTime')
+            await b.wait_for_function("""time=>{
+                const audio=document.querySelector('.pb-call-tile audio');
+                return !audio.muted&&!audio.paused&&audio.currentTime>time+0.3;
+            }""", arg=audio_time, timeout=10000)
             await b.locator('[data-hangup]').click()
             for page in (a,b):
                 await page.wait_for_function("testStreams.flatMap(s=>s.getTracks()).every(t=>t.readyState==='ended')", timeout=15000)
