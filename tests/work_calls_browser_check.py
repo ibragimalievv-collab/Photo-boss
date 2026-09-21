@@ -82,7 +82,15 @@ async def main():
                         g.connect=(...args)=>{if(args[0]===this.destination){const a=this.createAnalyser();
                             connect(a);testRingAnalysers.push(a);}return connect(...args);};return g;}};
                     const get=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-                    navigator.mediaDevices.getUserMedia=async (...args)=>{const s=await get(...args);testStreams.push(s);return s;};""")
+                    // The runner has one synthetic camera. Map facing requests to that real
+                    // capture device and verify constraints, replacement and recovery separately.
+                    window.testCameraRequests=[];window.testCameraFailure=false;
+                    navigator.mediaDevices.getUserMedia=async (config)=>{
+                        const facing=config.video?.facingMode;
+                        if(facing)testCameraRequests.push(facing.exact||facing.ideal||facing);
+                        if(testCameraFailure&&facing?.exact){testCameraFailure=false;throw new DOMException('fixture camera unavailable','OverconstrainedError');}
+                        const adjusted=config.video?{...config,video:{...config.video,facingMode:undefined}}:config;
+                        const s=await get(adjusted);testStreams.push(s);return s;};""")
                 page = await context.new_page()
                 page.on("pageerror", lambda e: errors.append(str(e)))
                 await page.route("**/*", route)
@@ -94,6 +102,12 @@ async def main():
             if not RELAY_ONLY:
                 for mode in ('audio', 'video'):
                     await a.locator(f'[data-record="{mode}"]').click()
+                    if mode == 'video':
+                        await a.locator('[data-record-camera]').click()
+                        await a.wait_for_function("!document.querySelector('[data-record-camera]').disabled")
+                        assert await a.evaluate("testCameraRequests.at(-1)==='environment'")
+                        assert await a.locator('[data-record-live]').evaluate("e=>getComputedStyle(e).transform==='none'")
+                        await a.locator('[data-record-start]').click()
                     await a.locator('[data-record-stop]:not([disabled])').wait_for()
                     await a.wait_for_timeout(1500)  # Record real synthetic media frames.
                     await a.locator('[data-record-stop]').click()
@@ -136,6 +150,21 @@ async def main():
                             const pairs=[...stats.values()].filter(x=>x.type==='candidate-pair'&&x.nominated&&x.state==='succeeded');
                             if(!pairs.length||pairs.some(x=>stats.get(x.localCandidateId)?.candidateType!=='relay'))return false;
                         }return true;}""")
+            if not RELAY_ONLY:
+                audio_id = await a.evaluate("testStreams.flatMap(s=>s.getAudioTracks()).find(t=>t.readyState==='live').id")
+                for facing in ('environment', 'user'):
+                    await a.locator('[data-switch-camera]').click()
+                    await a.wait_for_function("!document.querySelector('[data-switch-camera]').disabled")
+                    assert await a.evaluate("testCameraRequests.at(-1)") == facing
+                    assert await a.evaluate("id=>testStreams.flatMap(s=>s.getAudioTracks()).some(t=>t.id===id&&t.readyState==='live'&&t.enabled)", audio_id)
+                    assert await a.locator('.pb-call-tile video').first.evaluate("e=>getComputedStyle(e).transform==='none'")
+                before_frames = await b.evaluate("async()=>{let n=0;for(const p of testPCs)for(const x of (await p.getStats()).values())if(x.type==='inbound-rtp'&&x.kind==='video')n+=x.framesDecoded||0;return n;}")
+                await b.wait_for_function("async n=>{let frames=0;for(const p of testPCs)for(const x of (await p.getStats()).values())if(x.type==='inbound-rtp'&&x.kind==='video')frames+=x.framesDecoded||0;return frames>n+5;}", arg=before_frames)
+                await a.evaluate('testCameraFailure=true')
+                await a.locator('[data-switch-camera]').click()
+                await a.locator('[data-camera-error]:not([hidden])').wait_for()
+                assert await a.locator('[data-camera]').get_attribute('aria-pressed') == 'true'
+                assert await a.evaluate("testCameraRequests.at(-1)==='user'")
             await a.locator('[data-mic]').click()
             assert await a.evaluate("testStreams.flatMap(s=>s.getAudioTracks()).filter(t=>t.readyState==='live').every(t=>!t.enabled)")
             await a.locator('[data-camera]').click()
@@ -186,7 +215,7 @@ async def main():
             print(json.dumps({"ok":True,"groupParticipants":3,"inboundAudio":True,
                 "inboundVideoFrames":True,"privateAudio":True,"muteCameraToggle":True,
                 "devicesReleased":True,"ringtone":True,"ringtoneStopsOnAnswerDeclineCancel":True,
-                "relayOnly":RELAY_ONLY,"voiceAndVideoMessages":not RELAY_ONLY,
+                "cameraSwitchAndRecovery":not RELAY_ONLY,"unmirroredVideo":True,"relayOnly":RELAY_ONLY,"voiceAndVideoMessages":not RELAY_ONLY,
                 "pageErrors":errors,"screenshot":str(output / "group-call.png")}))
         finally:
             if RELAY_ONLY:

@@ -816,7 +816,7 @@ class WorkChat:
 
     async def static(self, request):
         name = request.match_info["asset"]
-        if name not in {"chat.js", "chat.css", "calls.js", "calls.css", "ringtone.js", "recorder.js"}:
+        if name not in {"chat.js", "chat.css", "calls.js", "calls.css", "ringtone.js", "recorder.js", "ui.js", "camera.js"}:
             raise web.HTTPNotFound()
         return web.FileResponse(
             self.static_dir / name,

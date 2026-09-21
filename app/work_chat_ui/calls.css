@@ -1,1 +1,74 @@
-.pb-call-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:0 0 10px}.pb-call-toolbar button,.pb-call-banner button{font:inherit;min-height:44px;padding:8px 12px;border:1px solid #9d7c40;border-radius:10px;background:#d4b16a;color:#171a21;cursor:pointer}.pb-call-toolbar small{font-size:11px;opacity:.7;width:100%}.pb-chat-body:has(.pb-call-toolbar){display:flex;flex-direction:column}.pb-chat-body:has(.pb-call-toolbar) .pb-chat-messages{height:auto;flex:1;min-height:80px}.pb-chat-body:has(.pb-call-toolbar) .pb-chat-compose{flex:none;display:block}.pb-call-dialog{box-sizing:border-box;width:min(94vw,850px);max-height:94dvh;overflow:auto;border:1px solid #b69453;border-radius:20px;background:#161b23;color:#f7f4eb;padding:22px;font:16px/1.5 system-ui,sans-serif}.pb-call-dialog::backdrop{background:#06090dda}.pb-call-dialog header{display:flex;gap:12px;justify-content:space-between;align-items:center}.pb-call-dialog h2{margin:0;font-size:22px;overflow-wrap:anywhere}.pb-call-dialog header small{font-size:11px;letter-spacing:.13em;color:#d4b16a}.pb-call-dialog button{font:inherit;min-height:44px;border-radius:12px;padding:9px 14px;background:#293241;color:#f7f4eb;border:1px solid #627087;cursor:pointer}.pb-call-dialog button:disabled{opacity:.5}.pb-call-dialog button[aria-pressed=true]{border-color:#d4b16a}.pb-call-dialog button.danger{background:#bd333f;border-color:#bd333f}.pb-call-dialog :focus-visible{outline:3px solid #e8c580;outline-offset:2px}.pb-call-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.pb-call-tile{position:relative;background:#252e3b;border-radius:16px;overflow:hidden;aspect-ratio:4/3;display:grid;place-items:center}.pb-call-tile video{position:absolute;width:100%;height:100%;object-fit:cover;opacity:0}.pb-call-tile.has-video video{opacity:1}.pb-call-tile.has-video .pb-call-avatar{display:none}.pb-call-avatar{display:grid;place-items:center;width:70px;height:70px;border-radius:50%;background:#d4b16a;color:#181d25;font-size:25px}.pb-call-tile>div{position:absolute;bottom:0;left:0;right:0;padding:22px 12px 10px;background:linear-gradient(transparent,#000c)}.pb-call-tile strong,.pb-call-tile small{display:block;overflow-wrap:anywhere}.pb-call-tile small{font-size:12px;color:#e1dacd}.pb-call-controls{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}.pb-call-note{font-size:12px;color:#c3cbd8}.pb-call-end-all{margin-top:12px}.pb-call-banner{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:5000;box-sizing:border-box;width:min(94vw,520px);padding:16px;border:1px solid #c9a057;border-radius:16px;background:#18212e;color:#fff;box-shadow:0 12px 48px #0008;font:15px/1.4 system-ui}.pb-call-banner[hidden]{display:none}.pb-call-banner strong{display:block;margin-bottom:10px}.pb-call-banner>div{display:flex;gap:8px}.pb-call-banner button{font-size:14px}.pb-call-banner button:last-child{background:transparent;color:#eee}.pb-call-active{background:#d4b16a!important;color:#171a21!important}@media(max-width:480px){.pb-call-dialog{width:100vw;max-height:96dvh;margin:auto 0 0;padding:16px;border-radius:18px 18px 0 0}.pb-call-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.pb-call-tile{aspect-ratio:3/4}.pb-call-tile strong{font-size:12px}.pb-call-tile small{font-size:10px}.pb-call-avatar{width:46px;height:46px;font-size:18px}.pb-call-controls button{flex:1;font-size:13px;padding:9px}.pb-call-toolbar button{font-size:13px}}
+.pb-call-toolbar{display:contents}
+.pb-call-actions{display:flex;flex:none;gap:1px}
+.pb-call-actions button{display:grid;place-items:center;width:40px;height:44px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--chat-accent,#208bd0);cursor:pointer}
+.pb-call-actions .pb-icon{width:21px;height:21px}
+.pb-call-actions button:hover{background:var(--chat-soft,#f2f6f9)}
+.pb-call-room-action{order:10;flex-basis:100%;padding:5px 1px 0}
+.pb-call-room-action button{display:flex;align-items:center;justify-content:center;gap:9px;width:100%;padding:10px;border:0;border-radius:10px;background:#e4f6ef;color:#23875f;font:600 12px/1.4 system-ui;cursor:pointer}
+.pb-call-room-action .pb-icon{width:16px;height:16px}
+.pb-call-dialog{box-sizing:border-box;width:min(94vw,920px);max-width:none;height:min(94dvh,850px);max-height:none;margin:auto;border:1px solid #ffffff15;border-radius:26px;overflow:auto;padding:24px;background:radial-gradient(ellipse at 50% 0,#2c465c,transparent 70%),#122333;color:#f0f6fc;font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;letter-spacing:normal;color-scheme:dark;box-shadow:0 24px 100px #00152c66}
+.pb-call-dialog[open]{display:flex;flex-direction:column}
+.pb-call-dialog *{box-sizing:border-box}
+.pb-call-dialog [hidden],.pb-call-banner[hidden]{display:none!important}
+.pb-call-dialog::backdrop{background:#071320ce;backdrop-filter:blur(12px)}
+.pb-call-dialog header{display:flex;align-items:center;justify-content:space-between;gap:16px;flex:none}
+.pb-call-dialog header>div{min-width:0}
+.pb-call-dialog h2{margin:0;color:inherit;font-size:22px;font-weight:600;letter-spacing:-.02em;overflow-wrap:anywhere}
+.pb-call-dialog header small{display:block;font-size:9px;color:#91aec4;letter-spacing:.17em;margin-bottom:4px}
+.pb-call-dialog button{font:inherit;min-height:44px;padding:10px 15px;border:0;border-radius:12px;background:#ffffff15;color:#eff7fc;cursor:pointer;transition:background .15s}
+.pb-call-dialog button:hover{background:#ffffff22}
+.pb-call-dialog button:disabled{opacity:.45;cursor:wait}
+.pb-call-dialog :focus-visible,.pb-call-banner :focus-visible{outline:3px solid #67bafa;outline-offset:3px}
+.pb-call-dialog [data-minimize-call]{display:grid;place-items:center;border-radius:50%;width:44px;padding:0}
+.pb-call-summary{display:flex;gap:10px;align-items:center;justify-content:space-between;flex:none;padding:14px 0 18px;color:#b7cbd9;font-size:13px}
+.pb-call-summary p{margin:0;color:inherit}
+.pb-call-summary time{font-variant-numeric:tabular-nums;background:#ffffff10;border-radius:20px;padding:3px 10px;color:#d3e2ed}
+.pb-call-grid{position:relative;flex:1;min-height:160px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-auto-rows:minmax(100px,1fr);gap:12px}
+.pb-call-grid[data-count='1']{grid-template-columns:1fr}
+.pb-call-tile{position:relative;min-width:0;min-height:120px;background:radial-gradient(ellipse at 30% 30%,#36536b,transparent),#233c50;border-radius:18px;overflow:hidden;display:grid;place-items:center}
+.pb-call-tile:nth-child(3n+2){background:radial-gradient(ellipse at 30% 30%,#526180,transparent),#303a55}
+.pb-call-tile:nth-child(3n+3){background:radial-gradient(ellipse at 30% 30%,#386d69,transparent),#274b52}
+.pb-call-tile video{position:absolute;width:100%;height:100%;object-fit:cover;opacity:0;transform:none!important}
+.pb-call-tile.has-video video{opacity:1}
+.pb-call-tile.has-video .pb-call-avatar{display:none}
+.pb-call-avatar{display:grid;place-items:center;width:88px;height:88px;margin:32px 0 60px;border-radius:50%;background:linear-gradient(145deg,#76bee6,#448ebf);box-shadow:0 0 0 12px #ffffff05,0 0 0 24px #ffffff03;color:#fff;font-size:28px;font-weight:500}
+.pb-call-tile>div{position:absolute;bottom:0;left:0;right:0;padding:26px 14px 12px;background:linear-gradient(transparent,#0917269c)}
+.pb-call-tile strong,.pb-call-tile small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.pb-call-tile strong{font-size:13px}.pb-call-tile small{font-size:11px;color:#c4d6e3;margin-top:2px}
+.pb-call-grid[data-group='false'][data-count='2']{grid-template-columns:1fr}
+.pb-call-grid[data-group='false'][data-count='2'] .pb-call-tile:first-child{position:absolute;bottom:12px;right:12px;width:120px;height:160px;z-index:1;border:2px solid #ffffff66;border-radius:14px;min-height:0;box-shadow:0 5px 24px #0004}
+.pb-call-grid[data-group='false'][data-count='2'] .pb-call-tile:first-child .pb-call-avatar{width:42px;height:42px;font-size:18px;margin:12px 0 30px;box-shadow:none}
+.pb-call-grid[data-group='false'][data-count='2'] .pb-call-tile:first-child>div{padding:20px 8px 7px}
+.pb-call-grid[data-group='false'][data-count='2'] .pb-call-tile:first-child small{display:none}
+.pb-call-controls{display:flex;align-items:flex-start;justify-content:center;gap:22px;margin-top:24px;flex:none}
+.pb-call-controls button{display:flex;flex-direction:column;align-items:center;gap:8px;width:84px;padding:0;background:transparent!important;font-size:10px;line-height:1.4;text-align:center}
+.pb-call-controls button>.pb-icon{box-sizing:content-box;width:25px;height:25px;padding:16px;border-radius:50%;background:#ffffff19;transition:background .15s}
+.pb-call-controls button:hover>.pb-icon{background:#ffffff30}
+.pb-call-controls button[aria-pressed=false]>.pb-icon{background:#eaf2f9;color:#203646}
+.pb-call-controls button.danger>.pb-icon{background:#ee5264;color:#fff}
+.pb-call-secondary{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin-top:17px;flex:none}
+.pb-call-secondary button{display:flex;align-items:center;justify-content:center;gap:7px;font-size:11px;min-height:34px;padding:6px 10px;border-radius:10px;background:transparent;color:#afc4d5}
+.pb-call-secondary .pb-icon{width:16px;height:16px}
+.pb-call-note{margin:10px 0 0;color:#90a8bb;font-size:11px;line-height:1.6;text-align:center;flex:none}
+.pb-call-dialog [data-camera-error]{margin-top:12px;padding:10px 12px;background:#faad641a;color:#ffdbbc;border-radius:10px;font-size:12px}
+.pb-call-invite{margin:auto;text-align:center;max-width:440px;align-self:center;padding:30px 0}
+.pb-call-invite>.pb-chat-avatar{width:100px;height:100px;font-size:34px;margin:0 auto 28px;box-shadow:0 0 0 14px #ffffff05,0 0 0 28px #ffffff03}
+.pb-call-invite h2{font-size:28px;margin:10px 0}
+.pb-call-invite p{color:#b7cbd9;font-size:13px}
+.pb-call-invite .pb-call-eyebrow{font-size:10px;letter-spacing:.15em;color:#81bcde}
+.pb-call-invite-actions{display:grid;gap:10px;margin:30px 0 12px}
+.pb-call-invite-actions button{display:flex;align-items:center;justify-content:center;gap:10px;min-height:50px;background:#2d9c78;color:#fff}
+.pb-call-invite-actions button[data-answer=video]{background:#258bc7}
+.pb-call-invite-actions button[data-call-close]{background:transparent;color:#b7cbd9}
+.pb-call-banner{position:fixed;top:max(16px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);z-index:5000;box-sizing:border-box;width:min(92vw,430px);padding:16px;border:1px solid #ffffff25;border-radius:22px;background:#192f43f7;color:#fff;box-shadow:0 12px 50px #03172c66;backdrop-filter:blur(20px);font:14px/1.4 system-ui,sans-serif;color-scheme:dark}
+.pb-call-incoming-person{display:flex;align-items:center;gap:12px}
+.pb-call-incoming-person>span:last-child{min-width:0;flex:1}
+.pb-call-incoming-person strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px}
+.pb-call-incoming-person small{display:block;font-size:12px;color:#b2cadb;margin-top:3px}
+.pb-call-incoming-actions{display:flex;gap:10px;margin-top:15px}
+.pb-call-incoming-actions button{display:flex;align-items:center;justify-content:center;gap:8px;flex:1;min-height:44px;padding:9px;border:0;border-radius:12px;background:#ee5264;color:#fff;font:600 13px/1.4 system-ui;cursor:pointer}
+.pb-call-incoming-actions [data-incoming]{background:#2da67a}
+.pb-call-incoming-actions .pb-icon{width:19px;height:19px}
+.pb-call-active{background:#278866!important;color:#fff!important;border-color:transparent!important}
+@media(max-width:600px){.pb-call-dialog{width:100%;height:100dvh;margin:0;inset:0;border:0;border-radius:0;padding:20px 14px max(14px,env(safe-area-inset-bottom));padding-top:max(20px,env(safe-area-inset-top))}.pb-call-dialog h2{font-size:20px}.pb-call-summary{font-size:12px;padding:13px 0 16px}.pb-call-grid{gap:8px}.pb-call-tile{border-radius:15px}.pb-call-avatar{width:65px;height:65px;font-size:24px}.pb-call-controls{gap:4px;margin-top:22px}.pb-call-controls button{width:72px;font-size:10px}.pb-call-controls button>.pb-icon{width:23px;height:23px;padding:14px}.pb-call-actions button{width:34px}.pb-call-actions .pb-icon{width:20px;height:20px}.pb-call-tile>div{padding:24px 10px 10px}.pb-call-tile strong{font-size:12px}.pb-call-tile small{font-size:10px}.pb-call-secondary{margin-top:10px}.pb-call-note{font-size:10px}}
+@media(prefers-reduced-motion:reduce){.pb-call-dialog *{transition:none!important}}
