@@ -73,11 +73,11 @@ async def main():
                 await context.add_init_script("window.Telegram={WebApp:{initData:" + json.dumps(signed(uid+1000)) + "}}")
                 # Instrument real browser APIs only to inspect stats and track cleanup.
                 await context.add_init_script("window.testRelayOnly=" + json.dumps(RELAY_ONLY) + ";")
-                await context.add_init_script("""window.testPlayErrors=[];const nativePlay=HTMLMediaElement.prototype.play;HTMLMediaElement.prototype.play=function(){const result=nativePlay.call(this);result?.catch(e=>testPlayErrors.push(e.name+": "+e.message));return result;};window.testPCs=[];window.testStreams=[];window.testRingAnalysers=[];window.testIceErrors=[];
+                await context.add_init_script("""window.testTrackEvents=[];window.testPlayErrors=[];const nativePlay=HTMLMediaElement.prototype.play;HTMLMediaElement.prototype.play=function(){const result=nativePlay.call(this);result?.catch(e=>testPlayErrors.push(e.name+": "+e.message));return result;};window.testPCs=[];window.testStreams=[];window.testRingAnalysers=[];window.testIceErrors=[];
                     const RealPC=window.RTCPeerConnection;
                     window.RTCPeerConnection=class extends RealPC{constructor(config){
                         super({...config,...(testRelayOnly?{iceTransportPolicy:'relay'}:{})});testPCs.push(this);
-                        this.addEventListener('icecandidateerror',e=>testIceErrors.push({code:e.errorCode,text:e.errorText,url:e.url}));}};
+                        this.addEventListener('track',e=>testTrackEvents.push({kind:e.track.kind,id:e.track.id,streams:e.streams.map(s=>s.id)}));this.addEventListener('icecandidateerror',e=>testIceErrors.push({code:e.errorCode,text:e.errorText,url:e.url}));}};
                     const RealAudio=window.AudioContext;
                     window.AudioContext=class extends RealAudio{createGain(){
                         const g=super.createGain(),connect=g.connect.bind(g);
@@ -152,12 +152,15 @@ async def main():
                         if(!reports.some(x=>x.kind==='audio' && x.bytesReceived>0))return false;
                         if(!reports.some(x=>x.kind==='video' && x.framesDecoded>0))return false;
                     }return true;}""", timeout=30000)
-                print(json.dumps(await page.evaluate("""({playErrors:testPlayErrors,
+                print(json.dumps(await page.evaluate("""({playErrors:testPlayErrors,trackEvents:testTrackEvents,
+                    callStatus:document.querySelector('[data-call-status]')?.textContent,
+                    peers:testPCs.map(p=>({ontrack:String(p.ontrack),receivers:p.getReceivers().map(r=>({id:r.track.id,kind:r.track.kind,muted:r.track.muted})),transceivers:p.getTransceivers().map(t=>({mid:t.mid,direction:t.direction,currentDirection:t.currentDirection,receiver:t.receiver.track.id}))})),
                     videos:[...document.querySelectorAll('.pb-call-tile video')].map(v=>({
                         participant:v.parentElement.dataset.participant,classes:v.parentElement.className,
                         width:v.videoWidth,height:v.videoHeight,ready:v.readyState,paused:v.paused,
                         opacity:getComputedStyle(v).opacity,currentTime:v.currentTime,
                         tracks:v.srcObject?.getTracks().map(t=>({kind:t.kind,ready:t.readyState,muted:t.muted,enabled:t.enabled}))}))})""")))
+                print(json.dumps({"pageErrorsBeforeRender": errors}))
                 # RTP decoding must also produce visible, playing participant videos.
                 await page.wait_for_function("""()=>{
                     const videos=[...document.querySelectorAll('.pb-call-tile.has-video video')];
