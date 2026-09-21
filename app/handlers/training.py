@@ -5,9 +5,10 @@ from datetime import UTC, datetime
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import CallbackQuery, FSInputFile
+from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile
 from sqlalchemy import select
 
+from ..academy_practice import DISK_PREFIX, photo_bytes
 from ..access import StaffFilter
 from ..config import config
 from ..db import Session
@@ -21,6 +22,7 @@ from ..services.training import (
     training_day,
 )
 from ..services.training_ai import MAX_IMAGE_BYTES, analyze_training_set, review_text
+from ..yandex_disk import YandexDisk, YandexDiskError, configured_from_env
 
 r = Router()
 r.message.filter(StaffFilter(*ROLES))
@@ -105,6 +107,8 @@ class TrainingBuffer(io.BytesIO):
 
 
 async def download_training_photo(bot, file_id):
+    if file_id.startswith(DISK_PREFIX):
+        return await photo_bytes(bot, YandexDisk(*configured_from_env()), file_id)
     buffer = TrainingBuffer()
     await bot.download(file_id, destination=buffer, timeout=25)
     content = buffer.getvalue()
@@ -134,7 +138,7 @@ async def ai_review_assignment(bot, assignment_id):
         uploaded = [await download_training_photo(bot, item.submitted_file_id) for item in submissions]
         references = [path.read_bytes() for path in category.image_paths]
         result = await analyze_training_set(category, references, uploaded)
-    except (OSError, TelegramAPIError, ValueError):
+    except (OSError, TelegramAPIError, ValueError, YandexDiskError):
         logger.warning("Could not prepare Academy assignment %s for AI", assignment_id)
         return False
     if result.get("status") != "completed":
@@ -267,6 +271,7 @@ async def training_reference(callback: CallbackQuery):
     today = training_day()
     async with Session() as session:
         user = await get_user(session, callback.from_user.id)
+        await session.get(User, user.id, with_for_update=True)
         unfinished = await latest_assignment(
             session, user.id, unfinished_only=True, lock=True
         )
@@ -431,9 +436,10 @@ async def training_review(callback: CallbackQuery, current_roles):
         await callback.message.answer_photo(
             FSInputFile(category.image_paths[pose - 1]), caption=f"Эталон {pose}/5"
         )
-        await callback.message.answer_photo(
-            submission.submitted_file_id, caption=f"Повтор сотрудника {pose}/5"
-        )
+        photo = submission.submitted_file_id
+        if photo.startswith(DISK_PREFIX):
+            photo = BufferedInputFile(await download_training_photo(callback.bot, photo), filename=f"practice-{pose}.jpg")
+        await callback.message.answer_photo(photo, caption=f"Повтор сотрудника {pose}/5")
     await callback.message.answer(
         "Примите весь набор или верните конкретный кадр на пересъёмку.",
         reply_markup=inline(
