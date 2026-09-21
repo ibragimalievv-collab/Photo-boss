@@ -150,7 +150,7 @@ async function ensurePeer(c,member) {
     if(p?.session === member.session) return p;
     if(p) {p.pc.close(); c.peers.delete(member.id);}
     const pc=new RTCPeerConnection({iceServers:c.iceServers});
-    p={id:member.id,session:member.session,pc,stream:new MediaStream(),candidates:[],sendChain:Promise.resolve(),restarts:0,created:Date.now()};
+    p={id:member.id,name:member.name,session:member.session,pc,stream:new MediaStream(),candidates:[],sendChain:Promise.resolve(),restarts:0,created:Date.now()};
     c.peers.set(p.id,p);
     const audio=c.stream.getAudioTracks()[0], video=c.stream.getVideoTracks()[0];
     p.audioSender=pc.addTransceiver(audio || 'audio',{direction:'sendrecv',streams:[c.stream]}).sender;
@@ -167,6 +167,17 @@ async function ensurePeer(c,member) {
     if(me.user.id < p.id) await offer(c,p);
     return p;
 }
+function bindRemoteMedia(p){
+    // Bind negotiated receiver tracks as well as track events. A receiver can
+    // already be active when its rendered tile is initialized or restored.
+    let changed=false;
+    for(const transceiver of p.pc.getTransceivers()){
+        const track=transceiver.receiver?.track;
+        if(!['sendrecv','recvonly'].includes(transceiver.currentDirection)||!track||track.readyState==='ended')continue;
+        if(!p.stream.getTracks().includes(track)){p.stream.addTrack(track);changed=true;}
+    }
+    if(changed)tile(p.id,p.name,p.stream);
+}
 async function receive(c,s) {
     const p=c.peers.get(s.from); if(!p || p.session !== s.session) return;
     const d=s.data;
@@ -181,11 +192,13 @@ async function receive(c,s) {
         await p.pc.setLocalDescription(await p.pc.createAnswer());
         await send(c,p,{type:'answer',sdp:p.pc.localDescription.sdp});
     }
+    bindRemoteMedia(p);
 }
 function updateTiles(c) {
     let connected=0, failed=false;
     for(const member of c.room.participants) {
         const local=member.id===me.user.id, peer=c.peers.get(member.id);
+        if(peer)bindRemoteMedia(peer);
         const card=panel.querySelector(`[data-participant="${member.id}"]`); if(!card) continue;
         const video=local ? c.video : member.video;
         card.classList.toggle('has-video',video);
