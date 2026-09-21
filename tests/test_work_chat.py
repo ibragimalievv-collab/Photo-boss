@@ -86,8 +86,11 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
                 original_name TEXT,mime_type TEXT,byte_size INTEGER,sha256 TEXT,
                 created_at DATETIME)"""))
             conn.execute(text("""CREATE TABLE work_chat_messages(
-                id INTEGER PRIMARY KEY,sender_id INTEGER,recipient_id INTEGER,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,sender_id INTEGER,recipient_id INTEGER,
                 attachment_id INTEGER,body TEXT,created_at DATETIME)"""))
+            conn.execute(text("""CREATE TABLE work_chat_deletions(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,message_id INTEGER UNIQUE,
+                sender_id INTEGER,recipient_id INTEGER,deleted_at DATETIME)"""))
             conn.execute(text("""CREATE TABLE work_chat_read_states(
                 id INTEGER PRIMARY KEY,user_id INTEGER,scope_key TEXT,
                 last_read_message_id INTEGER,updated_at DATETIME,
@@ -111,7 +114,15 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
             ("/chat/owner/threads", "GET"): self.chat.owner_threads,
             ("/chat/owner/messages", "GET"): self.chat.owner_messages,
         }
-        handler = handlers[(route, method)]
+        if route.startswith("/chat/messages/") and method == "DELETE":
+            request.match_info["id"] = route.rsplit("/", 1)[-1]
+            handler = self.chat.delete_message
+        elif route.startswith("/chat/attachments/"):
+            request.match_info["id"] = route.rsplit("/", 1)[-1]
+            handler = self.chat.attachment
+        else:
+            handler = handlers[(route, method)]
+        request.app = {"yandex_disk": getattr(self, "storage", None)}
         response = await self.service.middleware(request, handler)
         return response.status, json.loads(response.text)
 
@@ -327,3 +338,78 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
             )).first()
         assert row[0] == "work_chat_owner_thread_opened"
         assert "Содержимое" not in row[1]
+
+    async def test_only_owner_can_delete_only_their_own_messages(self):
+        for uid in (1001, 1002, 1003, 1004, 1005):
+            await self.accept(uid)
+            _, result = await self.call("/chat/messages", uid=uid, method="POST",
+                body={"peerId": None, "body": f"Message by {uid}"})
+            message_id = result["message"]["id"]
+            if uid != 1001:
+                assert (await self.call(f"/chat/messages/{message_id}", uid=uid, method="DELETE"))[0] == 403
+                assert (await self.call(f"/chat/messages/{message_id}", uid=1001, method="DELETE"))[0] == 404
+            else:
+                owner_id = message_id
+        assert (await self.call(f"/chat/messages/{owner_id}", uid=1002, method="DELETE"))[0] == 403
+        assert (await self.call(f"/chat/messages/{owner_id}", token="forged", method="DELETE"))[0] == 401
+        self.bot.send_message.reset_mock()
+        assert (await self.call(f"/chat/messages/{owner_id}", method="DELETE"))[0] == 200
+        assert (await self.call(f"/chat/messages/{owner_id}", method="DELETE"))[0] == 200
+        assert self.bot.send_message.await_count == 0
+        with self.engine.inner.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM work_chat_messages")).scalar() == 4
+            assert conn.execute(text("SELECT COUNT(*) FROM work_chat_deletions")).scalar() == 1
+            audit = conn.execute(text("SELECT details FROM audit_logs WHERE action='work_chat_message_deleted'")).scalar()
+            assert audit == "{}"
+
+    async def test_deletion_changes_are_scoped_and_unread_count_disappears(self):
+        for uid in (1001, 1003, 1004):
+            await self.accept(uid)
+        _, before = await self.call("/chat/messages?peer=1", uid=1003)
+        _, result = await self.call("/chat/messages", method="POST",
+            body={"peerId": 3, "body": "Delete this private text"})
+        message_id = result["message"]["id"]
+        assert (await self.call("/chat/unread", uid=1003))[1]["total"] == 1
+        assert (await self.call(f"/chat/messages/{message_id}", method="DELETE"))[0] == 200
+        _, changes = await self.call(f"/chat/messages?peer=1&after={message_id}&deletedAfter={before['deletionCursor']}", uid=1003)
+        assert changes["messages"] == []
+        assert changes["deletedIds"] == [message_id]
+        assert changes["unread"]["total"] == 0
+        for peer in ("general", "1", "3"):
+            _, unrelated = await self.call(f"/chat/messages?peer={peer}&deletedAfter=0", uid=1004)
+            assert unrelated["deletedIds"] == []
+        _, latest = await self.call("/chat/messages?peer=1", uid=1003)
+        assert latest["messages"] == []
+        assert latest["deletionCursor"] == changes["deletionCursor"]
+        _, again = await self.call(f"/chat/messages?peer=1&deletedAfter={changes['deletionCursor']}", uid=1003)
+        assert again["deletedIds"] == []
+
+    async def test_deleted_attachment_is_inaccessible_and_storage_cleanup_retries(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from app.work_chat import cleanup_orphan_attachments
+        from app.yandex_disk import YandexDiskError
+        await self.accept(1001)
+        await self.accept(1003)
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("INSERT INTO work_chat_attachments(id,uploader_id,storage_path) VALUES (12,1,'fixture-file')"))
+            conn.execute(text("INSERT INTO work_chat_messages(sender_id,recipient_id,attachment_id,body,created_at) VALUES (1,3,12,'',:now)"), {"now": datetime.now(UTC).replace(tzinfo=None)})
+            message_id = conn.execute(text("SELECT MAX(id) FROM work_chat_messages")).scalar()
+        self.storage = SimpleNamespace(delete=AsyncMock(side_effect=YandexDiskError('fixture unavailable')))
+        assert (await self.call(f"/chat/messages/{message_id}", method="DELETE"))[0] == 200
+        for uid in (1001, 1003):
+            assert (await self.call('/chat/attachments/12', uid=uid))[0] == 404
+        with self.engine.inner.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM work_chat_attachments")).scalar() == 1
+        self.storage.delete.side_effect = None
+        await cleanup_orphan_attachments(self.engine, self.storage)
+        self.storage.delete.assert_awaited_with('fixture-file')
+        with self.engine.inner.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM work_chat_attachments")).scalar() == 0
+
+    async def test_delete_requires_rules_and_rejects_bad_ids(self):
+        assert (await self.call('/chat/messages/1', method='DELETE'))[0] == 428
+        await self.accept(1001)
+        for value in ('0', '-1', 'bad', '2147483648'):
+            assert (await self.call(f'/chat/messages/{value}', method='DELETE'))[0] == 400

@@ -1127,7 +1127,7 @@ def test_new_booking_button_creates_complete_booking(monkeypatch):
             assert booking.deposit == 1000
             assert booking.shoot_date == date(2026, 9, 20)
             assert booking.shoot_time == time(14, 30)
-            assert booking.photographer_id == photographer.id
+            assert booking.photographer_id is None
             assert booking.status == "PENDING_CONFIRMATION"
             assert await session.scalar(
                 select(func.count(Shooting.id)).where(Shooting.booking_id == booking.id)
@@ -1475,4 +1475,47 @@ def test_training_is_locked_until_owner_reviews_and_rejected_pose_is_repeated():
                 )
             ) == 1
 
+    run(scenario())
+
+
+def test_photographer_assignment_is_owner_or_admin_only():
+    async def scenario():
+        async with Session() as session:
+            hotel = (await session.scalars(select(Hotel))).first()
+            package = (await session.scalars(select(Package))).first()
+            photographer = await get_user(session, PHOTO_A)
+            before = await session.scalar(select(func.count(Booking.id)))
+            data = {"hotel_id": hotel.id, "package_id": package.id, "client_name": "Fixture client",
+                "client_phone": None, "room": "200", "guest_count": 2, "deposit": 0,
+                "shoot_date": "2026-09-22", "shoot_time": "12:00:00"}
+        # Even a crafted callback in a stale photographer-selection state is rejected.
+        state = state_for(MANAGER)
+        await state.set_state(BookingFlow.photographer)
+        await state.set_data(data)
+        await callback(MANAGER, f"booking:photographer:{photographer.id}")
+        await callback(MANAGER, f"smart:assign:1:{photographer.id}")
+        async with Session() as session:
+            assert await session.scalar(select(func.count(Booking.id))) == before
+            assert (await session.get(Booking, 1)).photographer_id != photographer.id
+        # New manager bookings skip the selection UI and stay unassigned.
+        await state.set_state(BookingFlow.package)
+        telegram.calls.clear()
+        await callback(MANAGER, f"booking:package:{package.id}")
+        assert not any(isinstance(call, SendMessage) and "Выберите фотографа" in call.text for call in telegram.calls)
+        async with Session() as session:
+            created = await session.scalar(select(Booking).order_by(Booking.id.desc()))
+            assert created.photographer_id is None
+        # Both authorized roles can still create an assigned booking.
+        for actor in (OWNER, ADMIN):
+            await state_for(actor).set_state(BookingFlow.package)
+            await state_for(actor).set_data(data)
+            await callback(actor, f"booking:package:{package.id}")
+            assert await state_for(actor).get_state() == BookingFlow.photographer.state
+            await callback(actor, f"booking:photographer:{photographer.id}")
+            async with Session() as session:
+                created = await session.scalar(select(Booking).order_by(Booking.id.desc()))
+                assert created.photographer_id == photographer.id
+            await callback(actor, f"smart:assign:1:{photographer.id}")
+            async with Session() as session:
+                assert (await session.get(Booking, 1)).photographer_id == photographer.id
     run(scenario())

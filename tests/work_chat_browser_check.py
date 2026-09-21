@@ -1,4 +1,5 @@
 """Browser fixtures for work chat; no real Telegram, staff or messages."""
+import base64
 import json
 from pathlib import Path
 
@@ -30,6 +31,8 @@ def handler(page_state, role, sent):
             "/work-chat/calls.js": ROOT / "app/work_chat_ui/calls.js",
             "/work-chat/calls.css": ROOT / "app/work_chat_ui/calls.css",
             "/work-chat/ringtone.js": ROOT / "app/work_chat_ui/ringtone.js",
+            "/work-chat/ui.js": ROOT / "app/work_chat_ui/ui.js",
+            "/work-chat/camera.js": ROOT / "app/work_chat_ui/camera.js",
             "/work-chat/recorder.js": ROOT / "app/work_chat_ui/recorder.js",
             "/app/js/api.js": ROOT / "app/webapp/js/api.js",
             "/app/js/domain.js": ROOT / "app/webapp/js/domain.js",
@@ -70,6 +73,12 @@ def handler(page_state, role, sent):
                 "ownerControl": role == "OWNER",
                 "totalUnread": 3,
             })
+        if path.startswith("/api/miniapp/chat/messages/") and r.request.method == "DELETE":
+            if role != "OWNER":
+                return r.fulfill(status=403, json={"error": "Forbidden"})
+            mid = int(path.rsplit('/', 1)[-1])
+            page_state.setdefault('deleted', []).append(mid)
+            return r.fulfill(json={"ok": True, "deletedId": mid})
         if path == "/api/miniapp/chat/messages":
             if r.request.method == "POST":
                 body = json.loads(r.request.post_data)
@@ -83,7 +92,7 @@ def handler(page_state, role, sent):
                 "id": 1, "senderId": 2, "recipientId": None,
                 "body": "<img src=x onerror=alert(1)>", "createdAt": "2026-09-20T10:59:00",
                 "senderName": "Employee", "attachment": None,
-            }], "unread": {"total": 2, "general": 0, "people": {"2": 2}}})
+            }], "deletedIds": page_state.get("deleted", []), "deletionCursor": len(page_state.get("deleted", [])), "unread": {"total": 2, "general": 0, "people": {"2": 2}}})
         if path == "/api/miniapp/chat/attachments" and r.request.method == "POST":
             return r.fulfill(status=201, json={"message": {
                 "id": 9, "senderId": 1, "recipientId": None, "body": "",
@@ -110,7 +119,7 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch()
         for role in ("OWNER", "ADMIN", "PHOTOGRAPHER", "MANAGER"):
-            for width in (320, 390):
+            for width in ((320, 390, 1200) if role == "OWNER" else (320, 390)):
                 state, sent, errors = {"accepted": False, "peerOnline": True}, [], []
                 page = browser.new_page(viewport={"width": width, "height": 844})
                 page.on("pageerror", lambda event, bucket=errors: bucket.append(str(event)))
@@ -127,15 +136,40 @@ def main():
                 page.locator('[data-chat="general"] .pb-chat-unread').wait_for()
                 assert page.locator('[data-peer="2"] .pb-chat-unread').inner_text() == "2"
                 expect(page.locator('[data-peer="2"] .pb-chat-presence')).to_have_text("В сети")
+                search = page.locator('[data-chat-search]')
+                search.fill('несуществующий диалог')
+                expect(page.locator('[data-search-empty]')).to_be_visible()
+                expect(page.locator('[data-peer="2"]')).to_be_hidden()
+                search.fill('bad')
+                expect(page.locator('[data-peer="2"]')).to_be_visible()
+                expect(page.locator('[data-chat="general"]')).to_be_hidden()
+                search.fill('')
+                if role == "ADMIN":
+                    page.evaluate("document.documentElement.dataset.theme='photo'")
+                if role == "MANAGER":
+                    page.evaluate("document.documentElement.dataset.theme='premium'")
+                page.screenshot(path=str(OUT / f"list-{role}-{width}.png"))
+                if role == "OWNER" and width == 390:
+                    print("QA_PREVIEW list.jpg " + base64.b64encode(page.screenshot(type="jpeg", quality=60)).decode())
                 page.get_by_text("Общий чат", exact=True).first.wait_for()
                 assert page.locator(".pb-chat-unread").count() >= 2
                 page.get_by_text("Общий чат", exact=True).first.click()
                 page.locator("#pbChatMessages").wait_for()
                 assert page.locator("#pbChatMessages img").count() == 0
-                page.locator('textarea[name="body"]').fill("Тест рабочего чата")
+                expect(page.locator('.pb-chat-send')).to_be_hidden()
+                expect(page.locator('[data-record="audio"]')).to_be_visible()
+                field = page.locator('textarea[name="body"]')
+                field.fill("Черновик")
+                page.locator('[data-chat="home"]').click()
+                page.locator('[data-chat="general"]').click()
+                expect(field).to_have_value("Черновик")
+                field.fill("Тест рабочего чата")
+                expect(page.locator('[data-record="audio"]')).to_be_hidden()
+                field.press('Shift+Enter')
+                field.type('Вторая строка')
                 page.locator(".pb-chat-send").click()
                 page.wait_for_function("!document.querySelector('.pb-chat-send').disabled")
-                assert sent and sent[-1]["body"] == "Тест рабочего чата"
+                assert sent and sent[-1]["body"] == "Тест рабочего чата\nВторая строка"
                 page.locator('input[name="file"]').set_input_files({
                     "name": "report.pdf",
                     "mimeType": "application/pdf",
@@ -150,6 +184,32 @@ def main():
                 page.locator(".pb-chat-file").wait_for(timeout=5000)
                 assert "report.pdf" in page.locator(".pb-chat-file").inner_text()
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 2")
+                page.screenshot(path=str(OUT / f"thread-{role}-{width}.png"))
+                if role == "OWNER" and width == 390:
+                    print("QA_PREVIEW thread.jpg " + base64.b64encode(page.screenshot(type="jpeg", quality=60)).decode())
+                if width == 320:
+                    page.set_viewport_size({"width": 320, "height": 500})
+                    expect(page.locator('[data-record="audio"]')).to_be_in_viewport()
+                    assert page.locator('.pb-chat-compose').evaluate('e=>e.getBoundingClientRect().bottom<=innerHeight+2')
+                    page.set_viewport_size({"width": 320, "height": 844})
+                assert page.locator('.pb-chat-dialog').evaluate('(e)=>e.scrollWidth<=e.clientWidth+2')
+                if width == 1200:
+                    expect(page.locator('.pb-chat-sidebar')).to_be_visible()
+                    field.fill('Отправлено клавишей Enter')
+                    field.press('Enter')
+                    expect(field).to_have_value('')
+                    assert sent[-1]['body'] == 'Отправлено клавишей Enter'
+                if role == "OWNER":
+                    page.locator('[data-message-id="9"] summary').click()
+                    page.locator('[data-delete-message="9"]').click()
+                    page.locator('[data-delete-cancel]').click()
+                    expect(page.locator('[data-message-id="9"]')).to_be_visible()
+                    page.locator('[data-message-id="9"] summary').click()
+                    page.locator('[data-delete-message="9"]').click()
+                    page.locator('[data-delete-confirm]').click()
+                    expect(page.locator('[data-message-id="9"]')).to_have_count(0)
+                else:
+                    assert page.locator('[data-delete-message]').count() == 0
                 page.locator('[data-chat="home"]').click()
                 page.locator('[data-peer="2"]').click()
                 page.locator("#pbChatMessages").wait_for()

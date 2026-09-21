@@ -135,7 +135,7 @@ class YandexDisk:
         await self._json(
             "DELETE", "/resources",
             params={"path": path, "permanently": "true", "force_async": "false"},
-            ok=(202, 204),
+            ok=(202, 204, 404),
         )
 
     def public_status(self):

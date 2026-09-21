@@ -56,6 +56,8 @@ jobs:
           node --check app/work_chat_ui/calls.js
           node --check app/work_chat_ui/ringtone.js
           node --check app/work_chat_ui/recorder.js
+          node --check app/work_chat_ui/ui.js
+          node --check app/work_chat_ui/camera.js
           node --check app/webapp/js/practice.js
           DATABASE_URL='sqlite+aiosqlite:///:memory:' python -m pytest -q
 
