@@ -753,3 +753,33 @@ class GuestFeedback(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime,default=utc_now)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime,nullable=True)
     __table_args__ = (CheckConstraint('rating IS NULL OR rating BETWEEN 1 AND 5'),)
+
+
+class ShootDevelopmentReview(Base):
+    __tablename__ = 'shoot_development_reviews'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    shooting_id: Mapped[int] = mapped_column(ForeignKey('shootings.id'), index=True)
+    photographer_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    photo_ids: Mapped[str] = mapped_column(Text)
+    analyzed: Mapped[str] = mapped_column(Text, default='[]')
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default='PENDING', index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (UniqueConstraint('shooting_id','fingerprint',name='uq_shoot_review_fingerprint'),)
+
+
+class SalesTrainingSession(Base):
+    __tablename__ = 'sales_training_sessions'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    client_type: Mapped[str] = mapped_column(String(60))
+    transcript: Mapped[str] = mapped_column(Text, default='[]')
+    status: Mapped[str] = mapped_column(String(20), default='ACTIVE')
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    evaluation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)

@@ -96,6 +96,8 @@ async def on_startup(app):
     app["storage_task"] = asyncio.create_task(storage_loop(bot, app["yandex_disk"]))
     app["chat_cleanup_task"] = asyncio.create_task(cleanup_loop(engine, app["yandex_disk"]))
     app["academy_review_task"] = asyncio.create_task(app["academy_practice"].worker(app))
+    from .development import development_loop
+    app["development_task"] = asyncio.create_task(development_loop(engine, bot))
     app["ready"] = True
     mark_ready(me.username)
     logger.info("Release %s ready; live Mini App enabled; demo data disabled", RELEASE)
@@ -104,7 +106,7 @@ async def on_startup(app):
 async def on_cleanup(app):
     clear_ready_file()
     app["ready"] = False
-    for key in ("operations_task", "storage_task", "chat_cleanup_task", "academy_review_task"):
+    for key in ("operations_task", "storage_task", "chat_cleanup_task", "academy_review_task", "development_task"):
         task = app.get(key)
         if task:
             task.cancel()
