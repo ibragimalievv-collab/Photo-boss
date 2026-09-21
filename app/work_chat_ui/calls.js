@@ -152,9 +152,13 @@ async function ensurePeer(c,member) {
     const pc=new RTCPeerConnection({iceServers:c.iceServers});
     p={id:member.id,name:member.name,session:member.session,pc,stream:new MediaStream(),candidates:[],sendChain:Promise.resolve(),restarts:0,created:Date.now()};
     c.peers.set(p.id,p);
-    const audio=c.stream.getAudioTracks()[0], video=c.stream.getVideoTracks()[0];
-    p.audioSender=pc.addTransceiver(audio || 'audio',{direction:'sendrecv',streams:[c.stream]}).sender;
-    p.videoSender=pc.addTransceiver(video || 'video',{direction:'sendrecv',streams:[c.stream]}).sender;
+    // Only the offerer creates media sections. The answerer must attach its
+    // tracks to the offered transceivers, otherwise its answer is receive-only.
+    if(me.user.id < p.id){
+        const audio=c.stream.getAudioTracks()[0],video=c.stream.getVideoTracks()[0];
+        p.audioSender=pc.addTransceiver(audio||'audio',{direction:'sendrecv',streams:[c.stream]}).sender;
+        p.videoSender=pc.addTransceiver(video||'video',{direction:'sendrecv',streams:[c.stream]}).sender;
+    }
     tile(p.id,member.name,p.stream);
     pc.ontrack=e=>{if(!p.stream.getTracks().includes(e.track))p.stream.addTrack(e.track); tile(p.id,member.name,p.stream);};
     pc.onicecandidate=e=>{if(e.candidate) send(c,p,{type:'candidate',candidate:e.candidate.toJSON()});};
@@ -189,6 +193,13 @@ async function receive(c,s) {
     await p.pc.setRemoteDescription(d);
     for(const candidate of p.candidates.splice(0)) await p.pc.addIceCandidate(candidate);
     if(d.type==='offer') {
+        for(const transceiver of p.pc.getTransceivers()){
+            const kind=transceiver.receiver.track.kind;
+            transceiver.direction='sendrecv';
+            await transceiver.sender.replaceTrack(c.stream.getTracks().find(t=>t.kind===kind)||null);
+            transceiver.sender.setStreams?.(c.stream);
+            p[kind+'Sender']=transceiver.sender;
+        }
         await p.pc.setLocalDescription(await p.pc.createAnswer());
         await send(c,p,{type:'answer',sdp:p.pc.localDescription.sdp});
     }
@@ -251,13 +262,13 @@ async function toggleCamera() {
     let fresh=null;
     try {
         if(c.video) {
-            await Promise.all([...c.peers.values()].map(p=>p.videoSender.replaceTrack(null)));
+            await Promise.all([...c.peers.values()].filter(p=>p.videoSender).map(p=>p.videoSender.replaceTrack(null)));
             for(const t of c.stream.getVideoTracks()) {t.stop(); c.stream.removeTrack(t);} c.video=false;
         } else {
             fresh=await openCamera(c.facing);
             if(active!==c || c.closed) {fresh.getTracks().forEach(t=>t.stop());return;}
             const track=fresh.getVideoTracks()[0];
-            await Promise.all([...c.peers.values()].map(p=>p.videoSender.replaceTrack(track)));
+            await Promise.all([...c.peers.values()].filter(p=>p.videoSender).map(p=>p.videoSender.replaceTrack(track)));
             if(active!==c||c.closed){fresh.getTracks().forEach(t=>t.stop());return;}
             c.stream.addTrack(track);c.video=true;
         }
@@ -274,7 +285,7 @@ async function switchCamera(){
  const install=async (facing,exact)=>{
   const fresh=await openCamera(facing,exact);
   if(active!==c||c.closed){fresh.getTracks().forEach(t=>t.stop());return false;}
-  try{const track=fresh.getVideoTracks()[0];await Promise.all([...c.peers.values()].map(p=>p.videoSender.replaceTrack(track)));if(active!==c||c.closed){fresh.getTracks().forEach(t=>t.stop());return false;}c.stream.addTrack(track);c.facing=track.getSettings?.().facingMode||facing;c.video=true;return true;}
+  try{const track=fresh.getVideoTracks()[0];await Promise.all([...c.peers.values()].filter(p=>p.videoSender).map(p=>p.videoSender.replaceTrack(track)));if(active!==c||c.closed){fresh.getTracks().forEach(t=>t.stop());return false;}c.stream.addTrack(track);c.facing=track.getSettings?.().facingMode||facing;c.video=true;return true;}
   catch(e){fresh.getTracks().forEach(t=>t.stop());throw e;}
  };
  try{await install(next,true);}

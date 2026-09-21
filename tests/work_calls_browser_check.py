@@ -23,6 +23,17 @@ SILENT = """()=>testRingAnalysers.every(a=>{const v=new Float32Array(a.fftSize);
     a.getFloatTimeDomainData(v);return v.every(x=>Math.abs(x)<0.0001);})"""
 
 
+async def wait_async(page, predicate, *, arg=None, timeout=30000):
+    # Explicitly await async predicates. wait_for_function can treat their Promise
+    # as truthy before its eventual False result and produce a false positive.
+    deadline = asyncio.get_running_loop().time() + timeout / 1000
+    while asyncio.get_running_loop().time() < deadline:
+        if await page.evaluate(predicate, arg):
+            return
+        await page.wait_for_timeout(150)
+    raise AssertionError("Timed out waiting for actual browser media: " + predicate[:120])
+
+
 async def main():
     fixture = CallsTests()
     await fixture.asyncSetUp()
@@ -146,7 +157,7 @@ async def main():
                 await page.locator('[data-answer="video"]').click()
             for page in pages:
                 await page.wait_for_function("testPCs.filter(p=>p.connectionState==='connected').length===2", timeout=30000)
-                await page.wait_for_function("""async()=>{
+                await wait_async(page, """async()=>{
                     for(const pc of testPCs.filter(p=>p.connectionState==='connected')) {
                         const reports=[...(await pc.getStats()).values()].filter(x=>x.type==='inbound-rtp');
                         if(!reports.some(x=>x.kind==='audio' && x.bytesReceived>0))return false;
@@ -183,7 +194,7 @@ async def main():
                     assert await a.evaluate("id=>testStreams.flatMap(s=>s.getAudioTracks()).some(t=>t.id===id&&t.readyState==='live'&&t.enabled)", audio_id)
                     assert await a.locator('.pb-call-tile video').first.evaluate("e=>getComputedStyle(e).transform==='none'")
                 before_frames = await b.evaluate("async()=>{let n=0;for(const p of testPCs)for(const x of (await p.getStats()).values())if(x.type==='inbound-rtp'&&x.kind==='video')n+=x.framesDecoded||0;return n;}")
-                await b.wait_for_function("async n=>{let frames=0;for(const p of testPCs)for(const x of (await p.getStats()).values())if(x.type==='inbound-rtp'&&x.kind==='video')frames+=x.framesDecoded||0;return frames>n+5;}", arg=before_frames)
+                await wait_async(b, "async n=>{let frames=0;for(const p of testPCs)for(const x of (await p.getStats()).values())if(x.type==='inbound-rtp'&&x.kind==='video')frames+=x.framesDecoded||0;return frames>n+5;}", arg=before_frames)
                 await a.evaluate('testCameraFailure=true')
                 await a.locator('[data-switch-camera]').click()
                 await a.locator('[data-camera-error]:not([hidden])').wait_for()
@@ -221,6 +232,14 @@ async def main():
             for page in (a,b):
                 await page.wait_for_function("testPCs.some(p=>p.connectionState==='connected')", timeout=30000)
                 assert await page.evaluate("testStreams.flatMap(s=>s.getVideoTracks()).every(t=>t.readyState==='ended')")
+                await wait_async(page, """async()=>{
+                    const pcs=testPCs.filter(p=>p.connectionState==='connected');
+                    if(pcs.length!==1)return false;
+                    const stats=[...(await pcs[0].getStats()).values()];
+                    return stats.some(x=>x.type==='inbound-rtp'&&x.kind==='audio'&&x.bytesReceived>0);
+                }""")
+                await page.wait_for_function("""()=>[...document.querySelectorAll('.pb-call-tile video')]
+                    .filter(v=>!v.muted).some(v=>!v.paused&&v.currentTime>0&&v.readyState>=2)""", timeout=10000)
             await b.locator('[data-hangup]').click()
             for page in (a,b):
                 await page.wait_for_function("testStreams.flatMap(s=>s.getTracks()).every(t=>t.readyState==='ended')", timeout=15000)
