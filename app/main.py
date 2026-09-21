@@ -61,6 +61,8 @@ def create_dispatcher():
         dispatcher = Dispatcher(storage=storage, events_isolation=storage.create_isolation())
     else:
         dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
+    from .audit_context import ActorMiddleware
+    dispatcher.update.outer_middleware(ActorMiddleware())
     dispatcher.update.outer_middleware(CompactUiMiddleware())
     dispatcher.include_routers(
         common.r, receipts.r, admin.r, photographer.r, manager.r, sales.r,

@@ -166,6 +166,21 @@ class CallsTests(unittest.IsolatedAsyncioTestCase):
         assert (await self.request("/start", 4, {"peerId": None, "mode": "record"}))[0] == 400
         assert (await self.sync(data, after=999))[0] == 409
 
+    async def test_history_survives_room_loss_and_excludes_outsiders(self):
+        call = await self.start(3, 4)
+        await self.join(call, 4)
+        self.now += 12
+        await self.leave(call, 3)
+        status, history = await self.request('/history', 3)
+        assert status == 200
+        assert history['items'][0]['status'] == 'completed'
+        assert history['items'][0]['durationSeconds'] == 12
+        assert (await self.request('/history', 1))[1]['items'] == []
+        assert (await self.request('/history', 4))[1]['items'][0]['callId'] == call['call']['id']
+        await self.start(3, 4)
+        self.calls.rooms.clear()
+        assert (await self.request('/history', 3))[1]['items'][0]['status'] == 'interrupted'
+
 
 def test_turn_credentials_are_generated_only_on_server_and_expire():
     with patch.dict("os.environ", {"CALLS_TURN_URLS": "turns:relay.example:5349", "CALLS_TURN_SECRET": "fixture-secret"}):

@@ -26,6 +26,9 @@ if config.database_url.startswith("postgresql+asyncpg:"):
     }
 
 engine = create_async_engine(config.database_url, **engine_options)
+from .audit_context import install_actor_context
+
+install_actor_context(engine)
 Session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
@@ -190,6 +193,9 @@ async def init_db():
                     text("ALTER TABLE users ALTER COLUMN tg_id TYPE BIGINT")
                 )
                 logger.info("Migrated users.tg_id from INTEGER to BIGINT")
+
+        from .audit_capture import install_capture
+        await install_capture(connection)
 
 
 async def ping_database():

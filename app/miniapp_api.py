@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 PREFIX = "/api/miniapp"
 ROLE_ORDER = ("OWNER", "ADMIN", "PHOTOGRAPHER", "MANAGER")
 ACTIONS = {
+    "row.insert": "Созданы данные", "row.update": "Изменены данные", "row.delete": "Удалены данные",
+    "work_call_history": "Изменён статус звонка",
     "sale_created": "Зарегистрировал продажу",
     "booking_created": "Создал запись на съёмку",
     "booking_assigned": "Назначил фотографа",
@@ -129,11 +131,14 @@ class MiniApp:
     async def middleware(self, request, handler):
         if not (request.path.startswith(PREFIX) or request.path.startswith("/app/")):
             return await handler(request)
+        from .audit_context import actor_id
+        actor_token = actor_id.set(None)
         try:
             if request.path.startswith(PREFIX):
                 if any(k in request.query for k in ("role", "roles", "userId", "user_id", "employee_id", "scope")):
                     raise AccessError("Пользователь и роль определяются сервером.", 400)
                 request["miniapp_actor"] = await self.actor(request)
+                actor_id.set(request["miniapp_actor"]["id"])
             response = await handler(request)
         except AccessError as exc:
             response = web.json_response({"error": str(exc)}, status=exc.status)
@@ -142,6 +147,8 @@ class MiniApp:
         except Exception:
             logger.exception("Mini App handler failed: %s", request.path)
             response = web.json_response({"error": "Сервис временно недоступен. Повторите попытку."}, status=503)
+        finally:
+            actor_id.reset(actor_token)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -437,7 +444,7 @@ class MiniApp:
             team = []
             if "OWNER" in actor["roles"]:
                 team = await self.rows(conn, """SELECT u.id,u.name,
-                    (SELECT COUNT(*) FROM academy_lesson_progress alp WHERE alp.user_id=u.id) AS lessons,
+                    (SELECT COUNT(*) FROM academy_lesson_progress alp WHERE alp.user_id=u.id AND alp.topic_slug NOT LIKE 'guide-%') AS lessons,
                     (SELECT COUNT(*) FROM training_assignments ta WHERE ta.user_id=u.id AND ta.status='COMPLETED') AS practices,
                     (SELECT AVG(ta.ai_score) FROM training_assignments ta WHERE ta.user_id=u.id AND ta.status='COMPLETED') AS quality,
                     (SELECT COALESCE(SUM(s.amount),0) FROM sales s WHERE s.credited_user_id=u.id AND s.created_at>=:cutoff) AS sales,
