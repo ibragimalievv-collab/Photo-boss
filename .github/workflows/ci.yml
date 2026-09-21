@@ -54,6 +54,9 @@ jobs:
           node --check app/attendance_ui/attendance.js
           node --check app/work_chat_ui/chat.js
           node --check app/work_chat_ui/calls.js
+          node --check app/work_chat_ui/ringtone.js
+          node --check app/work_chat_ui/recorder.js
+          node --check app/webapp/js/practice.js
           DATABASE_URL='sqlite+aiosqlite:///:memory:' python -m pytest -q
 
       - name: Verify PostgreSQL, bot health and restart count
@@ -91,9 +94,39 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - name: Verify real audio and video between three fixture clients
         run: python tests/work_calls_browser_check.py
+      - name: Verify Academy uploads and owner review inside the app
+        run: python tests/academy_practice_browser_check.py
       - name: Save browser evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: calls-browser-evidence
           path: /tmp/photo-boss-calls-qa
+
+  turn-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+      PYTHONPATH: .
+      CALLS_QA_DIR: /tmp/photo-boss-turn-qa
+      CALLS_QA_RELAY_ONLY: '1'
+      CALLS_TURN_URLS: 'turn:127.0.0.1:13478?transport=udp,turn:127.0.0.1:13478?transport=tcp'
+      CALLS_TURN_SECRET: ci-only-turn-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-dev.txt playwright==1.51.0
+      - run: python -m playwright install --with-deps chromium
+      - name: Start an isolated test relay
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y coturn
+          turnserver -n --listening-ip=127.0.0.1 --relay-ip=127.0.0.1 --listening-port=13478 --realm=photo-boss-ci --use-auth-secret --static-auth-secret=ci-only-turn-secret --no-tls --no-dtls --no-cli --allow-loopback-peers --no-multicast-peers --min-port=49160 --max-port=49260 --pidfile=/tmp/photoboss-coturn.pid --log-file=/tmp/photoboss-coturn.log -o
+      - name: Verify audio and video through the relay without direct connections
+        run: python tests/work_calls_browser_check.py
+      - name: Show test relay diagnostics on failure
+        if: failure()
+        run: tail -120 /tmp/photoboss-coturn*.log

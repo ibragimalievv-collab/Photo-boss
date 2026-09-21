@@ -18,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .launch_policy import app_url
 from .miniapp_security import AccessError
+from .work_presence import PRESENCE_TTL, Presence
 from .work_rules import WORK_RULES_TEXT, WORK_RULES_VERSION, work_rules_hash
 from .yandex_disk import ROOT, YandexDiskError
 
@@ -93,6 +94,14 @@ def attachment_kind(filename, payload):
         return "image/webp", "webp", True
     if payload.startswith(b"%PDF-"):
         return "application/pdf", "pdf", False
+    if payload.startswith(b"\x1a\x45\xdf\xa3") and b"webm" in payload[:256]:
+        return ("audio/webm", "weba", False) if suffix == ".weba" else ("video/webm", "webm", False)
+    if len(payload) > 12 and payload[4:8] == b"ftyp":
+        return ("audio/mp4", "m4a", False) if suffix == ".m4a" else ("video/mp4", "mp4", False)
+    if payload.startswith(b"OggS"):
+        return "audio/ogg", "ogg", False
+    if len(payload) > 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WAVE":
+        return "audio/wav", "wav", False
     return "application/octet-stream", "bin", False
 
 
@@ -102,6 +111,7 @@ class WorkChat:
         self.engine = miniapp.engine
         self.bot = miniapp.bot
         self.static_dir = Path(__file__).parent / "work_chat_ui"
+        self.presence = Presence()
 
     def notification_markup(self):
         return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
@@ -135,6 +145,8 @@ class WorkChat:
         noun = {
             "photo": "фото",
             "file": "файл",
+            "voice": "голосовое сообщение",
+            "video": "видеосообщение",
         }.get(attachment, "сообщение")
         if general:
             text_value = f"💬 Photo Boss · Новое {noun} в общем чате\nОт: {sender_name}"
@@ -326,6 +338,7 @@ class WorkChat:
         role_map = {}
         for row in roles:
             role_map.setdefault(row["user_id"], []).append(row["role"])
+        online = self.presence.online()
         return web.json_response({
             "general": {
                 "id": "general",
@@ -338,12 +351,32 @@ class WorkChat:
                     "name": row["name"],
                     "roles": sorted(role_map.get(row["id"], [])),
                     "unread": unread["people"].get(row["id"], 0),
+                    "online": row["id"] in online,
                 }
                 for row in users
             ],
             "ownerControl": "OWNER" in actor["roles"],
             "totalUnread": unread["total"],
+            "presenceTtlSeconds": PRESENCE_TTL,
         })
+
+    async def presence_status(self, request):
+        actor = request["miniapp_actor"]
+        async with self.engine.connect() as conn:
+            await self.require_rules(conn, actor)
+            users = await self.api.rows(conn, """SELECT DISTINCT u.id FROM users u
+                JOIN user_roles r ON r.user_id=u.id WHERE u.active=TRUE
+                AND r.role IN ('OWNER','ADMIN','MANAGER','PHOTOGRAPHER')""")
+        allowed = {row["id"] for row in users}
+        return web.json_response({"online": sorted(self.presence.online() & allowed),
+                                  "ttlSeconds": PRESENCE_TTL})
+
+    async def presence_heartbeat(self, request):
+        actor = request["miniapp_actor"]
+        async with self.engine.connect() as conn:
+            await self.require_rules(conn, actor)
+        self.presence.update(actor["id"], await self.api.body(request))
+        return web.json_response({"ok": True, "ttlSeconds": PRESENCE_TTL})
 
     async def notification_targets(self, conn, actor, peer_id):
         if peer_id is not None:
@@ -412,6 +445,8 @@ class WorkChat:
                     "mimeType": mime,
                     "size": row["byte_size"],
                     "isImage": mime in {"image/jpeg", "image/png", "image/webp"},
+                    "isAudio": mime.startswith("audio/"),
+                    "isVideo": mime.startswith("video/"),
                 }
             packed.append({
                 "id": row["id"],
@@ -541,6 +576,8 @@ class WorkChat:
 
     async def upload_attachment(self, request):
         actor = request["miniapp_actor"]
+        async with self.engine.connect() as conn:
+            await self.require_rules(conn, actor)
         peer_id, caption, filename, payload = await self.read_upload(request)
         if peer_id == actor["id"]:
             raise AccessError("Нельзя отправить файл самому себе.", 400)
@@ -605,7 +642,7 @@ class WorkChat:
             notification_ids,
             sender_name=actor["name"],
             general=peer_id is None,
-            attachment="photo" if preview else "file",
+            attachment="photo" if preview else "voice" if mime_type.startswith("audio/") else "video" if mime_type.startswith("video/") else "file",
         )
         return web.json_response({
             "message": {
@@ -621,6 +658,8 @@ class WorkChat:
                     "mimeType": mime_type,
                     "size": len(payload),
                     "isImage": preview,
+                    "isAudio": mime_type.startswith("audio/"),
+                    "isVideo": mime_type.startswith("video/"),
                 },
             },
         }, status=201)
@@ -657,7 +696,8 @@ class WorkChat:
         except YandexDiskError as exc:
             logger.warning("Work-chat attachment download failed (%s)", type(exc).__name__)
             raise AccessError("Файл временно недоступен.", 503) from exc
-        preview = row["mime_type"] in {"image/jpeg", "image/png", "image/webp"}
+        preview = row["mime_type"] in {"image/jpeg", "image/png", "image/webp", "audio/webm",
+            "audio/mp4", "audio/ogg", "audio/wav", "video/webm", "video/mp4"}
         headers = {
             "Content-Disposition": (
                 f'inline; filename="photo-{attachment_id}"'
@@ -776,7 +816,7 @@ class WorkChat:
 
     async def static(self, request):
         name = request.match_info["asset"]
-        if name not in {"chat.js", "chat.css", "calls.js", "calls.css"}:
+        if name not in {"chat.js", "chat.css", "calls.js", "calls.css", "ringtone.js", "recorder.js"}:
             raise web.HTTPNotFound()
         return web.FileResponse(
             self.static_dir / name,
@@ -830,6 +870,8 @@ def install_work_chat(app, miniapp):
     app.router.add_get("/api/miniapp/chat/rules", service.rules)
     app.router.add_post("/api/miniapp/chat/rules/accept", service.accept_rules)
     app.router.add_get("/api/miniapp/chat/people", service.people)
+    app.router.add_get("/api/miniapp/chat/presence", service.presence_status)
+    app.router.add_post("/api/miniapp/chat/presence", service.presence_heartbeat)
     app.router.add_get("/api/miniapp/chat/unread", service.unread)
     app.router.add_get("/api/miniapp/chat/messages", service.messages)
     app.router.add_post("/api/miniapp/chat/messages", service.send)

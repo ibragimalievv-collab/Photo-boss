@@ -20,3 +20,25 @@
 .pb-chat-unread{display:inline-grid;place-items:center;min-width:20px;height:20px;padding:0 6px;box-sizing:border-box;border-radius:999px;background:#d93025;color:#fff;font:700 11px/1 system-ui,sans-serif;flex:0 0 auto}
 .pb-chat-person-copy{min-width:0;flex:1}
 .pb-chat-person>.pb-chat-unread{margin-left:auto}
+.pb-chat-heading{min-width:0;text-align:center}
+.pb-chat-presence{display:flex;align-items:center;gap:5px;font-size:12px;line-height:18px;color:#5c6470}
+.pb-chat-presence::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
+.pb-chat-presence.is-online{color:#187543}
+.pb-chat-heading .pb-chat-presence{justify-content:center;margin-top:3px}
+.pb-chat-person-copy strong{overflow-wrap:anywhere}
+[data-theme=premium] .pb-chat-presence,[data-theme=photo] .pb-chat-presence{color:#acb2bc}
+[data-theme=premium] .pb-chat-presence.is-online,[data-theme=photo] .pb-chat-presence.is-online{color:#69d99a}
+.pb-chat-record-controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.pb-chat-record-controls button,.pb-chat-media button{min-height:44px;padding:8px 10px;border:1px solid #8887;border-radius:10px;background:transparent;color:inherit;font:inherit;font-size:13px;cursor:pointer}
+.pb-chat-media{width:min(300px,72vw);margin:5px 0}
+.pb-chat-media audio,.pb-chat-media video{display:block;width:100%;max-height:300px;border-radius:12px}
+.pb-chat-media [hidden]{display:none}
+.pb-record-dialog{box-sizing:border-box;width:min(94vw,520px);max-height:94dvh;overflow:auto;padding:20px;border:1px solid #b69453;border-radius:18px;background:#181e27;color:#f7f4eb;font:15px/1.5 system-ui,sans-serif}
+.pb-record-dialog::backdrop{background:#000c}
+.pb-record-dialog video,.pb-record-dialog audio{width:100%;max-height:45dvh;border-radius:12px}
+.pb-record-dialog [hidden]{display:none}
+.pb-record-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:15px}
+.pb-record-actions button{min-height:44px;padding:9px 12px;border:1px solid #b69453;border-radius:10px;background:#d4b16a;color:#171a21;font:inherit;cursor:pointer}
+.pb-record-actions button:disabled{opacity:.5}
+.pb-record-note{font-size:12px;opacity:.7}
+.pb-record-dialog [role=alert]{color:#ffc2ba}

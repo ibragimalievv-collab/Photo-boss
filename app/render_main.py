@@ -9,6 +9,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 from sqlalchemy import text
 
+from .academy_practice import install_academy_practice
 from .attendance import install_attendance
 from .config import config
 from .db import engine, init_db, wait_for_database
@@ -31,7 +32,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.12-chat-calls"
+RELEASE = "miniapp-3.13-chat-presence"
 
 
 async def health(request):
@@ -94,6 +95,7 @@ async def on_startup(app):
     app["operations_task"] = asyncio.create_task(operations_loop(bot))
     app["storage_task"] = asyncio.create_task(storage_loop(bot, app["yandex_disk"]))
     app["chat_cleanup_task"] = asyncio.create_task(cleanup_loop(engine, app["yandex_disk"]))
+    app["academy_review_task"] = asyncio.create_task(app["academy_practice"].worker(app))
     app["ready"] = True
     mark_ready(me.username)
     logger.info("Release %s ready; live Mini App enabled; demo data disabled", RELEASE)
@@ -102,7 +104,7 @@ async def on_startup(app):
 async def on_cleanup(app):
     clear_ready_file()
     app["ready"] = False
-    for key in ("operations_task", "storage_task", "chat_cleanup_task"):
+    for key in ("operations_task", "storage_task", "chat_cleanup_task", "academy_review_task"):
         task = app.get(key)
         if task:
             task.cancel()
@@ -127,6 +129,7 @@ def main():
     install_people(app, miniapp)
     chat = install_work_chat(app, miniapp)
     install_work_calls(app, chat)
+    install_academy_practice(app, miniapp)
     install_yandex_disk(app)
     SimpleRequestHandler(
         dispatcher=dispatcher, bot=bot, secret_token=webhook_secret(config.bot_token),
