@@ -14,9 +14,10 @@ from .config import config
 logger = logging.getLogger(__name__)
 
 engine_options = {"pool_pre_ping": True, "pool_recycle": 300}
-if os.getenv("CI", "").lower() == "true":
+if os.getenv("CI", "").lower() == "true" and config.database_url.startswith("postgresql+asyncpg:"):
     # Regression tests create a fresh event loop for each scenario. Avoid
     # handing an asyncpg connection created by one loop to another loop.
+    # SQLite :memory: must retain its connection or every checkout loses tables.
     engine_options["poolclass"] = NullPool
 if config.database_url.startswith("postgresql+asyncpg:"):
     engine_options["connect_args"] = {

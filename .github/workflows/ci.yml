@@ -53,7 +53,8 @@ jobs:
           ruff check app tests
           node --check app/attendance_ui/attendance.js
           node --check app/work_chat_ui/chat.js
-          python -m pytest -q
+          node --check app/work_chat_ui/calls.js
+          DATABASE_URL='sqlite+aiosqlite:///:memory:' python -m pytest -q
 
       - name: Verify PostgreSQL, bot health and restart count
         run: |
@@ -73,3 +74,26 @@ jobs:
           if [ -f .env ]; then
             docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v
           fi
+
+  calls-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+      PYTHONPATH: .
+      CALLS_QA_DIR: /tmp/photo-boss-calls-qa
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-dev.txt playwright==1.51.0
+      - run: python -m playwright install --with-deps chromium
+      - name: Verify real audio and video between three fixture clients
+        run: python tests/work_calls_browser_check.py
+      - name: Save browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calls-browser-evidence
+          path: /tmp/photo-boss-calls-qa

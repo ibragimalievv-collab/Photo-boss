@@ -25,12 +25,13 @@ from .miniapp_security import webhook_secret
 from .people import install_people
 from .services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
 from .services.photo_storage import storage_loop
+from .work_calls import ice_config, install_work_calls
 from .work_chat import cleanup_expired_chat, cleanup_loop, install_work_chat
 from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.11-international-academy"
+RELEASE = "miniapp-3.12-chat-calls"
 
 
 async def health(request):
@@ -44,8 +45,12 @@ async def health(request):
         ready = False
     storage = request.app.get("yandex_disk")
     storage_state = storage.public_status() if storage is not None else {"configured": False, "connected": False, "writeVerified": False}
+    calls_state = ice_config(0)
     return web.json_response({"service": "photo-boss", "status": "ok" if ready else "not_ready",
                               "release": RELEASE, "app": "/app/",
+                              "calls": {"enabled": "work_calls" in request.app,
+                                        "maxParticipants": calls_state["maxParticipants"],
+                                        "relayConfigured": calls_state["relayConfigured"]},
                               "storage": {"provider": "yandex_disk",
                                           "configured": bool(storage_state.get("configured")),
                                           "connected": bool(storage_state.get("connected")),
@@ -120,7 +125,8 @@ def main():
                               blocks=ACADEMY_BLOCKS, tz_name=config.training_timezone)
     install_attendance(app, miniapp)
     install_people(app, miniapp)
-    install_work_chat(app, miniapp)
+    chat = install_work_chat(app, miniapp)
+    install_work_calls(app, chat)
     install_yandex_disk(app)
     SimpleRequestHandler(
         dispatcher=dispatcher, bot=bot, secret_token=webhook_secret(config.bot_token),

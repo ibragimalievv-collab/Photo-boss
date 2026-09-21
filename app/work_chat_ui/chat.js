@@ -1,5 +1,6 @@
 import {api,ApiError} from '/app/js/api.js';
 import {esc,ROLE_NAMES} from '/app/js/domain.js';
+import {initCalls,callToolbar,handleCallClick} from '/work-chat/calls.js';
 
 const dialog=document.createElement('dialog');
 dialog.className='pb-chat-dialog';
@@ -100,6 +101,7 @@ async function poll(){
 async function openThread(kind,peer=null,title='Общий чат'){
  current={kind,peer,title};last=0;stopPoll();
  shell(title,`<div id="pbChatMessages" class="pb-chat-messages" aria-live="polite"></div><p class="pb-chat-error" data-chat-error hidden role="alert"></p><form class="pb-chat-compose" id="pbChatCompose"><div class="pb-chat-input-row"><label class="pb-chat-attach" title="Фото или файл"><input type="file" name="file" hidden><span aria-hidden="true">📎</span><span class="sr-only">Прикрепить файл</span></label><textarea name="body" maxlength="2000" rows="2" placeholder="Рабочее сообщение…"></textarea><button class="pb-chat-send" type="submit">Отправить</button></div><div class="pb-chat-selected" data-selected-file hidden></div><div class="pb-chat-upload-note">Фото и файлы до 20 МБ. Опасные исполняемые файлы блокируются.</div></form>`);
+ dialog.querySelector('.pb-chat-body').insertAdjacentHTML('afterbegin',callToolbar(peer,title));
  await poll();timer=setInterval(poll,4000);
 }
 async function ownerThreads(){
@@ -135,6 +137,7 @@ dialog.addEventListener('change',e=>{
  selected.hidden=false;selected.textContent=`📎 ${file.name} · ${fileSize(file.size)}`;
 });
 dialog.addEventListener('click',async e=>{
+ if(e.target.closest('[data-start-call],[data-join-call],[data-resume-call]'))return handleCallClick(e,current.peer,current.title);
  const download=e.target.closest('[data-download-id]');if(download){download.disabled=true;try{await downloadAttachment(Number(download.dataset.downloadId),download.dataset.downloadName);}catch(err){showError(err.message);}finally{download.disabled=false;}return;}
  const peer=e.target.closest('[data-peer]');if(peer){const p=people.people.find(x=>x.id===Number(peer.dataset.peer));return openThread('peer',p.id,p.name);}
  const owner=e.target.closest('[data-owner-a]');if(owner)return ownerView(Number(owner.dataset.ownerA),Number(owner.dataset.ownerB),owner.dataset.ownerTitle);
@@ -165,8 +168,9 @@ function inject(){
  const btn=document.createElement('button');btn.className='pb-chat-trigger';btn.dataset.openChat='1';btn.innerHTML='<span>Чат</span>';btn.setAttribute('aria-label','Рабочий чат');
  btn.addEventListener('click',home);top.append(btn);
 }
-async function boot(){try{me=await api('/me');inject();startUnreadPoll();}catch{me=null;}}
+async function boot(){try{me=await api('/me');inject();startUnreadPoll();initCalls(me);}catch{me=null;}}
 const observer=new MutationObserver(()=>{if(me)inject();else if(document.querySelector('#topbar')?.children.length)boot();});
 observer.observe(document.querySelector('#topbar'),{childList:true});boot();
 
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')refreshUnread();});
+document.addEventListener('pb-calls-updated',()=>{if(!dialog.open)return;const toolbar=dialog.querySelector('.pb-call-toolbar');if(toolbar)toolbar.outerHTML=callToolbar(current.peer,current.title);});

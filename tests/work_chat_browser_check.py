@@ -27,6 +27,8 @@ def handler(page_state, role, sent):
         files = {
             "/work-chat/chat.js": ROOT / "app/work_chat_ui/chat.js",
             "/work-chat/chat.css": ROOT / "app/work_chat_ui/chat.css",
+            "/work-chat/calls.js": ROOT / "app/work_chat_ui/calls.js",
+            "/work-chat/calls.css": ROOT / "app/work_chat_ui/calls.css",
             "/app/js/api.js": ROOT / "app/webapp/js/api.js",
             "/app/js/domain.js": ROOT / "app/webapp/js/domain.js",
             "/app/css/styles.css": ROOT / "app/webapp/css/styles.css",
@@ -36,6 +38,8 @@ def handler(page_state, role, sent):
                 body=files[path].read_text(),
                 content_type="text/css" if path.endswith(".css") else "text/javascript",
             )
+        if path == "/api/miniapp/chat/calls":
+            return r.fulfill(json={"calls": [], "maxParticipants": 6})
         if path == "/api/miniapp/me":
             return r.fulfill(json={"user": {"id": 1, "name": "Test", "roles": [role]}})
         if path == "/api/miniapp/chat/rules/accept":
