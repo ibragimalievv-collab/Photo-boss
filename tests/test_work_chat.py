@@ -54,6 +54,16 @@ def test_attachment_validation_and_magic_detection():
             attachment_kind(name, b"payload")
 
 
+def test_voice_and_video_attachment_formats():
+    webm = b"\x1a\x45\xdf\xa3\x42\x82\x84webm" + b"x" * 30
+    mp4 = b"\x00\x00\x00\x18ftypisom" + b"x" * 30
+    assert attachment_kind("voice.weba", webm)[:2] == ("audio/webm", "weba")
+    assert attachment_kind("video.webm", webm)[:2] == ("video/webm", "webm")
+    assert attachment_kind("voice.m4a", mp4)[:2] == ("audio/mp4", "m4a")
+    assert attachment_kind("video.mp4", mp4)[:2] == ("video/mp4", "mp4")
+    assert attachment_kind("fake.webm", b"<html>bad</html>")[0] == "application/octet-stream"
+
+
 def test_rules_are_explicit_and_whole_document_acceptance():
     assert "Владелец компании имеет доступ" in WORK_RULES_TEXT
     assert "включая сообщения между двумя сотрудниками" in WORK_RULES_TEXT

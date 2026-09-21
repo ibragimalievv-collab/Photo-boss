@@ -6,6 +6,8 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from playwright.async_api import async_playwright
 from test_miniapp_release import signed
@@ -23,6 +25,17 @@ SILENT = """()=>testRingAnalysers.every(a=>{const v=new Float32Array(a.fftSize);
 async def main():
     fixture = CallsTests()
     await fixture.asyncSetUp()
+    files = {}
+
+    async def upload(path, payload, **kwargs):
+        files[path] = payload
+
+    async def download(path, **kwargs):
+        return files[path]
+
+    fixture.client.server.app['yandex_disk'] = SimpleNamespace(state={'connected': True},
+        ensure_dir=AsyncMock(), upload_bytes=AsyncMock(side_effect=upload),
+        download_bytes=AsyncMock(side_effect=download))
     errors = []
     contexts = []
     async with async_playwright() as p:
@@ -33,9 +46,9 @@ async def main():
                 path = request.request.url.removeprefix(BASE)
                 if path.startswith("/api/miniapp/"):
                     response = await fixture.client.request(request.request.method, path,
-                        data=request.request.post_data,
+                        data=request.request.post_data_buffer,
                         headers={"X-Telegram-Init-Data": request.request.headers.get("x-telegram-init-data", ""),
-                                 "Content-Type": "application/json"})
+                                 "Content-Type": request.request.headers.get('content-type', 'application/json')})
                     return await request.fulfill(status=response.status, body=await response.text(), content_type="application/json")
                 if path == "/":
                     return await request.fulfill(content_type="text/html", body="""<!doctype html>
@@ -58,10 +71,11 @@ async def main():
                 await context.add_init_script("window.Telegram={WebApp:{initData:" + json.dumps(signed(uid+1000)) + "}}")
                 # Instrument real browser APIs only to inspect stats and track cleanup.
                 await context.add_init_script("window.testRelayOnly=" + json.dumps(RELAY_ONLY) + ";")
-                await context.add_init_script("""window.testPCs=[];window.testStreams=[];window.testRingAnalysers=[];
+                await context.add_init_script("""window.testPCs=[];window.testStreams=[];window.testRingAnalysers=[];window.testIceErrors=[];
                     const RealPC=window.RTCPeerConnection;
                     window.RTCPeerConnection=class extends RealPC{constructor(config){
-                        super({...config,...(testRelayOnly?{iceTransportPolicy:'relay'}:{})});testPCs.push(this);}};
+                        super({...config,...(testRelayOnly?{iceTransportPolicy:'relay'}:{})});testPCs.push(this);
+                        this.addEventListener('icecandidateerror',e=>testIceErrors.push({code:e.errorCode,text:e.errorText,url:e.url}));}};
                     const RealAudio=window.AudioContext;
                     window.AudioContext=class extends RealAudio{createGain(){
                         const g=super.createGain(),connect=g.connect.bind(g);
@@ -77,6 +91,28 @@ async def main():
                 await page.locator('[data-chat="general"]').click()
                 pages.append(page)
             a, b, c = pages
+            if not RELAY_ONLY:
+                for mode in ('audio', 'video'):
+                    await a.locator(f'[data-record="{mode}"]').click()
+                    await a.locator('[data-record-stop]:not([disabled])').wait_for()
+                    await a.wait_for_timeout(1500)  # Record real synthetic media frames.
+                    await a.locator('[data-record-stop]').click()
+                    await a.locator('[data-record-send]').wait_for()
+                    assert await a.evaluate("testStreams.flatMap(s=>s.getTracks()).every(t=>t.readyState==='ended')")
+                    await a.locator('[data-record-send]').click()
+                    await a.wait_for_function("!document.querySelector('.pb-record-dialog').open")
+                    await b.locator('[data-load-media]').last.wait_for(timeout=10000)
+                    await b.locator('[data-load-media]').last.click()
+                    await b.wait_for_function("""tag=>{const m=[...document.querySelectorAll('.pb-chat-media '+tag)].at(-1);
+                        return m&&!m.hidden&&m.currentTime>0;}""", arg=mode, timeout=8000)
+                    await b.evaluate("document.querySelectorAll('.pb-chat-media audio,.pb-chat-media video').forEach(m=>m.pause())")
+                assert len(files) == 2
+                # Canceling a fresh recording must release devices without sending a message.
+                await a.locator('[data-record="audio"]').click()
+                await a.locator('[data-record-stop]:not([disabled])').wait_for()
+                await a.locator('[data-record-close]').click()
+                assert len(files) == 2
+                assert await a.evaluate("testStreams.flatMap(s=>s.getTracks()).every(t=>t.readyState==='ended')")
             await a.locator('[data-start-call="video"]').click()
             for page in (b, c):
                 await page.locator('[data-incoming]').wait_for(timeout=15000)
@@ -152,6 +188,11 @@ async def main():
                 "devicesReleased":True,"ringtone":True,"ringtoneStopsOnAnswerDeclineCancel":True,
                 "relayOnly":RELAY_ONLY,"pageErrors":errors,"screenshot":str(output / "group-call.png")}))
         finally:
+            if RELAY_ONLY:
+                for context in contexts:
+                    for page in context.pages:
+                        print(json.dumps(await page.evaluate("""({iceErrors:testIceErrors,
+                            states:testPCs.map(p=>({connection:p.connectionState,ice:p.iceConnectionState,gathering:p.iceGatheringState}))})""")))
             for context in contexts:
                 await context.close()
             await browser.close()

@@ -55,6 +55,7 @@ jobs:
           node --check app/work_chat_ui/chat.js
           node --check app/work_chat_ui/calls.js
           node --check app/work_chat_ui/ringtone.js
+          node --check app/work_chat_ui/recorder.js
           node --check app/webapp/js/practice.js
           DATABASE_URL='sqlite+aiosqlite:///:memory:' python -m pytest -q
 
@@ -110,7 +111,7 @@ jobs:
       PYTHONPATH: .
       CALLS_QA_DIR: /tmp/photo-boss-turn-qa
       CALLS_QA_RELAY_ONLY: '1'
-      CALLS_TURN_URLS: 'turn:127.0.0.1:3478?transport=udp,turn:127.0.0.1:3478?transport=tcp'
+      CALLS_TURN_URLS: 'turn:127.0.0.1:13478?transport=udp,turn:127.0.0.1:13478?transport=tcp'
       CALLS_TURN_SECRET: ci-only-turn-secret
     steps:
       - uses: actions/checkout@v4
@@ -123,6 +124,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y coturn
-          turnserver -n --listening-ip=127.0.0.1 --relay-ip=127.0.0.1 --listening-port=3478 --realm=photo-boss-ci --use-auth-secret --static-auth-secret=ci-only-turn-secret --no-tls --no-dtls --no-cli --allow-loopback-peers --no-multicast-peers --min-port=49160 --max-port=49260 --pidfile=/tmp/photoboss-coturn.pid --log-file=/tmp/photoboss-coturn.log -o
+          turnserver -n --listening-ip=127.0.0.1 --relay-ip=127.0.0.1 --listening-port=13478 --realm=photo-boss-ci --use-auth-secret --static-auth-secret=ci-only-turn-secret --no-tls --no-dtls --no-cli --allow-loopback-peers --no-multicast-peers --min-port=49160 --max-port=49260 --pidfile=/tmp/photoboss-coturn.pid --log-file=/tmp/photoboss-coturn.log -o
       - name: Verify audio and video through the relay without direct connections
         run: python tests/work_calls_browser_check.py
+      - name: Show test relay diagnostics on failure
+        if: failure()
+        run: tail -120 /tmp/photoboss-coturn*.log

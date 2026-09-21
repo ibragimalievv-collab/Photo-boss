@@ -30,6 +30,7 @@ def handler(page_state, role, sent):
             "/work-chat/calls.js": ROOT / "app/work_chat_ui/calls.js",
             "/work-chat/calls.css": ROOT / "app/work_chat_ui/calls.css",
             "/work-chat/ringtone.js": ROOT / "app/work_chat_ui/ringtone.js",
+            "/work-chat/recorder.js": ROOT / "app/work_chat_ui/recorder.js",
             "/app/js/api.js": ROOT / "app/webapp/js/api.js",
             "/app/js/domain.js": ROOT / "app/webapp/js/domain.js",
             "/app/css/styles.css": ROOT / "app/webapp/css/styles.css",
