@@ -74,6 +74,12 @@ jobs:
           $compose ps
           $compose logs --tail=100 bot postgres
 
+      - name: Verify additive migrations and audit on PostgreSQL
+        env:
+          PYTHONPATH: .
+          UPDATE_POSTGRES_TEST_URL: postgresql+asyncpg://postgres:ci-only-password@127.0.0.1:5432/hotel_photo_bot
+        run: python tests/update_postgres_check.py
+
       - name: Stop test stack
         if: always()
         run: |
