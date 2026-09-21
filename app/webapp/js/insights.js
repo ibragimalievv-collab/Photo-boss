@@ -1,7 +1,7 @@
 import {api} from './api.js';
 import {esc,money} from './domain.js';
 let report=null,events=[],period='week',from='',to='';
-const labels={revenue:'Выручка',cash:'Подтверждённая касса',accrued:'Начислено сотрудникам',cashAfterAccruals:'Остаток после начислений',average:'Средний чек',sales:'Продажи',shootings:'Завершённые съёмки',bookings:'Записи',cancellations:'Отмены и отказы',late:'Опоздания',attendance:'Выходы на работу',employees:'Сотрудников на смене',receiptIssues:'Чеки для проверки'};
+const labels={guestReviews:'Отзывы гостей',guestRating:'Средняя оценка гостей',revenue:'Выручка',cash:'Подтверждённая касса',accrued:'Начислено сотрудникам',cashAfterAccruals:'Остаток после начислений',average:'Средний чек',sales:'Продажи',shootings:'Завершённые съёмки',bookings:'Записи',cancellations:'Отмены и отказы',late:'Опоздания',attendance:'Выходы на работу',employees:'Сотрудников на смене',receiptIssues:'Чеки для проверки'};
 const monetary=new Set(['revenue','cash','accrued','cashAfterAccruals','average']);
 export async function loadInsights(){const q=new URLSearchParams({period});if(period==='custom'){q.set('from',from);q.set('to',to);}report=await api('/insights?'+q);events=(await api('/events')).items;}
 function value(k,v){return monetary.has(k)?money(v):esc(v);}

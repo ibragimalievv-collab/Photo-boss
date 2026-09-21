@@ -74,7 +74,8 @@ async def period_data(api, conn, start, end):
     for b in bookings:
         e = employees.setdefault(b['manager_id'], {'id': b['manager_id'], 'name': user_names.get(b['manager_id'], ''), 'revenue': 0, 'sales': 0, 'accrued': 0, 'bookings': 0})
         e['bookings'] += 1
-    metrics = {'revenue': revenue, 'cash': cash, 'accrued': accrued, 'cashAfterAccruals': cash-accrued,
+    feedback = await api.rows(conn, 'SELECT rating FROM guest_feedback WHERE submitted_at>=:lo AND submitted_at<:hi AND rating IS NOT NULL', **params)
+    metrics = {'guestReviews': len(feedback), 'guestRating': round(sum(r['rating'] for r in feedback)/len(feedback), 2) if feedback else 0, 'revenue': revenue, 'cash': cash, 'accrued': accrued, 'cashAfterAccruals': cash-accrued,
                'average': int((Decimal(revenue) / len(sales)).quantize(Decimal(1), rounding=ROUND_HALF_UP)) if sales else 0,
                'sales': len(sales), 'shootings': len(shootings), 'bookings': len(bookings),
                'cancellations': sum(b['status'] in ('CANCELLED', 'REJECTED') for b in bookings),

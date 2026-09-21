@@ -426,6 +426,9 @@ class ShiftCheckOut(Base):
         UniqueConstraint("user_id", "shift_date", name="uq_shift_check_out_user_day"),
     )
 
+    report_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    report_saved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
 
 class SalesPlan(Base):
     __tablename__ = "sales_plans"
@@ -715,3 +718,38 @@ class AcademyAssessment(Base):
     result: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     __table_args__ = (CheckConstraint('score BETWEEN 0 AND 100'),)
+
+
+class WorkChecklistCompletion(Base):
+    __tablename__ = 'work_checklist_completions'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    shift_date: Mapped[date] = mapped_column(Date)
+    item_key: Mapped[str] = mapped_column(String(80))
+    done: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (UniqueConstraint('user_id','shift_date','item_key',name='uq_checklist_user_day_item'),)
+
+
+class OperationRequest(Base):
+    """Idempotency receipt, not another financial or attendance ledger."""
+    __tablename__ = 'operation_requests'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    request_key: Mapped[str] = mapped_column(String(80))
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    result: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (UniqueConstraint('user_id','request_key',name='uq_operation_request_user_key'),)
+
+
+class GuestFeedback(Base):
+    __tablename__ = 'guest_feedback'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sale_id: Mapped[int] = mapped_column(ForeignKey('sales.id'),unique=True)
+    token_hash: Mapped[str] = mapped_column(String(64),unique=True)
+    rating: Mapped[int | None] = mapped_column(Integer,nullable=True)
+    comment: Mapped[str] = mapped_column(Text,default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime,default=utc_now)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime,nullable=True)
+    __table_args__ = (CheckConstraint('rating IS NULL OR rating BETWEEN 1 AND 5'),)

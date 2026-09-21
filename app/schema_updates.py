@@ -12,6 +12,9 @@ async def add_columns(connection, table, columns):
 
 
 async def upgrade(connection):
+    tables = await connection.run_sync(lambda conn: set(inspect(conn).get_table_names()))
+    if 'shift_check_outs' in tables:
+        await add_columns(connection, 'shift_check_outs', {'report_note': 'TEXT', 'report_saved_at': 'TIMESTAMP'})
     await add_columns(connection, 'notifications', {
         'event_key': 'VARCHAR(160)', 'priority': "VARCHAR(20) NOT NULL DEFAULT 'info'",
         'kind': "VARCHAR(50) NOT NULL DEFAULT 'legacy'", 'payload': 'TEXT',

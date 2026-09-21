@@ -1,0 +1,11 @@
+import {api} from './api.js';
+let userId=null,running=false;
+const open=()=>new Promise((resolve,reject)=>{const r=indexedDB.open('photo-boss-outbox',1);r.onupgradeneeded=()=>r.result.createObjectStore('operations',{keyPath:'key'});r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
+async function dbAction(mode,work){const db=await open();try{return await new Promise((resolve,reject)=>{const tx=db.transaction('operations',mode),req=work(tx.objectStore('operations'));tx.oncomplete=()=>resolve(req?.result);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('Не удалось сохранить данные на устройстве.'));});}finally{db.close();}}
+const update=row=>dbAction('readwrite',s=>s.put(row));
+export function setOutboxUser(id){userId=id;flushOutbox();}
+export async function outboxRows(){if(!userId)return [];return (await dbAction('readonly',s=>s.getAll())).filter(r=>r.userId===userId).sort((a,b)=>a.createdAt-b.createdAt);}
+export async function enqueueOperation(kind,date,data){if(!userId)throw new Error('Сначала откройте приложение при доступной сети.');const row={key:crypto.randomUUID(),userId,kind,date,data,status:'local',createdAt:Date.now()};await update(row);window.dispatchEvent(new Event('pb-outbox'));void flushOutbox();return row;}
+export async function retryOperation(key){const row=(await outboxRows()).find(r=>r.key===key);if(!row)return;row.status='local';row.error='';await update(row);return flushOutbox();}
+export async function flushOutbox(){if(running||!userId||!navigator.onLine)return;running=true;const actor=userId;try{for(const row of await outboxRows()){if(actor!==userId)break;if(!['local','syncing'].includes(row.status))continue;row.status='syncing';await update(row);window.dispatchEvent(new Event('pb-outbox'));try{await api('/operations/sync',{method:'POST',body:{key:row.key,kind:row.kind,date:row.date,data:row.data}});row.status='synced';row.error='';}catch(e){row.status=e.status?'error':'local';row.error=e.message;await update(row);window.dispatchEvent(new Event('pb-outbox'));if(!e.status||[401,403].includes(e.status))break;continue;}await update(row);window.dispatchEvent(new Event('pb-outbox'));}}finally{running=false;}}
+window.addEventListener('online',()=>flushOutbox());
