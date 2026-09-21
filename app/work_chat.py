@@ -576,6 +576,8 @@ class WorkChat:
 
     async def upload_attachment(self, request):
         actor = request["miniapp_actor"]
+        async with self.engine.connect() as conn:
+            await self.require_rules(conn, actor)
         peer_id, caption, filename, payload = await self.read_upload(request)
         if peer_id == actor["id"]:
             raise AccessError("Нельзя отправить файл самому себе.", 400)

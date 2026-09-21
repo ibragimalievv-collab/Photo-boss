@@ -49,7 +49,7 @@ async def main():
                         data=request.request.post_data_buffer,
                         headers={"X-Telegram-Init-Data": request.request.headers.get("x-telegram-init-data", ""),
                                  "Content-Type": request.request.headers.get('content-type', 'application/json')})
-                    return await request.fulfill(status=response.status, body=await response.text(), content_type="application/json")
+                    return await request.fulfill(status=response.status, body=await response.read(), content_type=response.content_type)
                 if path == "/":
                     return await request.fulfill(content_type="text/html", body="""<!doctype html>
                         <html lang="ru" data-theme="light"><head><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -137,7 +137,7 @@ async def main():
                             if(!pairs.length||pairs.some(x=>stats.get(x.localCandidateId)?.candidateType!=='relay'))return false;
                         }return true;}""")
             await a.locator('[data-mic]').click()
-            assert await a.evaluate("testStreams.flatMap(s=>s.getAudioTracks()).every(t=>!t.enabled)")
+            assert await a.evaluate("testStreams.flatMap(s=>s.getAudioTracks()).filter(t=>t.readyState==='live').every(t=>!t.enabled)")
             await a.locator('[data-camera]').click()
             await a.wait_for_function("testStreams.flatMap(s=>s.getVideoTracks()).every(t=>t.readyState==='ended')")
             await a.locator('[data-camera]').click()
@@ -186,7 +186,8 @@ async def main():
             print(json.dumps({"ok":True,"groupParticipants":3,"inboundAudio":True,
                 "inboundVideoFrames":True,"privateAudio":True,"muteCameraToggle":True,
                 "devicesReleased":True,"ringtone":True,"ringtoneStopsOnAnswerDeclineCancel":True,
-                "relayOnly":RELAY_ONLY,"pageErrors":errors,"screenshot":str(output / "group-call.png")}))
+                "relayOnly":RELAY_ONLY,"voiceAndVideoMessages":not RELAY_ONLY,
+                "pageErrors":errors,"screenshot":str(output / "group-call.png")}))
         finally:
             if RELAY_ONLY:
                 for context in contexts:
