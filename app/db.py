@@ -37,6 +37,8 @@ async def init_db():
     import_module(".models", package=__package__)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        from .schema_updates import upgrade
+        await upgrade(connection)
         if connection.dialect.name == "postgresql":
             await connection.execute(
                 text(

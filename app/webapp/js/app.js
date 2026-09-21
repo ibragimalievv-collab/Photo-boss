@@ -1,3 +1,4 @@
+import {insightsView,loadInsights,insightsClick} from './insights.js';
 import {academyScreen,academyReference} from './academy.js';
 import {openPractice} from './practice.js';
 import {icon} from './icons.js';
@@ -9,7 +10,7 @@ const state={me:null,dashboard:null,finance:null,schedule:null,academy:null,audi
 let toastTimer,focusBeforeDialog=null;
 const request=api;
 const NAV=[['home','home','Сегодня'],['shootings','camera','Съёмки'],['schedule','calendar','График'],['academy','cap','Академия'],['more','more','Ещё']];
-const names={home:'Рабочий день',shootings:'Съёмки и записи',schedule:'График команды',academy:'Академия фотографа',more:'Ваше пространство',profile:'Мой профиль',finance:'Касса и начисления',audit:'Аудит действий'};
+const names={home:'Рабочий день',shootings:'Съёмки и записи',schedule:'График команды',academy:'Академия фотографа',more:'Ваше пространство',profile:'Мой профиль',finance:'Касса и начисления',audit:'Аудит действий',insights:'Контроль бизнеса'};
 const roleNames=u=>(u.roles||[]).map(r=>ROLE_NAMES[r]||r).join(' · ');
 const btn=(label,action,cls='primary',ic='')=>`<button class="btn ${cls}" data-action="${action}">${ic?icon(ic):''}${label}</button>`;
 const empty=(title,text='',ic='list')=>`<div class="empty">${icon(ic)}<strong>${esc(title)}</strong>${esc(text)}</div>`;
@@ -58,9 +59,9 @@ function financialView(){const f=state.finance,p=state.me.permissions;return `${
 function academyView(){return academyScreen(state.academy,state.me.user,state.academyTab,{preview:false});}
 function themeChoices(){return `<div class="theme-grid">${[['premium','Премиум','Чёрный и золото'],['light','Светлая','Ясно и спокойно'],['photo','Фотостиль','Атмосфера кадра']].map(([id,n,desc])=>`<button class="theme-choice ${state.me.user.theme===id?'selected':''}" data-theme-choice="${id}" aria-pressed="${state.me.user.theme===id}"><div class="theme-mini ${id}"><span></span><span></span></div><strong>${n}</strong><small>${desc}</small></button>`).join('')}</div>`;}
 function profileView(){const u=state.me.user;return `${heading('Мой профиль','Оформление меняется. Права доступа — нет.')}<div class="panel profile-card"><span class="avatar">${esc(initials(u.name))}</span><h2>${esc(u.name)}</h2><div class="row wrap">${u.roles.map(r=>`<span class="badge accent">${esc(ROLE_NAMES[r]||r)}</span>`).join('')}</div><div class="id">Telegram ID: ${esc(u.telegramId)}</div></div><section class="section"><div class="section-head"><h2>Ваш стиль</h2>${icon('palette','accent')}</div>${themeChoices()}<p class="compact-note">Выбор сохраняется в вашем аккаунте. На новом устройстве загрузится та же тема.</p></section><section class="section"><div class="notice">${icon('shield')} Общая касса за прошлые периоды и аудит — только владельцу. Тема не меняет вашу роль.</div><p class="compact-note">Ограничены копирование и печать, финансовые экраны подписаны вашим именем. Полный запрет скриншотов не гарантируется.</p></section>`;}
-function moreView(){const p=state.me.permissions;const item=(r,ic,title,sub)=>`<button class="menu-item" data-go="${r}">${icon(ic)}<div class="grow"><strong>${title}</strong><small>${sub}</small></div>${icon('chevron')}</button>`;return `${heading('Ваше пространство','Всё остальное — под рукой.')}<div class="panel menu-list">${item('finance','wallet',p.financeScope==='self'?'Мои начисления':'Касса и начисления',p.financeScope==='all'?'Сегодня, неделя и месяц':p.financeScope==='today'?'Общая касса только за сегодня':'Только ваши продажи и деньги')}${item('schedule','calendar','График сотрудников','Смены фотографов и менеджеров')}${p.audit?item('audit','shield','Аудит действий','Кто, что и когда изменил'):''}${item('profile','palette','Профиль и оформление','Три темы на ваш выбор')}</div><section class="section"><button class="academy-link" data-go="academy"><span class="academy-logo">${icon('cap')}</span><div><h3>Академия фотографа</h3><p>Курсы, практика, разборы, прогресс.</p></div>${icon('arrow')}</button></section>`;}
+function moreView(){const p=state.me.permissions;const item=(r,ic,title,sub)=>`<button class="menu-item" data-go="${r}">${icon(ic)}<div class="grow"><strong>${title}</strong><small>${sub}</small></div>${icon('chevron')}</button>`;return `${heading('Ваше пространство','Всё остальное — под рукой.')}<div class="panel menu-list">${item('finance','wallet',p.financeScope==='self'?'Мои начисления':'Касса и начисления',p.financeScope==='all'?'Сегодня, неделя и месяц':p.financeScope==='today'?'Общая касса только за сегодня':'Только ваши продажи и деньги')}${item('schedule','calendar','График сотрудников','Смены фотографов и менеджеров')}${p.audit?item('insights','wallet','Контроль бизнеса','KPI, сравнение периодов и события'):''}${p.audit?item('audit','shield','Аудит действий','Кто, что и когда изменил'):''}${item('profile','palette','Профиль и оформление','Три темы на ваш выбор')}</div><section class="section"><button class="academy-link" data-go="academy"><span class="academy-logo">${icon('cap')}</span><div><h3>Академия фотографа</h3><p>Курсы, практика, разборы, прогресс.</p></div>${icon('arrow')}</button></section>`;}
 function auditView(){const a=state.audit;return `${heading('Аудит действий','Полная лента событий · только для владельца',`<span class="icon-button">${icon('shield','accent')}</span>`)}<div class="notice">Для старых записей показываются все имеющиеся сведения — отсутствующие детали не выдумываются.</div><div class="panel section">${a.items.length?a.items.map(x=>`<article class="audit-row"><div class="audit-time">${esc(new Date(x.at).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'}))}<br><small>${esc(new Date(x.at).toLocaleDateString('ru-RU',{timeZone:'Europe/Moscow',day:'2-digit',month:'2-digit'}))}</small></div><div class="grow"><h3>${esc(x.actor)}</h3><p>${esc(x.title)}</p><p>${esc(x.details||'')}</p><small>${esc(x.entity||'Событие')} ${x.entityId?'№'+esc(x.entityId):''} · ${esc(x.action)}</small></div></article>`).join(''):empty('Лента пока пуста','','shield')}</div>${a.next?`<div class="section">${btn('Загрузить ещё','more-audit','ghost')}</div>`:''}`;}
-function render(){shell();const views={home:homeView,shootings:shootingsView,schedule:scheduleView,academy:academyView,more:moreView,profile:profileView,finance:financialView,audit:auditView};$('#app').innerHTML=views[state.route]();}
+function render(){shell();const views={home:homeView,shootings:shootingsView,schedule:scheduleView,academy:academyView,more:moreView,profile:profileView,finance:financialView,audit:auditView,insights:insightsView};$('#app').innerHTML=views[state.route]();}
 async function loadRoute(route=state.route){
  if(!names[route])route='home';if(route==='audit'&&!state.me.permissions.audit){toast('Аудит доступен только владельцу.');route='home';}
  state.route=route;const ticket=++state.requestId;shell();$('#app').innerHTML='<div class="loading-screen"><div class="spinner"></div><p>Загружаем данные…</p></div>';
@@ -70,6 +71,7 @@ async function loadRoute(route=state.route){
   if(route==='shootings'){const d=await request(`/bookings?day=${state.day}`);if(ticket!==state.requestId)return;state.bookings=d.items;}
   if(route==='schedule'){const d=await request(`/schedule?from=${state.week}&to=${addDays(state.week,6)}`);if(ticket!==state.requestId)return;state.schedule=d;}
   if(route==='academy'){const d=await request('/academy');if(ticket!==state.requestId)return;state.academy=d;}
+  if(route==='insights')await loadInsights();
   if(route==='audit'){const d=await request('/audit');if(ticket!==state.requestId)return;state.audit=d;}
   if(ticket!==state.requestId)return;render();
  }catch(e){if(ticket!==state.requestId)return;showError(e);}
@@ -98,6 +100,7 @@ async function action(name){
 document.addEventListener('click',async event=>{
  const b=event.target.closest('button');if(!b||b.disabled)return;
  try{
+  if(b.dataset.insight)return await insightsClick(b);
   if(b.dataset.go)return go(b.dataset.go);
   if(b.dataset.action){b.disabled=true;try{return await action(b.dataset.action);}finally{b.disabled=false;}}
   if(b.dataset.booking)return showBooking(Number(b.dataset.booking));if(b.dataset.employee)return employeeDetail(Number(b.dataset.employee));

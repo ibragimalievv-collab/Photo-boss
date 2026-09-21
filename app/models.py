@@ -444,6 +444,14 @@ class Notification(Base):
     sent: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
+    event_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    priority: Mapped[str] = mapped_column(String(20), default="info", server_default="info")
+    kind: Mapped[str] = mapped_column(String(50), default="legacy", server_default="legacy")
+    payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (UniqueConstraint("user_id", "event_key", name="uq_notification_event"),)
+
 
 class BookingReminder(Base):
     __tablename__ = "booking_reminders"
