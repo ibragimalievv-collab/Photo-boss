@@ -73,7 +73,7 @@ async def main():
                 await context.add_init_script("window.Telegram={WebApp:{initData:" + json.dumps(signed(uid+1000)) + "}}")
                 # Instrument real browser APIs only to inspect stats and track cleanup.
                 await context.add_init_script("window.testRelayOnly=" + json.dumps(RELAY_ONLY) + ";")
-                await context.add_init_script("""window.testPCs=[];window.testStreams=[];window.testRingAnalysers=[];window.testIceErrors=[];
+                await context.add_init_script("""window.testPlayErrors=[];const nativePlay=HTMLMediaElement.prototype.play;HTMLMediaElement.prototype.play=function(){const result=nativePlay.call(this);result?.catch(e=>testPlayErrors.push(e.name+": "+e.message));return result;};window.testPCs=[];window.testStreams=[];window.testRingAnalysers=[];window.testIceErrors=[];
                     const RealPC=window.RTCPeerConnection;
                     window.RTCPeerConnection=class extends RealPC{constructor(config){
                         super({...config,...(testRelayOnly?{iceTransportPolicy:'relay'}:{})});testPCs.push(this);
@@ -152,6 +152,12 @@ async def main():
                         if(!reports.some(x=>x.kind==='audio' && x.bytesReceived>0))return false;
                         if(!reports.some(x=>x.kind==='video' && x.framesDecoded>0))return false;
                     }return true;}""", timeout=30000)
+                print(json.dumps(await page.evaluate("""({playErrors:testPlayErrors,
+                    videos:[...document.querySelectorAll('.pb-call-tile video')].map(v=>({
+                        participant:v.parentElement.dataset.participant,classes:v.parentElement.className,
+                        width:v.videoWidth,height:v.videoHeight,ready:v.readyState,paused:v.paused,
+                        opacity:getComputedStyle(v).opacity,currentTime:v.currentTime,
+                        tracks:v.srcObject?.getTracks().map(t=>({kind:t.kind,ready:t.readyState,muted:t.muted,enabled:t.enabled}))}))})""")))
                 # RTP decoding must also produce visible, playing participant videos.
                 await page.wait_for_function("""()=>{
                     const videos=[...document.querySelectorAll('.pb-call-tile.has-video video')];
