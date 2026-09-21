@@ -54,6 +54,7 @@ jobs:
           node --check app/attendance_ui/attendance.js
           node --check app/work_chat_ui/chat.js
           node --check app/work_chat_ui/calls.js
+          node --check app/work_chat_ui/ringtone.js
           DATABASE_URL='sqlite+aiosqlite:///:memory:' python -m pytest -q
 
       - name: Verify PostgreSQL, bot health and restart count
@@ -97,3 +98,28 @@ jobs:
         with:
           name: calls-browser-evidence
           path: /tmp/photo-boss-calls-qa
+
+  public-turn-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    # An external public relay is tested before production configuration is changed.
+    # Its availability must not block unrelated application/security updates.
+    continue-on-error: true
+    env:
+      DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+      PYTHONPATH: .
+      CALLS_QA_DIR: /tmp/photo-boss-turn-qa
+      CALLS_QA_RELAY_ONLY: '1'
+      CALLS_TURN_URLS: 'turn:staticauth.openrelay.metered.ca:80?transport=udp,turn:staticauth.openrelay.metered.ca:443?transport=tcp,turns:staticauth.openrelay.metered.ca:443?transport=tcp'
+      # Public test credential explicitly published by the Open Relay provider.
+      # https://www.metered.ca/tools/openrelay/#-static-auth
+      CALLS_TURN_SECRET: openrelayprojectsecret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-dev.txt playwright==1.51.0
+      - run: python -m playwright install --with-deps chromium
+      - name: Verify audio and video through the relay without direct connections
+        run: python tests/work_calls_browser_check.py

@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "qa-work-chat"
@@ -29,6 +29,7 @@ def handler(page_state, role, sent):
             "/work-chat/chat.css": ROOT / "app/work_chat_ui/chat.css",
             "/work-chat/calls.js": ROOT / "app/work_chat_ui/calls.js",
             "/work-chat/calls.css": ROOT / "app/work_chat_ui/calls.css",
+            "/work-chat/ringtone.js": ROOT / "app/work_chat_ui/ringtone.js",
             "/app/js/api.js": ROOT / "app/webapp/js/api.js",
             "/app/js/domain.js": ROOT / "app/webapp/js/domain.js",
             "/app/css/styles.css": ROOT / "app/webapp/css/styles.css",
@@ -40,6 +41,11 @@ def handler(page_state, role, sent):
             )
         if path == "/api/miniapp/chat/calls":
             return r.fulfill(json={"calls": [], "maxParticipants": 6})
+        if path == "/api/miniapp/chat/presence":
+            if r.request.method == "POST":
+                page_state["heartbeat"] = json.loads(r.request.post_data)
+                return r.fulfill(json={"ok": True, "ttlSeconds": 45})
+            return r.fulfill(json={"online": [2] if page_state["peerOnline"] else [], "ttlSeconds": 45})
         if path == "/api/miniapp/me":
             return r.fulfill(json={"user": {"id": 1, "name": "Test", "roles": [role]}})
         if path == "/api/miniapp/chat/rules/accept":
@@ -59,7 +65,7 @@ def handler(page_state, role, sent):
             return r.fulfill(json={
                 "general": {"id": "general", "name": "Общий чат", "unread": 1},
                 "people": [{"id": 2, "name": "<script>bad()</script>",
-                            "roles": ["PHOTOGRAPHER"], "unread": 2}],
+                            "roles": ["PHOTOGRAPHER"], "unread": 2, "online": page_state["peerOnline"]}],
                 "ownerControl": role == "OWNER",
                 "totalUnread": 3,
             })
@@ -104,7 +110,7 @@ def main():
         browser = p.chromium.launch()
         for role in ("OWNER", "ADMIN", "PHOTOGRAPHER", "MANAGER"):
             for width in (320, 390):
-                state, sent, errors = {"accepted": False}, [], []
+                state, sent, errors = {"accepted": False, "peerOnline": True}, [], []
                 page = browser.new_page(viewport={"width": width, "height": 844})
                 page.on("pageerror", lambda event, bucket=errors: bucket.append(str(event)))
                 page.route("**/*", handler(state, role, sent))
@@ -119,6 +125,7 @@ def main():
                 page.get_by_text("Принять общие правила и открыть чат", exact=True).click()
                 page.locator('[data-chat="general"] .pb-chat-unread').wait_for()
                 assert page.locator('[data-peer="2"] .pb-chat-unread').inner_text() == "2"
+                expect(page.locator('[data-peer="2"] .pb-chat-presence')).to_have_text("В сети")
                 page.get_by_text("Общий чат", exact=True).first.wait_for()
                 assert page.locator(".pb-chat-unread").count() >= 2
                 page.get_by_text("Общий чат", exact=True).first.click()
@@ -145,6 +152,11 @@ def main():
                 page.locator('[data-chat="home"]').click()
                 page.locator('[data-peer="2"]').click()
                 page.locator("#pbChatMessages").wait_for()
+                expect(page.locator('.pb-chat-heading .pb-chat-presence')).to_have_text("В сети")
+                state["peerOnline"] = False
+                # Observe the normal polling cycle, without a page reload.
+                expect(page.locator('.pb-chat-heading .pb-chat-presence')).to_have_text("Не в сети", timeout=15000)
+                assert state["heartbeat"]["online"] is True
                 if role == "OWNER":
                     page.locator('[data-chat="home"]').click()
                     page.get_by_text("Контроль диалогов сотрудников", exact=True).click()

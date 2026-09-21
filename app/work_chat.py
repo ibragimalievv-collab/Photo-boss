@@ -18,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .launch_policy import app_url
 from .miniapp_security import AccessError
+from .work_presence import PRESENCE_TTL, Presence
 from .work_rules import WORK_RULES_TEXT, WORK_RULES_VERSION, work_rules_hash
 from .yandex_disk import ROOT, YandexDiskError
 
@@ -102,6 +103,7 @@ class WorkChat:
         self.engine = miniapp.engine
         self.bot = miniapp.bot
         self.static_dir = Path(__file__).parent / "work_chat_ui"
+        self.presence = Presence()
 
     def notification_markup(self):
         return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
@@ -326,6 +328,7 @@ class WorkChat:
         role_map = {}
         for row in roles:
             role_map.setdefault(row["user_id"], []).append(row["role"])
+        online = self.presence.online()
         return web.json_response({
             "general": {
                 "id": "general",
@@ -338,12 +341,32 @@ class WorkChat:
                     "name": row["name"],
                     "roles": sorted(role_map.get(row["id"], [])),
                     "unread": unread["people"].get(row["id"], 0),
+                    "online": row["id"] in online,
                 }
                 for row in users
             ],
             "ownerControl": "OWNER" in actor["roles"],
             "totalUnread": unread["total"],
+            "presenceTtlSeconds": PRESENCE_TTL,
         })
+
+    async def presence_status(self, request):
+        actor = request["miniapp_actor"]
+        async with self.engine.connect() as conn:
+            await self.require_rules(conn, actor)
+            users = await self.api.rows(conn, """SELECT DISTINCT u.id FROM users u
+                JOIN user_roles r ON r.user_id=u.id WHERE u.active=TRUE
+                AND r.role IN ('OWNER','ADMIN','MANAGER','PHOTOGRAPHER')""")
+        allowed = {row["id"] for row in users}
+        return web.json_response({"online": sorted(self.presence.online() & allowed),
+                                  "ttlSeconds": PRESENCE_TTL})
+
+    async def presence_heartbeat(self, request):
+        actor = request["miniapp_actor"]
+        async with self.engine.connect() as conn:
+            await self.require_rules(conn, actor)
+        self.presence.update(actor["id"], await self.api.body(request))
+        return web.json_response({"ok": True, "ttlSeconds": PRESENCE_TTL})
 
     async def notification_targets(self, conn, actor, peer_id):
         if peer_id is not None:
@@ -776,7 +799,7 @@ class WorkChat:
 
     async def static(self, request):
         name = request.match_info["asset"]
-        if name not in {"chat.js", "chat.css", "calls.js", "calls.css"}:
+        if name not in {"chat.js", "chat.css", "calls.js", "calls.css", "ringtone.js"}:
             raise web.HTTPNotFound()
         return web.FileResponse(
             self.static_dir / name,
@@ -830,6 +853,8 @@ def install_work_chat(app, miniapp):
     app.router.add_get("/api/miniapp/chat/rules", service.rules)
     app.router.add_post("/api/miniapp/chat/rules/accept", service.accept_rules)
     app.router.add_get("/api/miniapp/chat/people", service.people)
+    app.router.add_get("/api/miniapp/chat/presence", service.presence_status)
+    app.router.add_post("/api/miniapp/chat/presence", service.presence_heartbeat)
     app.router.add_get("/api/miniapp/chat/unread", service.unread)
     app.router.add_get("/api/miniapp/chat/messages", service.messages)
     app.router.add_post("/api/miniapp/chat/messages", service.send)

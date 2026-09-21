@@ -1,5 +1,6 @@
 import {api, ApiError} from '/app/js/api.js';
 import {esc} from '/app/js/domain.js';
+import {setIncomingRingtone,stopIncomingRingtone} from '/work-chat/ringtone.js';
 
 // A call has its own dialog so chat navigation cannot accidentally capture media
 // or destroy an active connection. Only a deliberate Join/Call click gets media.
@@ -44,13 +45,14 @@ function setBanner() {
     if(!active) resume?.remove();
     // Do not replace an incoming call's accept control on every background poll.
     const room = !active && available.find(r => !ignored.has(r.id) && r.creatorId !== me?.user?.id && !r.participants.some(p => p.id === me?.user?.id));
+    setIncomingRingtone(room?.id || null);
     if(!room) {banner.hidden = true; banner.dataset.room = ''; return;}
     if(banner.dataset.room === room.id) return;
     banner.dataset.room = room.id; banner.hidden = false;
     banner.innerHTML = `<strong>${esc(room.creatorName)} · ${room.group ? 'Групповой звонок' : room.mode === 'video' ? 'Видеозвонок' : 'Аудиозвонок'}</strong><div><button data-incoming="${esc(room.id)}">Ответить</button><button data-ignore="${esc(room.id)}">${room.group ? 'Скрыть' : 'Отклонить'}</button></div>`;
 }
 async function refresh() {
-    if(!me || (document.visibilityState !== 'visible' && !active)) return;
+    if(!me) return;
     try {
         const data = await callApi(''); available = data.calls; setBanner();
         for(const id of ignored) if(!available.some(r => r.id === id)) ignored.delete(id);
@@ -99,6 +101,7 @@ async function begin({peer=null, room=null, mode='audio', name=''} = {}) {
     if(starting) return;
     if(active) {panel.showModal(); return;}
     starting=true; let stream=null, result=null;
+    stopIncomingRingtone();
     try {
         if(!room) selected={peer,title:name};
         stream=await media(mode);
@@ -243,6 +246,7 @@ export async function handleCallClick(e, peer, name) {
 }
 function invite(room) {
     if(active) {if(!panel.open) panel.showModal();return;}
+    stopIncomingRingtone();
     showPanel(`<h2 id="pbCallTitle">${esc(title(room))}</h2><p>${esc(room.creatorName)} приглашает ${room.group?'команду':'вас'} в звонок.</p><p>Микрофон и камера включатся после вашего выбора.</p><div class="pb-call-controls"><button data-answer="audio" data-room="${esc(room.id)}">Только аудио</button><button data-answer="video" data-room="${esc(room.id)}">С видео</button><button data-call-close>Позже</button></div>`);
 }
 panel.addEventListener('click',async e=>{

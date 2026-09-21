@@ -93,6 +93,8 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
             ("/chat/rules", "GET"): self.chat.rules,
             ("/chat/rules/accept", "POST"): self.chat.accept_rules,
             ("/chat/people", "GET"): self.chat.people,
+            ("/chat/presence", "GET"): self.chat.presence_status,
+            ("/chat/presence", "POST"): self.chat.presence_heartbeat,
             ("/chat/unread", "GET"): self.chat.unread,
             ("/chat/messages", "GET"): self.chat.messages,
             ("/chat/messages", "POST"): self.chat.send,
@@ -115,12 +117,32 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
         assert (await self.call("/chat/rules", uid=1003))[0] == 200
         for path,method,body in [
             ("/chat/people","GET",None),
+            ("/chat/presence","GET",None),
+            ("/chat/presence","POST",{}),
             ("/chat/messages?peer=general&after=0","GET",None),
             ("/chat/messages","POST",{"peerId": None, "body": "hello"}),
         ]:
             assert (await self.call(path, uid=1003, method=method, body=body))[0] == 428
         assert (await self.accept(1003))[0] == 200
         assert (await self.call("/chat/people", uid=1003))[0] == 200
+
+    async def test_presence_auth_identity_and_inactive_accounts(self):
+        for uid in (1003, 1004):
+            await self.accept(uid)
+        body = {"sessionId": "fixture-session-123456", "sequence": 1, "online": True}
+        assert (await self.call("/chat/presence", token="forged"))[0] == 401
+        for uid in (1006, 1007):
+            assert (await self.call("/chat/presence", uid=uid))[0] == 403
+        assert (await self.call("/chat/presence", uid=1003, method="POST", body=body))[0] == 200
+        _, data = await self.call("/chat/presence", uid=1004)
+        assert data["online"] == [3]
+        _, people = await self.call("/chat/people", uid=1004)
+        assert next(p for p in people["people"] if p["id"] == 3)["online"] is True
+        assert (await self.call("/chat/presence", uid=1003, method="POST",
+                               body={**body, "userId": 4}))[0] == 400
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("UPDATE users SET active=FALSE WHERE id=3"))
+        assert (await self.call("/chat/presence", uid=1004))[1]["online"] == []
 
     async def test_general_and_private_visibility(self):
         for uid in (1001,1003,1004,1005):

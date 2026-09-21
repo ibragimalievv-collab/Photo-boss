@@ -13,6 +13,11 @@ from test_work_calls import CallsTests
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "https://photo-boss-calls.invalid"
+RELAY_ONLY = os.getenv("CALLS_QA_RELAY_ONLY") == "1"
+RINGING = """()=>testRingAnalysers.some(a=>{const v=new Float32Array(a.fftSize);
+    a.getFloatTimeDomainData(v);return v.some(x=>Math.abs(x)>0.005);})"""
+SILENT = """()=>testRingAnalysers.every(a=>{const v=new Float32Array(a.fftSize);
+    a.getFloatTimeDomainData(v);return v.every(x=>Math.abs(x)<0.0001);})"""
 
 
 async def main():
@@ -52,9 +57,16 @@ async def main():
                 contexts.append(context)
                 await context.add_init_script("window.Telegram={WebApp:{initData:" + json.dumps(signed(uid+1000)) + "}}")
                 # Instrument real browser APIs only to inspect stats and track cleanup.
-                await context.add_init_script("""window.testPCs=[];window.testStreams=[];
+                await context.add_init_script("window.testRelayOnly=" + json.dumps(RELAY_ONLY) + ";")
+                await context.add_init_script("""window.testPCs=[];window.testStreams=[];window.testRingAnalysers=[];
                     const RealPC=window.RTCPeerConnection;
-                    window.RTCPeerConnection=class extends RealPC{constructor(...args){super(...args);testPCs.push(this);}};
+                    window.RTCPeerConnection=class extends RealPC{constructor(config){
+                        super({...config,...(testRelayOnly?{iceTransportPolicy:'relay'}:{})});testPCs.push(this);}};
+                    const RealAudio=window.AudioContext;
+                    window.AudioContext=class extends RealAudio{createGain(){
+                        const g=super.createGain(),connect=g.connect.bind(g);
+                        g.connect=(...args)=>{if(args[0]===this.destination){const a=this.createAnalyser();
+                            connect(a);testRingAnalysers.push(a);}return connect(...args);};return g;}};
                     const get=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
                     navigator.mediaDevices.getUserMedia=async (...args)=>{const s=await get(...args);testStreams.push(s);return s;};""")
                 page = await context.new_page()
@@ -68,7 +80,9 @@ async def main():
             await a.locator('[data-start-call="video"]').click()
             for page in (b, c):
                 await page.locator('[data-incoming]').wait_for(timeout=15000)
+                await page.wait_for_function(RINGING, timeout=8000)
                 await page.locator('[data-incoming]').click()
+                await page.wait_for_function(SILENT, timeout=2000)
                 await page.locator('[data-answer="video"]').click()
             for page in pages:
                 await page.wait_for_function("testPCs.filter(p=>p.connectionState==='connected').length===2", timeout=30000)
@@ -79,6 +93,13 @@ async def main():
                         if(!reports.some(x=>x.kind==='video' && x.framesDecoded>0))return false;
                     }return true;}""", timeout=30000)
                 assert await page.evaluate("document.documentElement.scrollWidth<=innerWidth+2")
+                if RELAY_ONLY:
+                    assert await page.evaluate("""async()=>{
+                        for(const pc of testPCs.filter(p=>p.connectionState==='connected')){
+                            const stats=await pc.getStats();
+                            const pairs=[...stats.values()].filter(x=>x.type==='candidate-pair'&&x.nominated&&x.state==='succeeded');
+                            if(!pairs.length||pairs.some(x=>stats.get(x.localCandidateId)?.candidateType!=='relay'))return false;
+                        }return true;}""")
             await a.locator('[data-mic]').click()
             assert await a.evaluate("testStreams.flatMap(s=>s.getAudioTracks()).every(t=>!t.enabled)")
             await a.locator('[data-camera]').click()
@@ -110,10 +131,26 @@ async def main():
             await b.locator('[data-hangup]').click()
             for page in (a,b):
                 await page.wait_for_function("testStreams.flatMap(s=>s.getTracks()).every(t=>t.readyState==='ended')", timeout=15000)
+                if await page.locator('[data-call-close]').is_visible():
+                    await page.locator('[data-call-close]').click()
+            # Decline and caller cancellation both silence the incoming melody.
+            for decline in (True, False):
+                await a.locator('[data-start-call="audio"]').click()
+                await b.locator('[data-incoming]').wait_for(timeout=15000)
+                await b.wait_for_function(RINGING, timeout=8000)
+                if decline:
+                    await b.locator('[data-ignore]').click()
+                else:
+                    await a.locator('[data-hangup]').click()
+                await b.wait_for_function(SILENT, timeout=8000)
+                await a.wait_for_function("testStreams.flatMap(s=>s.getTracks()).every(t=>t.readyState==='ended')", timeout=15000)
+                if await a.locator('[data-call-close]').is_visible():
+                    await a.locator('[data-call-close]').click()
             assert not errors, errors
             print(json.dumps({"ok":True,"groupParticipants":3,"inboundAudio":True,
                 "inboundVideoFrames":True,"privateAudio":True,"muteCameraToggle":True,
-                "devicesReleased":True,"pageErrors":errors,"screenshot":str(output / "group-call.png")}))
+                "devicesReleased":True,"ringtone":True,"ringtoneStopsOnAnswerDeclineCancel":True,
+                "relayOnly":RELAY_ONLY,"pageErrors":errors,"screenshot":str(output / "group-call.png")}))
         finally:
             for context in contexts:
                 await context.close()
