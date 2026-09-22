@@ -23,6 +23,9 @@ class Insights:
         start, end = financial_period(actor['roles'], period, self.api.today(), start=request.query.get('from'), end=request.query.get('to'))
         async with self.api.engine.connect() as conn:
             result = await compare_periods(self.api, conn, start, end, offset_days=7 if period=='week' else None)
+            from .cash_control import CATEGORIES
+            result['expenseOptions']={'categories':CATEGORIES,'hotels':[dict(r) for r in await self.api.rows(conn,'SELECT id,name FROM hotels ORDER BY name')],
+                'employees':[dict(r) for r in await self.api.rows(conn,'SELECT id,name FROM users ORDER BY name')], 'today':str(self.api.today())}
         return web.json_response(result)
 
     async def events(self, request):
@@ -103,6 +106,7 @@ async def daily_control(session, now, tz_name):
         report = await compare_periods(api, session, day, day)
         m = report['metrics']
         summary = (f"Photo Boss · {day:%d.%m.%Y}\nВыручка {m['revenue']/100:,.2f} ₽ · поступило {m['cash']/100:,.2f} ₽\n"
+                   f"Оплачено расходов {m['paidOut']/100:,.2f} ₽ · чистая касса {m['netCash']/100:,.2f} ₽\n"
                    f"Продаж {m['sales']} · съёмок {m['shootings']} · сотрудников {m['employees']}\n"
                    f"Опозданий {m['late']} · пропусков {m['missed']} · незакрытых смен {m['unclosed']}\n"
                    f"Отметок на проверке {m['pendingAttendance']} · проблемных чеков {m['receiptIssues']} · открытых событий {len(events)}")

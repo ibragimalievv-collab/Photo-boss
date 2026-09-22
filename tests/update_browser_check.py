@@ -11,6 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from playwright.async_api import async_playwright
 from test_insights import fixture
 from test_miniapp_release import TOKEN, signed
+from work_calls_browser_check import wait_async
 
 from app.academy_practice import install_academy_practice
 from app.attendance import install_attendance
@@ -59,6 +60,24 @@ async def main():
                     await page.goto(BASE+'/app/#'+name)
                     await page.get_by_role('heading',name=title,exact=True).wait_for()
                     if name == 'insights':
+                        await page.get_by_text('Оплаченные расходы и выплаты',exact=True).click()
+                        await page.locator('#cashExpense [name=category]').select_option('OTHER')
+                        await page.locator('#cashExpense [name=amount]').fill('12.34')
+                        await page.locator('#cashExpense [name=note]').fill('Paid supplies fixture')
+                        await page.locator('#cashExpense [name=paidConfirmed]').check()
+                        async with page.expect_response(lambda r:r.url.endswith('/operations/sync') and r.status==200):
+                            await page.locator('#cashExpense button').click()
+                        await wait_async(page,"async ()=>(await (await import('/app/js/outbox.js')).outboxRows()).some(r=>r.kind==='cash_expense'&&r.status==='synced')")
+                        await page.get_by_role('button',name='Обновить суммы',exact=True).click()
+                        await page.get_by_text('Оплаченные расходы и выплаты',exact=True).click()
+                        await page.get_by_text('Paid supplies fixture',exact=True).wait_for()
+                        await page.screenshot(path=str(output/'update-cash-mobile.png'),full_page=True)
+                        await page.get_by_text('Отменить ошибочную запись',exact=True).click()
+                        await page.locator('.cashVoid [name=reason]').fill('Correct erroneous fixture entry')
+                        async with page.expect_response(lambda r:r.url.endswith('/void') and r.status==200):
+                            await page.locator('.cashVoid button').click()
+                        await page.get_by_text('Оплаченные расходы и выплаты',exact=True).click()
+                        await page.get_by_text('Основание отмены: Correct erroneous fixture entry',exact=True).wait_for()
                         await page.locator('#notifyDaily').check()
                         async with page.expect_response(lambda r:r.url.endswith('/events/preferences') and r.status==200):
                             await page.get_by_role('button',name='Сохранить уведомления',exact=True).click()

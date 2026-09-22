@@ -207,6 +207,8 @@ class Team:
             flo,fhi=utc_bounds(fstart,end,self.api.tz)
             sales=await self.api.rows(conn,'SELECT id,amount,commission,created_at FROM sales WHERE credited_user_id=:uid AND created_at>=:lo AND created_at<:hi',uid=uid,lo=flo,hi=fhi)
             pay=await self.api.rows(conn,'SELECT kind,amount,note,created_at FROM payroll_entries WHERE user_id=:uid AND created_at>=:lo AND created_at<:hi',uid=uid,lo=flo,hi=fhi)
+            payouts=await self.api.rows(conn,"SELECT id,amount,paid_on,note FROM cash_movements WHERE employee_id=:uid AND status='POSTED' AND paid_on>=:start AND paid_on<=:end ORDER BY paid_on DESC",uid=uid,start=fstart,end=end)
+            compensation=await self.api.rows(conn,'SELECT role,base_salary,sales_percent FROM compensation WHERE user_id=:uid',uid=uid)
             ratings=await self.api.rows(conn,'SELECT f.rating FROM guest_feedback f JOIN sales s ON s.id=f.sale_id WHERE s.credited_user_id=:uid AND f.submitted_at>=:lo AND f.submitted_at<:hi AND f.rating IS NOT NULL',uid=uid,lo=lo,hi=hi)
             hotels=await self.api.rows(conn,'SELECT h.id,h.name FROM hotels h JOIN hotel_employees he ON he.hotel_id=h.id WHERE he.user_id=:uid',uid=uid)
             bookings = await self.api.rows(conn,'SELECT id,status,shoot_date,shoot_time,hotel_id,room FROM bookings WHERE (manager_id=:uid OR photographer_id=:uid) AND shoot_date>=:start AND shoot_date<=:end ORDER BY shoot_date DESC,id DESC',uid=uid,start=start,end=end)
@@ -217,7 +219,7 @@ class Team:
         return web.json_response({'profile':profile,'hotels':[dict(h) for h in hotels],'from':str(start),'to':str(end),
             'feedback':{'count':len(ratings),'average':round(sum(r['rating'] for r in ratings)/len(ratings),2) if ratings else None},
             'discipline':discipline,
-            'finance':{'from':str(fstart),'to':str(end),'revenue':sum(cents(s['amount']) for s in sales),'sales':len(sales),'commission':sum(cents(s['commission']) for s in sales),'adjustments':sum(cents(p['amount']) for p in pay),'entries':[{'kind':p['kind'],'amount':cents(p['amount']),'note':p['note'],'at':str(p['created_at'])} for p in pay],
+            'finance':{'paidOut':sum(cents(r['amount']) for r in payouts),'payouts':[{'id':r['id'],'amount':cents(r['amount']),'date':str(r['paid_on']),'note':r['note']} for r in payouts], 'compensation':[{'role':r['role'],'baseSalary':cents(r['base_salary']),'salesPercent':r['sales_percent']} for r in compensation], 'from':str(fstart),'to':str(end),'revenue':sum(cents(s['amount']) for s in sales),'sales':len(sales),'commission':sum(cents(s['commission']) for s in sales),'adjustments':sum(cents(p['amount']) for p in pay),'entries':[{'kind':p['kind'],'amount':cents(p['amount']),'note':p['note'],'at':str(p['created_at'])} for p in pay],
                 'saleHistory':[{'id':s['id'],'amount':cents(s['amount']),'commission':cents(s['commission']),'at':str(s['created_at'])} for s in sales]},
             'bookings':[dict(b)|{'shoot_date':str(b['shoot_date']),'shoot_time':str(b['shoot_time'])} for b in bookings],
             'history':[dict(r)|{'created_at':str(r['created_at'])} for r in audits],

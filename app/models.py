@@ -317,6 +317,8 @@ class Sale(Base):
     percent: Mapped[float] = mapped_column(Float, default=0)
     commission: Mapped[float] = mapped_column(Float, default=0)
     commission_finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    manager_percent_applied: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    manager_payroll_entry_id: Mapped[int | None] = mapped_column(ForeignKey('payroll_entries.id', ondelete='SET NULL'), nullable=True)
     payment_status: Mapped[str] = mapped_column(String(20), default="UNPAID")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
@@ -367,6 +369,30 @@ class PayrollEntry(Base):
     period: Mapped[str] = mapped_column(String(30))
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class CashMovement(Base):
+    """Owner-recorded paid outflows, distinct from salary accruals."""
+    __tablename__ = 'cash_movements'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str] = mapped_column(String(20))
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    paid_on: Mapped[date] = mapped_column(Date, index=True)
+    hotel_id: Mapped[int | None] = mapped_column(ForeignKey('hotels.id'), nullable=True)
+    employee_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    note: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default='POSTED')
+    created_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    voided_by_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    void_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    __table_args__ = (
+        CheckConstraint("category IN ('HOTEL','TAX','PAYROLL','OTHER')"),
+        CheckConstraint('amount>0'),
+        CheckConstraint("status IN ('POSTED','VOIDED')"),
+        CheckConstraint("(category='PAYROLL' AND employee_id IS NOT NULL) OR (category<>'PAYROLL' AND employee_id IS NULL)"),
+    )
 
 
 class Shift(Base):

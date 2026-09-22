@@ -17,6 +17,7 @@ from app.db import Base
 from app.models import (
     AuditLog,
     Booking,
+    CashMovement,
     Hotel,
     Notification,
     OperationRequest,
@@ -42,8 +43,10 @@ async def main():
             # Reconstruct the pre-update surface without touching other schemas.
             for table in ('hr_candidates', 'academy_assessments', 'work_checklist_completions',
                           'operation_requests', 'guest_feedback', 'shoot_development_reviews',
-                          'sales_training_sessions'):
+                          'sales_training_sessions', 'cash_movements'):
                 await conn.execute(text(f'DROP TABLE {table}'))
+            for column in ('manager_percent_applied','manager_payroll_entry_id'):
+                await conn.execute(text(f'ALTER TABLE sales DROP COLUMN {column}'))
             for column in ('event_key', 'priority', 'kind', 'payload', 'acknowledged_at', 'resolved_at'):
                 await conn.execute(text(f'ALTER TABLE notifications DROP COLUMN {column}'))
             for table in ('shift_check_ins', 'shift_check_outs'):
@@ -53,8 +56,8 @@ async def main():
             await conn.execute(text("INSERT INTO users(id,tg_id,name,active,created_at) VALUES (1,9876543210,'Before',true,CURRENT_TIMESTAMP)"))
             await conn.execute(text("INSERT INTO notifications(user_id,text,sent,created_at) VALUES (1,'Legacy notification',true,CURRENT_TIMESTAMP)"))
 
-        migrations = sorted(Path('migrations').glob('00[4-9]_*.sql'))
-        assert len(migrations) == 6
+        migrations = sorted(p for p in Path('migrations').glob('*.sql') if 4<=int(p.name.split('_')[0])<=10)
+        assert len(migrations) == 7
         for _ in range(2):
             async with engine.begin() as conn:
                 driver = (await conn.get_raw_connection()).driver_connection
@@ -93,7 +96,7 @@ async def main():
             assert entry.user_id is None, 'Actor leaked between transactions'
             triggers = await conn.scalar(text("SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=:schema AND t.tgname LIKE 'pb_audit_%'"), {'schema': schema})
             assert triggers == len(TABLES)
-        print('PostgreSQL migrations 004–009 twice, legacy data, audit actor/snapshots/rollback: PASS')
+        print('PostgreSQL migrations 004–010 twice, legacy data, audit actor/snapshots/rollback: PASS')
 
         async with factory() as session:
             session.add_all([UserRole(user_id=1, role='MANAGER'), Hotel(id=1, name='Hotel'),
@@ -114,6 +117,25 @@ async def main():
             assert len((await session.scalars(select(Booking))).all()) == 1
             assert len((await session.scalars(select(OperationRequest))).all()) == 1
         print('PostgreSQL concurrent replay: one booking and one operation acknowledgement: PASS')
+        async def audit(conn,actor,action,entity,eid,details):
+            await conn.execute(text('INSERT INTO audit_logs(user_id,action,entity,entity_id,details,created_at) VALUES (:uid,:action,:entity,:eid,:details,CURRENT_TIMESTAMP)'),
+                {'uid':actor['id'],'action':action,'entity':entity,'eid':eid,'details':details})
+        api.audit_write=audit
+        async with engine.begin() as conn:
+            await conn.execute(text("UPDATE user_roles SET role='OWNER' WHERE user_id=1"))
+            await conn.execute(text("INSERT INTO settings(key,value) VALUES ('MANAGER_PERCENT','5'),('private-secret','redacted')"))
+            await conn.execute(text("UPDATE settings SET value='7' WHERE key='MANAGER_PERCENT'"))
+            captured=await rows(conn,"SELECT details FROM audit_logs WHERE entity='settings' ORDER BY id")
+            assert len(captured)==2 and 'private-secret' not in str(captured)
+            assert json.loads(captured[-1]['details'])['before']['value']=='5'
+        cashbody={'actorId':1,'key':'postgres-concurrent-expense','kind':'cash_expense','date':'2026-09-22',
+            'data':{'category':'OTHER','amount':'123.45','paidOn':'2026-09-22','hotelId':None,'employeeId':None,'note':'Paid supplies','paidConfirmed':True}}
+        results=await asyncio.gather(*(work.execute({'id':1,'roles':['OWNER']},cashbody) for _ in range(2)))
+        assert results[0].text==results[1].text
+        async with factory() as session:
+            assert len((await session.scalars(select(CashMovement))).all())==1
+        print('PostgreSQL concurrent expense replay and financial settings audit: PASS')
+
     finally:
         async with engine.begin() as conn:
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))

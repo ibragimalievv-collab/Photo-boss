@@ -56,6 +56,8 @@ async def period_data(api, conn, start, end):
     bad_receipts = await api.rows(conn, '''SELECT * FROM receipts WHERE created_at>=:lo AND created_at<:hi''', **params)
     revenue = sum(cents(s['amount']) for s in sales)
     cash = sum(cents(r['verified_amount']) for r in receipts)
+    paid = await api.rows(conn, "SELECT * FROM cash_movements WHERE paid_on>=:start AND paid_on<=:end ORDER BY paid_on DESC,id DESC", **params)
+    paid_out = sum(cents(r['amount']) for r in paid if r['status']=='POSTED')
     accrued = sum(cents(s['commission']) for s in sales) + sum(cents(p['amount']) for p in payroll)
     employees, hotels = {}, {}
     names = {h['id']: h['name'] for h in await api.rows(conn, 'SELECT id,name FROM hotels')}
@@ -82,7 +84,7 @@ async def period_data(api, conn, start, end):
     feedback = await api.rows(conn, 'SELECT rating FROM guest_feedback WHERE submitted_at>=:lo AND submitted_at<:hi AND rating IS NOT NULL', **params)
     from .discipline import period
     discipline = await period(api,conn,start,end)
-    metrics = {'guestReviews': len(feedback), 'guestRating': round(sum(r['rating'] for r in feedback)/len(feedback), 2) if feedback else 0, 'revenue': revenue, 'cash': cash, 'accrued': accrued, 'cashAfterAccruals': cash-accrued,
+    metrics = {'guestReviews': len(feedback), 'guestRating': round(sum(r['rating'] for r in feedback)/len(feedback), 2) if feedback else 0, 'revenue': revenue, 'cash': cash, 'accrued': accrued, 'cashAfterAccruals': cash-accrued, 'paidOut':paid_out, 'netCash':cash-paid_out,
                'average': int((Decimal(revenue) / len(sales)).quantize(Decimal(1), rounding=ROUND_HALF_UP)) if sales else 0,
                'sales': len(sales), 'shootings': len(shootings), 'bookings': len(bookings),
                'cancellations': sum(b['status'] in ('CANCELLED', 'REJECTED') for b in bookings),
@@ -95,7 +97,9 @@ async def period_data(api, conn, start, end):
                'receiptIssues': sum(r['status']=='REJECTED' or (bool(receipt_check(r)['findings']) and (r['status']=='PENDING' or parsed(r['analysis']).get('status')=='extracted')) for r in bad_receipts)}
     return {'from': str(start), 'to': str(end), 'metrics': metrics,
             'employees': sorted(employees.values(), key=lambda x: -x['revenue']), 'hotels': list(hotels.values()),
-            'note': 'Остаток после начислений = подтверждённые поступления минус комиссии, премии и удержания. Расходы отелей, налоги и фактические выплаты не учтены: это не чистая прибыль.'}
+            'paidMovements':[{'id':r['id'],'category':r['category'],'amount':cents(r['amount']),'paidOn':str(r['paid_on']),'hotelId':r['hotel_id'],'employeeId':r['employee_id'],'note':r['note'],'status':r['status'],'voidReason':r['void_reason']} for r in paid[:200]],
+            'paidMovementCount':len(paid),
+            'note': 'Чистая касса за период = поступления по дате подтверждения чека минус внесённые оплаченные расходы по дате оплаты. Начисления сотрудникам вычитаются только из отдельного показателя «остаток после начислений». Неучтённые расходы и начальный остаток неизвестны; это не прибыль и не банковский баланс.'}
 
 
 async def compare_periods(api, conn, start, end, *, offset_days=None):
@@ -126,9 +130,9 @@ async def anomalies(api, conn):
     findings = []
     def add(key, title, entity, eid, evidence, priority='warning'):
         findings.append({'key': key, 'title': title, 'entity': entity, 'entityId': eid, 'evidence': evidence, 'priority': priority})
-    sales = await api.rows(conn, '''SELECT s.*,sh.full_upload_completed_at,
+    sales = await api.rows(conn, '''SELECT s.*,b.hotel_id,b.package_id,b.manager_id,pe.amount AS manager_amount,pe.user_id AS manager_user_id,sh.full_upload_completed_at,
         (SELECT COUNT(*) FROM photos p WHERE p.shooting_id=sh.id) AS frames
-        FROM sales s LEFT JOIN shootings sh ON sh.booking_id=s.booking_id''')
+        FROM sales s JOIN bookings b ON b.id=s.booking_id LEFT JOIN payroll_entries pe ON pe.id=s.manager_payroll_entry_id LEFT JOIN shootings sh ON sh.booking_id=s.booking_id''')
     for s in sales:
         if s['payment_status'] != 'PAID':
             add(f"sale:{s['id']}:payment", 'Продажа оплачена не полностью', 'sale', s['id'], {'amount': cents(s['amount']), 'status': s['payment_status']})
@@ -138,6 +142,34 @@ async def anomalies(api, conn):
             expected = 15 if s['frames'] >= 150 else 10
             if Decimal(str(s['percent'])) != expected or abs(cents(s['commission'])-cents(Decimal(str(s['amount']))*expected/100)) > 0:
                 add(f"sale:{s['id']}:commission", 'Комиссия отличается от правила 150 кадров', 'sale', s['id'], {'frames': s['frames'], 'expectedPercent': expected, 'actualPercent': s['percent'], 'commission': cents(s['commission'])}, 'critical')
+        if s['manager_percent_applied'] is not None:
+            from decimal import InvalidOperation
+            try:
+                rate=Decimal(s['manager_percent_applied'])
+                valid=rate.is_finite() and 0<=rate<=100
+                expected_manager=cents(Decimal(str(s['amount']))*rate/100) if valid else None
+            except (InvalidOperation,ValueError):
+                expected_manager=None
+            if expected_manager is None or s['manager_amount'] is None or s['manager_user_id']!=s['manager_id'] or cents(s['manager_amount'])!=expected_manager:
+                add(f"sale:{s['id']}:manager",'Начисление менеджеру отличается от ставки продажи','sale',s['id'],
+                    {'appliedPercent':s['manager_percent_applied'],'expectedAmount':expected_manager,'actualAmount':cents(s['manager_amount']) if s['manager_amount'] is not None else None,'payrollEntryId':s['manager_payroll_entry_id']},'critical')
+    # Compare unit prices only within the same hotel/package and preceding 90 days.
+    # No inference for sparse history and no automatic correction.
+    from collections import defaultdict, deque
+    from statistics import median
+    history=defaultdict(deque)
+    for s in sorted(sales,key=lambda r:(str(r['created_at']),r['id'])):
+        if s['amount']<=0 or s['sold_photos']<=0: continue
+        at=datetime.fromisoformat(s['created_at']) if isinstance(s['created_at'],str) else s['created_at']
+        group=history[(s['hotel_id'],s['package_id'])]
+        while group and group[0][0]<at-timedelta(days=90): group.popleft()
+        unit=Decimal(str(s['amount']))/s['sold_photos']
+        if len(group)>=10:
+            baseline=median(x[1] for x in group)
+            if unit>=baseline*3 or unit<=baseline/5:
+                add(f"sale:{s['id']}:unusual-price",'Цена кадра существенно отличается от истории','sale',s['id'],
+                    {'unitPrice':cents(unit),'medianUnitPrice':cents(baseline),'sampleSize':len(group),'from':str(group[0][0]),'to':str(group[-1][0]),'hotelId':s['hotel_id'],'packageId':s['package_id'],'rule':'Не менее 10 предшествующих продаж за 90 дней; цена ≥3 медиан или ≤1/5 медианы. Возможное объяснение — изменение тарифа; нужна проверка.'})
+        group.append((at,unit))
     for row in await api.rows(conn, "SELECT id,entity_id,details,created_at FROM audit_logs WHERE entity='sales' AND action='row.update' ORDER BY id DESC LIMIT 500"):
         data = parsed(row['details'])
         before, after = data.get('before') or {}, data.get('after') or {}

@@ -98,7 +98,7 @@ class Workday:
         if not isinstance(body, dict):
             raise AccessError('Некорректная операция.', 400)
         if set(body)!={'key','kind','date','data','actorId'} or not isinstance(body['key'],str) or not 16<=len(body['key'])<=80 or not isinstance(body['data'],dict): raise AccessError('Некорректная операция.',400)
-        if not isinstance(body['kind'], str) or body['kind'] not in KINDS | {'checklist','shift_report','attendance'}: raise AccessError('Этот тип операции не поддерживает синхронизацию.',400)
+        if not isinstance(body['kind'], str) or body['kind'] not in KINDS | {'checklist','shift_report','attendance','cash_expense'}: raise AccessError('Этот тип операции не поддерживает синхронизацию.',400)
         if type(body['actorId']) is not int or body['actorId'] != a['id']: raise AccessError('Аккаунт изменился. Операция принадлежит другому сотруднику.',403)
         payload = json.dumps(body,sort_keys=True,ensure_ascii=False).encode()
         digest=hashlib.sha256(payload + (b'\x00'+hashlib.sha256(raw).digest() if raw is not None else b'')).hexdigest()
@@ -115,7 +115,12 @@ class Workday:
             if not self.api.today()-timedelta(days=7)<=day<=self.api.today(): raise AccessError('Дата требует ручной проверки; операция не применена.',409)
             data=body['data']
             extra = {}
-            if body['kind'] == 'attendance':
+            if body['kind'] == 'cash_expense':
+                from .cash_control import CashControl
+                if raw is not None:
+                    raise AccessError('Вложение в этой операции не поддерживается.',400)
+                extra=await CashControl(self.api).record(conn,a|{'roles':sorted(roles)},data)
+            elif body['kind'] == 'attendance':
                 from .attendance import Attendance
                 extra = await Attendance(self.api).offline(conn, a | {'roles': sorted(roles)}, day, data, raw)
             elif body['kind'] in KINDS:
@@ -172,6 +177,8 @@ class Workday:
 
 def install_workday(app,api):
     service=Workday(api)
+    from .cash_control import install_cash_control
+    install_cash_control(app,api)
     from .workflow import Workflow
     for method,path,handler in [('GET','/workflow',Workflow(api).listing),('GET','/workday',service.state),('PUT','/workday/checklist',service.configure),('POST','/operations/sync',service.operation),('POST','/operations/media',service.media),('POST','/sales/{id}/feedback-link',service.feedback_link)]:
         app.router.add_route(method,'/api/miniapp'+path,handler)

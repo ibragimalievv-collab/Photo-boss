@@ -63,11 +63,32 @@ def test_shared_sale_uses_server_price_receipt_and_single_commission():
                                              storage_path=f'app:/selected/{n}.jpg', sha256=str(n), byte_size=100))
                 await session.flush()
                 result = await complete_sale(session, manager, draft.id)
+                assert result.sale.manager_percent_applied is not None
+                entry=await session.get(PayrollEntry,result.sale.manager_payroll_entry_id)
+                from decimal import Decimal
+                assert Decimal(str(entry.amount))==(Decimal(800)*Decimal(result.sale.manager_percent_applied)/100).quantize(Decimal('.01'))
                 assert result.sale.amount == 800 and result.sale.percent == 0
                 assert result.sale.payment_status == 'UNPAID'
                 assert result.receipt.status == 'PENDING'
                 await session.commit()
+                # Changing today's setting must not rewrite the historical applied rate.
+                from datetime import date
+                from types import SimpleNamespace
+                from zoneinfo import ZoneInfo
+
+                from sqlalchemy import text
+
+                from app.services.insights import anomalies
+                async def rows(conn,sql,**params):
+                    return list((await conn.execute(text(sql),params)).mappings())
+                api=SimpleNamespace(rows=rows,today=lambda:date(2026,9,22),tz=ZoneInfo('Europe/Moscow'))
+                await session.execute(text("INSERT INTO settings(key,value) VALUES ('MANAGER_PERCENT','99')"))
+                assert not any(f['key'].endswith(':manager') for f in await anomalies(api,session))
+                entry.amount+=1
+                await session.flush()
+                assert any(f['key'].endswith(':manager') for f in await anomalies(api,session))
                 with pytest.raises(ValueError, match='завершена'):
+
                     await complete_sale(session, manager, draft.id)
                 assert await session.scalar(select(func.count(Sale.id))) == 1
                 assert await session.scalar(select(func.count(PayrollEntry.id))) == 1

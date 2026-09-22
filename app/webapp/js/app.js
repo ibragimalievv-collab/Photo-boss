@@ -3,7 +3,7 @@ import {developmentView,loadDevelopment,developmentClick,developmentSubmit} from
 import {setOutboxUser} from './outbox.js';
 import {workdayView,loadWorkday,workdayClick,workdaySubmit} from './workday.js';
 import {teamView,guideView,loadTeam,loadGuide,teamClick,teamSubmit} from './team.js';
-import {insightsView,loadInsights,insightsClick} from './insights.js';
+import {insightsView,loadInsights,insightsClick,insightsSubmit} from './insights.js';
 import {academyScreen,academyReference} from './academy.js';
 import {openPractice} from './practice.js';
 import {icon} from './icons.js';
@@ -137,6 +137,7 @@ document.addEventListener('change',async e=>{if(e.target.id==='workflowSalePick'
 document.addEventListener('input',e=>{if(e.target.id==='bookingSearch'){state.search=e.target.value;const pos=e.target.selectionStart;$('#app').innerHTML=shootingsView();const input=$('#bookingSearch');input.focus();input.setSelectionRange(pos,pos);}});
 document.addEventListener('submit',async e=>{
  if(['workflowBooking','workflowSale','workflowShoot'].includes(e.target.id)){e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{await workflowSubmit(e.target);toast('Данные сохранены на устройстве. Статус — в очереди синхронизации.');}catch(err){toast(err.message);}finally{b.disabled=false;}return;}
+ if(e.target.id==='cashExpense'||e.target.classList.contains('cashVoid')){e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{await insightsSubmit(e.target);}catch(err){toast(err.message);}finally{b.disabled=false;}return;}
  if(e.target.id==='salesTrainingForm'){e.preventDefault();const buttons=[...e.target.querySelectorAll('button')];buttons.forEach(b=>b.disabled=true);try{await developmentSubmit(e.target,e.submitter?.value==='finish');}catch(err){toast(err.message);}finally{buttons.forEach(b=>b.disabled=false);}return;}
  if(['shiftNote','checklistForm'].includes(e.target.id)){e.preventDefault();try{await workdaySubmit(e.target);}catch(err){toast(err.message);}return;}
  if(['hrCreate','hrUpdate','hrHire','entryQuiz','disciplinePeriod'].includes(e.target.id)||e.target.classList.contains('attendance-review')){e.preventDefault();const b=e.target.querySelector('[type=submit],button:not([type])');b.disabled=true;try{await teamSubmit(e.target);}catch(err){toast(err.message);}finally{b.disabled=false;}return;}

@@ -125,7 +125,10 @@ class Workflow:
         if kind in MEDIA_KINDS:
             if not raw or len(raw) < 100:
                 raise AccessError('Прикрепите изображение.', 400)
-            image_format(raw)
+            try:
+                image_format(raw)
+            except ValueError as exc:
+                raise AccessError('Нужен поддерживаемый формат изображения: JPEG или PNG.',400) from exc
             if kind in {'sale_receipt', 'booking_receipt'} and len(raw) > 8 * 1024 * 1024:
                 raise AccessError('Чек должен быть не больше 8 МБ.', 413)
         elif raw is not None:

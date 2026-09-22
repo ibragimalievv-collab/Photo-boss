@@ -13,6 +13,9 @@ async def add_columns(connection, table, columns):
 
 async def upgrade(connection):
     tables = await connection.run_sync(lambda conn: set(inspect(conn).get_table_names()))
+    if 'sales' in tables:
+        await add_columns(connection,'sales',{'manager_percent_applied':'VARCHAR(60)',
+            'manager_payroll_entry_id':'INTEGER REFERENCES payroll_entries(id) ON DELETE SET NULL'})
     for table in ('shift_check_ins', 'shift_check_outs'):
         if table in tables:
             await add_columns(connection, table, {'offline_claimed_at': 'TIMESTAMP'})

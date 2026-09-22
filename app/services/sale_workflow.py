@@ -291,18 +291,22 @@ async def complete_sale(session, actor, draft_id):
                 )
             )
         )
+        if not manager_percent_value.is_finite() or not 0<=manager_percent_value<=100:
+            raise ValueError("Проверьте ставку менеджера: от 0 до 100 процентов.")
         manager_amount = (
             sale_amount * manager_percent_value / 100
         ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        session.add(
-            PayrollEntry(
+        manager_entry = PayrollEntry(
                 user_id=manager.id,
                 kind="Комиссия менеджера",
                 amount=float(manager_amount),
                 period=datetime.now(UTC).date().isoformat(),
                 note=f"sale={sale.id};booking={booking.id}",
             )
-        )
+        session.add(manager_entry)
+        await session.flush()
+        sale.manager_percent_applied = str(manager_percent_value)
+        sale.manager_payroll_entry_id = manager_entry.id
 
     draft.status = "COMPLETED"
     draft.completed_at = datetime.now(UTC).replace(tzinfo=None)
