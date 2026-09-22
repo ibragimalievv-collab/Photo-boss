@@ -172,6 +172,33 @@ class People:
             if not rows:
                 raise AccessError("Один из выбранных отелей недоступен. Обновите список.", 409)
 
+    async def create_hotel(self, request):
+        actor = request["miniapp_actor"]
+        check_editor(actor["roles"])
+        body = await self.api.body(request)
+        name = body.get("name")
+        if (set(body) != {"name"} or not isinstance(name, str)
+                or not 1 <= len(name.strip()) <= 200
+                or any(ord(c) < 32 for c in name)):
+            raise AccessError("Название отеля: 1–200 символов без управляющих знаков.", 400)
+        name = name.strip()
+        async with self.engine.begin() as conn:
+            await self.current_editor(conn, actor["id"])
+            if conn.dialect.name == "postgresql":
+                # Serialize concurrent additions without changing the legacy table.
+                await conn.execute(text("LOCK TABLE hotels IN SHARE ROW EXCLUSIVE MODE"))
+            existing = await self.api.rows(conn, "SELECT id,name,active FROM hotels")
+            if any(row["name"].casefold() == name.casefold() for row in existing):
+                raise AccessError("Отель с таким названием уже существует. Обновите список.", 409)
+            hotel = (await self.api.rows(conn,
+                "INSERT INTO hotels(name,active) VALUES (:name,TRUE) RETURNING id,name",
+                name=name))[0]
+            await self.api.audit_write(conn, actor, "hotel_created", "hotel", hotel["id"],
+                json.dumps({"source": "miniapp", "before": None,
+                            "after": {"id": hotel["id"], "name": name, "active": True}},
+                           ensure_ascii=False))
+        return web.json_response({"hotel": dict(hotel)}, status=201)
+
     async def assignments(self, conn, uid, payload):
         await conn.execute(text("DELETE FROM user_roles WHERE user_id=:id"), {"id": uid})
         for role in payload["roles"]:
@@ -312,7 +339,7 @@ class People:
         try:
             await self.bot.send_message(
                 after["telegramId"],
-                "♻️ Доступ к Photo Boss восстановлен. Откройте бот и нажмите /start.",
+                "♻️ Доступ к Photo Boss восстановлен. Вернитесь в приложение и обновите экран.",
                 disable_notification=False,
             )
         except TelegramAPIError:
@@ -341,6 +368,7 @@ def install_people(app, miniapp):
     service = People(miniapp)
     app.router.add_get("/api/miniapp/people", service.listing)
     app.router.add_post("/api/miniapp/people", service.create)
+    app.router.add_post("/api/miniapp/hotels", service.create_hotel)
     app.router.add_put("/api/miniapp/people/{id}", service.update)
     app.router.add_post("/api/miniapp/people/{id}/fire", service.fire)
     app.router.add_post("/api/miniapp/people/{id}/restore", service.restore)

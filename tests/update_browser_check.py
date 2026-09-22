@@ -41,18 +41,21 @@ async def main():
     ai_config.start();ai_reply.start()
     offline=False
     errors=[]
+    failure_mode=None
     try:
         async with async_playwright() as p:
             browser=await p.chromium.launch(executable_path=os.getenv('CALLS_CHROMIUM_PATH') or None)
             try:
                 context=await browser.new_context(viewport={'width':390,'height':844},is_mobile=True,has_touch=True)
                 init=signed(1)
-                await context.add_init_script('window.Telegram={WebApp:{initData:'+json.dumps(init)+',ready(){},expand(){},setHeaderColor(){},setBackgroundColor(){},onEvent(){},BackButton:{show(){},hide(){},onClick(){}}}};')
+                await context.add_init_script('window.__externalOpen=[];window.open=(url)=>window.__externalOpen.push(url);window.Telegram={WebApp:{initData:'+json.dumps(init)+',openTelegramLink(url){window.__externalOpen.push(url);},ready(){},expand(){},setHeaderColor(){},setBackgroundColor(){},onEvent(){},BackButton:{show(){},hide(){},onClick(){}}}};')
                 async def route(r):
                     url=r.request.url
                     if url.startswith('https://telegram.org/'):
                         return await r.fulfill(status=200,content_type='text/javascript',body='')
                     path=url.removeprefix(BASE)
+                    if failure_mode and path=='/api/miniapp/me':
+                        return await r.fulfill(status=failure_mode,content_type='application/json',body=json.dumps({'error':'Проверка ошибки входа','telegramId':1} if failure_mode==403 else {'error':'Проверка ошибки загрузки'}))
                     if offline and path.startswith('/api/'):
                         return await r.abort('internetdisconnected')
                     response=await client.request(r.request.method,path,data=r.request.post_data_buffer,headers={'X-Telegram-Init-Data':init,'Content-Type':r.request.headers.get('content-type','application/json')})
@@ -114,6 +117,44 @@ async def main():
                         await page.get_by_text('Результат 100/100 · зачтено',exact=True).wait_for()
                     assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth'),name
                     await page.screenshot(path=str(output/f'update-{name}-mobile.png'),full_page=True)
+                # Every work shortcut and recovery path stays in the Mini App.
+                await page.goto(BASE+'/app/')
+                await page.locator('[data-action="new-booking"]').click()
+                await page.locator('#workflowBooking [name=client_name]').wait_for(state='visible')
+                assert await page.locator('#workflowBooking [name=client_name]').evaluate('(e)=>e===document.activeElement')
+                await page.goto(BASE+'/app/')
+                await page.locator('[data-action="new-sale"]').click()
+                await page.locator('#workflowSalePick').wait_for(state='visible')
+                await page.goto(BASE+'/app/')
+                await page.locator('#attendanceCard button').click()
+                await page.locator('#attendanceDialog').wait_for(state='visible')
+                await page.locator('[data-att=close]').click()
+                await page.locator('[data-open-people]').click()
+                await page.locator('[data-people=hotels]').click()
+                await page.locator('#pbHotelForm [name=name]').fill('Hotel from mobile app')
+                await page.locator('#pbHotelForm button[type=submit]').click()
+                await page.get_by_text('Hotel from mobile app',exact=True).wait_for()
+                await page.locator('[data-people=list]').click()
+                await page.locator('[data-people=add]').click()
+                assert 'командой /myid' not in await page.locator('#pbEmployeeForm').inner_text()
+                assert 'Hotel from mobile app' in await page.locator('#pbEmployeeForm').inner_text()
+                await page.screenshot(path=str(output/'update-in-app-staff-mobile.png'),full_page=True)
+                await page.locator('[data-people=close]').click()
+                for status_code,title in [(503,'Не удалось загрузить'),(401,'Требуется повторный вход'),(403,'Рабочий доступ недоступен')]:
+                    failure_mode=status_code
+                    await page.reload()
+                    await page.get_by_role('heading',name=title,exact=True).wait_for()
+                    assert await page.locator('a[href*="t.me"],a[href^="tg:"]').count()==0
+                    assert 'в боте' not in await page.locator('#app').inner_text()
+                    assert await page.evaluate('window.__externalOpen.length')==0
+                    if status_code==403:
+                        assert 'Ваш Telegram ID: 1' in await page.locator('#app').inner_text()
+                    await page.screenshot(path=str(output/f'update-in-app-error-{status_code}.png'),full_page=True)
+                    failure_mode=None
+                    await page.get_by_role('button',name='Повторить',exact=True).click()
+                    await page.get_by_role('heading',name='Всё под контролем',exact=True).wait_for()
+                assert bot.send_message.await_count==0
+                assert bot.me.await_count==0
                 await page.goto(BASE+'/app/#workday')
                 await page.get_by_text('Настроить чек-лист',exact=True).click()
                 await page.locator('#checklistForm [name=title]').fill('Проверить резервную карту')

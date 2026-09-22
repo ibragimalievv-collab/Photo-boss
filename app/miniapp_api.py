@@ -115,6 +115,7 @@ class MiniApp:
 
     async def actor(self, request):
         telegram_id = validate_init_data(request.headers.get("X-Telegram-Init-Data", ""), self.bot.token)
+        request["miniapp_telegram_id"] = telegram_id
         async with self.engine.connect() as conn:
             people = await self.rows(conn, "SELECT id,tg_id,name,active FROM users WHERE tg_id=:tg", tg=telegram_id)
             if not people or not people[0]["active"]:
@@ -141,7 +142,11 @@ class MiniApp:
                 actor_id.set(request["miniapp_actor"]["id"])
             response = await handler(request)
         except AccessError as exc:
-            response = web.json_response({"error": str(exc)}, status=exc.status)
+            body = {"error": str(exc)}
+            if exc.status == 403 and request.get("miniapp_telegram_id"):
+                # Signed account identity only; never disclose a different user or roles.
+                body["telegramId"] = request["miniapp_telegram_id"]
+            response = web.json_response(body, status=exc.status)
         except web.HTTPException as exc:
             response = web.json_response({"error": "Недопустимый запрос."}, status=exc.status)
         except Exception:
@@ -580,18 +585,15 @@ class MiniApp:
     async def handoff(self, request):
         actor = request["miniapp_actor"]
         body = await self.body(request)
-        options = {"new-booking": "➕ Новая запись", "new-sale": "🧾 Продажа", "shift": "🔄 Моя смена", "practice": "📚 Академия"}
+        # Compatibility for older clients. No Telegram messages or bot URLs.
+        options = {"new-booking": "/app/#workflow", "new-sale": "/app/#workflow",
+                   "shift": "/app/#schedule", "practice": "/app/#academy"}
         choice = body.get("action")
         if set(body) != {"action"} or not isinstance(choice, str) or choice not in options:
             raise AccessError("Действие не найдено.", 400)
         if choice == "new-booking" and not actor["permissions"]["manageBookings"]:
             raise AccessError("Создавать записи может менеджер или администратор.")
-        if choice == "shift" and "PHOTOGRAPHER" not in actor["roles"]:
-            raise AccessError("Эта отметка смены доступна фотографу. График менеджера доступен в приложении.")
-        await self.bot.send_message(actor["tg_id"], f"Продолжите в боте: нажмите «{options[choice]}» внизу.",
-            protect_content=True, reply_markup={"keyboard": [[{"text": options[choice]}], [{"text": "❌ Отменить"}]], "resize_keyboard": True})
-        me = await self.bot.me()
-        return web.json_response({"url": f"https://t.me/{me.username}"})
+        return web.json_response({"url": options[choice]})
 
     async def static_file(self, request):
         name = request.match_info.get("asset", "index.html")
