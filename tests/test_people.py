@@ -68,8 +68,12 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
             else:
                 fn=self.people.create
         if method=='PUT':
-            fn=self.people.update
-            req.match_info={'id':route.rsplit('/',1)[1]}
+            if route.endswith('/screen-capture'):
+                fn=self.people.set_screen_capture
+                req.match_info={'id':route.split('/')[-2]}
+            else:
+                fn=self.people.update
+                req.match_info={'id':route.rsplit('/',1)[1]}
         response=await self.service.middleware(req,fn)
         return response.status,json.loads(response.text)
 
@@ -157,6 +161,28 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
         assert (await self.call('/people/3/restore',method='POST',body={}))[0]==200
         _,active=await self.call()
         assert any(item['id']==3 for item in active['items'])
+
+    async def test_owner_controls_screen_capture_and_sees_last_login(self):
+        _, listing = await self.call()
+        owner = next(x for x in listing['items'] if x['id'] == 1)
+        photographer = next(x for x in listing['items'] if x['id'] == 3)
+        assert listing['canManageScreenCapture'] is True
+        assert owner['screenCaptureAllowed'] is True
+        assert photographer['screenCaptureAllowed'] is False
+        assert (await self.call('/people/3/screen-capture', uid=1002, method='PUT', body={'allowed': True}))[0] == 403
+        status, changed = await self.call('/people/3/screen-capture', method='PUT', body={'allowed': True})
+        assert status == 200 and changed['employee']['screenCaptureAllowed'] is True
+
+        request = baseline.Request('/api/miniapp/session', 1003, 'POST', {}, None)
+        response = await self.service.middleware(request, self.service.session_open)
+        assert response.status == 200
+        _, listing = await self.call()
+        photographer = next(x for x in listing['items'] if x['id'] == 3)
+        assert photographer['lastLoginAt']
+        with self.engine.inner.connect() as conn:
+            assert conn.execute(text(
+                "SELECT COUNT(*) FROM audit_logs WHERE action='miniapp_screen_capture_changed'"
+            )).scalar() == 1
 
     async def test_latest_role_rechecked(self):
         with self.engine.inner.begin() as c:

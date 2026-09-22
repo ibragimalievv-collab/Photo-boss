@@ -60,6 +60,7 @@ ACTIONS = {
     "academy_location_created": "Добавил учебную локацию",
     "miniapp_theme_changed": "Изменил оформление приложения",
     "miniapp_opened": "Открыл приложение",
+    "miniapp_screen_capture_changed": "Изменил разрешение на скриншоты",
     "miniapp_shift_created": "Назначил смену",
     "miniapp_shift_cancelled": "Отменил запланированную смену",
 }
@@ -194,10 +195,15 @@ class MiniApp:
         actor = request["miniapp_actor"]
         async with self.engine.connect() as conn:
             theme = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=f"miniapp:theme:{actor['id']}")
+            capture = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=f"miniapp:screen_capture:{actor['id']}")
+        capture_allowed = (
+            capture[0]["value"] == "1" if capture else "OWNER" in actor["roles"]
+        )
         return web.json_response({"user": {"id": actor["id"], "telegramId": actor["tg_id"],
             "name": actor["name"], "roles": actor["roles"],
             "theme": theme[0]["value"] if theme and theme[0]["value"] in THEMES else ("premium" if "OWNER" in actor["roles"] else "light")},
-            "permissions": actor["permissions"], "today": self.today().isoformat(),
+            "permissions": actor["permissions"], "screenCaptureAllowed": capture_allowed,
+            "today": self.today().isoformat(),
             "timezone": str(self.tz), "mode": "live"})
 
     async def session_open(self, request):
@@ -206,8 +212,13 @@ class MiniApp:
         actor = request["miniapp_actor"]
         digest = hashlib.sha256(request.headers["X-Telegram-Init-Data"].encode()).hexdigest()
         key = f"miniapp:opened:{actor['id']}"
+        last_login_key = f"miniapp:last_login:{actor['id']}"
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         async with self.engine.begin() as conn:
             await self.rows(conn, "SELECT id FROM users WHERE id=:uid FOR UPDATE", uid=actor["id"])
+            await conn.execute(text("""INSERT INTO settings (key,value) VALUES (:key,:value)
+                ON CONFLICT (key) DO UPDATE SET value=excluded.value"""),
+                {"key": last_login_key, "value": now.isoformat()})
             old = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=key)
             if not old or old[0]["value"] != digest:
                 await conn.execute(text("""INSERT INTO settings (key,value) VALUES (:key,:value)

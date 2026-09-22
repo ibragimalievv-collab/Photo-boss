@@ -368,6 +368,15 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         _, audit, _ = await self.call("/audit")
         assert sum(x["action"] == "miniapp_opened" for x in audit["items"]) == 1
         assert token not in json.dumps(audit)
+        with self.engine.inner.connect() as connection:
+            last_login = connection.execute(text(
+                "SELECT value FROM settings WHERE key='miniapp:last_login:3'"
+            )).scalar()
+        assert last_login
+        _, owner_me, _ = await self.call("/me", uid=1001)
+        _, staff_me, _ = await self.call("/me", uid=1003)
+        assert owner_me["screenCaptureAllowed"] is True
+        assert staff_me["screenCaptureAllowed"] is False
 
     async def test_handoff_does_not_create_sale(self):
         status, result, _ = await self.call("/handoff", uid=1003, method="POST", body={"action": "new-sale"})
