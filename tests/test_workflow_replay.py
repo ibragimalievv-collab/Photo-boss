@@ -18,6 +18,8 @@ from app.models import (
     Receipt,
     Sale,
     SaleDraft,
+    Shooting,
+    User,
 )
 from app.workday import Workday
 from app.workflow import Workflow
@@ -134,6 +136,56 @@ def test_missing_dependency_and_revoked_role_never_create_sale():
             async with factory() as session:
                 assert await session.scalar(select(func.count(Booking.id))) == 0
                 assert await session.scalar(select(func.count(Sale.id))) == 0
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('roles,visible,upload', [
+    (['MANAGER'], True, False), (['PHOTOGRAPHER'], False, False),
+    (['MANAGER', 'PHOTOGRAPHER'], True, False),
+    (['OWNER'], True, True), (['ADMIN'], True, True), ([], False, False),
+])
+def test_workflow_list_respects_current_assignment_roles(roles, visible, upload):
+    async def run():
+        engine, _factory, work = await setup()
+        try:
+            await work.execute(ACTOR, packet('book', 'booking', booking_data() | {'photographer_id': None}))
+            workflow = Workflow(work.api)
+            for _ in range(2):
+                response = await workflow.listing({'miniapp_actor': {'id': 1, 'roles': roles}})
+                rows = json.loads(response.text)['bookings']
+                assert bool(rows) is visible
+                if visible:
+                    assert rows[0]['canUpload'] is upload
+                summary = json.loads((await work.state({'miniapp_actor': {'id': 1, 'roles': roles}})).text)
+                assert summary['summary']['bookings'] == int(visible)
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_stale_assignment_cannot_upload_receipt_or_shoot_after_role_change():
+    async def run():
+        engine, factory, work = await setup()
+        try:
+            result = json.loads((await work.execute(ACTOR, packet('book', 'booking', booking_data() | {'photographer_id': None}))).text)
+            async with factory() as session:
+                booking = await session.get(Booking, result['bookingId'])
+                booking.photographer_id = 2
+                shooting = await session.scalar(select(Shooting))
+                shooting.status = 'READY_FOR_SALE'
+                await session.commit()
+                workflow = Workflow(work.api)
+                for _ in range(2):
+                    with pytest.raises(AccessError) as error:
+                        await workflow.receipt(session, await session.get(User, 1), {'PHOTOGRAPHER'},
+                            {'booking': {'id': booking.id}, 'purpose': 'DEPOSIT'}, b'fixture')
+                    assert error.value.status == 403
+                    with pytest.raises(AccessError) as error:
+                        await workflow.shoot(session, await session.get(User, 2), {'MANAGER'},
+                            'shoot_photo', {'shooting': {'id': shooting.id}}, b'fixture')
+                    assert error.value.status == 403
         finally:
             await engine.dispose()
     asyncio.run(run())
