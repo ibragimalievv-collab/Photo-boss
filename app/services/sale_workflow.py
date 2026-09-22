@@ -1,10 +1,9 @@
 """Sale workflow helpers: photographer percentage is final only after full-shoot upload."""
 from datetime import UTC, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from sqlalchemy import func, or_, select
 
-from ..config import config
 from ..models import (
     Booking,
     Package,
@@ -17,8 +16,13 @@ from ..models import (
     Shooting,
     User,
 )
-from .commissions import photographer_percent
-from .core import audit, setting
+from .commissions import (
+    MANAGER_PERCENT,
+    booking_photo_price,
+    photographer_bonus,
+    photographer_percent,
+)
+from .core import audit
 from .receipts import money, operation_key, payment_totals, refresh_payment_statuses
 
 
@@ -174,7 +178,7 @@ async def capture_draft_receipt(session, actor, draft, file_id, unique_id, diges
     await audit(session, actor, 'sale_receipt_captured', 'sale_draft', draft.id)
 
 
-async def set_sale_counts(session, actor, draft, total, sold):
+async def set_sale_counts(session, actor, draft, total, sold, discount=0):
     if draft.created_by_id != actor.id or draft.status != 'AWAITING_COUNTS':
         raise ValueError('Черновик продажи уже закрыт.')
     if type(total) is not int or type(sold) is not int or not 0 < sold <= total <= 10000:
@@ -186,10 +190,23 @@ async def set_sale_counts(session, actor, draft, total, sold):
     already = await session.scalar(select(func.coalesce(func.sum(Sale.sold_photos), 0)).where(Sale.booking_id == booking.id))
     if already + sold > total:
         raise ValueError(f'Уже продано: {already}. Итог превышает общее количество кадров.')
-    price = Decimal(str(package.price_per_photo))
+    price = await booking_photo_price(session, booking)
     if not price.is_finite() or price <= 0:
         raise ValueError('Некорректная цена пакета.')
-    amount = money(Decimal(sold) * price)
+    from .core import roles_of
+    try:
+        discount = Decimal(str(discount))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError('Некорректная скидка.') from exc
+    if not discount.is_finite() or not 0 <= discount <= 50 or discount != money(discount):
+        raise ValueError('Скидка должна быть от 0 до 50%.')
+    if discount and (sold != total or already):
+        raise ValueError('Скидка доступна только на всю съёмку, без предыдущих продаж.')
+    if discount and (booking.photographer_id != actor.id or 'PHOTOGRAPHER' not in await roles_of(session, actor)):
+        raise ValueError('Скидку назначает фотограф этой съёмки.')
+    draft.unit_price = price
+    draft.discount_percent = discount
+    amount = money(Decimal(sold) * price * (100 - discount) / 100)
     before, paid, _ = await payment_totals(session, booking.id)
     expected = max(money(before) + amount - money(paid), Decimal(0))
     draft.declared_photo_count = total
@@ -225,16 +242,13 @@ async def complete_sale(session, actor, draft_id):
     package = await session.get(Package, booking.package_id)
     if photographer is None or package is None:
         raise ValueError("Проверьте фотографа и пакет записи.")
-    price = Decimal(str(package.price_per_photo))
-    if not price.is_finite() or price <= 0:
-        raise ValueError("Некорректная цена пакета.")
-    amount = money(draft.expected_amount or 0)
-    # expected_amount is the still-unpaid part after approved deposits; the sale itself
-    # must always use sold_photos * package price.
-    sale_amount = (
-        Decimal(draft.sold_photos)
-        * Decimal(str(package.price_per_photo))
-    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    price = draft.unit_price or await booking_photo_price(session, booking)
+    discount = draft.discount_percent or Decimal(0)
+    if discount and (draft.sold_photos != draft.declared_photo_count or already_sold):
+        raise ValueError("Скидка доступна только на всю съёмку.")
+    sale_amount = money(Decimal(draft.sold_photos) * price * (100 - discount) / 100)
+    before, paid, _ = await payment_totals(session, booking.id)
+    amount = max(money(before) + sale_amount - money(paid), Decimal(0))
     percent, actual_full_count = await final_photographer_percent(
         session, booking.id
     )
@@ -257,6 +271,8 @@ async def complete_sale(session, actor, draft_id):
         declared_photo_count=draft.declared_photo_count,
         source_draft_id=draft.id,
         amount=float(sale_amount),
+        unit_price=price,
+        discount_percent=discount,
         percent=float(photographer_percent_value),
         commission=float(photographer_commission),
         commission_finalized_at=finalized_at,
@@ -282,17 +298,7 @@ async def complete_sale(session, actor, draft_id):
         await session.flush()
 
     if manager is not None:
-        manager_percent_value = Decimal(
-            str(
-                await setting(
-                    session,
-                    "MANAGER_PERCENT",
-                    config.manager_percent,
-                )
-            )
-        )
-        if not manager_percent_value.is_finite() or not 0<=manager_percent_value<=100:
-            raise ValueError("Проверьте ставку менеджера: от 0 до 100 процентов.")
+        manager_percent_value = MANAGER_PERCENT
         manager_amount = (
             sale_amount * manager_percent_value / 100
         ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -301,13 +307,18 @@ async def complete_sale(session, actor, draft_id):
                 kind="Комиссия менеджера",
                 amount=float(manager_amount),
                 period=datetime.now(UTC).date().isoformat(),
-                note=f"sale={sale.id};booking={booking.id}",
+                note=f"sale={sale.id};booking={booking.id};base={sale_amount};percent={manager_percent_value}",
             )
         session.add(manager_entry)
         await session.flush()
         sale.manager_percent_applied = str(manager_percent_value)
         sale.manager_payroll_entry_id = manager_entry.id
 
+    bonus = photographer_bonus(sale_amount)
+    if bonus:
+        session.add(PayrollEntry(user_id=photographer.id, kind="Бонус фотографа",
+            amount=float(bonus), period=datetime.now(UTC).date().isoformat(),
+            note=f"sale={sale.id};booking={booking.id};base={sale_amount};bonus={bonus}"))
     draft.status = "COMPLETED"
     draft.completed_at = datetime.now(UTC).replace(tzinfo=None)
     await audit(

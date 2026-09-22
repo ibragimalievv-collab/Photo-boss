@@ -44,7 +44,7 @@ async def period_data(api, conn, start, end):
     sales = await api.rows(conn, '''SELECT s.*,b.hotel_id,b.manager_id,u.name AS employee
         FROM sales s LEFT JOIN bookings b ON b.id=s.booking_id
         JOIN users u ON u.id=s.credited_user_id WHERE s.created_at>=:lo AND s.created_at<:hi''', **params)
-    receipts = await api.rows(conn, '''SELECT r.*,b.hotel_id FROM receipts r JOIN bookings b ON b.id=r.booking_id
+    receipts = await api.rows(conn, '''SELECT r.*,b.hotel_id,b.photographer_id FROM receipts r JOIN bookings b ON b.id=r.booking_id
         WHERE r.status='APPROVED' AND r.reviewed_at>=:lo AND r.reviewed_at<:hi''', **params)
     payroll = await api.rows(conn, '''SELECT p.*,u.name AS employee FROM payroll_entries p JOIN users u ON u.id=p.user_id
         WHERE p.created_at>=:lo AND p.created_at<:hi''', **params)
@@ -74,6 +74,10 @@ async def period_data(api, conn, start, end):
     for r in receipts:
         h = hotels.setdefault(r['hotel_id'], {'id': r['hotel_id'], 'name': names.get(r['hotel_id'], 'Без отеля'), 'revenue': 0, 'sales': 0, 'cash': 0})
         h['cash'] += cents(r['verified_amount'])
+        if r['photographer_id'] is not None:
+            uid = r['photographer_id']
+            e = employees.setdefault(uid, {'id': uid, 'name': user_names.get(uid, ''), 'revenue': 0, 'sales': 0, 'accrued': 0, 'bookings': 0})
+            e['cash'] = e.get('cash', 0) + cents(r['verified_amount'])
     for p in payroll:
         e = employees.setdefault(p['user_id'], {'id': p['user_id'], 'name': p['employee'], 'revenue': 0, 'sales': 0, 'accrued': 0, 'bookings': 0})
         e['accrued'] += cents(p['amount'])

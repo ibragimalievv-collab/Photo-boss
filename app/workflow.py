@@ -25,6 +25,7 @@ from .models import (
     User,
 )
 from .services.bookings import create_booking_record
+from .services.commissions import booking_photo_price
 from .services.core import audit
 from .services.photo_storage import ensure_photo_storage, image_format
 from .services.receipts import expected_amount, extract_receipt, money, operation_key
@@ -85,11 +86,11 @@ class Workflow:
                     SaleDraft.status.in_(['AWAITING_RECEIPT', 'AWAITING_COUNTS', 'AWAITING_SELECTED'])).order_by(SaleDraft.id.desc()).limit(1))
                 shoot = await session.scalar(select(Shooting).where(Shooting.booking_id == b.id))
                 rows.append({'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
-                    'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': prices.get(b.package_id),
+                    'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': str(money(draft.unit_price if draft and draft.unit_price else await booking_photo_price(session, b))),
                     'shootingId': shoot.id if shoot else None, 'fullUploaded': bool(shoot and shoot.full_upload_completed_at),
                     'canUpload': ('PHOTOGRAPHER' in a['roles'] and b.photographer_id == a['id']) or bool({'OWNER', 'ADMIN'} & set(a['roles'])),
                     'draft': ({'id': draft.id, 'mine': draft.created_by_id == a['id'], 'status': draft.status,
-                        'total': draft.declared_photo_count, 'sold': draft.sold_photos,
+                        'total': draft.declared_photo_count, 'sold': draft.sold_photos, 'discount': str(draft.discount_percent or 0),
                         'selected': await selected_count(session, draft.id)} if draft else None)})
             hotels = (await session.scalars(select(Hotel).where(Hotel.active.is_(True)))).all()
         return web.json_response({'bookings': rows, 'hotels': [{'id': h.id, 'name': h.name} for h in hotels],
@@ -168,6 +169,8 @@ class Workflow:
         else:
             expected = {'sale_counts': 'draft total sold price', 'sale_complete': 'draft price',
                         'sale_receipt': 'draft', 'sale_selected': 'draft'}[kind]
+            if kind == 'sale_counts' and 'discount' in data:
+                expected += ' discount'
             fields(data, expected)
             did = await target(session, actor, data['draft'], 'draftId')
             preview = await session.get(SaleDraft, did)
@@ -179,16 +182,16 @@ class Workflow:
         if draft.created_by_id != actor.id or not await can_sell(actor, roles, booking):
             raise AccessError('Нет доступа к этой продаже.', 403)
         if 'price' in data:
-            package = await session.get(Package, booking.package_id)
-            if not isinstance(data['price'], str) or data['price'] != str(money(package.price_per_photo)):
-                raise AccessError('Цена пакета изменилась. Обновите данные и проверьте продажу.', 409)
+            price = draft.unit_price or await booking_photo_price(session, booking)
+            if not isinstance(data['price'], str) or data['price'] != str(money(price)):
+                raise AccessError('Цена кадра изменилась. Обновите данные и проверьте продажу.', 409)
         result = {'draftId': draft.id, 'bookingId': booking.id}
         if kind == 'sale_receipt':
             file_id, unique_id = await self.save_telegram(actor, raw, receipt=True)
             await capture_draft_receipt(session, actor, draft, file_id, unique_id,
                 hashlib.sha256(raw).hexdigest(), await extract_receipt(raw))
         elif kind == 'sale_counts':
-            amount = await set_sale_counts(session, actor, draft, data['total'], data['sold'])
+            amount = await set_sale_counts(session, actor, draft, data['total'], data['sold'], data.get('discount', 0))
             result['amount'] = str(amount)
         elif kind == 'sale_selected':
             if draft.status != 'AWAITING_SELECTED':

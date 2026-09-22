@@ -193,8 +193,8 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                 "CREATE TABLE bookings(id INTEGER PRIMARY KEY,room TEXT,shoot_date DATE,shoot_time TEXT,status TEXT,photographer_id INTEGER,manager_id INTEGER,hotel_id INTEGER,client_id INTEGER,package_id INTEGER)",
                 "CREATE TABLE shootings(id INTEGER PRIMARY KEY,booking_id INTEGER)",
                 "CREATE TABLE photos(id INTEGER PRIMARY KEY,shooting_id INTEGER)",
-                "CREATE TABLE sales(id INTEGER PRIMARY KEY,booking_id INTEGER,credited_user_id INTEGER,commission_role TEXT,amount NUMERIC,commission NUMERIC,payment_status TEXT,created_at DATETIME)",
-                "CREATE TABLE payroll_entries(id INTEGER PRIMARY KEY,user_id INTEGER,kind TEXT,amount NUMERIC,created_at DATETIME)",
+                "CREATE TABLE sales(id INTEGER PRIMARY KEY,booking_id INTEGER,credited_user_id INTEGER,commission_role TEXT,amount NUMERIC,commission NUMERIC,payment_status TEXT,created_at DATETIME,percent NUMERIC DEFAULT 15,commission_finalized_at DATETIME,sold_photos INTEGER,declared_photo_count INTEGER,unit_price NUMERIC,discount_percent NUMERIC)",
+                "CREATE TABLE payroll_entries(id INTEGER PRIMARY KEY,user_id INTEGER,kind TEXT,amount NUMERIC,created_at DATETIME,period TEXT,note TEXT)",
                 "CREATE TABLE receipts(id INTEGER PRIMARY KEY,status TEXT,verified_amount NUMERIC,reviewed_at DATETIME)",
                 "CREATE TABLE shifts(id INTEGER PRIMARY KEY,user_id INTEGER,hotel_id INTEGER,start_at DATETIME,end_at DATETIME,status TEXT)",
                 "CREATE TABLE shift_check_ins(id INTEGER PRIMARY KEY,user_id INTEGER,shift_date DATE,started_at DATETIME)",
@@ -217,8 +217,8 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
             connection.execute(text("INSERT INTO clients VALUES (1,'Own guest'),(2,'Other guest')"))
             connection.execute(text("INSERT INTO packages VALUES (1,'Family')"))
             connection.execute(text("INSERT INTO bookings VALUES (1,'101',:day,'10:00','ASSIGNED',3,4,1,1,1),(2,'201',:day,'11:00','ASSIGNED',5,4,2,2,1)"), {"day": self.service.today()})
-            connection.execute(text("INSERT INTO sales VALUES (1,1,3,'PHOTOGRAPHER',21000,3150,'PAID',:now),(2,2,5,'PHOTOGRAPHER',26000,3900,'UNPAID',:now)"), {"now": now})
-            connection.execute(text("INSERT INTO payroll_entries VALUES (1,3,'Премия',1000,:now),(2,5,'Премия',1500,:now)"), {"now": now})
+            connection.execute(text("INSERT INTO sales(id,booking_id,credited_user_id,commission_role,amount,commission,payment_status,created_at) VALUES (1,1,3,'PHOTOGRAPHER',21000,3150,'PAID',:now),(2,2,5,'PHOTOGRAPHER',26000,3900,'UNPAID',:now)"), {"now": now})
+            connection.execute(text("INSERT INTO payroll_entries(id,user_id,kind,amount,created_at) VALUES (1,3,'Премия',1000,:now),(2,5,'Премия',1500,:now)"), {"now": now})
             connection.execute(text("INSERT INTO receipts VALUES (1,'APPROVED',21000,:now),(2,'PENDING',26000,:now)"), {"now": now})
             connection.execute(text("INSERT INTO audit_logs VALUES (1,1,'unknown_legacy_event','sale',1,'Full retained details',:now)"), {"now": now})
 
@@ -311,6 +311,9 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         _, data, _ = await self.call("/finance?period=month", uid=1003)
         assert data["cashReceived"] is None and data["sales"] == 2100000
         assert data["payroll"] == 415000 and [x["id"] for x in data["employees"]] == [3]
+        assert {x["userId"] for x in data["accrualRows"]} == {3}
+        assert data["salesRows"][0]["commission"] == 315000
+        assert data["salesRows"][0]["percent"] == 15
         _, bookings, _ = await self.call("/bookings", uid=1003)
         assert [x["id"] for x in bookings["items"]] == [1]
         _, bookings, _ = await self.call("/bookings", uid=1004)

@@ -320,10 +320,17 @@ class MiniApp:
         return {"period": period, "from": str(start), "to": str(end), "scope": "self" if own else "company",
                 "sales": sum(cents(s["amount"]) for s in sales), "cashReceived": cash,
                 "payroll": sum(e["earned"] for e in employees.values()),
+                "accrualRows": [{"id": r["id"], "userId": r["user_id"], "kind": r["kind"],
+                    "amount": cents(r["amount"]), "period": r["period"], "note": r["note"]} for r in payroll],
                 "employees": sorted(employees.values(), key=lambda x: (-x["sales"], x["name"])),
                 "salesRows": [{"id": s["id"], "bookingId": s["booking_id"], "client": s["client"],
                     "employee": s["employee"], "date": str(as_utc(s["created_at"]).astimezone(self.tz).date()),
-                    "amount": cents(s["amount"]), "status": s["payment_status"]} for s in sales[:100]],
+                    "amount": cents(s["amount"]), "status": s["payment_status"],
+                    "userId": s["credited_user_id"], "percent": s["percent"], "commission": cents(s["commission"]),
+                    "commissionFinalized": s["commission_finalized_at"] is not None,
+                    "soldPhotos": s["sold_photos"], "declaredPhotos": s["declared_photo_count"],
+                    "unitPrice": cents(s["unit_price"]) if s["unit_price"] is not None else None,
+                    "discountPercent": str(s["discount_percent"]) if s["discount_percent"] is not None else None} for s in sales[:100]],
                 "salesCount": len(sales), "salesListLimited": len(sales) > 100,
                 "note": "Касса — подтверждённые чеки по дате подтверждения. Начислено — комиссии и записи премий/удержаний существующего бота. Это не выплаченная зарплата и не чистая прибыль. Продажи показаны до учёта оплаты."}
 

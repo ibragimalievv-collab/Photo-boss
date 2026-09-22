@@ -37,6 +37,7 @@ async def create_booking_record(session, actor, data, photographer_id=None):
     from ..models import UserRole
     from .core import audit, roles_of
 
+    await session.get(User, actor.id, with_for_update=True)
     roles = await roles_of(session, actor)
     if not roles & {'OWNER', 'ADMIN', 'MANAGER'}:
         raise ValueError('Нет доступа к созданию записи.')
@@ -78,7 +79,24 @@ async def create_booking_record(session, actor, data, photographer_id=None):
     session.add(booking)
     await session.flush()
     session.add(Shooting(booking_id=booking.id, status='PENDING_CONFIRMATION'))
-    await audit(session, actor, 'booking_created', 'booking', booking.id)
+    if 'MANAGER' in roles:
+        from datetime import UTC, datetime, time, timedelta
+        from zoneinfo import ZoneInfo
+
+        from ..config import config
+        from ..models import PayrollEntry
+        from .commissions import manager_booking_bonus
+        tz = ZoneInfo(config.training_timezone)
+        local_day = datetime.now(tz).date()
+        lower = datetime.combine(local_day, time.min, tz).astimezone(UTC).replace(tzinfo=None)
+        upper = datetime.combine(local_day + timedelta(days=1), time.min, tz).astimezone(UTC).replace(tzinfo=None)
+        count_today = await session.scalar(select(func.count(Booking.id)).where(
+            Booking.manager_id == actor.id, Booking.created_at >= lower, Booking.created_at < upper))
+        increment = manager_booking_bonus(count_today) - manager_booking_bonus(count_today - 1)
+        if increment:
+            session.add(PayrollEntry(user_id=actor.id, kind='Бонус за записи', amount=float(increment),
+                period=local_day.isoformat(), note=f'booking={booking.id};day={local_day};count={count_today};bonus={increment}'))
+    await audit(session, actor, 'booking_created' , 'booking', booking.id)
     await session.flush()
     return booking
 
