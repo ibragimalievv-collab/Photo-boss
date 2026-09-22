@@ -115,7 +115,15 @@ class MiniApp:
         return list((await conn.execute(text(sql), params)).mappings())
 
     async def actor(self, request):
-        telegram_id = validate_init_data(request.headers.get("X-Telegram-Init-Data", ""), self.bot.token)
+        # Telegram Android may reuse the same Mini App WebView/initData when the
+        # user reopens the app. One hour was too short and caused a 401 re-login
+        # loop even for a valid Telegram-signed launch. Keep signature
+        # verification strict, but allow the signed launch for up to 24 hours.
+        telegram_id = validate_init_data(
+            request.headers.get("X-Telegram-Init-Data", ""),
+            self.bot.token,
+            max_age=24 * 60 * 60,
+        )
         request["miniapp_telegram_id"] = telegram_id
         async with self.engine.connect() as conn:
             people = await self.rows(conn, "SELECT id,tg_id,name,active FROM users WHERE tg_id=:tg", tg=telegram_id)
