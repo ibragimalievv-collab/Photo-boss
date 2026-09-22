@@ -46,13 +46,15 @@ async def main():
                 await conn.execute(text(f'DROP TABLE {table}'))
             for column in ('event_key', 'priority', 'kind', 'payload', 'acknowledged_at', 'resolved_at'):
                 await conn.execute(text(f'ALTER TABLE notifications DROP COLUMN {column}'))
+            for table in ('shift_check_ins', 'shift_check_outs'):
+                await conn.execute(text(f'ALTER TABLE {table} DROP COLUMN offline_claimed_at'))
             for column in ('report_note', 'report_saved_at'):
                 await conn.execute(text(f'ALTER TABLE shift_check_outs DROP COLUMN {column}'))
             await conn.execute(text("INSERT INTO users(id,tg_id,name,active,created_at) VALUES (1,9876543210,'Before',true,CURRENT_TIMESTAMP)"))
             await conn.execute(text("INSERT INTO notifications(user_id,text,sent,created_at) VALUES (1,'Legacy notification',true,CURRENT_TIMESTAMP)"))
 
-        migrations = sorted(Path('migrations').glob('00[4-8]_*.sql'))
-        assert len(migrations) == 5
+        migrations = sorted(Path('migrations').glob('00[4-9]_*.sql'))
+        assert len(migrations) == 6
         for _ in range(2):
             async with engine.begin() as conn:
                 driver = (await conn.get_raw_connection()).driver_connection
@@ -91,7 +93,7 @@ async def main():
             assert entry.user_id is None, 'Actor leaked between transactions'
             triggers = await conn.scalar(text("SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=:schema AND t.tgname LIKE 'pb_audit_%'"), {'schema': schema})
             assert triggers == len(TABLES)
-        print('PostgreSQL migrations 004–008 twice, legacy data, audit actor/snapshots/rollback: PASS')
+        print('PostgreSQL migrations 004–009 twice, legacy data, audit actor/snapshots/rollback: PASS')
 
         async with factory() as session:
             session.add_all([UserRole(user_id=1, role='MANAGER'), Hotel(id=1, name='Hotel'),

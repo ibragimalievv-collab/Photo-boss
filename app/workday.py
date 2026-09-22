@@ -91,7 +91,7 @@ class Workday:
         if not isinstance(body, dict):
             raise AccessError('Некорректная операция.', 400)
         if set(body)!={'key','kind','date','data','actorId'} or not isinstance(body['key'],str) or not 16<=len(body['key'])<=80 or not isinstance(body['data'],dict): raise AccessError('Некорректная операция.',400)
-        if not isinstance(body['kind'], str) or body['kind'] not in KINDS | {'checklist','shift_report'}: raise AccessError('Этот тип операции не поддерживает синхронизацию.',400)
+        if not isinstance(body['kind'], str) or body['kind'] not in KINDS | {'checklist','shift_report','attendance'}: raise AccessError('Этот тип операции не поддерживает синхронизацию.',400)
         if type(body['actorId']) is not int or body['actorId'] != a['id']: raise AccessError('Аккаунт изменился. Операция принадлежит другому сотруднику.',403)
         payload = json.dumps(body,sort_keys=True,ensure_ascii=False).encode()
         digest=hashlib.sha256(payload + (b'\x00'+hashlib.sha256(raw).digest() if raw is not None else b'')).hexdigest()
@@ -108,7 +108,10 @@ class Workday:
             if not self.api.today()-timedelta(days=7)<=day<=self.api.today(): raise AccessError('Дата требует ручной проверки; операция не применена.',409)
             data=body['data']
             extra = {}
-            if body['kind'] in KINDS:
+            if body['kind'] == 'attendance':
+                from .attendance import Attendance
+                extra = await Attendance(self.api).offline(conn, a | {'roles': sorted(roles)}, day, data, raw)
+            elif body['kind'] in KINDS:
                 extra = await Workflow(self.api).apply(conn, a | {'roles': sorted(roles)}, body['kind'], data, raw)
             elif raw is not None:
                 raise AccessError('Вложение не поддерживается для этой операции.', 400)

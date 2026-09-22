@@ -98,6 +98,9 @@ async def my_shift(m, state, current_roles):
             "После 09:00 автоматически начисляется штраф 500 ₽.",
             reply_markup=inline([[("▶️ Начать смену", "shift:begin")]]),
         )
+    if check_in.status == 'PENDING_REVIEW' or (check_out and check_out.status == 'PENDING_REVIEW'):
+        await state.clear()
+        return await m.answer('Офлайн-отметка сохранена и ожидает проверки руководителем в Photo Boss.')
     if check_in.status == "STARTED":
         await state.clear()
         started = shift_now(check_in.started_at)
@@ -142,6 +145,9 @@ async def begin_shift(c: CallbackQuery, state, current_roles):
             await audit(s, u, "shift_check_in_started", "shift_check_in", check_in.id)
             await s.commit()
     await c.answer()
+    if check_in.status == 'PENDING_REVIEW':
+        await state.clear()
+        return await c.message.answer('Офлайн-отметка ожидает проверки руководителем.')
     if check_in.status == "STARTED":
         await state.clear()
         return await c.message.answer("✅ Сегодняшняя смена уже начата.")
@@ -159,10 +165,11 @@ async def save_shift_location(m, state):
         if check_in is None:
             await state.clear()
             return await m.answer("Начните заново через «🔄 Моя смена».")
-        if check_in.status == "STARTED":
+        if check_in.status in ('STARTED', 'PENDING_REVIEW'):
             await state.clear()
-            return await m.answer("✅ Сегодняшняя смена уже начата.")
+            return await m.answer('Отметка уже сохранена. Проверьте её статус в Photo Boss.')
         check_in.latitude = m.location.latitude
+        check_in.offline_claimed_at = None
         check_in.longitude = m.location.longitude
         check_in.location_received_at = now
         check_in.status = "AWAITING_PHOTO"
@@ -271,6 +278,9 @@ async def end_shift(c: CallbackQuery, state, current_roles):
             await audit(s, u, "shift_check_out_started", "shift_check_out", check_out.id)
             await s.commit()
     await c.answer()
+    if check_out.status == 'PENDING_REVIEW':
+        await state.clear()
+        return await c.message.answer('Офлайн-завершение ожидает проверки руководителем.')
     if check_out.status == "FINISHED":
         await state.clear()
         return await c.message.answer("✅ Сегодняшняя смена уже завершена.")
@@ -288,7 +298,11 @@ async def save_end_location(m, state):
         if check_out is None:
             await state.clear()
             return await m.answer("Начните завершение заново через «🔄 Моя смена».")
+        if check_out.status in ('FINISHED', 'PENDING_REVIEW'):
+            await state.clear()
+            return await m.answer('Завершение уже сохранено. Проверьте его статус в Photo Boss.')
         check_out.latitude = m.location.latitude
+        check_out.offline_claimed_at = None
         check_out.longitude = m.location.longitude
         check_out.location_received_at = now
         check_out.status = "AWAITING_PHOTO"

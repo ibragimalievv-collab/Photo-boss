@@ -399,6 +399,7 @@ class ShiftCheckIn(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     late: Mapped[bool] = mapped_column(Boolean, default=False)
     fine_amount: Mapped[float] = mapped_column(Float, default=0)
+    offline_claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     __table_args__ = (
         UniqueConstraint("user_id", "shift_date", name="uq_shift_check_in_user_day"),
     )
@@ -422,6 +423,7 @@ class ShiftCheckOut(Base):
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     workplace_file_id: Mapped[str | None] = mapped_column(String(300), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    offline_claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     __table_args__ = (
         UniqueConstraint("user_id", "shift_date", name="uq_shift_check_out_user_day"),
     )

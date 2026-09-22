@@ -13,6 +13,9 @@ async def add_columns(connection, table, columns):
 
 async def upgrade(connection):
     tables = await connection.run_sync(lambda conn: set(inspect(conn).get_table_names()))
+    for table in ('shift_check_ins', 'shift_check_outs'):
+        if table in tables:
+            await add_columns(connection, table, {'offline_claimed_at': 'TIMESTAMP'})
     if 'shift_check_outs' in tables:
         await add_columns(connection, 'shift_check_outs', {'report_note': 'TEXT', 'report_saved_at': 'TIMESTAMP'})
     await add_columns(connection, 'notifications', {

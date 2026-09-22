@@ -47,7 +47,9 @@ async def install_capture(conn):
                 condition=f'WHEN {before} <> {after}' if op=='UPDATE' else ''
                 row='OLD' if op=='DELETE' else 'NEW'
                 # The function is registered on the connection before init_db runs.
-                await conn.exec_driver_sql(f'''CREATE TRIGGER IF NOT EXISTS pb_audit_{table}_{op.lower()}
+                # Refresh column lists after additive schema upgrades as well.
+                await conn.exec_driver_sql(f'DROP TRIGGER IF EXISTS pb_audit_{table}_{op.lower()}')
+                await conn.exec_driver_sql(f'''CREATE TRIGGER pb_audit_{table}_{op.lower()}
                     AFTER {op} ON {table} {condition} BEGIN
                     INSERT INTO audit_logs(user_id,action,entity,entity_id,details,created_at)
                     VALUES(pb_actor_id(),'row.{op.lower()}','{table}',{row}.id,

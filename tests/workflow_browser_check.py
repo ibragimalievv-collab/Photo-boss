@@ -26,8 +26,11 @@ from app.models import (
     PayrollEntry,
     Receipt,
     Sale,
+    ShiftCheckIn,
+    ShiftCheckOut,
     Shooting,
     User,
+    UserRole,
 )
 from app.people import install_people
 from app.services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
@@ -45,15 +48,20 @@ async def main():
         booking.photographer_id = 2
         booking.status = 'READY_FOR_SALE'
         (await session.scalar(select(Shooting))).status = 'READY_FOR_SALE'
+        session.add_all([User(id=3, tg_id=3, name='Owner'), UserRole(user_id=3, role='OWNER')])
         await session.commit()
+    media = {}
     async def upload(_id, file, **kwargs):
         digest = hashlib.sha256(file.data).hexdigest()
+        media[digest] = file.data
         attachment = SimpleNamespace(file_id=digest, file_unique_id=digest)
         return SimpleNamespace(photo=[attachment], document=attachment)
     async def save_selected(self, draft, raw):
         return 'app:/fixture/' + hashlib.sha256(raw).hexdigest()
+    async def download(file_id, destination, **kwargs):
+        destination.write(media[file_id])
     bot = SimpleNamespace(token=TOKEN, send_photo=upload, send_document=upload,
-        send_message=AsyncMock(), me=AsyncMock(return_value=SimpleNamespace(username='fixture_bot')))
+        send_message=AsyncMock(), download=download, me=AsyncMock(return_value=SimpleNamespace(username='fixture_bot')))
     app = web.Application(client_max_size=25*1024*1024)
     api = install_miniapp(app, engine=engine, bot=bot, lessons=ACADEMY_LESSONS, blocks=ACADEMY_BLOCKS)
     original = api.rows
@@ -74,9 +82,10 @@ async def main():
     try:
         with patch.object(Workflow, 'save_selected', save_selected):
             async with async_playwright() as p:
-                browser = await p.chromium.launch(args=['--ignore-certificate-errors'])
+                browser = await p.chromium.launch(args=['--ignore-certificate-errors', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'])
                 try:
-                    context = await browser.new_context(ignore_https_errors=True, viewport={'width': 390, 'height': 844}, is_mobile=True)
+                    context = await browser.new_context(ignore_https_errors=True, viewport={'width': 390, 'height': 844}, is_mobile=True,
+                        geolocation={'latitude': 41.5, 'longitude': 48.1}, permissions=['geolocation', 'camera'])
                     init = signed(1)
                     await context.add_init_script('window.Telegram={WebApp:{initData:'+json.dumps(init)+',ready(){},expand(){},setHeaderColor(){},setBackgroundColor(){},onEvent(){},BackButton:{show(){},hide(){},onClick(){}}}};')
                     await context.route('https://telegram.org/**', lambda r: r.fulfill(status=200, content_type='text/javascript', body=''))
@@ -120,6 +129,17 @@ async def main():
                     await sale.locator('[name=selected]').set_input_files('app/webapp/assets/academy/family.jpg')
                     await sale.locator('button').click()
                     await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length===6;}")
+                    await page.locator('#attendanceCard button').click()
+                    dialog = page.locator('#attendanceDialog')
+                    for _ in range(2):
+                        await dialog.locator('[data-att=location]').click()
+                        await dialog.locator('[data-att=camera]:not([disabled])').click()
+                        await page.wait_for_function("document.querySelector('#attCameraVideo')?.videoWidth>0")
+                        await dialog.locator('[data-att=snap]').click()
+                        await dialog.locator('[data-att=confirm]').click()
+                    await dialog.get_by_role('heading', name='Ожидает проверки руководителем').wait_for()
+                    await dialog.locator('[data-att=close]').click()
+                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length===8;}")
                     # A new page removes in-memory state; only SW and IndexedDB remain.
                     await page.close()
                     page = await context.new_page()
@@ -130,20 +150,44 @@ async def main():
                     await context.set_offline(False)
                     await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.kind==='sale_complete'&&r.status==='local'&&r.error);}")
                     await page.get_by_role('button', name='Синхронизировать сейчас').click()
-                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');const rows=await m.outboxRows();return rows.length===6&&rows.every(r=>r.status==='synced'&&!r.blob);}")
+                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');const rows=await m.outboxRows();return rows.length===8&&rows.every(r=>r.status==='synced'&&!r.blob);}")
                     async with factory() as session:
                         assert await session.scalar(select(func.count(Booking.id))) == 2
                         assert await session.scalar(select(func.count(Sale.id))) == 1
                         assert await session.scalar(select(func.count(Receipt.id))) == 1
                         assert await session.scalar(select(func.count(PayrollEntry.id))) == 1
-                        assert await session.scalar(select(func.count(OperationRequest.id))) == 6
+                        assert await session.scalar(select(func.count(OperationRequest.id))) == 8
                         assert (await session.scalar(select(Sale))).amount == 400
+                        assert (await session.scalar(select(ShiftCheckIn))).status == 'PENDING_REVIEW'
+                        assert (await session.scalar(select(ShiftCheckOut))).status == 'PENDING_REVIEW'
                     assert lost and not errors, errors
                     assert await page.evaluate("async()=>{for(const name of await caches.keys()){for(const request of await (await caches.open(name)).keys())if(new URL(request.url).pathname.startsWith('/api/'))return false;}return true;}")
                     output = Path(os.getenv('CALLS_QA_DIR', '/tmp/photo-boss-calls-qa'))
                     output.mkdir(parents=True, exist_ok=True)
                     await page.screenshot(path=str(output/'offline-replay-mobile.png'), full_page=True)
-                    print('PASS: cold offline start, booking + sale blobs, lost response replay, one sale/commission, no API cache')
+                    owner = await browser.new_context(ignore_https_errors=True, viewport={'width': 390, 'height': 844}, is_mobile=True)
+                    await owner.add_init_script('window.Telegram={WebApp:{initData:'+json.dumps(signed(3))+',ready(){},expand(){},setHeaderColor(){},setBackgroundColor(){},onEvent(){},BackButton:{show(){},hide(){},onClick(){}}}};')
+                    await owner.route('https://telegram.org/**', lambda r: r.fulfill(status=200, content_type='text/javascript', body=''))
+                    panel = await owner.new_page()
+                    panel.on('pageerror', lambda e: errors.append(str(e)))
+                    await panel.goto(str(server.make_url('/app/#team')))
+                    for purpose in ('start', 'end'):
+                        form = panel.locator(f'.attendance-review[data-purpose={purpose}]')
+                        await form.locator('..').locator('summary').click()
+                        await form.locator('..').get_by_role('button', name='Посмотреть фото').click()
+                        await form.locator('..').get_by_alt_text('Фото офлайн-отметки').wait_for()
+                        value = await panel.evaluate("async purpose=>{const {api}=await import('/app/js/api.js');return (await api('/attendance/pending')).items.find(r=>r.purpose===purpose).offline_claimed_at.slice(0,16);}", purpose)
+                        await form.locator('[name=verifiedAt]').fill(value)
+                        await form.locator('[name=note]').fill('Checked photo and shift time')
+                        await form.locator('button').click()
+                        await form.wait_for(state='detached')
+                    await panel.get_by_text('Нет отметок, ожидающих проверки.').wait_for()
+                    async with factory() as session:
+                        assert (await session.scalar(select(ShiftCheckIn))).status == 'STARTED'
+                        assert (await session.scalar(select(ShiftCheckOut))).status == 'FINISHED'
+                    assert not errors, errors
+                    await panel.screenshot(path=str(output/'offline-attendance-review-mobile.png'), full_page=True)
+                    print('PASS: cold offline start, booking + sale blobs, lost response replay, single sale/commission, offline camera shifts and owner review, no API cache')
                 finally:
                     await browser.close()
     finally:
