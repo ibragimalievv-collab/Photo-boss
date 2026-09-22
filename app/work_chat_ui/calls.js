@@ -71,7 +71,7 @@ export function callToolbar(peer, name) {
     selected = {peer, title:name};
     const room = available.find(r => peer === null ? r.group : !r.group &&
         [r.creatorId,r.peerId].includes(peer) && [r.creatorId,r.peerId].includes(me?.user?.id));
-    return `<div class="pb-call-toolbar"><div class="pb-call-actions"><button data-call-history aria-label="История вызовов" title="История вызовов">История</button><button data-start-call="audio" aria-label="${peer===null?'Начать групповой аудиозвонок':'Аудиозвонок'}" title="Аудиозвонок">${icon('phone')}</button><button data-start-call="video" aria-label="${peer===null?'Начать групповой видеозвонок':'Видеозвонок'}" title="Видеозвонок">${icon('video')}</button></div>${room||active?`<div class="pb-call-room-action">${active?`<button data-resume-call>${icon('phone')} Вернуться к звонку</button>`:`<button data-join-call="${esc(room.id)}">${icon('phone')} Присоединиться · ${room.participants.length} из 6</button>`}</div>`:''}</div>`;
+    return `<div class="pb-call-toolbar"><div class="pb-call-actions"><button data-call-history aria-label="История вызовов" title="История вызовов">${icon('history')}</button><button data-start-call="audio" aria-label="${peer===null?'Начать групповой аудиозвонок':'Аудиозвонок'}" title="Аудиозвонок">${icon('phone')}</button><button data-start-call="video" aria-label="${peer===null?'Начать групповой видеозвонок':'Видеозвонок'}" title="Видеозвонок">${icon('video')}</button></div>${room||active?`<div class="pb-call-room-action">${active?`<button data-resume-call>${icon('phone')} Вернуться к звонку</button>`:`<button data-join-call="${esc(room.id)}">${icon('phone')} Присоединиться · ${room.participants.length} из 6</button>`}</div>`:''}</div>`;
 }
 
 async function media(mode) {
@@ -107,6 +107,7 @@ function tile(id, name, stream, local = false) {
     // An offered but inactive video receiver can keep a combined media element
     // waiting for its first frame. Play sound independently so audio-only and
     // mixed calls remain audible while cameras are off or switching.
+    card.dataset.local=String(local);
     const video = card.querySelector('video'); video.muted = true;
     if(!local){
         let audio=card.querySelector('audio');
@@ -143,10 +144,20 @@ async function begin({peer=null, room=null, mode='audio', name=''} = {}) {
     } finally {starting=false;}
 }
 function send(c, peer, data) {
-    peer.sendChain = peer.sendChain.then(async () => {
-        if(c.closed || active !== c || c.peers.get(peer.id) !== peer) return;
-        await callApi('/signal',{callId:c.room.id,session:c.session,to:peer.id,toSession:peer.session,data});
-    }).catch(e=>{if(!c.closed && e.status !== 409) status(e.message);});
+    const signalId=crypto.randomUUID();
+    peer.sendChain = peer.sendChain.catch(()=>{}).then(async () => {
+        const deadline=Date.now()+25000;
+        while(!c.closed && active===c && c.peers.get(peer.id)===peer){
+            try{return await callApi('/signal',{callId:c.room.id,session:c.session,to:peer.id,toSession:peer.session,data,signalId});}
+            catch(e){
+                if((e.status&&e.status<500&&e.status!==429)||Date.now()>deadline)throw e;
+                status('Восстанавливаем соединение…');
+                await new Promise(resolve=>setTimeout(resolve,1000));
+            }
+        }
+    });
+    // Keep the rejected promise for callers (SDP must not be silently lost).
+    peer.sendChain.catch(e=>{if(!c.closed)status(e.message);});
     return peer.sendChain;
 }
 async function offer(c,p,restart=false) {
@@ -176,8 +187,8 @@ async function ensurePeer(c,member) {
     pc.onicecandidate=e=>{if(e.candidate) send(c,p,{type:'candidate',candidate:e.candidate.toJSON()});};
     pc.onconnectionstatechange=()=>{
         if(c.closed) return;
-        if(pc.connectionState==='failed' && me.user.id < p.id && p.restarts++ < 1)
-            offer(c,p,true).catch(e=>status(e.message));
+        if(pc.connectionState==='connected'){p.restarts=0;p.disconnectedAt=null;}
+        if(['failed','disconnected'].includes(pc.connectionState))p.disconnectedAt??=Date.now();
         updateTiles(c);
     };
     if(me.user.id < p.id) await offer(c,p);
@@ -250,11 +261,18 @@ async function sync() {
         }
         for(const m of d.call.participants) if(m.id!==me.user.id) await ensurePeer(c,m);
         for(const s of d.signals) {await receive(c,s); c.cursor=s.seq;}
-        c.cursor=d.cursor; updateTiles(c);
+        c.cursor=d.cursor;
+        for(const p of c.peers.values()){
+            if(['failed','disconnected'].includes(p.pc.connectionState)&&me.user.id<p.id&&p.restarts<3&&
+               Date.now()-(p.lastRestart||0)>5000&&Date.now()-(p.disconnectedAt||p.created)>2000){
+                p.lastRestart=Date.now();p.restarts++;await offer(c,p,true);
+            }
+        }
+        updateTiles(c);
     } catch(e) {
         if(active!==c || c.closed) return;
         if([401,403,404,409,428].includes(e.status)) await hangup(false,e.status===404 ? 'Звонок завершён.' : e.message);
-        else if(Date.now()-c.lastSync>30000) await hangup(false,'Связь прервалась. Подключитесь к звонку заново.');
+        else if(Date.now()-c.lastSync>50000) await hangup(false,'Связь прервалась. Подключитесь к звонку заново.');
         else status('Восстанавливаем соединение…');
     } finally {polling=false;}
 }
@@ -273,15 +291,16 @@ async function toggleCamera() {
     const c=active; if(!c || controlsBusy)return; controlsBusy=true;
     let fresh=null;
     try {
-        if(c.video) {
-            await Promise.all([...c.peers.values()].filter(p=>p.videoSender).map(p=>p.videoSender.replaceTrack(null)));
-            for(const t of c.stream.getVideoTracks()) {t.stop(); c.stream.removeTrack(t);} c.video=false;
+        const existing=c.stream.getVideoTracks().find(t=>t.readyState==='live');
+        if(existing){
+            c.video=!c.video;existing.enabled=c.video;
         } else {
             fresh=await openCamera(c.facing);
             if(active!==c || c.closed) {fresh.getTracks().forEach(t=>t.stop());return;}
             const track=fresh.getVideoTracks()[0];
             await Promise.all([...c.peers.values()].filter(p=>p.videoSender).map(p=>p.videoSender.replaceTrack(track)));
             if(active!==c||c.closed){fresh.getTracks().forEach(t=>t.stop());return;}
+            for(const old of c.stream.getVideoTracks())c.stream.removeTrack(old);
             c.stream.addTrack(track);c.video=true;
         }
         updateControls(c);
@@ -292,6 +311,13 @@ async function toggleCamera() {
 async function switchCamera(){
  const c=active;if(!c||!c.video||controlsBusy)return;
  controlsBusy=true;updateControls(c);panel.querySelector('[data-camera-error]').hidden=true;const before=c.facing,next=before==='environment'?'user':'environment';
+ const existing=c.stream.getVideoTracks()[0];
+ if(existing?.applyConstraints){
+  try{await existing.applyConstraints(cameraConstraints(next,true));
+   if(active!==c||c.closed){controlsBusy=false;return;}
+   if(existing.getSettings?.().facingMode===next){c.facing=next;controlsBusy=false;updateControls(c);updateTiles(c);return;}
+  }catch{/* Fall back only when the current track cannot change its physical source. */}
+ }
  // Mobile browsers may only open one camera at a time; keep the microphone live.
  for(const track of c.stream.getVideoTracks()){track.stop();c.stream.removeTrack(track);}
  const install=async (facing,exact)=>{
@@ -301,7 +327,7 @@ async function switchCamera(){
   catch(e){fresh.getTracks().forEach(t=>t.stop());throw e;}
  };
  try{await install(next,true);}
- catch(e){if(active===c&&!c.closed){try{await install(before,false);}catch{c.video=false;}const warning=panel.querySelector('[data-camera-error]');if(warning){warning.hidden=false;warning.textContent='Другая камера недоступна. '+(c.video?'Предыдущая камера снова включена.':'Можно продолжить разговор без видео.');}}}
+ catch(e){if(active===c&&!c.closed){try{if(e.name==='NotAllowedError')throw e;await install(before,false);}catch{c.video=false;}const warning=panel.querySelector('[data-camera-error]');if(warning){warning.hidden=false;warning.textContent='Другая камера недоступна. '+(c.video?'Предыдущая камера снова включена.':'Можно продолжить разговор без видео.');}}}
  finally{controlsBusy=false;if(active===c){updateControls(c);updateTiles(c);sync();}}
 }
 export async function handleCallClick(e, peer, name) {
@@ -315,9 +341,11 @@ export async function handleCallClick(e, peer, name) {
 function invite(room) {
     if(active) {resumeCall();return;}
     stopIncomingRingtone();
-    showPanel(`<div class="pb-call-invite">${avatar(room.creatorName,room.creatorId)}<p class="pb-call-eyebrow">ВХОДЯЩИЙ ЗВОНОК</p><h2 id="pbCallTitle">${esc(title(room))}</h2><p>${esc(room.creatorName)} приглашает ${room.group?'команду':'вас'} в звонок</p><div class="pb-call-invite-actions"><button data-answer="audio" data-room="${esc(room.id)}">${icon('phone')} Только аудио</button><button data-answer="video" data-room="${esc(room.id)}">${icon('video')} С видео</button><button data-call-close>Позже</button></div><p class="pb-call-note">Микрофон и камера включатся после вашего выбора.</p></div>`);
+    showPanel(`<div class="pb-call-invite">${avatar(room.creatorName,room.creatorId)}<p class="pb-call-eyebrow">ВХОДЯЩИЙ ЗВОНОК</p><h2 id="pbCallTitle">${esc(title(room))}</h2><p>${esc(room.creatorName)} приглашает ${room.group?'команду':'вас'} в звонок</p><div class="pb-call-invite-actions"><button data-answer="audio" data-room="${esc(room.id)}">${icon('phone')} Только аудио</button><button data-answer="video" data-room="${esc(room.id)}">${icon('video')} С видео</button><button data-decline-room="${esc(room.id)}">Отклонить</button><button data-call-close>Позже</button></div><p class="pb-call-note">Микрофон и камера включатся после вашего выбора.</p></div>`);
 }
 panel.addEventListener('click',async e=>{
+    const decline=e.target.closest('[data-decline-room]');
+    if(decline){const room=available.find(r=>r.id===decline.dataset.declineRoom);if(!room){panel.close();return;}decline.disabled=true;try{if(!room.group)await callApi('/decline',{callId:room.id});ignored.add(room.id);stopIncomingRingtone();panel.close();refresh();}catch(err){fail(err.message);}return;}
     const answer=e.target.closest('[data-answer]');
     if(answer) {const room=available.find(r=>r.id===answer.dataset.room);if(room) await begin({room,mode:answer.dataset.answer}); else fail('Звонок уже завершён.');return;}
     if(e.target.closest('[data-hangup]')) return hangup();
@@ -342,5 +370,6 @@ banner.addEventListener('click',async e=>{
 });
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){refresh();sync();}});
 window.addEventListener('pagehide',()=>{if(active)hangup();});
+window.addEventListener('online',()=>{refresh();sync();});
 
-document.addEventListener('click',async e=>{if(!e.target.closest('[data-call-history]'))return;try{const d=await callApi('/history');const labels={ringing:'Вызов',connected:'На связи',completed:'Завершён',missed:'Не отвечен',declined:'Отклонён',cancelled:'Отменён',interrupted:'Прерван'};showPanel(`<h2 id="pbCallTitle">История вызовов</h2>${d.items.map(x=>`<article class="pb-call-note"><strong>${esc(x.creatorName)} · ${x.mode==='video'?'Видео':'Аудио'}</strong><p>${esc(labels[x.status]||x.status)} · ${x.durationSeconds} сек.</p><p>${esc(new Date(x.at+'Z').toLocaleString('ru-RU'))}</p></article>`).join('')||'<p>Звонков пока нет.</p>'}<button data-call-close>Закрыть</button>`);}catch(err){fail(err.message);}});
+document.addEventListener('click',async e=>{if(!e.target.closest('[data-call-history]'))return;if(active){resumeCall();return;}try{const d=await callApi('/history');const labels={ringing:'Вызов',connected:'На связи',completed:'Завершён',missed:'Не отвечен',declined:'Отклонён',cancelled:'Отменён',interrupted:'Прерван'};showPanel(`<h2 id="pbCallTitle">История вызовов</h2>${d.items.map(x=>`<article class="pb-call-note"><strong>${esc(x.creatorName)} · ${x.mode==='video'?'Видео':'Аудио'}</strong><p>${esc(labels[x.status]||x.status)} · ${x.durationSeconds} сек.</p><p>${esc(new Date(x.at+'Z').toLocaleString('ru-RU'))}</p></article>`).join('')||'<p>Звонков пока нет.</p>'}<button data-call-close>Закрыть</button>`);}catch(err){fail(err.message);}});

@@ -78,6 +78,8 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
         await baseline.MiniAppTests.asyncSetUp(self)
         self.chat = WorkChat(self.service)
         with self.engine.inner.begin() as conn:
+            from app.models import WorkChatSendReceipt
+            WorkChatSendReceipt.__table__.create(conn)
             conn.execute(text("""CREATE TABLE work_rule_acceptances(
                 id INTEGER PRIMARY KEY,user_id INTEGER,version TEXT,text_sha256 TEXT,
                 accepted_at DATETIME,UNIQUE(user_id,version))"""))
@@ -133,6 +135,40 @@ class WorkChatTests(unittest.IsolatedAsyncioTestCase):
             "/chat/rules/accept", uid=uid, method="POST",
             body={"version": rules["version"], "sha256": rules["sha256"]},
         )
+
+    async def test_retry_after_lost_ack_is_one_message_and_payload_is_bound(self):
+        await self.accept(1003)
+        body = {"peerId": 4, "body": "Сохранить один раз", "clientId": "retry-fixture-0001"}
+        status, first = await self.call("/chat/messages", uid=1003, method="POST", body=body)
+        assert status == 201
+        status, replay = await self.call("/chat/messages", uid=1003, method="POST", body=body)
+        assert status == 200 and replay["message"] == first["message"]
+        assert replay["replayed"] is True
+        for update in ({"body": "Другой текст"}, {"peerId": None}):
+            assert (await self.call("/chat/messages", uid=1003, method="POST", body={**body, **update}))[0] == 409
+        _, history = await self.call("/chat/messages?peer=4", uid=1003)
+        assert len(history["messages"]) == 1
+        await self.accept(1004)
+        # Same client ID from a different signed sender is an independent request.
+        assert (await self.call("/chat/messages", uid=1004, method="POST", body={**body, "peerId": 3}))[0] == 201
+
+    async def test_deleted_message_cannot_be_resurrected_by_retry(self):
+        await self.accept(1001)
+        body = {"peerId": None, "body": "Удалить", "clientId": "retry-fixture-0002"}
+        _, sent = await self.call("/chat/messages", method="POST", body=body)
+        assert (await self.call(f"/chat/messages/{sent['message']['id']}", method="DELETE"))[0] == 200
+        assert (await self.call("/chat/messages", method="POST", body=body))[0] == 409
+        assert (await self.call("/chat/messages?peer=general"))[1]["messages"] == []
+
+    async def test_retry_key_validation_and_rollback(self):
+        await self.accept(1003)
+        for key in ("short", True, "x" * 65, "bad key contains spaces"):
+            assert (await self.call("/chat/messages", uid=1003, method="POST",
+                body={"peerId": 4, "body": "test", "clientId": key}))[0] == 400
+        # A rejected target must not consume a key.
+        body = {"peerId": 999, "body": "test", "clientId": "retry-fixture-0003"}
+        assert (await self.call("/chat/messages", uid=1003, method="POST", body=body))[0] == 409
+        assert (await self.call("/chat/messages", uid=1003, method="POST", body={**body, "peerId": 4}))[0] == 201
 
     async def test_rules_gate_all_chat_data(self):
         assert (await self.call("/chat/rules", uid=1003))[0] == 200

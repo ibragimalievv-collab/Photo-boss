@@ -124,6 +124,16 @@ class WorkChatMessage(Base):
     )
 
 
+class WorkChatSendReceipt(Base):
+    """Atomic retry guard, retained after message deletion; contains no message text."""
+    __tablename__ = "work_chat_send_receipts"
+    sender_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class WorkChatDeletion(Base):
     """Content-free change feed for clients with an already open conversation."""
     __tablename__ = "work_chat_deletions"
