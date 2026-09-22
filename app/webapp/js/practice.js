@@ -28,7 +28,7 @@ function analysisMarkup(data){
  if(a.status==='owner')return `<div class="practice-feedback"><strong>Решение владельца</strong><p>${esc(a.comment||'Набор принят.')}</p></div>`;
  if(a.status!=='completed')return '<p class="practice-feedback">Работу проверит владелец. Результат появится здесь.</p>';
  const r=a.review;
- return `<div class="practice-feedback"><h3>Разбор: ${esc(r.score)}/100</h3>${r.strengths?.length?`<p>${esc(r.strengths.join(' · '))}</p>`:''}${r.issues?.length?`<ul>${r.issues.map(i=>`<li>${esc(i)}</li>`).join('')}</ul>`:''}<p>${esc(r.next_action)}</p></div>`;
+ return `<div class="practice-feedback"><h3>Разбор: ${esc(r.score)}/100</h3>${r.strengths?.length?`<p>${esc(r.strengths.join(' · '))}</p>`:''}${r.issues?.length?`<ul>${r.issues.map(i=>`<li>${esc(i)}</li>`).join('')}</ul>`:''}<p>${esc(r.next_action)}</p>${(r.frame_feedback||[]).map(f=>`<article><h4>Кадр ${esc(f.index)}${f.uncertain?' · нужен пересмотр':''}</h4><p>Техника: ${esc(f.technical)}</p><p>Субъективная оценка: ${esc(f.subjective)}</p><p>Исправление: ${esc(f.correction)}</p><p>Следующее задание: ${esc(f.next_task)}</p></article>`).join('')}</div>`;
 }
 function renderAssignment(data){
  current=data;

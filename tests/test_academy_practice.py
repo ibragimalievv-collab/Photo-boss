@@ -142,3 +142,16 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
         assert data["status"] == "COMPLETED" and data["score"] == 90
         assert data["analysis"] == result
         assert self.bot.send_message.await_count == 0
+
+    async def test_old_accepted_practice_is_not_lost_after_thirty_new_assignments(self):
+        self.finish_lessons()
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("INSERT INTO training_assignments(id,user_id,category_slug,status) VALUES(1,3,'woman','COMPLETED')"))
+            for i in range(2,34):
+                conn.execute(text("INSERT INTO training_assignments(id,user_id,category_slug,status) VALUES(:id,3,'man','ACTIVE')"),{'id':i})
+        response=await self.client.get('/api/miniapp/academy',headers={'X-Telegram-Init-Data':baseline.signed(1003)})
+        data=await response.json()
+        assert response.status==200
+        assert data['blocks'][0]['practiceDone']
+        assert not data['blocks'][1]['locked']
+        assert len(data['practices'])==30

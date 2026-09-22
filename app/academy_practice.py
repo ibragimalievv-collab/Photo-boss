@@ -99,7 +99,7 @@ class AcademyPractice:
             result = {"assignment": await self.detail_data(conn, actor, active["id"]) if active else None,
                 "ready": ready and not today_done, "todayDone": today_done,
                 "categories": [{"slug": c.slug, "title": c.title} for c in TRAINING_CATEGORIES
-                               if c.slug in allowed and (not latest or c.slug != latest["category_slug"])],
+                               if c.slug in allowed and (not latest or latest["status"] != "COMPLETED" or c.slug != latest["category_slug"])],
                 "history": [{"id": r["id"], "title": CATEGORY_BY_SLUG[r["category_slug"]].title,
                              "status": r["status"]} for r in assignments[:30]],
                 "queue": [{"id": r["id"], "name": r["name"],

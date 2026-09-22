@@ -1,5 +1,7 @@
 """Recruitment and employee overview, extending existing People and Academy."""
+import asyncio
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from aiohttp import web
@@ -11,6 +13,40 @@ from .models import utc_now
 from .people import People, check_editor, positive_id
 from .services.insights import cents, parsed
 from .services.onboarding import guides, quiz_for, quiz_kind
+
+HIRING_TERMS = ('Работа в Сочи, Анапе и Крыму. Опыт необязателен: предусмотрено обучение. '
+    'Рассматриваем кандидатов из других регионов. Оплата процентная, выплаты еженедельные. '
+    'Дорога компенсируется после приезда и минимум месяца работы. Жильё компенсируется частично.')
+REGIONS = {'Сочи', 'Анапа', 'Крым'}
+
+
+def contact_key(value):
+    value = value.strip().casefold()
+    telegram = re.fullmatch(r'(?:https?://)?(?:t\.me|telegram\.me)/([a-z0-9_]+)/*', value)
+    if telegram:
+        return '@' + telegram[1]
+    phone = re.sub(r'[\s()+.\-]', '', value)
+    if phone.isascii() and phone.isdecimal() and 10 <= len(phone) <= 15:
+        if len(phone) == 11 and phone.startswith('8'):
+            phone = '7' + phone[1:]
+        if len(phone) == 10:
+            phone = '7' + phone
+        return 'phone:' + phone
+    return value
+
+
+def optional_time(body, key):
+    value = body.get(key)
+    if not value:
+        return None
+    try:
+        result = datetime.fromisoformat(value)
+        if result.tzinfo is None:
+            raise ValueError
+        return result.astimezone(timezone.utc).replace(tzinfo=None)
+    except (ValueError, TypeError):
+        raise AccessError('Укажите время с часовым поясом.', 400) from None
+
 
 STAGES = {'NEW':'Новый','CONTACTED':'Общение','INTERVIEW':'Интервью','OFFER':'Предложение','DOCUMENTS':'Оформление','HIRED':'Принят','REJECTED':'Отказ'}
 TRANSITIONS = {'NEW':{'CONTACTED','REJECTED'},'CONTACTED':{'INTERVIEW','REJECTED'},'INTERVIEW':{'OFFER','REJECTED'},'OFFER':{'DOCUMENTS','REJECTED'},'DOCUMENTS':{'REJECTED'},'REJECTED':{'NEW'},'HIRED':set()}
@@ -31,16 +67,39 @@ class Team:
     def __init__(self,api):
         self.api=api
         self.people=People(api)
+        self.create_lock = asyncio.Lock()
+
+    async def check_recruiter(self,conn,uid):
+        rows=await self.api.rows(conn,"SELECT u.id FROM users u JOIN user_roles r ON r.user_id=u.id WHERE u.id=:uid AND u.active=TRUE AND r.role IN ('OWNER','ADMIN')",uid=uid)
+        if not rows: raise AccessError('Ответственным может быть только действующий владелец или администратор.',400)
 
     async def listing(self,request):
         actor=request['miniapp_actor'];check_editor(actor['roles'])
         async with self.api.engine.connect() as conn:
-            rows=await self.api.rows(conn,'SELECT * FROM hr_candidates ORDER BY updated_at DESC,id DESC LIMIT 300')
+            rows=await self.api.rows(conn,'''SELECT c.*,u.name AS responsible_name,
+                (SELECT MIN(started_at) FROM shift_check_ins WHERE user_id=c.employee_id AND status='STARTED') AS first_shift_at
+                FROM hr_candidates c LEFT JOIN users u ON u.id=COALESCE(c.responsible_id,c.created_by_id)
+                ORDER BY c.updated_at DESC,c.id DESC LIMIT 300''')
+            recruiters=await self.api.rows(conn,'''SELECT DISTINCT u.id,u.name FROM users u
+                JOIN user_roles r ON r.user_id=u.id WHERE u.active=TRUE AND r.role IN ('OWNER','ADMIN') ORDER BY u.name''')
             staff=await self.api.rows(conn,'SELECT id,name,active FROM users ORDER BY name')
             from .services.discipline import compare
             end = self.api.today()-timedelta(days=1)
             discipline = await compare(self.api,conn,end-timedelta(days=6),end)
-        return web.json_response({'items':[candidate(r) for r in rows],'stages':STAGES,'employees':[dict(r) for r in staff],'discipline':discipline})
+        return web.json_response({'items':[candidate(r) for r in rows],'stages':STAGES,'employees':[dict(r) for r in staff],'discipline':discipline,
+            'recruiters':[dict(r) for r in recruiters], 'terms':HIRING_TERMS,
+            'integrations':{'telegram':'not_connected','whatsapp':'not_connected','calls':'not_connected','search':'not_connected','calendar':'not_connected'},
+            'externalAutomationEnabled':False})
+
+    async def detail(self,request):
+        check_editor(request['miniapp_actor']['roles'])
+        cid=positive_id(request.match_info['id'])
+        async with self.api.engine.connect() as conn:
+            rows=await self.api.rows(conn,"""SELECT c.*,u.name AS responsible_name,
+                (SELECT MIN(started_at) FROM shift_check_ins WHERE user_id=c.employee_id AND status='STARTED') AS first_shift_at
+                FROM hr_candidates c LEFT JOIN users u ON u.id=COALESCE(c.responsible_id,c.created_by_id) WHERE c.id=:id""",id=cid)
+        if not rows: raise AccessError('Кандидат не найден.',404)
+        return web.json_response(candidate(rows[0]))
 
     async def discipline(self, request):
         check_editor(request['miniapp_actor']['roles'])
@@ -55,20 +114,32 @@ class Team:
     async def create(self,request):
         actor=request['miniapp_actor'];check_editor(actor['roles'])
         body=await self.api.body(request)
-        if set(body)!={'name','contact','source','role'} or body.get('role') not in {'PHOTOGRAPHER','MANAGER'}:
+        if not {'name','contact','source','role'} <= set(body) or set(body)-{'name','contact','source','role','region','responsibleId'} or body.get('role') not in ('PHOTOGRAPHER','MANAGER'):
             raise AccessError('Заполните имя, контакт, источник и рабочую роль.',400)
         values={k:field(body,k,n,required=True) for k,n in [('name',150),('contact',300),('source',150)]}
-        async with self.api.engine.begin() as conn:
+        region=field(body,'region',50)
+        if region and region not in REGIONS: raise AccessError('Выберите Сочи, Анапу или Крым.',400)
+        responsible=positive_id(body.get('responsibleId') or actor['id'])
+        async with self.create_lock, self.api.engine.begin() as conn:
             await self.people.current_editor(conn,actor['id'])
-            row=(await self.api.rows(conn,'''INSERT INTO hr_candidates(name,contact,source,role,stage,decision,notes,created_by_id,revision,created_at,updated_at)
-                VALUES (:name,:contact,:source,:role,'NEW','','[]',:actor,1,:now,:now) RETURNING id''',**values,role=body['role'],actor=actor['id'],now=utc_now()))[0]
+            await self.check_recruiter(conn,responsible)
+            if conn.dialect.name == 'postgresql':
+                # Covers different workers and older clients; no destructive merge of legacy duplicates.
+                await conn.execute(text('LOCK TABLE hr_candidates IN SHARE ROW EXCLUSIVE MODE'))
+            existing=await self.api.rows(conn,'SELECT id,contact FROM hr_candidates')
+            key=contact_key(values['contact'])
+            for c in existing:
+                if contact_key(c['contact']) == key:
+                    return web.json_response({'id':c['id'],'alreadyExists':True})
+            row=(await self.api.rows(conn,'''INSERT INTO hr_candidates(name,contact,source,role,stage,decision,notes,created_by_id,responsible_id,region,revision,created_at,updated_at)
+                VALUES (:name,:contact,:source,:role,'NEW','','[]',:actor,:responsible,:region,1,:now,:now) RETURNING id''',**values,role=body['role'],actor=actor['id'],responsible=responsible,region=region,now=utc_now()))[0]
             await self.api.audit_write(conn,actor,'candidate_created','hr_candidate',row['id'],json.dumps({'before':None,'after':values},ensure_ascii=False))
         return web.json_response({'id':row['id']},status=201)
 
     async def update(self,request):
         actor=request['miniapp_actor'];check_editor(actor['roles'])
         cid=positive_id(request.match_info['id']);body=await self.api.body(request)
-        if set(body)!={'revision','stage','interviewAt','decision','note'} or type(body['revision']) is not int or not isinstance(body['stage'],str) or body['stage'] not in STAGES:
+        if not {'revision','stage','interviewAt','decision','note'} <= set(body) or set(body)-{'revision','stage','interviewAt','decision','note','responsibleId','region','reminderAt'} or type(body['revision']) is not int or not isinstance(body['stage'],str) or body['stage'] not in STAGES:
             raise AccessError('Обновите карточку кандидата.',400)
         note=field(body,'note',2000);decision=field(body,'decision',2000)
         interview=None
@@ -85,6 +156,11 @@ class Team:
             if not rows: raise AccessError('Кандидат не найден.',404)
             old=rows[0]
             if old['revision']!=body['revision']: raise AccessError('Карточка изменена другим сотрудником. Обновите её.',409)
+            responsible=positive_id(body.get('responsibleId') or old['responsible_id'] or old['created_by_id'])
+            await self.check_recruiter(conn,responsible)
+            region=field(body,'region',50) if 'region' in body else old['region']
+            if region and region not in REGIONS: raise AccessError('Выберите Сочи, Анапу или Крым.',400)
+            reminder=optional_time(body,'reminderAt') if 'reminderAt' in body else old['reminder_at']
             stage=body['stage']
             if stage!=old['stage'] and stage not in TRANSITIONS[old['stage']]: raise AccessError('Сначала завершите предыдущий этап. Найм выполняется отдельной кнопкой.',409)
             if stage=='INTERVIEW' and interview is None: raise AccessError('Укажите время интервью.',400)
@@ -93,9 +169,9 @@ class Team:
             if note:
                 if len(notes)>=200: raise AccessError('В карточке достигнут предел 200 заметок.',409)
                 notes.append({'actorId':actor['id'],'at':str(utc_now()),'text':note})
-            new={'stage':stage,'interview_at':str(interview) if interview else None,'decision':decision}
-            await conn.execute(text('''UPDATE hr_candidates SET stage=:stage,interview_at=:interview,decision=:decision,notes=:notes,revision=revision+1,updated_at=:now WHERE id=:id'''),
-                {'stage':stage,'interview':interview,'decision':decision,'notes':json.dumps(notes,ensure_ascii=False),'now':utc_now(),'id':cid})
+            new={'stage':stage,'interview_at':str(interview) if interview else None,'decision':decision,'responsible_id':responsible,'region':region,'reminder_at':str(reminder) if reminder else None}
+            await conn.execute(text('''UPDATE hr_candidates SET stage=:stage,interview_at=:interview,decision=:decision,notes=:notes,responsible_id=:responsible,region=:region,reminder_at=:reminder,revision=revision+1,updated_at=:now WHERE id=:id'''),
+                {'stage':stage,'interview':interview,'decision':decision,'responsible':responsible,'region':region,'reminder':reminder,'notes':json.dumps(notes,ensure_ascii=False),'now':utc_now(),'id':cid})
             await self.api.audit_write(conn,actor,'candidate_updated','hr_candidate',cid,json.dumps({'before':{k:str(old[k]) if old[k] is not None else None for k in new},'after':new,'noteAdded':bool(note)},ensure_ascii=False))
         return web.json_response({'ok':True})
 
@@ -230,6 +306,6 @@ class Team:
 
 def install_team(app,api):
     service=Team(api)
-    for method,path,handler in [('GET','/discipline',service.discipline),('GET','/hr',service.listing),('POST','/hr',service.create),('PUT','/hr/{id}',service.update),('POST','/hr/{id}/hire',service.hire),('GET','/team/{id}/overview',service.overview),('GET','/onboarding',service.onboarding),('POST','/onboarding/progress',service.progress),('POST','/onboarding/assessment',service.assessment)]:
+    for method,path,handler in [('GET','/discipline',service.discipline),('GET','/hr',service.listing),('POST','/hr',service.create),('GET','/hr/{id}',service.detail),('PUT','/hr/{id}',service.update),('POST','/hr/{id}/hire',service.hire),('GET','/team/{id}/overview',service.overview),('GET','/onboarding',service.onboarding),('POST','/onboarding/progress',service.progress),('POST','/onboarding/assessment',service.assessment)]:
         app.router.add_route(method,'/api/miniapp'+path,handler)
     return service

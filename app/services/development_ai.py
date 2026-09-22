@@ -68,7 +68,7 @@ async def analyze_batch(images):
         if not raw.startswith((b'\xff\xd8\xff',b'\x89PNG')) or len(raw)>8*1024*1024: return {'status':'invalid_image'}
         mime='image/png' if raw.startswith(b'\x89PNG') else 'image/jpeg'
         content += [{'type':'input_text','text':f'photo_id={pid}'},{'type':'input_image','detail':'high','image_url':f'data:{mime};base64,'+base64.b64encode(raw).decode()}]
-    response=await structured('Оцени только видимое: повторяющиеся ракурсы, свет, резкость, композицию, позу. Не оценивай личность, привлекательность, здоровье или эмоции как факт. Не выдумывай EXIF, условия съёмки и детали. Для каждого кадра укажи неопределённость; предполагаемые дубли группируй по photo_id.',content,BATCH_SCHEMA,'shoot_frames')
+    response=await structured('Оцени только видимое: повторяющиеся ракурсы, свет, резкость, композицию, позу. Не оценивай личность, привлекательность, здоровье или эмоции как факт. Не выдумывай EXIF, условия съёмки и детали. Технический брак описывай в technical, субъективную оценку композиции отдельно в composition. В recommendation свяжи конкретное исправление и следующее упражнение с photo_id. Не повторяй общие советы. Для каждого кадра укажи неопределённость; если уверен в наблюдениях, uncertainty должна быть пустой строкой; предполагаемые дубли группируй по photo_id.',content,BATCH_SCHEMA,'shoot_frames')
     if response['status']=='completed':
         if not valid_value(response.get('data'),BATCH_SCHEMA): return {'status':'unavailable'}
         frames=response['data']['frames']

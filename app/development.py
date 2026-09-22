@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .config import config
-from .miniapp_security import AccessError
+from .miniapp_security import AccessError, require_owner
 from .models import Booking, Photo, Sale, ShootDevelopmentReview, Shooting, utc_now
 from .people import positive_id
 from .services import development_ai as ai
@@ -95,7 +95,10 @@ async def review_one(factory,bot):
             part={'frameIds':[f['photo_id'] for batch in summary_chunk for f in batch['frames']],'summary':response['data']}
             row.summary_parts=json.dumps(parts+[part],ensure_ascii=False);row.status='PENDING';row.attempts=0;row.claimed_at=None;row.last_error=None
         else:
-            row.result=json.dumps(response['data'],ensure_ascii=False);row.status='COMPLETED';row.completed_at=utc_now();row.last_error=None
+            row.result=json.dumps(response['data'],ensure_ascii=False)
+            uncertain=any(f.get('uncertainty','').strip() for batch in batches for f in batch['frames'])
+            row.status='NEEDS_REVIEW' if uncertain else 'COMPLETED'
+            row.completed_at=None if uncertain else utc_now();row.last_error=None
         await session.commit()
     return True
 
@@ -109,10 +112,28 @@ class Development:
             reviews=await self.api.rows(conn,'SELECT * FROM shoot_development_reviews '+('' if owner else 'WHERE photographer_id=:uid ')+'ORDER BY id DESC LIMIT 50',uid=a['id'])
             sessions=await self.api.rows(conn,'SELECT * FROM sales_training_sessions WHERE user_id=:uid ORDER BY id DESC LIMIT 30',uid=a['id'])
         return web.json_response({'configured':bool(config.openai_api_key),'rules':ai.SALES_RULES,'scenarios':ai.SALES_SCENARIOS,
-            'reviews':[{'id':r['id'],'shootingId':r['shooting_id'],'photographerId':r['photographer_id'],'status':r['status'],
+            'reviews':[{'id':r['id'],'shootingId':r['shooting_id'],'photographerId':r['photographer_id'],'status':r['status'],'canReview':owner and r['status']=='NEEDS_REVIEW',
                 'total':len(json.loads(r['photo_ids'])),'analyzed':sum(len(b['frames']) for b in json.loads(r['analyzed'])),
                 'summaryParts':len(json.loads(r['summary_parts'])),'batches':json.loads(r['analyzed']),'result':parsed(r['result']),'error':r['last_error'],'at':str(r['created_at'])} for r in reviews],
             'sessions':[{'id':s['id'],'clientType':s['client_type'],'status':s['status'],'revision':s['revision'],'transcript':json.loads(s['transcript']),'evaluation':parsed(s['evaluation'])} for s in sessions]})
+
+    async def resolve_review(self,request):
+        actor=request['miniapp_actor'];require_owner(actor['roles'])
+        rid=positive_id(request.match_info['id']);body=await self.api.body(request)
+        if set(body)!={'comment'} or not isinstance(body['comment'],str) or not 3<=len(body['comment'].strip())<=2000:
+            raise AccessError('Запишите результат пересмотра (3–2000 символов).',400)
+        async with self.api.engine.begin() as conn:
+            from .people import People
+            roles=await People(self.api).current_editor(conn,actor['id'])
+            require_owner(roles)
+            rows=await self.api.rows(conn,'SELECT status,result FROM shoot_development_reviews WHERE id=:id FOR UPDATE',id=rid)
+            if not rows: raise AccessError('Разбор не найден.',404)
+            if rows[0]['status']!='NEEDS_REVIEW': raise AccessError('Этот разбор уже не ожидает пересмотра.',409)
+            result=parsed(rows[0]['result'])
+            result['humanReview']={'actorId':actor['id'],'at':str(utc_now()),'comment':body['comment'].strip()}
+            await conn.execute(text("UPDATE shoot_development_reviews SET status='COMPLETED',result=:result,completed_at=:now WHERE id=:id"),{'id':rid,'result':json.dumps(result,ensure_ascii=False),'now':utc_now()})
+            await self.api.audit_write(conn,actor,'shoot_review_resolved','shoot_development_review',rid,json.dumps(result['humanReview'],ensure_ascii=False))
+        return web.json_response({'ok':True})
 
     async def start(self,request):
         a=request['miniapp_actor'];body=await self.api.body(request)
@@ -167,6 +188,6 @@ async def development_loop(engine,bot):
 
 def install_development(app,api):
     service=Development(api)
-    for method,path,handler in [('GET','/academy/development',service.listing),('POST','/academy/sales-training',service.start),('POST','/academy/sales-training/{id}/turn',service.turn),('POST','/academy/shoot-reviews/{id}/retry',service.retry)]:
+    for method,path,handler in [('GET','/academy/development',service.listing),('POST','/academy/shoot-reviews/{id}/resolve',service.resolve_review),('POST','/academy/sales-training',service.start),('POST','/academy/sales-training/{id}/turn',service.turn),('POST','/academy/shoot-reviews/{id}/retry',service.retry)]:
         app.router.add_route(method,'/api/miniapp'+path,handler)
     return service

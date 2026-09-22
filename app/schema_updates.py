@@ -13,6 +13,9 @@ async def add_columns(connection, table, columns):
 
 async def upgrade(connection):
     tables = await connection.run_sync(lambda conn: set(inspect(conn).get_table_names()))
+    if 'hr_candidates' in tables:
+        await add_columns(connection, 'hr_candidates', {'responsible_id': 'INTEGER REFERENCES users(id)',
+            'region': "VARCHAR(50) NOT NULL DEFAULT ''", 'reminder_at': 'TIMESTAMP'})
     if 'shoot_development_reviews' in tables:
         await add_columns(connection,'shoot_development_reviews',{'summary_parts':"TEXT NOT NULL DEFAULT '[]'"})
     if 'sales' in tables:
