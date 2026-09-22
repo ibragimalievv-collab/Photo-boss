@@ -59,6 +59,7 @@ class Member:
     session: str
     seen: float
     signals: deque = field(default_factory=lambda: deque(maxlen=MAX_SIGNALS))
+    sent_signals: dict = field(default_factory=dict)
     sequence: int = 0
     audio: bool = True
     video: bool = False
@@ -293,7 +294,10 @@ class WorkCalls:
                 raise AccessError("Слишком большой запрос.", 413)
         try:
             body = json.loads(raw)
-            if not isinstance(body, dict) or set(body) != {"callId", "session", "to", "toSession", "data"}:
+            if not isinstance(body, dict) or set(body) not in ({"callId", "session", "to", "toSession", "data"}, {"callId", "session", "to", "toSession", "data", "signalId"}):
+                raise ValueError
+            signal_id = body.get("signalId")
+            if signal_id is not None and (not isinstance(signal_id, str) or not 16 <= len(signal_id) <= 64):
                 raise ValueError
             data = body["data"]
             if not isinstance(data, dict) or data.get("type") not in ("offer", "answer", "candidate"):
@@ -313,11 +317,20 @@ class WorkCalls:
             target = room.members.get(target_id)
             if target is None or target_id == actor["id"] or target.session != body["toSession"]:
                 raise AccessError("Участник отключился.", 409)
+            fingerprint = hashlib.sha256(json.dumps([target_id, target.session, data], sort_keys=True).encode()).hexdigest()
+            if signal_id is not None and signal_id in member.sent_signals:
+                if member.sent_signals[signal_id] != fingerprint:
+                    raise AccessError("Идентификатор сигнала уже использован.", 409)
+                return web.json_response({"ok": True})
             # Bound unacknowledged signals; do not allow a peer to exhaust memory.
             if target.signals and len(target.signals) == MAX_SIGNALS and self.clock() - target.signals[0]["at"] < 10:
                 raise AccessError("Слишком много сигналов.", 429)
             if sum(len(json.dumps(s["data"])) for s in target.signals) + len(raw) > 512000:
                 raise AccessError("Слишком много сигналов.", 429)
+            if signal_id is not None:
+                member.sent_signals[signal_id] = fingerprint
+                if len(member.sent_signals) > 1024:
+                    del member.sent_signals[next(iter(member.sent_signals))]
             target.sequence += 1
             target.signals.append({"seq": target.sequence, "from": actor["id"],
                                    "session": member.session, "data": data, "at": self.clock()})

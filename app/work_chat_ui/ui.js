@@ -1,6 +1,7 @@
 import {esc} from '/app/js/domain.js';
 
 const paths={
+ history:'M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7M12 7v5l3 2',
  more:'M4 12h.01M12 12h.01M20 12h.01',trash:'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7',
  flip:'M20 7V3l-3 3M4 17v4l3-3M20 7a9 9 0 0 0-15-2M4 17a9 9 0 0 0 15 2M8 12a4 4 0 1 1 8 0 4 4 0 0 1-8 0',
  back:'m15 18-6-6 6-6',close:'m6 6 12 12M6 18 18 6',search:'M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
