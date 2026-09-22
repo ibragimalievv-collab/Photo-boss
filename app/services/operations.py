@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -283,7 +283,7 @@ async def backup_payload(session):
     ]:
         rows = (await session.scalars(select(model).order_by(model.id))).all()
         data[name] = [
-            {field: str(getattr(row, field)) if isinstance(getattr(row, field), (date, datetime, Decimal)) else getattr(row, field) for field in fields}
+            {field: str(getattr(row, field)) if isinstance(getattr(row, field), (date, datetime, time, Decimal)) else getattr(row, field) for field in fields}
             for row in rows
         ]
     return json.dumps(data, ensure_ascii=False, indent=2).encode()
