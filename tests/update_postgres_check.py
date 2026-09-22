@@ -198,7 +198,7 @@ async def main():
         async with factory() as session:
             photo = await session.scalar(select(Photo))
             session.add(PhotoStorage(photo_id=photo.id, shooting_id=photo.shooting_id,
-                                     telegram_file_id='fixture-original', source_kind='DOCUMENT'))
+                                     telegram_file_id='fixture-original', telegram_unique_id='fixture-unique', source_kind='DOCUMENT'))
             await session.commit()
         with patch.object(photo_storage, 'Session', factory):
             claims = await asyncio.gather(photo_storage._claim_job(), photo_storage._claim_job())
