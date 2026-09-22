@@ -462,7 +462,7 @@ class MiniApp:
         cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
         async with self.engine.connect() as conn:
             completed = await self.rows(conn, "SELECT topic_slug FROM academy_lesson_progress WHERE user_id=:uid", uid=uid)
-            practices = await self.rows(conn, "SELECT id,category_slug,status FROM training_assignments WHERE user_id=:uid ORDER BY id DESC LIMIT 30", uid=uid)
+            practices = await self.rows(conn, "SELECT id,category_slug,status FROM training_assignments WHERE user_id=:uid ORDER BY id DESC", uid=uid)
             reviews = await self.rows(conn, "SELECT id,quality_score,issues,recommendation FROM academy_reviews WHERE user_id=:uid ORDER BY id DESC LIMIT 30", uid=uid)
             certificate = await self.rows(conn, "SELECT certificate_no,verification_code,final_score,issued_at FROM academy_certificates WHERE user_id=:uid AND revoked_at IS NULL", uid=uid)
             locations = await self.rows(conn, "SELECT id,name,description,shot_plan FROM academy_locations WHERE active=TRUE ORDER BY name")
@@ -501,7 +501,7 @@ class MiniApp:
         return web.json_response({"lessons": lessons, "blocks": blocks,
             "currentBlock": current["number"] if current else None,
             "carryOver": True, "completed": done, "points": len(done)*10,
-            "practices": [{"id": p["id"], "category": p["category_slug"], "status": p["status"]} for p in practices],
+            "practices": [{"id": p["id"], "category": p["category_slug"], "status": p["status"]} for p in practices[:30]],
             "reviews": [{"id": r["id"], "score": r["quality_score"], "issues": r["issues"], "recommendation": r["recommendation"]} for r in reviews],
             "personalTip": tip,
             "certificate": ({"number": cert["certificate_no"], "score": cert["final_score"],
