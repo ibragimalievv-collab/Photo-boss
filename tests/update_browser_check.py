@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -36,6 +36,9 @@ async def main():
     chat=install_work_chat(app,api);install_work_calls(app,chat);install_academy_practice(app,api)
     client=TestClient(TestServer(app));await client.start_server()
     output=Path(os.getenv('CALLS_QA_DIR','/tmp/photo-boss-update-qa'));output.mkdir(parents=True,exist_ok=True)
+    ai_config=patch('app.development.config',SimpleNamespace(openai_api_key='fixture-key'))
+    ai_reply=patch('app.development.ai.roleplay',AsyncMock(return_value={'status':'completed','data':{'reply':'Объясните стоимость до выбора кадров.','score':80,'errors':['Цена названа поздно'],'recommendations':['Назовите условия заранее']}}))
+    ai_config.start();ai_reply.start()
     offline=False
     errors=[]
     try:
@@ -93,6 +96,15 @@ async def main():
                         await page.get_by_role('button',name='Photo',exact=True).last.click()
                         await page.get_by_role('heading',name='Photo',exact=True).wait_for()
                         await page.get_by_text('История записей и съёмок',exact=True).click()
+                    if name == 'development':
+                        await page.get_by_role('button',name='Тренироваться с AI',exact=True).first.click()
+                        await page.locator('#salesTrainingForm textarea').fill('Съёмка бесплатная, выбранный кадр стоит 400 рублей.')
+                        async with page.expect_response(lambda r:r.url.endswith('/turn') and r.status==200):
+                            await page.get_by_role('button',name='Завершить и получить оценку',exact=True).click()
+                        await page.get_by_role('heading',name='Оценка 80/100',exact=True).wait_for()
+                        await page.reload()
+                        await page.get_by_role('button',name='№1 · budget · завершена · 80/100',exact=True).click()
+                        await page.get_by_role('heading',name='Оценка 80/100',exact=True).wait_for()
                     if name == 'onboarding':
                         for field in ('price','receipt','sync','flag'):
                             await page.locator(f'#entryQuiz [name={field}][value="1"]').check()
@@ -117,6 +129,7 @@ async def main():
                 print('Mobile routes, no overflow, real IndexedDB queue and replay: PASS')
             finally: await browser.close()
     finally:
+        ai_reply.stop();ai_config.stop()
         await client.close();await engine.dispose()
 
 

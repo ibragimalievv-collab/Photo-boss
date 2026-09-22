@@ -13,6 +13,8 @@ async def add_columns(connection, table, columns):
 
 async def upgrade(connection):
     tables = await connection.run_sync(lambda conn: set(inspect(conn).get_table_names()))
+    if 'shoot_development_reviews' in tables:
+        await add_columns(connection,'shoot_development_reviews',{'summary_parts':"TEXT NOT NULL DEFAULT '[]'"})
     if 'sales' in tables:
         await add_columns(connection,'sales',{'manager_percent_applied':'VARCHAR(60)',
             'manager_payroll_entry_id':'INTEGER REFERENCES payroll_entries(id) ON DELETE SET NULL'})

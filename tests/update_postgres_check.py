@@ -22,6 +22,10 @@ from app.models import (
     Notification,
     OperationRequest,
     Package,
+    Photo,
+    Sale,
+    ShootDevelopmentReview,
+    Shooting,
     User,
     UserRole,
 )
@@ -56,8 +60,8 @@ async def main():
             await conn.execute(text("INSERT INTO users(id,tg_id,name,active,created_at) VALUES (1,9876543210,'Before',true,CURRENT_TIMESTAMP)"))
             await conn.execute(text("INSERT INTO notifications(user_id,text,sent,created_at) VALUES (1,'Legacy notification',true,CURRENT_TIMESTAMP)"))
 
-        migrations = sorted(p for p in Path('migrations').glob('*.sql') if 4<=int(p.name.split('_')[0])<=10)
-        assert len(migrations) == 7
+        migrations = sorted(p for p in Path('migrations').glob('*.sql') if 4<=int(p.name.split('_')[0])<=11)
+        assert len(migrations) == 8
         for _ in range(2):
             async with engine.begin() as conn:
                 driver = (await conn.get_raw_connection()).driver_connection
@@ -96,7 +100,7 @@ async def main():
             assert entry.user_id is None, 'Actor leaked between transactions'
             triggers = await conn.scalar(text("SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=:schema AND t.tgname LIKE 'pb_audit_%'"), {'schema': schema})
             assert triggers == len(TABLES)
-        print('PostgreSQL migrations 004–010 twice, legacy data, audit actor/snapshots/rollback: PASS')
+        print('PostgreSQL migrations 004–011 twice, legacy data, audit actor/snapshots/rollback: PASS')
 
         async with factory() as session:
             session.add_all([UserRole(user_id=1, role='MANAGER'), Hotel(id=1, name='Hotel'),
@@ -135,6 +139,23 @@ async def main():
         async with factory() as session:
             assert len((await session.scalars(select(CashMovement))).all())==1
         print('PostgreSQL concurrent expense replay and financial settings audit: PASS')
+        from app.development import queue_reviews
+        from app.models import utc_now
+        async with factory() as session:
+            booking=await session.get(Booking,1);booking.photographer_id=1
+            shooting=await session.scalar(select(Shooting).where(Shooting.booking_id==1))
+            shooting.full_upload_completed_at=utc_now()
+            session.add(Photo(shooting_id=shooting.id,file_id='fixture-frame'))
+            session.add(Sale(booking_id=1,created_by_id=1,credited_user_id=1,sold_photos=1,amount=400,percent=0,commission=0))
+            await session.commit()
+        async def enqueue():
+            async with factory() as session: return await queue_reviews(session)
+        await asyncio.gather(enqueue(),enqueue())
+        async with factory() as session:
+            reviews=(await session.scalars(select(ShootDevelopmentReview))).all()
+            assert len(reviews)==1 and reviews[0].summary_parts=='[]'
+        print('PostgreSQL concurrent AI enqueue: one review per complete frame set: PASS')
+
 
     finally:
         async with engine.begin() as conn:

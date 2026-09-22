@@ -791,6 +791,7 @@ class ShootDevelopmentReview(Base):
     fingerprint: Mapped[str] = mapped_column(String(64))
     photo_ids: Mapped[str] = mapped_column(Text)
     analyzed: Mapped[str] = mapped_column(Text, default='[]')
+    summary_parts: Mapped[str] = mapped_column(Text, default='[]', server_default='[]')
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(30), default='PENDING', index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)

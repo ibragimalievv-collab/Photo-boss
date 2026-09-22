@@ -7,8 +7,8 @@ from datetime import timedelta
 
 from aiogram.exceptions import TelegramAPIError
 from aiohttp import ClientError, web
-from sqlalchemy import select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import select, text, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .config import config
@@ -34,8 +34,16 @@ async def queue_reviews(session):
         fingerprint=hashlib.sha256(json.dumps(ids).encode()).hexdigest()
         existing=await session.scalar(select(ShootDevelopmentReview.id).where(ShootDevelopmentReview.shooting_id==shooting.id,ShootDevelopmentReview.fingerprint==fingerprint))
         if existing: continue
-        session.add(ShootDevelopmentReview(shooting_id=shooting.id,photographer_id=booking.photographer_id,fingerprint=fingerprint,photo_ids=json.dumps(ids)))
-        count+=1
+        try:
+            async with session.begin_nested():
+                session.add(ShootDevelopmentReview(shooting_id=shooting.id,photographer_id=booking.photographer_id,fingerprint=fingerprint,photo_ids=json.dumps(ids)))
+                await session.flush()
+            count+=1
+        except IntegrityError:
+            # A second worker may have queued the same immutable frame set.
+            if not await session.scalar(select(ShootDevelopmentReview.id).where(ShootDevelopmentReview.shooting_id==shooting.id,ShootDevelopmentReview.fingerprint==fingerprint)):
+                raise
+
     await session.commit()
     return count
 
@@ -43,14 +51,20 @@ async def queue_reviews(session):
 async def review_one(factory,bot):
     if not config.openai_api_key: return False
     async with factory() as session:
+        deadline=utc_now()-timedelta(minutes=5)
+        expired=await session.execute(update(ShootDevelopmentReview).where(ShootDevelopmentReview.status=='RUNNING',ShootDevelopmentReview.attempts>=5,ShootDevelopmentReview.claimed_at<deadline).values(status='FAILED',last_error='Последняя попытка прервана. Сохранённые кадры доступны; запустите повтор.'))
         row=await session.scalar(select(ShootDevelopmentReview).where(ShootDevelopmentReview.status.in_(['PENDING','RETRY','RUNNING']),ShootDevelopmentReview.attempts<5,
             (ShootDevelopmentReview.claimed_at.is_(None)) | (ShootDevelopmentReview.claimed_at<utc_now()-timedelta(minutes=5))).order_by(ShootDevelopmentReview.id).with_for_update(skip_locked=True).limit(1))
-        if not row: return False
-        row.status='RUNNING';row.claimed_at=utc_now();row.attempts+=1
-        rid=row.id;ids=json.loads(row.photo_ids);batches=json.loads(row.analyzed)
+        if not row:
+            await session.commit()
+            return bool(expired.rowcount)
+        claim=utc_now()
+        row.status='RUNNING';row.claimed_at=claim;row.attempts+=1
+        rid=row.id;ids=json.loads(row.photo_ids);batches=json.loads(row.analyzed);parts=json.loads(row.summary_parts)
         done={f['photo_id'] for b in batches for f in b['frames']}
         pending=[pid for pid in ids if pid not in done][:6]
         photos=list((await session.scalars(select(Photo).where(Photo.id.in_(pending)))).all()) if pending else []
+        summary_chunk=batches[len(parts)*6:(len(parts)+1)*6] if len(batches)>6 and len(parts)*6<len(batches) and not pending else []
         await session.commit()
     error=None;response=None
     try:
@@ -63,17 +77,23 @@ async def review_one(factory,bot):
                 await bot.download(photo.file_id,destination=data,timeout=20)
                 images.append((photo.id,data.getvalue()))
             response=await ai.analyze_batch(images)
-        else: response=await ai.summarize_shoot(batches)
+        elif summary_chunk: response=await ai.summarize_shoot(summary_chunk)
+        else: response=await ai.summarize_shoot({'segments':parts,'totalFrames':len(ids)} if parts else batches)
         if response['status']!='completed': error='AI недоступен или вернул неполные данные. Анализ не завершён.'
     except (TelegramAPIError, ClientError, TimeoutError, ValueError, OSError, KeyError, TypeError) as exc:
         error=str(exc) if isinstance(exc,ValueError) else 'Не удалось получить фотографии или выполнить анализ. Повторите позднее.'
     async with factory() as session:
-        row=await session.get(ShootDevelopmentReview,rid)
+        row=await session.get(ShootDevelopmentReview,rid,with_for_update=True)
+        if not row or row.status!='RUNNING' or row.claimed_at!=claim:
+            return True  # The old worker cannot overwrite a newer claim/retry.
         if error:
             row.status='FAILED' if row.attempts>=5 else 'RETRY';row.last_error=error
             # claimed_at gives bounded backoff, including after a process crash.
         elif pending:
             row.analyzed=json.dumps(batches+[response['data']],ensure_ascii=False);row.status='PENDING';row.attempts=0;row.claimed_at=None;row.last_error=None
+        elif summary_chunk:
+            part={'frameIds':[f['photo_id'] for batch in summary_chunk for f in batch['frames']],'summary':response['data']}
+            row.summary_parts=json.dumps(parts+[part],ensure_ascii=False);row.status='PENDING';row.attempts=0;row.claimed_at=None;row.last_error=None
         else:
             row.result=json.dumps(response['data'],ensure_ascii=False);row.status='COMPLETED';row.completed_at=utc_now();row.last_error=None
         await session.commit()
@@ -91,7 +111,7 @@ class Development:
         return web.json_response({'configured':bool(config.openai_api_key),'rules':ai.SALES_RULES,'scenarios':ai.SALES_SCENARIOS,
             'reviews':[{'id':r['id'],'shootingId':r['shooting_id'],'photographerId':r['photographer_id'],'status':r['status'],
                 'total':len(json.loads(r['photo_ids'])),'analyzed':sum(len(b['frames']) for b in json.loads(r['analyzed'])),
-                'batches':json.loads(r['analyzed']),'result':parsed(r['result']),'error':r['last_error'],'at':str(r['created_at'])} for r in reviews],
+                'summaryParts':len(json.loads(r['summary_parts'])),'batches':json.loads(r['analyzed']),'result':parsed(r['result']),'error':r['last_error'],'at':str(r['created_at'])} for r in reviews],
             'sessions':[{'id':s['id'],'clientType':s['client_type'],'status':s['status'],'revision':s['revision'],'transcript':json.loads(s['transcript']),'evaluation':parsed(s['evaluation'])} for s in sessions]})
 
     async def start(self,request):
@@ -117,7 +137,7 @@ class Development:
             response=await ai.roleplay(s['client_type'],transcript,body['finish'])
             if response['status']!='completed': raise AccessError('AI временно недоступен. Ваш ход не потерян в форме; попробуйте снова.',503)
             result=response['data']
-            if not isinstance(result.get('reply'),str) or (body['finish'] and (type(result.get('score')) is not int or not 0<=result['score']<=100)): raise AccessError('AI вернул некорректную оценку; повторите попытку.',503)
+            if not ai.valid_roleplay(result,body['finish']): raise AccessError('AI вернул некорректную оценку; повторите попытку.',503)
             transcript.append({'role':'coach' if body['finish'] else 'client','text':result['reply']})
             await conn.execute(text('UPDATE sales_training_sessions SET transcript=:transcript,status=:status,revision=revision+1,evaluation=:evaluation WHERE id=:id'),{'transcript':json.dumps(transcript,ensure_ascii=False),'status':'COMPLETED' if body['finish'] else 'ACTIVE','evaluation':json.dumps(result,ensure_ascii=False) if body['finish'] else None,'id':sid})
         return web.json_response({'ok':True})

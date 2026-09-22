@@ -104,6 +104,8 @@ async def main():
         storage = YandexDisk(token, client_id)
         if token:
             await storage.verify(write_test=True)
+        from .development import development_loop
+        development_task = asyncio.create_task(development_loop(engine,bot))
         operations_task = asyncio.create_task(operations_loop(bot))
         storage_task = asyncio.create_task(storage_loop(bot, storage)) if token else None
         try:
@@ -114,6 +116,9 @@ async def main():
                 bot, allowed_updates=dispatcher.resolve_used_update_types(), close_bot_session=False,
             )
         finally:
+            development_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await development_task
             operations_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await operations_task
