@@ -29,10 +29,12 @@ from app.miniapp_security import (
     MINIAPP_SESSION_MAX_AGE,
     AccessError,
     financial_period,
+    owner_launch_token,
     parse_shift,
     role_permissions,
     utc_bounds,
     validate_init_data,
+    validate_owner_launch_token,
     webhook_secret,
 )
 
@@ -85,6 +87,17 @@ def test_webhook_secret_not_public_token_and_rotates():
     assert webhook_secret(TOKEN) == webhook_secret(TOKEN)
     assert webhook_secret(TOKEN) != webhook_secret(TOKEN + "rotated")
     assert TOKEN not in webhook_secret(TOKEN)
+
+
+def test_owner_fallback_token_is_signed_short_lived_and_tamper_safe():
+    now = 1_800_000_000
+    value = owner_launch_token(1001, TOKEN, now=now, ttl=120)
+    assert validate_owner_launch_token(value, TOKEN, now=now + 60) == 1001
+    with pytest.raises(AccessError):
+        validate_owner_launch_token(value + "0", TOKEN, now=now + 60)
+    with pytest.raises(AccessError):
+        validate_owner_launch_token(value, TOKEN, now=now + 121)
+    assert TOKEN not in value
 
 
 def test_admin_plus_staff_remains_today_only():
