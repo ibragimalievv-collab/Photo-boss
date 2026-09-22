@@ -180,7 +180,7 @@ function install() {
    return;
   }
   if(busy||!data?.eligible)return;
-  const version=generation;busy=true;draw();
+  const version=generation;let openReport=false;busy=true;draw();
   try{
    if(act==='location'){
     const captured=await getLocation(tg);if(version!==generation)return;
@@ -195,10 +195,11 @@ function install() {
     if(!navigator.onLine||data.start?.status==='PENDING_REVIEW')await queueOffline();
     else try{data=await api('/attendance/photo',{method:'POST',body:{purpose,date:data.date,image:photo}});photo=null;point=null;}
     catch(e){if(e.status&&e.status<500)throw e;await queueOffline();}
+    openReport=purpose==='end';
    }
    failure='';
   }catch(error){failure=error.message;}
-  finally{busy=false;updateCard();draw();}
+  finally{busy=false;updateCard();draw();if(openReport){close();location.hash='workday';}}
  },true);
  dialog.addEventListener('cancel',e=>{if(busy)e.preventDefault();else{generation++;stopCamera();photo=null;}});
  new MutationObserver(card).observe(root,{childList:true,subtree:false});

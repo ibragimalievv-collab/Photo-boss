@@ -137,9 +137,10 @@ async def main():
                         await wait_async(page, "()=>document.querySelector('#attCameraVideo')?.videoWidth>0")
                         await dialog.locator('[data-att=snap]').click()
                         await dialog.locator('[data-att=confirm]').click()
-                    await dialog.get_by_role('heading', name='Ожидает проверки руководителем').wait_for()
-                    await dialog.locator('[data-att=close]').click()
-                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length===8;}")
+                    await page.get_by_role('heading', name='Итоги смены', exact=True).wait_for()
+                    await page.locator('#shiftNote [name=note]').fill('Connection was unavailable at shift close')
+                    await page.locator('#shiftNote button').click()
+                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length===9;}")
                     # A new page removes in-memory state; only SW and IndexedDB remain.
                     await page.close()
                     page = await context.new_page()
@@ -150,16 +151,17 @@ async def main():
                     await context.set_offline(False)
                     await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.kind==='sale_complete'&&r.status==='local'&&r.error);}")
                     await page.get_by_role('button', name='Синхронизировать сейчас').click()
-                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');const rows=await m.outboxRows();return rows.length===8&&rows.every(r=>r.status==='synced'&&!r.blob);}")
+                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');const rows=await m.outboxRows();return rows.length===9&&rows.every(r=>r.status==='synced'&&!r.blob);}")
                     async with factory() as session:
                         assert await session.scalar(select(func.count(Booking.id))) == 2
                         assert await session.scalar(select(func.count(Sale.id))) == 1
                         assert await session.scalar(select(func.count(Receipt.id))) == 1
                         assert await session.scalar(select(func.count(PayrollEntry.id))) == 1
-                        assert await session.scalar(select(func.count(OperationRequest.id))) == 8
+                        assert await session.scalar(select(func.count(OperationRequest.id))) == 9
                         assert (await session.scalar(select(Sale))).amount == 400
                         assert (await session.scalar(select(ShiftCheckIn))).status == 'PENDING_REVIEW'
-                        assert (await session.scalar(select(ShiftCheckOut))).status == 'PENDING_REVIEW'
+                        end = await session.scalar(select(ShiftCheckOut))
+                        assert end.status == 'PENDING_REVIEW' and end.report_note == 'Connection was unavailable at shift close'
                     assert lost and not errors, errors
                     assert await page.evaluate("async()=>{for(const name of await caches.keys()){for(const request of await (await caches.open(name)).keys())if(new URL(request.url).pathname.startsWith('/api/'))return false;}return true;}")
                     output = Path(os.getenv('CALLS_QA_DIR', '/tmp/photo-boss-calls-qa'))

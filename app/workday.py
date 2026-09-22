@@ -30,10 +30,11 @@ class Workday:
             sale_rows=await self.api.rows(conn,'SELECT id,amount,payment_status FROM sales WHERE credited_user_id=:uid AND created_at>=:lo AND created_at<:hi',uid=a['id'],lo=lo,hi=hi)
             bookings=await self.api.rows(conn,'SELECT id,status FROM bookings WHERE (photographer_id=:uid OR manager_id=:uid) AND shoot_date=:day',uid=a['id'],day=day)
             close=await self.api.rows(conn,'SELECT status,ended_at,report_note,report_saved_at FROM shift_check_outs WHERE user_id=:uid AND shift_date=:day',uid=a['id'],day=day)
-        return web.json_response({'date':str(day),'items':[i|{'done':done.get(i['key'],False)} for i in items],
+        return web.json_response({'date':str(day),'timezone':str(self.api.tz),'items':[i|{'done':done.get(i['key'],False)} for i in items],
             'summary':{'sales':len(sale_rows),'revenue':sum(cents(r['amount']) for r in sale_rows),'unpaid':sum(r['payment_status']!='PAID' for r in sale_rows),'bookings':len(bookings),'cancelled':sum(b['status'] in ('CANCELLED','REJECTED') for b in bookings)},
             'sales':[{'id':r['id'],'amount':cents(r['amount'])} for r in sale_rows],
             'closed':bool(close and close[0]['status']=='FINISHED'),'note':close[0]['report_note'] or '' if close else '',
+            'canReport':bool(close and close[0]['status'] in ('FINISHED','PENDING_REVIEW')),
             'reportSavedAt':str(close[0]['report_saved_at']) if close and close[0]['report_saved_at'] else None,
             'canConfigure':bool({'OWNER','ADMIN'} & set(a['roles']))})
 
@@ -121,8 +122,8 @@ class Workday:
                     ON CONFLICT(user_id,shift_date,item_key) DO UPDATE SET done=excluded.done,updated_at=excluded.updated_at'''),{'uid':a['id'],'day':day,'item':data['itemKey'],'done':data['done'],'now':utc_now()})
             else:
                 if set(data)!={'note','expectedSavedAt'} or not isinstance(data['note'],str) or len(data['note'])>2000: raise AccessError('Замечание — до 2000 символов.',400)
-                outs=await self.api.rows(conn,"SELECT id,report_note,report_saved_at FROM shift_check_outs WHERE user_id=:uid AND shift_date=:day AND status='FINISHED' FOR UPDATE",uid=a['id'],day=day)
-                if not outs: raise AccessError('Сначала подтвердите окончание смены геолокацией и фото.',409)
+                outs=await self.api.rows(conn,"SELECT id,report_note,report_saved_at FROM shift_check_outs WHERE user_id=:uid AND shift_date=:day AND status IN ('FINISHED','PENDING_REVIEW') FOR UPDATE",uid=a['id'],day=day)
+                if not outs: raise AccessError('Сначала сохраните окончание смены с геолокацией и фото.',409)
                 current=str(outs[0]['report_saved_at']) if outs[0]['report_saved_at'] else None
                 if data['expectedSavedAt']!=current: raise AccessError('Отчёт уже изменён. Обновите его перед сохранением.',409)
                 await conn.execute(text('UPDATE shift_check_outs SET report_note=:note,report_saved_at=:now WHERE id=:id'),{'note':data['note'].strip(),'now':utc_now(),'id':outs[0]['id']})

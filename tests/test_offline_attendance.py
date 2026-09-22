@@ -55,6 +55,9 @@ def test_offline_review_does_not_fine_delivery_delay_and_preserves_single_ledger
                 assert await session.scalar(select(func.count(PayrollEntry.id))) == 0
             with pytest.raises(AccessError, match='Сначала подтвердите начало'):
                 await attendance.review(decision('end', '2026-09-22T18:00:00+03:00'))
+            note = packet('closure-note', 'shift_report', {'note': 'Connection failed', 'expectedSavedAt': None})
+            saved = await work.execute(ACTOR, note)
+            assert (await work.execute(ACTOR, note)).text == saved.text
             await attendance.review(decision('start', '2026-09-22T08:55:00+03:00'))
             await attendance.review(decision('end', '2026-09-22T18:00:00+03:00'))
             assert json.loads((await attendance.review(decision('start', '2026-09-22T08:55:00+03:00'))).text)['alreadyReviewed']
@@ -62,7 +65,8 @@ def test_offline_review_does_not_fine_delivery_delay_and_preserves_single_ledger
                 start = await session.scalar(select(ShiftCheckIn))
                 assert start.status == 'STARTED' and not start.late and start.offline_claimed_at is not None
                 assert await session.scalar(select(func.count(ShiftCheckIn.id))) == 1
-                assert (await session.scalar(select(ShiftCheckOut))).status == 'FINISHED'
+                end = await session.scalar(select(ShiftCheckOut))
+                assert end.status == 'FINISHED' and end.report_note == 'Connection failed'
                 assert await session.scalar(select(func.count(PayrollEntry.id))) == 0
         finally:
             await engine.dispose()
