@@ -9,12 +9,12 @@ from datetime import UTC, datetime, timedelta
 
 import aiohttp
 from aiogram.exceptions import TelegramAPIError
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from ..db import Session
 from ..models import PhotoStorage
-from ..yandex_disk import ROOT, YandexDisk
+from ..yandex_disk import ROOT, YandexDisk, YandexDiskError, validate_saved
 
 logger = logging.getLogger(__name__)
 
@@ -85,13 +85,17 @@ async def _claim_job():
     now = datetime.now(UTC).replace(tzinfo=None)
     stale = now - STALE_UPLOAD
     async with Session() as session:
+        await session.execute(update(PhotoStorage).where(
+            PhotoStorage.status == 'UPLOADING', PhotoStorage.started_at < stale,
+            PhotoStorage.attempts >= MAX_ATTEMPTS,
+        ).values(status='FAILED', last_error='Последняя попытка прервана. Повторите загрузку.', updated_at=now))
         row = await session.scalar(
             select(PhotoStorage)
             .where(
                 PhotoStorage.attempts < MAX_ATTEMPTS,
                 or_(
                     PhotoStorage.status == "PENDING",
-                    PhotoStorage.status == "FAILED",
+                    and_(PhotoStorage.status == "FAILED", PhotoStorage.updated_at < now - timedelta(seconds=60)),
                     and_(
                         PhotoStorage.status == "UPLOADING",
                         PhotoStorage.started_at.is_not(None),
@@ -104,6 +108,7 @@ async def _claim_job():
             .limit(1)
         )
         if row is None:
+            await session.commit()
             return None
         row.status = "UPLOADING"
         row.attempts += 1
@@ -115,6 +120,8 @@ async def _claim_job():
             "photo_id": row.photo_id,
             "shooting_id": row.shooting_id,
             "file_id": row.telegram_file_id,
+            "attempt": row.attempts,
+            "started_at": now,
         }
         await session.commit()
         return result
@@ -144,11 +151,11 @@ async def _existing_hash(shooting_id: int, digest: str, current_id: int):
         )
 
 
-async def _finish_success(job_id: int, *, path: str, digest: str, size: int):
+async def _finish_success(job_id: int, *, path: str, digest: str, size: int, attempt: int, started_at):
     now = datetime.now(UTC).replace(tzinfo=None)
     async with Session() as session:
         row = await session.get(PhotoStorage, job_id, with_for_update=True)
-        if row is None:
+        if row is None or row.status != "UPLOADING" or row.attempts != attempt or row.started_at != started_at:
             return
         row.status = "STORED"
         row.disk_path = path
@@ -160,12 +167,12 @@ async def _finish_success(job_id: int, *, path: str, digest: str, size: int):
         await session.commit()
 
 
-async def _finish_failure(job_id: int, exc: Exception):
+async def _finish_failure(job_id: int, exc: Exception, *, attempt: int, started_at):
     now = datetime.now(UTC).replace(tzinfo=None)
-    safe = f"{type(exc).__name__}: {str(exc)[:180]}"
+    safe = "Хранилище заполнено. Освободите место и повторите." if "507" in str(exc) else "Не удалось подтвердить сохранение. Повторите загрузку."
     async with Session() as session:
         row = await session.get(PhotoStorage, job_id, with_for_update=True)
-        if row is None:
+        if row is None or row.status != "UPLOADING" or row.attempts != attempt or row.started_at != started_at:
             return
         row.status = "FAILED"
         row.last_error = safe
@@ -189,6 +196,11 @@ async def sync_one(bot, storage: YandexDisk) -> bool:
         duplicate = await _existing_hash(job["shooting_id"], digest, job["id"])
         if duplicate is not None and duplicate.disk_path:
             path = duplicate.disk_path
+            try:
+                validate_saved(await storage.metadata(path), data)
+            except YandexDiskError:
+                # Repair a missing/corrupt copy instead of trusting an old STORED row.
+                await storage.upload_bytes(path, data, content_type=content_type)
         else:
             base = ROOT + "/shootings"
             folder = base + f"/{job['shooting_id']}"
@@ -196,7 +208,7 @@ async def sync_one(bot, storage: YandexDisk) -> bool:
             await storage.ensure_dir(folder)
             path = folder + f"/{job['photo_id']}_{digest[:12]}.{ext}"
             await storage.upload_bytes(path, data, content_type=content_type)
-        await _finish_success(job["id"], path=path, digest=digest, size=len(data))
+        await _finish_success(job["id"], path=path, digest=digest, size=len(data), attempt=job["attempt"], started_at=job["started_at"])
         logger.info(
             "Photo stored on Yandex.Disk: photo=%s shooting=%s bytes=%s",
             job["photo_id"], job["shooting_id"], len(data),
@@ -209,7 +221,7 @@ async def sync_one(bot, storage: YandexDisk) -> bool:
         RuntimeError,
         asyncio.TimeoutError,
     ) as exc:
-        await _finish_failure(job["id"], exc)
+        await _finish_failure(job["id"], exc, attempt=job["attempt"], started_at=job["started_at"])
     return True
 
 
@@ -221,6 +233,8 @@ async def storage_loop(bot, storage: YandexDisk, *, interval=15, batch=3):
                 if not await sync_one(bot, storage):
                     break
                 processed += 1
+            from ..photo_edits import process_one
+            await process_one(storage)
             if processed:
                 logger.info("Yandex.Disk photo sync cycle: processed=%s", processed)
         except asyncio.CancelledError:

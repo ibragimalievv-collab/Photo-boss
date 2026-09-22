@@ -4,3 +4,4 @@ SQLAlchemy==2.0.53
 asyncpg==0.31.0
 python-dotenv==1.2.3
 redis==6.4.0
+Pillow==12.3.0

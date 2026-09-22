@@ -10,10 +10,10 @@ async function telegramInitData(waitMs=2500){
  }
  return window.Telegram?.WebApp?.initData||'';
 }
-export async function api(path,{body,method='GET',timeoutMs,...options}={}){
+export async function api(path,{body,method='GET',timeoutMs,responseType,...options}={}){
  const cfg=window.PHOTO_BOSS_CONFIG||{};
  const initData=await telegramInitData();
- if(!initData&&!OWNER_LAUNCH_TOKEN)throw new ApiError('Telegram не передал данные входа. Отправьте /app в боте и откройте новую кнопку Photo Boss.',401);
+ if(!initData&&!OWNER_LAUNCH_TOKEN)throw new ApiError('Telegram не передал данные входа. Закройте окно Photo Boss и откройте приложение заново для обновления входа.',401);
  const base=String(cfg.API_BASE_URL||'').replace(/\/$/,'');
  const url=new URL(base+`/api/miniapp${path}`,location.origin);
  if(url.protocol!=='https:')throw new ApiError('Рабочее приложение должно открываться по HTTPS.');
@@ -22,6 +22,7 @@ export async function api(path,{body,method='GET',timeoutMs,...options}={}){
  try {
   const multipart=body instanceof FormData;
   const response=await fetch(url,{...options,method,signal:controller.signal,cache:'no-store',credentials:'omit',redirect:'error',headers:{...(!multipart?{'Content-Type':'application/json'}:{}),...(initData?{'X-Telegram-Init-Data':initData}:{'X-PhotoBoss-Owner-Launch':OWNER_LAUNCH_TOKEN})},body:body===undefined?undefined:multipart?body:JSON.stringify(body)});
+  if(response.ok&&responseType==='blob')return await response.blob();
   const data=await response.json().catch(()=>null);
   if(!response.ok)throw new ApiError(data?.error||(response.status>=500?'Сервис временно недоступен. Повторите попытку.':`Запрос отклонён (${response.status}).`),response.status,data?.telegramId);
   if(!data)throw new ApiError('Сервер вернул некорректный ответ.');
