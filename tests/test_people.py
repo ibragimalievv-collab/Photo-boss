@@ -167,8 +167,10 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
         owner = next(x for x in listing['items'] if x['id'] == 1)
         photographer = next(x for x in listing['items'] if x['id'] == 3)
         assert listing['canManageScreenCapture'] is True
+        assert listing['canViewLastLogin'] is True
         assert owner['screenCaptureAllowed'] is True
         assert photographer['screenCaptureAllowed'] is False
+        assert (await self.call('/people/1/screen-capture', method='PUT', body={'allowed': False}))[0] == 409
         assert (await self.call('/people/3/screen-capture', uid=1002, method='PUT', body={'allowed': True}))[0] == 403
         status, changed = await self.call('/people/3/screen-capture', method='PUT', body={'allowed': True})
         assert status == 200 and changed['employee']['screenCaptureAllowed'] is True
@@ -179,6 +181,12 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
         _, listing = await self.call()
         photographer = next(x for x in listing['items'] if x['id'] == 3)
         assert photographer['lastLoginAt']
+
+        _, admin_listing = await self.call(uid=1002)
+        admin_photographer = next(x for x in admin_listing['items'] if x['id'] == 3)
+        assert admin_listing['canViewLastLogin'] is False
+        assert 'lastLoginAt' not in admin_photographer
+
         with self.engine.inner.connect() as conn:
             assert conn.execute(text(
                 "SELECT COUNT(*) FROM audit_logs WHERE action='miniapp_screen_capture_changed'"
