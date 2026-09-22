@@ -105,7 +105,7 @@ async def main():
                     await page.goto(url)
                     await page.get_by_role('heading', name='Рабочие операции', exact=True).wait_for()
                     await page.evaluate('navigator.serviceWorker.ready')
-                    await page.wait_for_function('navigator.serviceWorker.controller !== null')
+                    await wait_async(page, '()=>navigator.serviceWorker.controller !== null')
                     assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                     await context.set_offline(True)
                     assert await page.evaluate("""async()=>{
@@ -134,7 +134,7 @@ async def main():
                     for _ in range(2):
                         await dialog.locator('[data-att=location]').click()
                         await dialog.locator('[data-att=camera]:not([disabled])').click()
-                        await page.wait_for_function("document.querySelector('#attCameraVideo')?.videoWidth>0")
+                        await wait_async(page, "()=>document.querySelector('#attCameraVideo')?.videoWidth>0")
                         await dialog.locator('[data-att=snap]').click()
                         await dialog.locator('[data-att=confirm]').click()
                     await dialog.get_by_role('heading', name='Ожидает проверки руководителем').wait_for()

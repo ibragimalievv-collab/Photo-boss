@@ -296,8 +296,7 @@ class Attendance:
         if when and (when.astimezone(self.api.tz).date() != day or when > self.now()):
             raise AccessError('Подтверждённое время должно относиться к дню смены и не быть будущим.', 400)
         async with self.api.engine.begin() as conn:
-            await People(self.api).current_editor(conn, actor['id'])
-            await self.api.rows(conn, 'SELECT id FROM users WHERE id=:id FOR UPDATE', id=uid)
+            await People(self.api).current_editor(conn, actor['id'], uid)
             start, end = await self.records(conn, uid, day, lock=True)
             row = start if body['purpose'] == 'start' else end
             if not row or not row['offline_claimed_at']:
