@@ -1,31 +1,21 @@
 import hashlib
-import json
-from datetime import UTC, datetime
-from decimal import ROUND_HALF_UP, Decimal
 
 import aiohttp
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
 from ..access import StaffFilter
-from ..config import config, number
 from ..db import Session
 from ..keyboards import inline
 from ..models import (
     Booking,
-    Package,
-    PayrollEntry,
-    Receipt,
-    Sale,
     SaleDraft,
     SaleDraftPhoto,
     Shooting,
-    User,
 )
-from ..services.core import audit, setting
 from ..services.photo_storage import (
     MAX_TELEGRAM_IMAGE_BYTES,
     LimitedBuffer,
@@ -35,12 +25,16 @@ from ..services.receipts import (
     MAX_IMAGE_BYTES,
     download_receipt,
     extract_receipt,
-    money,
-    operation_key,
-    payment_totals,
-    refresh_payment_statuses,
 )
-from ..services.sale_workflow import final_photographer_percent
+from ..services.sale_workflow import (
+    active_draft,  # noqa: F401 - compatibility export
+    can_sell,  # noqa: F401 - compatibility export
+    capture_draft_receipt,
+    complete_sale,
+    selected_count,
+    set_sale_counts,
+    start_sale_draft,
+)
 from ..yandex_disk import ROOT, YandexDisk, YandexDiskError, configured_from_env
 
 r = Router()
@@ -71,14 +65,6 @@ def positive_id(value):
         return None
 
 
-async def can_sell(actor, roles, booking):
-    if booking is None or booking.status != "READY_FOR_SALE":
-        return False
-    if roles & {"OWNER", "ADMIN"}:
-        return True
-    if "MANAGER" in roles and booking.manager_id == actor.id:
-        return True
-    return "PHOTOGRAPHER" in roles and booking.photographer_id == actor.id
 
 
 async def ready_bookings(session, actor, roles):
@@ -97,27 +83,6 @@ async def ready_bookings(session, actor, roles):
     ).all()
 
 
-async def active_draft(session, booking_id):
-    return await session.scalar(
-        select(SaleDraft)
-        .where(
-            SaleDraft.booking_id == booking_id,
-            SaleDraft.status.in_(ACTIVE_DRAFT_STATUSES),
-        )
-        .order_by(SaleDraft.id.desc())
-        .limit(1)
-    )
-
-
-async def selected_count(session, draft_id):
-    return int(
-        await session.scalar(
-            select(func.count(SaleDraftPhoto.id)).where(
-                SaleDraftPhoto.draft_id == draft_id
-            )
-        )
-        or 0
-    )
 
 
 async def continue_draft(message, state, draft):
@@ -159,32 +124,11 @@ async def selected_count_from_id(draft_id):
 
 async def begin_for_booking(message, state, actor, roles, booking_id):
     async with Session() as session:
-        booking = await session.get(Booking, booking_id)
-        if not await can_sell(actor, roles, booking):
-            return await message.answer("Эта запись ещё не готова к продаже или недоступна.")
-        draft = await active_draft(session, booking.id)
-        if draft is not None and draft.created_by_id != actor.id:
-            return await message.answer(
-                "Эту продажу уже оформляет другой сотрудник. Завершите тот процесс "
-                "или обратитесь к администратору."
-            )
-        if draft is None:
-            draft = SaleDraft(
-                booking_id=booking.id,
-                created_by_id=actor.id,
-                status="AWAITING_RECEIPT",
-            )
-            session.add(draft)
-            await session.flush()
-            await audit(
-                session,
-                actor,
-                "sale_draft_started",
-                "sale_draft",
-                draft.id,
-                f"booking={booking.id}",
-            )
-            await session.commit()
+        try:
+            draft = await start_sale_draft(session, actor, roles, booking_id)
+        except ValueError as exc:
+            return await message.answer(str(exc))
+        await session.commit()
     await state.clear()
     await continue_draft(message, state, draft)
 
@@ -248,7 +192,6 @@ async def sale_receipt(m, state, current_user):
         content = await download_receipt(m.bot, photo)
         digest = hashlib.sha256(content).hexdigest()
         analysis = await extract_receipt(content)
-        op_key = operation_key(analysis.get("fields", {}))
     except (
         TelegramAPIError,
         aiohttp.ClientError,
@@ -267,43 +210,11 @@ async def sale_receipt(m, state, current_user):
         ):
             await state.clear()
             return await m.answer("Этот черновик продажи уже закрыт.")
-        existing = await session.scalar(
-            select(Receipt.id).where(
-                or_(
-                    Receipt.file_unique_id == photo.file_unique_id,
-                    Receipt.image_sha256 == digest,
-                    Receipt.operation_key == op_key if op_key else False,
-                )
-            ).limit(1)
-        )
-        draft_duplicate = await session.scalar(
-            select(SaleDraft.id).where(
-                SaleDraft.id != draft.id,
-                or_(
-                    SaleDraft.receipt_file_unique_id == photo.file_unique_id,
-                    SaleDraft.receipt_image_sha256 == digest,
-                    SaleDraft.receipt_operation_key == op_key if op_key else False,
-                ),
-            ).limit(1)
-        )
-        if existing or draft_duplicate:
-            return await m.answer(
-                "⚠️ Этот чек уже использовался или похож на ранее загруженный. "
-                "Пришлите другой чек."
-            )
-        draft.receipt_file_id = photo.file_id
-        draft.receipt_file_unique_id = photo.file_unique_id
-        draft.receipt_image_sha256 = digest
-        draft.receipt_operation_key = op_key
-        draft.receipt_analysis = json.dumps(analysis, ensure_ascii=False)
-        draft.status = "AWAITING_COUNTS"
-        await audit(
-            session,
-            current_user,
-            "sale_receipt_captured",
-            "sale_draft",
-            draft.id,
-        )
+        try:
+            await capture_draft_receipt(session, current_user, draft, photo.file_id,
+                                        photo.file_unique_id, digest, analysis)
+        except ValueError as exc:
+            return await m.answer(str(exc))
         await session.commit()
     await state.set_state(S.total)
     status = analysis.get("status")
@@ -376,40 +287,10 @@ async def sale_sold_frames(m, state, current_user):
             return await m.answer(
                 "Проданных кадров не может быть больше общего количества кадров."
             )
-        booking = await session.get(Booking, draft.booking_id)
-        package = await session.get(Package, booking.package_id) if booking else None
-        if booking is None or package is None:
-            await state.clear()
-            return await m.answer("У записи не найден пакет. Обратитесь к администратору.")
-        already_sold = int(
-            await session.scalar(
-                select(func.coalesce(func.sum(Sale.sold_photos), 0)).where(
-                    Sale.booking_id == booking.id
-                )
-            )
-            or 0
-        )
-        if already_sold + sold > draft.declared_photo_count:
-            return await m.answer(
-                f"Уже продано: {already_sold}. После этой продажи получится "
-                f"{already_sold + sold}, что больше указанных {draft.declared_photo_count} кадров."
-            )
         try:
-            price = Decimal(str(number(package.price_per_photo, "Цена", minimum=0.01)))
-        except ValueError:
-            await state.clear()
-            return await m.answer("Некорректная цена пакета. Обратитесь к администратору.")
-        amount = (Decimal(sold) * price).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        total_before, paid_before, _ = await payment_totals(session, booking.id)
-        expected_payment = max(
-            money(total_before) + amount - money(paid_before),
-            Decimal("0.00"),
-        )
-        draft.sold_photos = sold
-        draft.expected_amount = expected_payment if expected_payment > 0 else None
-        draft.status = "AWAITING_SELECTED"
+            amount = await set_sale_counts(session, current_user, draft, draft.declared_photo_count, sold)
+        except ValueError as exc:
+            return await m.answer(str(exc))
         await session.commit()
     await state.set_state(S.selected)
     await m.answer(
@@ -533,121 +414,14 @@ async def finalize_sale(c, state, current_user, current_roles):
     if draft_id is None or c.message is None:
         return await c.answer("Некорректная кнопка.", show_alert=True)
     async with Session() as session:
-        draft = await session.get(SaleDraft, draft_id, with_for_update=True)
-        if draft is None or draft.status != "AWAITING_SELECTED":
-            return await c.answer("Продажа уже завершена или отменена.", show_alert=True)
-        booking = await session.get(Booking, draft.booking_id)
-        if draft.created_by_id != current_user.id or not await can_sell(
-            current_user, current_roles, booking
-        ):
-            return await c.answer("Нет доступа к этой продаже.", show_alert=True)
-        count = await selected_count(session, draft.id)
-        if not draft.sold_photos or count < draft.sold_photos:
-            return await c.answer(
-                f"Сначала загрузите все выбранные фотографии: {count}/{draft.sold_photos or 0}.",
-                show_alert=True,
-            )
-        if not booking.photographer_id:
-            return await c.answer("У записи не назначен фотограф.", show_alert=True)
-        photographer = await session.get(User, booking.photographer_id)
-        manager = await session.get(User, booking.manager_id)
-        if photographer is None:
-            return await c.answer("Фотограф не найден.", show_alert=True)
-        package = await session.get(Package, booking.package_id)
-        if package is None:
-            return await c.answer("Пакет не найден.", show_alert=True)
-        amount = money(draft.expected_amount or 0)
-        # expected_amount is the still-unpaid part after approved deposits; the sale itself
-        # must always use sold_photos * package price.
-        sale_amount = (
-            Decimal(draft.sold_photos)
-            * Decimal(str(package.price_per_photo))
-        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        percent, actual_full_count = await final_photographer_percent(
-            session, booking.id
-        )
-        if percent is None:
-            photographer_percent_value = Decimal(0)
-            photographer_commission = Decimal(0)
-            finalized_at = None
-        else:
-            photographer_percent_value = Decimal(str(percent))
-            photographer_commission = (
-                sale_amount * photographer_percent_value / 100
-            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            finalized_at = datetime.now(UTC).replace(tzinfo=None)
-        sale = Sale(
-            booking_id=booking.id,
-            created_by_id=current_user.id,
-            credited_user_id=photographer.id,
-            commission_role="PHOTOGRAPHER",
-            sold_photos=draft.sold_photos,
-            declared_photo_count=draft.declared_photo_count,
-            source_draft_id=draft.id,
-            amount=float(sale_amount),
-            percent=float(photographer_percent_value),
-            commission=float(photographer_commission),
-            commission_finalized_at=finalized_at,
-        )
-        session.add(sale)
-        await session.flush()
-
-        receipt = None
-        if draft.receipt_file_id and amount > 0:
-            receipt = Receipt(
-                booking_id=booking.id,
-                uploaded_by_id=current_user.id,
-                purpose="PAYMENT",
-                file_id=draft.receipt_file_id,
-                file_unique_id=draft.receipt_file_unique_id,
-                image_sha256=draft.receipt_image_sha256,
-                operation_key=draft.receipt_operation_key,
-                expected_amount=amount,
-                analysis=draft.receipt_analysis,
-                status="PENDING",
-            )
-            session.add(receipt)
-            await session.flush()
-
-        if manager is not None:
-            manager_percent_value = Decimal(
-                str(
-                    await setting(
-                        session,
-                        "MANAGER_PERCENT",
-                        config.manager_percent,
-                    )
-                )
-            )
-            manager_amount = (
-                sale_amount * manager_percent_value / 100
-            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            session.add(
-                PayrollEntry(
-                    user_id=manager.id,
-                    kind="Комиссия менеджера",
-                    amount=float(manager_amount),
-                    period=datetime.now(UTC).date().isoformat(),
-                    note=f"sale={sale.id};booking={booking.id}",
-                )
-            )
-
-        draft.status = "COMPLETED"
-        draft.completed_at = datetime.now(UTC).replace(tzinfo=None)
-        await audit(
-            session,
-            current_user,
-            "sale_created",
-            "sale",
-            sale.id,
-            (
-                f"booking={booking.id};sold={draft.sold_photos};"
-                f"declared={draft.declared_photo_count};selected={count};"
-                f"full_uploaded={actual_full_count};"
-                f"photographer_percent={percent if percent is not None else 'PENDING'}"
-            ),
-        )
-        await refresh_payment_statuses(session, booking.id)
+        try:
+            result = await complete_sale(session, current_user, draft_id)
+        except ValueError as exc:
+            return await c.answer(str(exc), show_alert=True)
+        sale, draft, booking = result.sale, result.draft, result.booking
+        photographer, receipt = result.photographer, result.receipt
+        count, percent = result.count, result.percent
+        actual_full_count, sale_amount = result.actual_full_count, result.sale_amount
         try:
             await session.commit()
         except IntegrityError:

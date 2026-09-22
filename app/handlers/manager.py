@@ -21,11 +21,12 @@ from ..models import (
 )
 from ..services.bookings import (
     booking_card,
+    create_booking_record,
     notify_photographer_assignment,
     notify_photographer_cancelled,
     notify_photographer_rescheduled,
 )
-from ..services.core import audit, get_user, menu, roles_of
+from ..services.core import audit, get_user, menu
 
 r = Router()
 r.message.filter(StaffFilter("MANAGER"), F.text)
@@ -215,32 +216,10 @@ async def create_booking(c, state, current_roles, photographer_id):
     data = await state.get_data()
     async with Session() as s:
         manager = await get_user(s, c.from_user.id)
-        actor_roles = await roles_of(s, manager)
-        if not {"OWNER", "ADMIN", "MANAGER"} & actor_roles:
-            return await c.answer("Нет доступа к созданию записи.", show_alert=True)
-        if photographer_id is not None:
-            if not {"OWNER", "ADMIN"} & actor_roles:
-                return await c.answer("Назначать фотографа может только администратор или владелец.", show_alert=True)
-            photographer = await s.get(User, photographer_id)
-            roles = set(await s.scalars(select(UserRole.role).where(UserRole.user_id == photographer_id)))
-            if photographer is None or not photographer.active or "PHOTOGRAPHER" not in roles:
-                return await c.answer("Фотограф недоступен.", show_alert=True)
-        client = Client(name=data["client_name"], phone=data["client_phone"])
-        s.add(client)
-        await s.flush()
-        booking = Booking(
-            hotel_id=data["hotel_id"], client_id=client.id, room=data["room"],
-            guest_count=data["guest_count"], deposit=data["deposit"],
-            shoot_date=date.fromisoformat(data["shoot_date"]),
-            shoot_time=time.fromisoformat(data["shoot_time"]),
-            package_id=data["package_id"], manager_id=manager.id,
-            photographer_id=photographer_id,
-            status="PENDING_CONFIRMATION",
-        )
-        s.add(booking)
-        await s.flush()
-        s.add(Shooting(booking_id=booking.id, status="PENDING_CONFIRMATION"))
-        await audit(s, manager, "booking_created", "booking", booking.id)
+        try:
+            booking = await create_booking_record(s, manager, data, photographer_id)
+        except ValueError as exc:
+            return await c.answer(str(exc), show_alert=True)
         await s.commit()
     await state.clear()
     await c.answer()

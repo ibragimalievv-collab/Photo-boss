@@ -29,6 +29,60 @@ STATUS_NAMES = {
 }
 
 
+async def create_booking_record(session, actor, data, photographer_id=None):
+    """One booking operation for the bot and queued Mini App requests."""
+    from datetime import date, time
+    from decimal import Decimal, InvalidOperation
+
+    from ..models import UserRole
+    from .core import audit, roles_of
+
+    roles = await roles_of(session, actor)
+    if not roles & {'OWNER', 'ADMIN', 'MANAGER'}:
+        raise ValueError('Нет доступа к созданию записи.')
+    if photographer_id is not None:
+        if not roles & {'OWNER', 'ADMIN'}:
+            raise ValueError('Назначать фотографа может только администратор или владелец.')
+        photographer = await session.get(User, photographer_id)
+        photo_roles = set(await session.scalars(select(UserRole.role).where(UserRole.user_id == photographer_id)))
+        if photographer is None or not photographer.active or 'PHOTOGRAPHER' not in photo_roles:
+            raise ValueError('Фотограф недоступен.')
+    try:
+        name = data['client_name'].strip()
+        phone = data['client_phone']
+        room = data['room'].strip()
+        count = data['guest_count']
+        deposit = Decimal(str(data['deposit']))
+        day = date.fromisoformat(data['shoot_date'])
+        at = time.fromisoformat(data['shoot_time'])
+        if (not 2 <= len(name) <= 200 or not 1 <= len(room) <= 100
+                or (phone is not None and (not isinstance(phone, str) or not 5 <= len(phone) <= 80))
+                or type(count) is not int or not 1 <= count <= 100
+                or not deposit.is_finite() or not 0 <= deposit <= 10_000_000 or at.tzinfo is not None):
+            raise ValueError
+        if type(data['hotel_id']) is not int or type(data['package_id']) is not int:
+            raise ValueError
+    except (ValueError, TypeError, KeyError, AttributeError, InvalidOperation) as exc:
+        raise ValueError('Проверьте данные гостя, дату, количество гостей и сумму брони.') from exc
+    hotel = await session.get(Hotel, data['hotel_id'])
+    package = await session.get(Package, data['package_id'])
+    if hotel is None or not hotel.active or package is None or not package.active:
+        raise ValueError('Отель или пакет больше не доступны. Обновите данные.')
+    client = Client(name=name, phone=phone)
+    session.add(client)
+    await session.flush()
+    booking = Booking(hotel_id=hotel.id, client_id=client.id, room=room, guest_count=count,
+                      deposit=float(deposit.quantize(Decimal('0.01'))), shoot_date=day, shoot_time=at,
+                      package_id=package.id, manager_id=actor.id, photographer_id=photographer_id,
+                      status='PENDING_CONFIRMATION')
+    session.add(booking)
+    await session.flush()
+    session.add(Shooting(booking_id=booking.id, status='PENDING_CONFIRMATION'))
+    await audit(session, actor, 'booking_created', 'booking', booking.id)
+    await session.flush()
+    return booking
+
+
 async def booking_card(session, booking: Booking):
     hotel = await session.get(Hotel, booking.hotel_id)
     client = await session.get(Client, booking.client_id)
