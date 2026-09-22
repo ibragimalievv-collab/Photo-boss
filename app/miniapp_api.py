@@ -185,7 +185,9 @@ class MiniApp:
             theme = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=f"miniapp:theme:{actor['id']}")
             capture = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=f"miniapp:screen_capture:{actor['id']}")
         capture_allowed = (
-            capture[0]["value"] == "1" if capture else "OWNER" in actor["roles"]
+            True
+            if "OWNER" in actor["roles"]
+            else bool(capture and capture[0]["value"] == "1")
         )
         return web.json_response({"user": {"id": actor["id"], "telegramId": actor["tg_id"],
             "name": actor["name"], "roles": actor["roles"],
