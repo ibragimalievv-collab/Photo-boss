@@ -121,6 +121,10 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements-dev.txt playwright==1.51.0
       - run: python -m playwright install --with-deps chromium
+      - name: Verify camera grant reuse, controls and permission denial
+        env:
+          CALLS_QA_CONTROLS_ONLY: '1'
+        run: python tests/work_calls_browser_check.py
       - name: Verify real audio and video between three fixture clients
         run: python tests/work_calls_browser_check.py
       - name: Verify Academy uploads and owner review inside the app

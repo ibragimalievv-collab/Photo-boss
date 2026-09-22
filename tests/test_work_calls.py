@@ -97,6 +97,46 @@ class CallsTests(unittest.IsolatedAsyncioTestCase):
         assert (await self.request("/signal", 5, payload))[0] == 404
         assert (await self.request("/signal", 3, {**payload, "data": {"type": "offer", "sdp": "x" * 70000}}))[0] == 413
 
+    async def test_retried_signals_are_not_delivered_twice(self):
+        data = await self.start(mode="video")
+        joined = await self.join(data, mode="video")
+        payload = {"callId": data["call"]["id"], "session": data["session"],
+            "to": 4, "toSession": joined["session"], "signalId": "fixture-signal-0001",
+            "data": {"type": "offer", "sdp": "v=0"}}
+        responses = await asyncio.gather(*(self.request("/signal", 3, payload) for _ in range(3)))
+        assert all(status == 200 for status, _ in responses)
+        _, receiver = await self.sync(joined, 4)
+        assert len(receiver["signals"]) == 1
+        await self.sync(joined, 4, receiver["cursor"])
+        assert (await self.request("/signal", 3, payload))[0] == 200
+        assert (await self.sync(joined, 4, receiver["cursor"]))[1]["signals"] == []
+        assert (await self.request("/signal", 3, {**payload, "data": {"type": "offer", "sdp": "changed"}}))[0] == 409
+
+    async def test_attachment_retry_is_atomic_and_removes_redundant_upload(self):
+        from types import SimpleNamespace
+
+        from aiohttp import FormData
+        storage = SimpleNamespace(state={"connected": True}, ensure_dir=AsyncMock(),
+            upload_bytes=AsyncMock(), delete=AsyncMock())
+        self.client.server.app["yandex_disk"] = storage
+        async def upload(caption="caption"):
+            form = FormData()
+            for key, value in {"peerId": "4", "caption": caption, "clientId": "fixture-upload-0001"}.items():
+                form.add_field(key, value)
+            form.add_field("file", b"%PDF-1.7 fixture", filename="document.pdf", content_type="application/pdf")
+            response = await self.client.post("/api/miniapp/chat/attachments", data=form,
+                headers={"X-Telegram-Init-Data": baseline.signed(1003)})
+            return response.status, await response.json()
+        first, second = await upload(), await upload()
+        assert first[0] == 201 and second[0] == 200
+        assert first[1]["message"] == second[1]["message"]
+        assert storage.delete.await_count == 1
+        assert (await upload("changed"))[0] == 409
+        assert storage.delete.await_count == 2
+        with self.engine.inner.connect() as conn:
+            assert conn.scalar(text("SELECT count(*) FROM work_chat_messages")) == 1
+            assert conn.scalar(text("SELECT count(*) FROM work_chat_attachments")) == 1
+
     async def test_decline_and_direct_leave_end_call(self):
         data = await self.start()
         assert (await self.request("/decline", 4, {"callId": data["call"]["id"]}))[0] == 200

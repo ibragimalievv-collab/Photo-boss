@@ -19,9 +19,11 @@ from aiohttp import web
 from sqlalchemy import text
 
 from .miniapp_security import (
+    MINIAPP_SESSION_MAX_AGE,
     STAFF_ROLES,
     THEMES,
     AccessError,
+    booking_assignment_columns,
     financial_period,
     parse_shift,
     require_owner,
@@ -122,7 +124,7 @@ class MiniApp:
         telegram_id = validate_init_data(
             request.headers.get("X-Telegram-Init-Data", ""),
             self.bot.token,
-            max_age=24 * 60 * 60,
+            max_age=MINIAPP_SESSION_MAX_AGE,
         )
         request["miniapp_telegram_id"] = telegram_id
         async with self.engine.connect() as conn:
@@ -260,8 +262,11 @@ class MiniApp:
         return web.json_response({"theme": body["theme"]})
 
     async def bookings_data(self, conn, actor, day):
-        own = actor["permissions"]["financeScope"] == "self"
-        clause = "AND (b.photographer_id=:uid OR b.manager_id=:uid)" if own else ""
+        clause = ""
+        if not {"OWNER", "ADMIN"} & set(actor["roles"]):
+            assignments = booking_assignment_columns(actor["roles"])
+            condition = " OR ".join(f"b.{column}=:uid" for column in assignments) or "1=0"
+            clause = f"AND ({condition})"
         rows = await self.rows(conn, f"""SELECT b.id,b.room,b.shoot_date,b.shoot_time,b.status,
             b.photographer_id,b.manager_id,b.hotel_id,c.name AS client,h.name AS hotel,
             p.name AS photographer,pk.name AS package,

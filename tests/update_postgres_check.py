@@ -47,7 +47,7 @@ async def main():
             # Reconstruct the pre-update surface without touching other schemas.
             for table in ('hr_candidates', 'academy_assessments', 'work_checklist_completions',
                           'operation_requests', 'guest_feedback', 'shoot_development_reviews',
-                          'sales_training_sessions', 'cash_movements'):
+                          'sales_training_sessions', 'cash_movements', 'photo_edits'):
                 await conn.execute(text(f'DROP TABLE {table}'))
             for column in ('manager_percent_applied','manager_payroll_entry_id'):
                 await conn.execute(text(f'ALTER TABLE sales DROP COLUMN {column}'))
@@ -65,8 +65,8 @@ async def main():
             legacy_money={table:await conn.scalar(text(f'SELECT to_jsonb(t) FROM {table} t WHERE id=999')) for table in ('sales','payroll_entries','shift_check_ins')}
 
 
-        migrations = sorted(p for p in Path('migrations').glob('*.sql') if 4<=int(p.name.split('_')[0])<=11)
-        assert len(migrations) == 8
+        migrations = sorted(p for p in Path('migrations').glob('*.sql') if 4<=int(p.name.split('_')[0])<=12)
+        assert len(migrations) == 9
         for _ in range(2):
             async with engine.begin() as conn:
                 driver = (await conn.get_raw_connection()).driver_connection
@@ -111,7 +111,7 @@ async def main():
             assert entry.user_id is None, 'Actor leaked between transactions'
             triggers = await conn.scalar(text("SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=:schema AND t.tgname LIKE 'pb_audit_%'"), {'schema': schema})
             assert triggers == len(TABLES)
-        print('PostgreSQL migrations 004–011 twice, legacy data, audit actor/snapshots/rollback: PASS')
+        print('PostgreSQL migrations 004–012 twice, legacy data, audit actor/snapshots/rollback: PASS')
 
         async with factory() as session:
             session.add_all([UserRole(user_id=1, role='MANAGER'), Hotel(id=1, name='Hotel'),
@@ -189,6 +189,24 @@ async def main():
         async with engine.connect() as conn:
             assert await conn.scalar(text("SELECT count(*) FROM hotels WHERE name='Concurrent Hotel'"))==1
         print('PostgreSQL concurrent hotel additions: one hotel, duplicate rejected, audit retained: PASS')
+
+        # Queue claims must remain unique across simultaneous PostgreSQL workers.
+        from unittest.mock import patch
+        from app.models import PhotoStorage
+        from app.services import photo_storage
+        async with factory() as session:
+            photo = await session.scalar(select(Photo))
+            session.add(PhotoStorage(photo_id=photo.id, shooting_id=photo.shooting_id,
+                                     telegram_file_id='fixture-original', source_kind='DOCUMENT'))
+            await session.commit()
+        with patch.object(photo_storage, 'Session', factory):
+            claims = await asyncio.gather(photo_storage._claim_job(), photo_storage._claim_job())
+        assert sum(claim is not None for claim in claims) == 1, claims
+        async with factory() as session:
+            stored = await session.scalar(select(PhotoStorage))
+            assert stored.status == 'UPLOADING' and stored.attempts == 1
+        print('PostgreSQL concurrent storage claims: exactly one worker owns the original: PASS')
+
 
 
     finally:

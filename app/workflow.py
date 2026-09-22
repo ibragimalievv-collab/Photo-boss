@@ -10,7 +10,7 @@ from aiohttp import web
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .miniapp_security import AccessError
+from .miniapp_security import AccessError, booking_assignment_columns
 from .models import (
     Booking,
     Hotel,
@@ -75,7 +75,8 @@ class Workflow:
         async with AsyncSession(self.api.engine) as session:
             query = select(Booking).where(Booking.status.notin_(['CANCELLED', 'REJECTED']))
             if not {'OWNER', 'ADMIN'} & set(a['roles']):
-                query = query.where(or_(Booking.manager_id == a['id'] if 'MANAGER' in a['roles'] else False, Booking.photographer_id == a['id'] if 'PHOTOGRAPHER' in a['roles'] else False))
+                assignments = booking_assignment_columns(a['roles'])
+                query = query.where(or_(False, *(getattr(Booking, column) == a['id'] for column in assignments)))
             bookings = (await session.scalars(query.order_by(Booking.shoot_date.desc()).limit(200))).all()
             packages = (await session.scalars(select(Package))).all()
             prices = {p.id: str(money(p.price_per_photo)) for p in packages}
@@ -221,7 +222,9 @@ class Workflow:
         fields(data, 'booking purpose')
         bid = await target(session, actor, data['booking'], 'bookingId')
         booking = await session.get(Booking, bid, with_for_update=True)
-        if booking is None or (not roles & {'OWNER', 'ADMIN'} and actor.id not in (booking.manager_id, booking.photographer_id)):
+        if booking is None or (not roles & {'OWNER', 'ADMIN'} and not any(
+            getattr(booking, column) == actor.id for column in booking_assignment_columns(roles)
+        )):
             raise AccessError('Нет доступа к записи.', 403)
         if data['purpose'] not in ('DEPOSIT', 'PAYMENT'):
             raise AccessError('Неизвестный вид чека.', 400)
@@ -248,7 +251,9 @@ class Workflow:
         sid = await target(session, actor, data['shooting'], 'shootingId')
         shooting = await session.get(Shooting, sid, with_for_update=True)
         booking = await session.get(Booking, shooting.booking_id) if shooting else None
-        if booking is None or (not roles & {'OWNER', 'ADMIN'} and not ('PHOTOGRAPHER' in roles and booking.photographer_id == actor.id)):
+        if booking is None or (not roles & {'OWNER', 'ADMIN'} and (
+            'PHOTOGRAPHER' not in roles or booking.photographer_id != actor.id
+        )):
             raise AccessError('Нет доступа к съёмке.', 403)
         if kind == 'shoot_retry':
             rows = (await session.scalars(select(PhotoStorage).where(
