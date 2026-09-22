@@ -151,8 +151,10 @@ class People:
         result["revision"] = revision(core)
         result["lastLoginAt"] = settings.get(f"miniapp:last_login:{uid}")
         stored_capture = settings.get(f"miniapp:screen_capture:{uid}")
+        # The owner must always be able to capture the screen. Individual
+        # permissions only apply to non-owner staff accounts.
         result["screenCaptureAllowed"] = (
-            stored_capture == "1" if stored_capture is not None else "OWNER" in role_names
+            True if "OWNER" in role_names else stored_capture == "1"
         )
         return result
 
@@ -175,11 +177,15 @@ class People:
             hotels = await self.api.rows(
                 conn, "SELECT id,name FROM hotels WHERE active=TRUE ORDER BY name,id"
             )
+        can_view_last_login = "OWNER" in roles
         for item in items:
             item["editable"] = item["id"] != actor["id"] and "OWNER" not in item["roles"] and ("OWNER" in roles or "ADMIN" not in item["roles"])
+            if not can_view_last_login:
+                item.pop("lastLoginAt", None)
         return web.json_response({"items": items, "hotels": [dict(h) for h in hotels],
                                   "canAssignAdmin": "OWNER" in roles,
                                   "canManageScreenCapture": "OWNER" in roles,
+                                  "canViewLastLogin": can_view_last_login,
                                   "archived": archived,
                                   "next": ids[99]["id"] if len(ids) > 100 else None})
 
@@ -347,6 +353,8 @@ class People:
         async with self.engine.begin() as conn:
             await self.current_editor(conn, actor["id"])
             target = await self.card(conn, uid)
+            if "OWNER" in target["roles"]:
+                raise AccessError("Для владельца скриншоты всегда разрешены.", 409)
             key = f"miniapp:screen_capture:{uid}"
             await conn.execute(
                 text("""INSERT INTO settings (key,value) VALUES (:key,:value)
