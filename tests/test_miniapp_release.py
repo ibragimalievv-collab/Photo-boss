@@ -26,6 +26,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.miniapp_api import MiniApp
 from app.miniapp_security import (
+    MINIAPP_SESSION_MAX_AGE,
     AccessError,
     financial_period,
     parse_shift,
@@ -251,7 +252,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         status, data, _ = await self.call("/me", uid=1001, token=signed(1001, issued=two_hours_old))
         assert status == 200 and data["user"]["id"] == 1
 
-        older_than_one_day = int(time.time()) - 24 * 60 * 60 - 1
+        older_than_one_day = int(time.time()) - MINIAPP_SESSION_MAX_AGE - 1
         assert (await self.call("/me", uid=1001, token=signed(1001, issued=older_than_one_day)))[0] == 401
 
     async def test_no_credentials_and_inactive_users(self):
@@ -265,7 +266,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
             status, data, _ = await self.call("/me", uid=uid)
             assert status == 403 and data["telegramId"] == uid
             assert set(data) == {"error", "telegramId"}
-        for token in ["", signed(9999, issued=int(time.time()) - 86401)]:
+        for token in ["", signed(9999, issued=int(time.time()) - MINIAPP_SESSION_MAX_AGE - 1)]:
             status, data, _ = await self.call("/me", uid=9999, token=token)
             assert status == 401 and "telegramId" not in data
 
