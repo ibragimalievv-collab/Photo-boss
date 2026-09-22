@@ -30,11 +30,13 @@ class Workday:
             sale_rows=await self.api.rows(conn,'SELECT id,amount,payment_status FROM sales WHERE credited_user_id=:uid AND created_at>=:lo AND created_at<:hi',uid=a['id'],lo=lo,hi=hi)
             bookings=await self.api.rows(conn,'SELECT id,status FROM bookings WHERE (photographer_id=:uid OR manager_id=:uid) AND shoot_date=:day',uid=a['id'],day=day)
             close=await self.api.rows(conn,'SELECT status,ended_at,report_note,report_saved_at FROM shift_check_outs WHERE user_id=:uid AND shift_date=:day',uid=a['id'],day=day)
+            config_items = [parsed(r['value'])|{'key':r['key']} for r in await self.api.rows(conn,"SELECT key,value FROM settings WHERE key LIKE 'checklist:%' ORDER BY key")] if {'OWNER','ADMIN'} & set(a['roles']) else []
         return web.json_response({'date':str(day),'timezone':str(self.api.tz),'items':[i|{'done':done.get(i['key'],False)} for i in items],
             'summary':{'sales':len(sale_rows),'revenue':sum(cents(r['amount']) for r in sale_rows),'unpaid':sum(r['payment_status']!='PAID' for r in sale_rows),'bookings':len(bookings),'cancelled':sum(b['status'] in ('CANCELLED','REJECTED') for b in bookings)},
             'sales':[{'id':r['id'],'amount':cents(r['amount'])} for r in sale_rows],
             'closed':bool(close and close[0]['status']=='FINISHED'),'note':close[0]['report_note'] or '' if close else '',
             'canReport':bool(close and close[0]['status'] in ('FINISHED','PENDING_REVIEW')),
+            'configItems':config_items,
             'reportSavedAt':str(close[0]['report_saved_at']) if close and close[0]['report_saved_at'] else None,
             'canConfigure':bool({'OWNER','ADMIN'} & set(a['roles']))})
 
@@ -42,12 +44,16 @@ class Workday:
         a=request['miniapp_actor'];body=await self.api.body(request)
         from .people import check_editor
         check_editor(a['roles'])
-        if set(body)!={'key','title','roles','active'} or not isinstance(body['title'],str) or not 3<=len(body['title'].strip())<=200 or type(body['active']) is not bool or not isinstance(body['roles'],list) or not body['roles'] or any(r not in ('PHOTOGRAPHER','MANAGER','ADMIN','OWNER') for r in body['roles']): raise AccessError('Проверьте контрольный пункт и роли.',400)
+        if set(body) not in ({'key','title','roles','active'},{'key','title','roles','active','required'}) or not isinstance(body['title'],str) or not 3<=len(body['title'].strip())<=200 or type(body['active']) is not bool or type(body.get('required',False)) is not bool or not isinstance(body['roles'],list) or not body['roles'] or any(r not in ('PHOTOGRAPHER','MANAGER','ADMIN','OWNER') for r in body['roles']): raise AccessError('Проверьте контрольный пункт и роли.',400)
+        body = body | {'required':body.get('required',False)}
         import re
         if not isinstance(body['key'],str) or not re.fullmatch(r'checklist:[a-z0-9-]{1,60}',body['key']): raise AccessError('Некорректный ключ пункта.',400)
         async with self.api.engine.begin() as conn:
             await People(self.api).current_editor(conn,a['id'])
             old=await self.api.rows(conn,'SELECT value FROM settings WHERE key=:key',key=body['key'])
+            previous = parsed(old[0]['value']) if old else {}
+            same_rule = previous.get('active') and all(previous.get(key)==body.get(key) for key in ('title','roles','required'))
+            body['effectiveFrom'] = previous.get('effectiveFrom',str(self.api.today())) if same_rule else str(self.api.today())
             await conn.execute(text('INSERT INTO settings(key,value) VALUES (:key,:value) ON CONFLICT(key) DO UPDATE SET value=excluded.value'),{'key':body['key'],'value':json.dumps(body,ensure_ascii=False)})
             await self.api.audit_write(conn,a,'checklist_configured','setting',None,json.dumps({'before':parsed(old[0]['value']) if old else None,'after':body},ensure_ascii=False))
         return web.json_response({'ok':True})

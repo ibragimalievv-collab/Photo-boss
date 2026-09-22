@@ -58,6 +58,13 @@ async def main():
                 for name,title in [('insights','Контроль бизнеса'),('team','Команда и найм'),('onboarding','Начало работы с Photo Boss'),('workday','Итоги смены'),('development','Развитие фотографа и продажи')]:
                     await page.goto(BASE+'/app/#'+name)
                     await page.get_by_role('heading',name=title,exact=True).wait_for()
+                    if name == 'insights':
+                        await page.locator('#notifyDaily').check()
+                        async with page.expect_response(lambda r:r.url.endswith('/events/preferences') and r.status==200):
+                            await page.get_by_role('button',name='Сохранить уведомления',exact=True).click()
+                        await page.reload()
+                        await page.get_by_role('heading',name=title,exact=True).wait_for()
+                        assert await page.locator('#notifyDaily').is_checked()
                     if name == 'team':
                         await page.get_by_text('Дисциплина команды',exact=True).click()
                         await page.locator('#disciplinePeriod [name=from]').fill('2026-09-14')

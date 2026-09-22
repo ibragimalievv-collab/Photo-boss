@@ -140,3 +140,20 @@ def test_partial_week_compares_same_weekdays_and_does_not_raise_drop_flags(monke
         assert result['changes']['revenue']['percent'] == -100
         assert result['flags'] == []
     asyncio.run(run())
+
+
+def test_receipt_flags_compare_rates_with_data_on_both_sides(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.services import insights
+    async def run():
+        base = {'revenue':0,'sales':0,'bookings':0,'attendance':0,'cancellations':0,'late':0}
+        for issues,receipts,old_issues,old_receipts,flagged in [(6,100,3,50,False),(3,5,1,5,True),(3,3,0,0,False)]:
+            provider=AsyncMock(side_effect=[{'metrics':base|{'receiptIssues':issues,'receipts':receipts}},
+                                          {'metrics':base|{'receiptIssues':old_issues,'receipts':old_receipts}}])
+            monkeypatch.setattr(insights,'period_data',provider)
+            result=await insights.compare_periods(SimpleNamespace(today=lambda:date(2026,9,21)),None,date(2026,9,20),date(2026,9,20))
+            assert bool(result['flags']) is flagged
+            if flagged:
+                assert result['flags'][0]['rate']==.6 and result['flags'][0]['previousRate']==.2
+    asyncio.run(run())

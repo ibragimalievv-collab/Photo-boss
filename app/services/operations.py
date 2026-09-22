@@ -99,10 +99,12 @@ async def run_operations_once(session, bot, now=None):
     certificates = await issue_academy_certificates(session)
     from ..insights import daily_control
     summaries = await daily_control(session, now, config.training_timezone)
+    from .control_notifications import deliver_owner_notifications
+    owner_messages = await deliver_owner_notifications(session,bot,now,config.training_timezone)
     await session.commit()
     return {"reminders": sent, "repeat_sale_leads": leads,
             "academy_reminders": academy_reminders,
-            "academy_certificates": certificates, "owner_summaries": summaries}
+            "academy_certificates": certificates, "owner_summaries": summaries, "owner_messages":owner_messages}
 
 
 async def send_academy_reminders(session, bot, now=None):

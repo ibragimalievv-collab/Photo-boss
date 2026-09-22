@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from .miniapp_security import AccessError, financial_period, require_owner
 from .models import utc_now
-from .services.insights import compare_periods, parsed, sync_events
+from .services.insights import anomalies, compare_periods, parsed, sync_events
 
 
 class Insights:
@@ -31,9 +31,25 @@ class Insights:
         async with self.api.engine.connect() as conn:
             rows = await self.api.rows(conn, '''SELECT * FROM notifications WHERE user_id=:uid
                 AND kind IN ('control','daily_summary') ORDER BY id DESC LIMIT 200''', uid=actor['id'])
+            settings = await self.api.rows(conn,'SELECT value FROM settings WHERE key=:key',key=f'notify:owner:{actor["id"]}')
+            preferences = {'daily':False,'critical':False} | (parsed(settings[0]['value']) if settings else {})
         return web.json_response({'items': [{'id': r['id'], 'title': r['text'], 'priority': r['priority'],
             'kind': r['kind'], 'at': str(r['created_at']), 'acknowledged': bool(r['acknowledged_at']),
-            'resolved': bool(r['resolved_at']), 'data': parsed(r['payload'])} for r in rows]})
+            'resolved': bool(r['resolved_at']), 'data': parsed(r['payload'])} for r in rows], 'preferences':preferences})
+
+    async def preferences(self, request):
+        actor=request['miniapp_actor'];require_owner(actor['roles'])
+        body=await self.api.body(request)
+        if set(body)!={'daily','critical'} or any(type(v) is not bool for v in body.values()):
+            raise AccessError('Выберите уведомления.',400)
+        from .people import People
+        async with self.api.engine.begin() as conn:
+            require_owner(await People(self.api).current_editor(conn,actor['id']))
+            key=f'notify:owner:{actor["id"]}'
+            old=await self.api.rows(conn,'SELECT value FROM settings WHERE key=:key',key=key)
+            await conn.execute(text('INSERT INTO settings(key,value) VALUES (:key,:value) ON CONFLICT(key) DO UPDATE SET value=excluded.value'),{'key':key,'value':json.dumps(body)})
+            await self.api.audit_write(conn,actor,'notification_preferences_updated','setting',None,json.dumps({'before':parsed(old[0]['value']) if old else None,'after':body}))
+        return web.json_response({'ok':True})
 
     async def scan(self, request):
         actor = request['miniapp_actor']
@@ -61,7 +77,7 @@ class Insights:
 def install_insights(app, miniapp):
     service = Insights(miniapp)
     for method, path, handler in [('GET', '/insights', service.report), ('GET', '/events', service.events),
-                                  ('POST', '/events/scan', service.scan), ('POST', '/events/{id}/acknowledge', service.acknowledge)]:
+                                  ('PUT','/events/preferences',service.preferences),('POST', '/events/scan', service.scan), ('POST', '/events/{id}/acknowledge', service.acknowledge)]:
         app.router.add_route(method, '/api/miniapp'+path, handler)
     return service
 
@@ -70,16 +86,17 @@ async def daily_control(session, now, tz_name):
     """Persist one owner digest per completed local day. No external sends here."""
     zone = ZoneInfo(tz_name)
     local = now.astimezone(zone)
-    if local.hour < 1:
-        return 0
     day = local.date()-timedelta(days=1)
     async def rows(conn, sql, **params):
         return list((await conn.execute(text(sql), params)).mappings())
     api = SimpleNamespace(rows=rows, tz=zone, today=lambda: local.date())
     owners = await rows(session, "SELECT u.id FROM users u JOIN user_roles r ON r.user_id=u.id WHERE u.active=TRUE AND r.role='OWNER'")
     count = 0
+    findings = await anomalies(api,session) if owners else []
     for owner in owners:
-        events = await sync_events(api, session, owner['id'])
+        events = await sync_events(api, session, owner['id'],items=findings)
+        if local.hour < 1:
+            continue
         key = f'daily:{day}'
         if await rows(session, 'SELECT id FROM notifications WHERE user_id=:uid AND event_key=:key', uid=owner['id'], key=key):
             continue
@@ -87,7 +104,11 @@ async def daily_control(session, now, tz_name):
         m = report['metrics']
         summary = (f"Photo Boss · {day:%d.%m.%Y}\nВыручка {m['revenue']/100:,.2f} ₽ · поступило {m['cash']/100:,.2f} ₽\n"
                    f"Продаж {m['sales']} · съёмок {m['shootings']} · сотрудников {m['employees']}\n"
-                   f"Опозданий {m['late']} · проблемных чеков {m['receiptIssues']} · открытых событий {len(events)}")
+                   f"Опозданий {m['late']} · пропусков {m['missed']} · незакрытых смен {m['unclosed']}\n"
+                   f"Отметок на проверке {m['pendingAttendance']} · проблемных чеков {m['receiptIssues']} · открытых событий {len(events)}")
+        attention = sorted(events,key=lambda e:e['priority']!='critical')[:3]
+        if attention:
+            summary += '\nТребуют внимания:\n'+'\n'.join(f"• {e['title']} · {e['entity']} №{e['entityId']}" for e in attention)
         await session.execute(text('''INSERT INTO notifications(user_id,text,sent,created_at,event_key,priority,kind,payload)
             VALUES (:uid,:title,FALSE,:now,:key,'info','daily_summary',:payload) ON CONFLICT(user_id,event_key) DO NOTHING'''),
             {'uid': owner['id'], 'title': summary, 'now': utc_now(), 'key': key, 'payload': json.dumps(report, ensure_ascii=False)})

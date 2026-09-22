@@ -80,13 +80,19 @@ async def period_data(api, conn, start, end):
         e = employees.setdefault(b['manager_id'], {'id': b['manager_id'], 'name': user_names.get(b['manager_id'], ''), 'revenue': 0, 'sales': 0, 'accrued': 0, 'bookings': 0})
         e['bookings'] += 1
     feedback = await api.rows(conn, 'SELECT rating FROM guest_feedback WHERE submitted_at>=:lo AND submitted_at<:hi AND rating IS NOT NULL', **params)
+    from .discipline import period
+    discipline = await period(api,conn,start,end)
     metrics = {'guestReviews': len(feedback), 'guestRating': round(sum(r['rating'] for r in feedback)/len(feedback), 2) if feedback else 0, 'revenue': revenue, 'cash': cash, 'accrued': accrued, 'cashAfterAccruals': cash-accrued,
                'average': int((Decimal(revenue) / len(sales)).quantize(Decimal(1), rounding=ROUND_HALF_UP)) if sales else 0,
                'sales': len(sales), 'shootings': len(shootings), 'bookings': len(bookings),
                'cancellations': sum(b['status'] in ('CANCELLED', 'REJECTED') for b in bookings),
                'late': sum(bool(a['late']) for a in attendance), 'attendance': len(attendance),
                'employees': len({a['user_id'] for a in attendance}),
-               'receiptIssues': sum(bool(receipt_check(r)['findings']) or r['status']=='REJECTED' for r in bad_receipts)}
+               'missed': sum(r['missed'] for r in discipline.values()),
+               'unclosed': sum(r['unclosed'] for r in discipline.values()),
+               'pendingAttendance': sum(r['pending'] for r in discipline.values()),
+               'receipts':len(bad_receipts),
+               'receiptIssues': sum(r['status']=='REJECTED' or (bool(receipt_check(r)['findings']) and (r['status']=='PENDING' or parsed(r['analysis']).get('status')=='extracted')) for r in bad_receipts)}
     return {'from': str(start), 'to': str(end), 'metrics': metrics,
             'employees': sorted(employees.values(), key=lambda x: -x['revenue']), 'hotels': list(hotels.values()),
             'note': 'Остаток после начислений = подтверждённые поступления минус комиссии, премии и удержания. Расходы отелей, налоги и фактические выплаты не учтены: это не чистая прибыль.'}
@@ -103,14 +109,12 @@ async def compare_periods(api, conn, start, end, *, offset_days=None):
     c, p = current['metrics'], previous['metrics']
     if p['sales'] >= 5 and changes['revenue']['percent'] is not None and changes['revenue']['percent'] <= -30:
         flags.append({'metric': 'revenue', 'reason': 'Выручка снизилась не менее чем на 30%; в базе сравнения не менее 5 продаж.', **changes['revenue']})
-    for key, denominator in [('cancellations', 'bookings'), ('late', 'attendance')]:
-        if min(c[denominator], p[denominator]) >= 5:
+    for key, denominator in [('cancellations', 'bookings'), ('late', 'attendance'), ('receiptIssues','receipts')]:
+        if min(c.get(denominator,0), p.get(denominator,0)) >= 5:
             rate, old_rate = c[key]/c[denominator], p[key]/p[denominator]
             if c[key] >= 3 and rate-old_rate >= .2:
                 flags.append({'metric': key, 'reason': 'Доля выросла не менее чем на 20 процентных пунктов; в обоих периодах не менее 5 наблюдений.',
                               'rate': rate, 'previousRate': old_rate, **changes[key]})
-    if c['receiptIssues'] >= 3 and c['receiptIssues'] >= max(1,p['receiptIssues'])*2:
-        flags.append({'metric': 'receiptIssues', 'reason': 'Не менее 3 проблемных чеков и рост числа не менее чем вдвое.', **changes['receiptIssues']})
     if end >= api.today():
         flags = []  # A partial trading day is not evidence of a sales drop.
     return {**current, 'previous': previous, 'changes': changes, 'flags': flags,
@@ -144,7 +148,7 @@ async def anomalies(api, conn):
     hashes, operations = {}, {}
     for r in receipts:
         check = receipt_check(r)
-        if check['findings'] and r['status'] != 'REJECTED':
+        if check['findings'] and (r['status']=='PENDING' or r['status']=='APPROVED' and parsed(r['analysis']).get('status')=='extracted'):
             add(f"receipt:{r['id']}:check", 'Чек требует проверки', 'receipt', r['id'], check)
         for field, seen in [('image_sha256', hashes), ('operation_key', operations)]:
             value = r[field]
@@ -155,20 +159,47 @@ async def anomalies(api, conn):
         add(f"bank:{r['id']}", 'Сумма банковской сверки не совпадает', 'receipt', r['receipt_id'], {'bankAmount': cents(r['amount'])}, 'critical')
     for r in await api.rows(conn, "SELECT id,shooting_id,attempts FROM photo_storage WHERE status='FAILED'"):
         add(f"upload:{r['id']}", 'Не удалось сохранить фото на Яндекс.Диске', 'shooting', r['shooting_id'], {'attempts': r['attempts']})
-    for row in await api.rows(conn, "SELECT id,user_id,shift_date FROM shift_check_ins WHERE late=TRUE AND shift_date=:today", today=api.today()):
+    for row in await api.rows(conn, "SELECT id,user_id,shift_date FROM shift_check_ins WHERE late=TRUE AND status='STARTED' AND shift_date=:today", today=api.today()):
         add(f"late:{row['id']}", 'Опоздание на смену', 'shift_check_in', row['id'], {'employeeId': row['user_id'], 'date': str(row['shift_date'])})
     yesterday = api.today()-timedelta(days=1)
     for r in await api.rows(conn, '''SELECT i.id,i.user_id,i.shift_date FROM shift_check_ins i
         WHERE i.status='STARTED' AND i.shift_date<=:yesterday AND NOT EXISTS
-        (SELECT 1 FROM shift_check_outs o WHERE o.user_id=i.user_id AND o.shift_date=i.shift_date AND o.status='FINISHED')''', yesterday=yesterday):
+        (SELECT 1 FROM shift_check_outs o WHERE o.user_id=i.user_id AND o.shift_date=i.shift_date AND o.status IN ('FINISHED','PENDING_REVIEW'))''', yesterday=yesterday):
         add(f"shift:{r['id']}:open", 'Смена не закрыта', 'shift_check_in', r['id'], {'employeeId': r['user_id'], 'date': str(r['shift_date'])})
+    lower, upper = utc_bounds(api.today()-timedelta(days=7),api.today(),api.tz)
+    for r in await api.rows(conn, "SELECT id,cancellation_reason,cancelled_at,shoot_date FROM bookings WHERE status IN ('CANCELLED','REJECTED') AND ((cancelled_at>=:lo AND cancelled_at<:hi) OR (cancelled_at IS NULL AND shoot_date>=:start AND shoot_date<=:end))",lo=lower,hi=upper,start=api.today()-timedelta(days=7),end=api.today()+timedelta(days=7)):
+        add(f"booking:{r['id']}:cancelled:{r['cancelled_at']}",'Запись отменена','booking',r['id'],{'shootDate':str(r['shoot_date']),'cancelledAt':str(r['cancelled_at']),'reason':r['cancellation_reason']})
+    for table in ('shift_check_ins','shift_check_outs'):
+        for r in await api.rows(conn,f"SELECT id,user_id,shift_date,offline_claimed_at,location_received_at FROM {table} WHERE status='PENDING_REVIEW'"):
+            add(f"attendance:{table}:{r['id']}",'Офлайн-отметка ожидает проверки',table,r['id'],{'employeeId':r['user_id'],'date':str(r['shift_date']),'claimedAt':str(r['offline_claimed_at']),'receivedAt':str(r['location_received_at'])})
+    for r in await api.rows(conn,"SELECT id,shooting_id,last_error FROM shoot_development_reviews WHERE status='FAILED'"):
+        add(f"shoot-review:{r['id']}:failed",'AI-разбор не завершён','shooting',r['shooting_id'],{'reviewId':r['id'],'reason':r['last_error']})
+    for r in await api.rows(conn,'''SELECT sh.id,b.photographer_id,MIN(s.created_at) AS first_sale FROM shootings sh JOIN bookings b ON b.id=sh.booking_id
+        JOIN sales s ON s.booking_id=b.id WHERE sh.full_upload_completed_at IS NULL GROUP BY sh.id,b.photographer_id HAVING MIN(s.created_at)<:cutoff''',cutoff=lower+timedelta(days=6)):
+        add(f"shooting:{r['id']}:full-upload",'После продажи не завершена полная загрузка','shooting',r['id'],{'employeeId':r['photographer_id'],'firstSaleAt':str(r['first_sale']),'rule':'Прошёл как минимум один завершённый местный день.'})
+    checks = await api.rows(conn,"SELECT key,value FROM settings WHERE key LIKE 'checklist:%'")
+    checks = [(r['key'],parsed(r['value'])) for r in checks if parsed(r['value']).get('active',True) and parsed(r['value']).get('required',False)]
+    if checks:
+        roles = {}
+        for r in await api.rows(conn,'SELECT user_id,role FROM user_roles'):
+            roles.setdefault(r['user_id'],set()).add(r['role'])
+        closures = await api.rows(conn,"SELECT id,user_id,shift_date FROM shift_check_outs WHERE status IN ('FINISHED','PENDING_REVIEW') AND shift_date>=:start",start=api.today()-timedelta(days=7))
+        done = {(r['user_id'],str(r['shift_date']),r['item_key']) for r in await api.rows(conn,'SELECT user_id,shift_date,item_key FROM work_checklist_completions WHERE done=TRUE AND shift_date>=:start',start=api.today()-timedelta(days=7))}
+        for closure in closures:
+            for key,item in checks:
+                if str(closure['shift_date']) >= item.get('effectiveFrom',str(api.today())) and roles.get(closure['user_id'],set()) & set(item.get('roles',[])) and (closure['user_id'],str(closure['shift_date']),key) not in done:
+                    add(f"required:{closure['user_id']}:{closure['shift_date']}:{key}",'Не выполнен настроенный обязательный пункт','shift_check_out',closure['id'],{'employeeId':closure['user_id'],'date':str(closure['shift_date']),'itemKey':key,'title':item['title']})
+    report = await compare_periods(api,conn,yesterday-timedelta(days=6),yesterday)
+    for flag in report['flags']:
+        add(f"trend:{report['from']}:{report['to']}:{flag['metric']}",'Существенное изменение показателя','period',None,
+            flag | {'from':report['from'],'to':report['to'],'previousFrom':report['previous']['from'],'previousTo':report['previous']['to']})
     return findings
 
 
-async def sync_events(api, conn, owner_id):
+async def sync_events(api, conn, owner_id, *, items=None):
     from ..models import utc_now
     now = utc_now()
-    items = await anomalies(api, conn)
+    items = await anomalies(api, conn) if items is None else items
     active_keys = {item['key'] for item in items}
     old = await api.rows(conn, "SELECT id,event_key FROM notifications WHERE user_id=:uid AND kind='control' AND resolved_at IS NULL", uid=owner_id)
     for row in old:
@@ -177,6 +208,9 @@ async def sync_events(api, conn, owner_id):
     for item in items:
         await conn.execute(text('''INSERT INTO notifications(user_id,text,sent,created_at,event_key,priority,kind,payload)
             VALUES (:uid,:title,FALSE,:now,:key,:priority,'control',:payload)
-            ON CONFLICT(user_id,event_key) DO UPDATE SET text=excluded.text,payload=excluded.payload,resolved_at=NULL'''),
+            ON CONFLICT(user_id,event_key) DO UPDATE SET text=excluded.text,payload=excluded.payload,
+            acknowledged_at=CASE WHEN notifications.resolved_at IS NOT NULL THEN NULL ELSE notifications.acknowledged_at END,
+            sent=CASE WHEN notifications.resolved_at IS NOT NULL THEN FALSE ELSE notifications.sent END,
+            priority=excluded.priority,resolved_at=NULL'''),
             {'uid': owner_id, 'title': item['title'], 'now': now, 'key': item['key'], 'priority': item['priority'], 'payload': json.dumps(item, ensure_ascii=False)})
     return items
