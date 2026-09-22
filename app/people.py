@@ -123,7 +123,17 @@ class People:
         u = users[0]
         roles = await self.api.rows(conn, "SELECT role FROM user_roles WHERE user_id=:id ORDER BY role", id=uid)
         hotels = await self.api.rows(conn, "SELECT hotel_id FROM hotel_employees WHERE user_id=:id ORDER BY hotel_id", id=uid)
-        result = {
+        role_names = sorted({r["role"] for r in roles})
+        hotel_ids = sorted({r["hotel_id"] for r in hotels})
+        setting_rows = await self.api.rows(
+            conn,
+            """SELECT key,value FROM settings
+               WHERE key IN (:last_login,:screen_capture)""",
+            last_login=f"miniapp:last_login:{uid}",
+            screen_capture=f"miniapp:screen_capture:{uid}",
+        )
+        settings = {row["key"]: row["value"] for row in setting_rows}
+        core = {
             "id": u["id"],
             "telegramId": u["tg_id"],
             "name": u["name"],
@@ -134,10 +144,16 @@ class People:
                 and hasattr(u["terminated_at"], "isoformat")
                 else (str(u["terminated_at"]) if u["terminated_at"] else None)
             ),
-            "roles": sorted({r["role"] for r in roles}),
-            "hotelIds": sorted({r["hotel_id"] for r in hotels}),
+            "roles": role_names,
+            "hotelIds": hotel_ids,
         }
-        result["revision"] = revision(result)
+        result = dict(core)
+        result["revision"] = revision(core)
+        result["lastLoginAt"] = settings.get(f"miniapp:last_login:{uid}")
+        stored_capture = settings.get(f"miniapp:screen_capture:{uid}")
+        result["screenCaptureAllowed"] = (
+            stored_capture == "1" if stored_capture is not None else "OWNER" in role_names
+        )
         return result
 
     async def listing(self, request):
@@ -163,6 +179,7 @@ class People:
             item["editable"] = item["id"] != actor["id"] and "OWNER" not in item["roles"] and ("OWNER" in roles or "ADMIN" not in item["roles"])
         return web.json_response({"items": items, "hotels": [dict(h) for h in hotels],
                                   "canAssignAdmin": "OWNER" in roles,
+                                  "canManageScreenCapture": "OWNER" in roles,
                                   "archived": archived,
                                   "next": ids[99]["id"] if len(ids) > 100 else None})
 
@@ -319,6 +336,41 @@ class People:
             pass
         return web.json_response({"employee": after})
 
+    async def set_screen_capture(self, request):
+        actor = request["miniapp_actor"]
+        if "OWNER" not in actor["roles"]:
+            raise AccessError("Разрешение на скриншоты может менять только владелец.", 403)
+        uid = positive_id(request.match_info["id"])
+        body = await self.api.body(request)
+        if set(body) != {"allowed"} or type(body["allowed"]) is not bool:
+            raise AccessError("Передайте только признак allowed.", 400)
+        async with self.engine.begin() as conn:
+            await self.current_editor(conn, actor["id"])
+            target = await self.card(conn, uid)
+            key = f"miniapp:screen_capture:{uid}"
+            await conn.execute(
+                text("""INSERT INTO settings (key,value) VALUES (:key,:value)
+                    ON CONFLICT (key) DO UPDATE SET value=excluded.value"""),
+                {"key": key, "value": "1" if body["allowed"] else "0"},
+            )
+            await self.api.audit_write(
+                conn,
+                actor,
+                "miniapp_screen_capture_changed",
+                "user",
+                uid,
+                json.dumps(
+                    {
+                        "employee": target["name"],
+                        "allowed": body["allowed"],
+                        "source": "owner",
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            updated = await self.card(conn, uid)
+        return web.json_response({"employee": updated})
+
     async def documents(self, request):
         return web.json_response({"version": DOCUMENT_VERSION, "status": "draft", "canSign": False,
             "canAcceptWorkRules": True,
@@ -344,6 +396,7 @@ def install_people(app, miniapp):
     app.router.add_put("/api/miniapp/people/{id}", service.update)
     app.router.add_post("/api/miniapp/people/{id}/fire", service.fire)
     app.router.add_post("/api/miniapp/people/{id}/restore", service.restore)
+    app.router.add_put("/api/miniapp/people/{id}/screen-capture", service.set_screen_capture)
     app.router.add_get("/api/miniapp/documents", service.documents)
     app.router.add_get("/people/{asset}", service.static)
     return service
