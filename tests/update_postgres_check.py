@@ -59,6 +59,11 @@ async def main():
                 await conn.execute(text(f'ALTER TABLE shift_check_outs DROP COLUMN {column}'))
             await conn.execute(text("INSERT INTO users(id,tg_id,name,active,created_at) VALUES (1,9876543210,'Before',true,CURRENT_TIMESTAMP)"))
             await conn.execute(text("INSERT INTO notifications(user_id,text,sent,created_at) VALUES (1,'Legacy notification',true,CURRENT_TIMESTAMP)"))
+            await conn.execute(text("INSERT INTO sales(id,created_by_id,credited_user_id,commission_role,sold_photos,amount,percent,commission,payment_status,created_at) VALUES (999,1,1,'PHOTOGRAPHER',3,1234.56,12.5,154.32,'PAID','2026-09-01 10:00:00')"))
+            await conn.execute(text("INSERT INTO payroll_entries(id,user_id,kind,amount,period,note,created_at) VALUES (999,1,'Legacy bonus',41.25,'2026-09','Legacy note','2026-09-01 10:00:00')"))
+            await conn.execute(text("INSERT INTO shift_check_ins(id,user_id,shift_date,status,initiated_at,started_at,late,fine_amount) VALUES (999,1,'2026-09-01','STARTED','2026-09-01 06:00:00','2026-09-01 06:00:00',false,0)"))
+            legacy_money={table:await conn.scalar(text(f'SELECT to_jsonb(t) FROM {table} t WHERE id=999')) for table in ('sales','payroll_entries','shift_check_ins')}
+
 
         migrations = sorted(p for p in Path('migrations').glob('*.sql') if 4<=int(p.name.split('_')[0])<=11)
         assert len(migrations) == 8
@@ -75,6 +80,12 @@ async def main():
             assert legacy.text == 'Legacy notification' and legacy.sent
             assert legacy.kind == 'legacy' and legacy.priority == 'info'
             assert (await session.get(User, 1)).tg_id == 9876543210
+            for table,original in legacy_money.items():
+                current=await session.scalar(text(f'SELECT to_jsonb(t) FROM {table} t WHERE id=999'))
+                assert {k:current[k] for k in original}==original, f'Legacy ledger changed: {table}'
+            sale=await session.get(Sale,999)
+            assert sale.manager_percent_applied is None and sale.manager_payroll_entry_id is None
+
 
         token = actor_id.set(1)
         try:

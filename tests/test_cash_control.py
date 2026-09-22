@@ -98,3 +98,18 @@ def test_anomalous_price_requires_ten_comparable_previous_sales():
             assert len(flags)==1 and flags[0]['entityId']==11 and flags[0]['evidence']['sampleSize']==10
         await engine.dispose()
     asyncio.run(run())
+
+
+def test_legacy_sales_without_booking_stay_in_financial_checks():
+    async def run():
+        engine,factory,work=await fixture()
+        from app.models import Sale
+        async with factory() as s:
+            s.add(Sale(id=20,created_by_id=1,credited_user_id=2,sold_photos=1,amount=400,percent=0,commission=0))
+            await s.commit()
+        async with engine.connect() as conn:
+            findings=await anomalies(work.api,conn)
+            assert any(f['key']=='sale:20:payment' for f in findings)
+            assert not any(f['key']=='sale:20:unusual-price' for f in findings)
+        await engine.dispose()
+    asyncio.run(run())

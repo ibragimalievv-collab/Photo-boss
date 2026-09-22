@@ -72,6 +72,7 @@ async def main():
                             await page.locator('#cashExpense button').click()
                         await wait_async(page,"async ()=>(await (await import('/app/js/outbox.js')).outboxRows()).some(r=>r.kind==='cash_expense'&&r.status==='synced')")
                         await page.get_by_role('button',name='Обновить суммы',exact=True).click()
+                        await page.get_by_text('Paid supplies fixture',exact=True).wait_for(state='attached')
                         await page.get_by_text('Оплаченные расходы и выплаты',exact=True).click()
                         await page.get_by_text('Paid supplies fixture',exact=True).wait_for()
                         await page.screenshot(path=str(output/'update-cash-mobile.png'),full_page=True)
@@ -79,6 +80,7 @@ async def main():
                         await page.locator('.cashVoid [name=reason]').fill('Correct erroneous fixture entry')
                         async with page.expect_response(lambda r:r.url.endswith('/void') and r.status==200):
                             await page.locator('.cashVoid button').click()
+                        await page.get_by_text('Основание отмены: Correct erroneous fixture entry',exact=True).wait_for(state='attached')
                         await page.get_by_text('Оплаченные расходы и выплаты',exact=True).click()
                         await page.get_by_text('Основание отмены: Correct erroneous fixture entry',exact=True).wait_for()
                         await page.locator('#notifyDaily').check()

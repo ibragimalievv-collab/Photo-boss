@@ -132,7 +132,7 @@ async def anomalies(api, conn):
         findings.append({'key': key, 'title': title, 'entity': entity, 'entityId': eid, 'evidence': evidence, 'priority': priority})
     sales = await api.rows(conn, '''SELECT s.*,b.hotel_id,b.package_id,b.manager_id,pe.amount AS manager_amount,pe.user_id AS manager_user_id,sh.full_upload_completed_at,
         (SELECT COUNT(*) FROM photos p WHERE p.shooting_id=sh.id) AS frames
-        FROM sales s JOIN bookings b ON b.id=s.booking_id LEFT JOIN payroll_entries pe ON pe.id=s.manager_payroll_entry_id LEFT JOIN shootings sh ON sh.booking_id=s.booking_id''')
+        FROM sales s LEFT JOIN bookings b ON b.id=s.booking_id LEFT JOIN payroll_entries pe ON pe.id=s.manager_payroll_entry_id LEFT JOIN shootings sh ON sh.booking_id=s.booking_id''')
     for s in sales:
         if s['payment_status'] != 'PAID':
             add(f"sale:{s['id']}:payment", 'Продажа оплачена не полностью', 'sale', s['id'], {'amount': cents(s['amount']), 'status': s['payment_status']})
@@ -159,7 +159,7 @@ async def anomalies(api, conn):
     from statistics import median
     history=defaultdict(deque)
     for s in sorted(sales,key=lambda r:(str(r['created_at']),r['id'])):
-        if s['amount']<=0 or s['sold_photos']<=0: continue
+        if s['amount']<=0 or s['sold_photos']<=0 or s['hotel_id'] is None or s['package_id'] is None: continue
         at=datetime.fromisoformat(s['created_at']) if isinstance(s['created_at'],str) else s['created_at']
         group=history[(s['hotel_id'],s['package_id'])]
         while group and group[0][0]<at-timedelta(days=90): group.popleft()
