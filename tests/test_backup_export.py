@@ -57,3 +57,31 @@ def test_daily_export_marks_delivered_only_after_success_and_retries_failure(mon
         finally:
             await engine.dispose()
     asyncio.run(run())
+
+
+def test_partial_daily_export_retries_only_undelivered_recipients(monkeypatch):
+    async def run():
+        engine, factory, _ = await fixture()
+        recipients = [6000000001, 6000000002]
+        monkeypatch.setattr(operations, 'config', SimpleNamespace(training_timezone='Europe/Moscow', admin_ids=recipients))
+        failure = True
+        async def delivery(tg_id, *args, **kwargs):
+            if failure and tg_id == recipients[1]:
+                raise TelegramBadRequest(method=SendDocument(chat_id=tg_id, document='fixture'), message='Fixture delivery failure')
+        bot = SimpleNamespace(send_document=AsyncMock(side_effect=delivery))
+        now = datetime(2026, 9, 22, 0, 15, tzinfo=UTC)
+        try:
+            async with factory() as session:
+                assert await operations.maybe_send_daily_backup(session, bot, now) == 1
+                await session.commit()
+                assert await session.get(Setting, 'LAST_AUTOMATIC_BACKUP_DATE') is None
+            failure = False
+            async with factory() as session:
+                assert await operations.maybe_send_daily_backup(session, bot, now) == 1
+                await session.commit()
+                assert (await session.get(Setting, 'LAST_AUTOMATIC_BACKUP_DATE')).value == '2026-09-22'
+                assert await operations.maybe_send_daily_backup(session, bot, now) == 0
+            assert [call.args[0] for call in bot.send_document.await_args_list] == [*recipients, recipients[1]]
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
