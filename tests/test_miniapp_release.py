@@ -119,6 +119,7 @@ def test_bad_schedule_payload(change):
 class Connection:
     def __init__(self, connection):
         self.connection = connection
+        self.dialect = connection.dialect
 
     async def execute(self, statement, parameters=None):
         return self.connection.execute(text(str(statement).replace(" FOR UPDATE", "")), parameters or {})
@@ -251,6 +252,15 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         for uid in [9999, 1006, 1007]:
             assert (await self.call("/me", uid=uid))[0] == 403
 
+    async def test_access_screen_shows_only_signed_own_identity(self):
+        for uid in [9999, 1006, 1007]:
+            status, data, _ = await self.call("/me", uid=uid)
+            assert status == 403 and data["telegramId"] == uid
+            assert set(data) == {"error", "telegramId"}
+        for token in ["", signed(9999, issued=int(time.time()) - 7200)]:
+            status, data, _ = await self.call("/me", uid=9999, token=token)
+            assert status == 401 and "telegramId" not in data
+
     async def test_owner_cash_is_not_unpaid_sales(self):
         status, data, _ = await self.call("/finance")
         assert status == 200
@@ -370,10 +380,21 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_handoff_does_not_create_sale(self):
         status, result, _ = await self.call("/handoff", uid=1003, method="POST", body={"action": "new-sale"})
-        assert status == 200 and result["url"] == "https://t.me/unit_test_bot"
-        assert self.bot.send_message.await_args.kwargs["protect_content"] is True
+        assert status == 200 and result["url"] == "/app/#workflow"
+        self.bot.send_message.assert_not_awaited()
+        self.bot.me.assert_not_awaited()
         assert (await self.call("/finance"))[1]["salesCount"] == 2
         assert (await self.call("/handoff", method="POST", body={"action": []}))[0] == 400
+
+    async def test_legacy_navigation_stays_in_app_with_role_checks(self):
+        for action, path in [("new-booking", "workflow"), ("new-sale", "workflow"),
+                             ("shift", "schedule"), ("practice", "academy")]:
+            status, data, _ = await self.call("/handoff", uid=1004, method="POST", body={"action": action})
+            assert status == 200 and data == {"url": f"/app/#{path}"}
+        assert (await self.call("/handoff", uid=1003, method="POST", body={"action": "new-booking"}))[0] == 403
+        assert (await self.call("/handoff", method="POST", token="", body={"action": "shift"}))[0] == 401
+        self.bot.send_message.assert_not_awaited()
+        self.bot.me.assert_not_awaited()
 
     async def test_static_allowlist_and_route_registration(self):
         for name in ["js/demo.js", "preview.html", ".env", "../config.py", "package.json"]:

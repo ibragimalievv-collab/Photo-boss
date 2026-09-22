@@ -71,7 +71,7 @@ export function callToolbar(peer, name) {
     selected = {peer, title:name};
     const room = available.find(r => peer === null ? r.group : !r.group &&
         [r.creatorId,r.peerId].includes(peer) && [r.creatorId,r.peerId].includes(me?.user?.id));
-    return `<div class="pb-call-toolbar"><div class="pb-call-actions"><button data-start-call="audio" aria-label="${peer===null?'Начать групповой аудиозвонок':'Аудиозвонок'}" title="Аудиозвонок">${icon('phone')}</button><button data-start-call="video" aria-label="${peer===null?'Начать групповой видеозвонок':'Видеозвонок'}" title="Видеозвонок">${icon('video')}</button></div>${room||active?`<div class="pb-call-room-action">${active?`<button data-resume-call>${icon('phone')} Вернуться к звонку</button>`:`<button data-join-call="${esc(room.id)}">${icon('phone')} Присоединиться · ${room.participants.length} из 6</button>`}</div>`:''}</div>`;
+    return `<div class="pb-call-toolbar"><div class="pb-call-actions"><button data-call-history aria-label="История вызовов" title="История вызовов">История</button><button data-start-call="audio" aria-label="${peer===null?'Начать групповой аудиозвонок':'Аудиозвонок'}" title="Аудиозвонок">${icon('phone')}</button><button data-start-call="video" aria-label="${peer===null?'Начать групповой видеозвонок':'Видеозвонок'}" title="Видеозвонок">${icon('video')}</button></div>${room||active?`<div class="pb-call-room-action">${active?`<button data-resume-call>${icon('phone')} Вернуться к звонку</button>`:`<button data-join-call="${esc(room.id)}">${icon('phone')} Присоединиться · ${room.participants.length} из 6</button>`}</div>`:''}</div>`;
 }
 
 async function media(mode) {
@@ -342,3 +342,5 @@ banner.addEventListener('click',async e=>{
 });
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){refresh();sync();}});
 window.addEventListener('pagehide',()=>{if(active)hangup();});
+
+document.addEventListener('click',async e=>{if(!e.target.closest('[data-call-history]'))return;try{const d=await callApi('/history');const labels={ringing:'Вызов',connected:'На связи',completed:'Завершён',missed:'Не отвечен',declined:'Отклонён',cancelled:'Отменён',interrupted:'Прерван'};showPanel(`<h2 id="pbCallTitle">История вызовов</h2>${d.items.map(x=>`<article class="pb-call-note"><strong>${esc(x.creatorName)} · ${x.mode==='video'?'Видео':'Аудио'}</strong><p>${esc(labels[x.status]||x.status)} · ${x.durationSeconds} сек.</p><p>${esc(new Date(x.at+'Z').toLocaleString('ru-RU'))}</p></article>`).join('')||'<p>Звонков пока нет.</p>'}<button data-call-close>Закрыть</button>`);}catch(err){fail(err.message);}});

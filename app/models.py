@@ -317,6 +317,8 @@ class Sale(Base):
     percent: Mapped[float] = mapped_column(Float, default=0)
     commission: Mapped[float] = mapped_column(Float, default=0)
     commission_finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    manager_percent_applied: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    manager_payroll_entry_id: Mapped[int | None] = mapped_column(ForeignKey('payroll_entries.id', ondelete='SET NULL'), nullable=True)
     payment_status: Mapped[str] = mapped_column(String(20), default="UNPAID")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
@@ -369,6 +371,30 @@ class PayrollEntry(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class CashMovement(Base):
+    """Owner-recorded paid outflows, distinct from salary accruals."""
+    __tablename__ = 'cash_movements'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str] = mapped_column(String(20))
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    paid_on: Mapped[date] = mapped_column(Date, index=True)
+    hotel_id: Mapped[int | None] = mapped_column(ForeignKey('hotels.id'), nullable=True)
+    employee_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    note: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default='POSTED')
+    created_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    voided_by_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    void_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    __table_args__ = (
+        CheckConstraint("category IN ('HOTEL','TAX','PAYROLL','OTHER')"),
+        CheckConstraint('amount>0'),
+        CheckConstraint("status IN ('POSTED','VOIDED')"),
+        CheckConstraint("(category='PAYROLL' AND employee_id IS NOT NULL) OR (category<>'PAYROLL' AND employee_id IS NULL)"),
+    )
+
+
 class Shift(Base):
     __tablename__ = "shifts"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -399,6 +425,7 @@ class ShiftCheckIn(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     late: Mapped[bool] = mapped_column(Boolean, default=False)
     fine_amount: Mapped[float] = mapped_column(Float, default=0)
+    offline_claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     __table_args__ = (
         UniqueConstraint("user_id", "shift_date", name="uq_shift_check_in_user_day"),
     )
@@ -422,9 +449,13 @@ class ShiftCheckOut(Base):
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     workplace_file_id: Mapped[str | None] = mapped_column(String(300), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    offline_claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     __table_args__ = (
         UniqueConstraint("user_id", "shift_date", name="uq_shift_check_out_user_day"),
     )
+
+    report_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    report_saved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class SalesPlan(Base):
@@ -443,6 +474,14 @@ class Notification(Base):
     text: Mapped[str] = mapped_column(Text)
     sent: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+    event_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    priority: Mapped[str] = mapped_column(String(20), default="info", server_default="info")
+    kind: Mapped[str] = mapped_column(String(50), default="legacy", server_default="legacy")
+    payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (UniqueConstraint("user_id", "event_key", name="uq_notification_event"),)
 
 
 class BookingReminder(Base):
@@ -676,3 +715,100 @@ class AcademyReview(Base):
             name="ck_academy_review_quality_score",
         ),
     )
+
+
+class HRCandidate(Base):
+    __tablename__ = 'hr_candidates'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(150))
+    contact: Mapped[str] = mapped_column(String(300), default='')
+    source: Mapped[str] = mapped_column(String(150), default='')
+    role: Mapped[str] = mapped_column(String(30))
+    stage: Mapped[str] = mapped_column(String(30), default='NEW')
+    interview_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    decision: Mapped[str] = mapped_column(Text, default='')
+    notes: Mapped[str] = mapped_column(Text, default='[]')
+    employee_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True, unique=True)
+    created_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (CheckConstraint("stage IN ('NEW','CONTACTED','INTERVIEW','OFFER','DOCUMENTS','HIRED','REJECTED')"),
+                     CheckConstraint("role IN ('PHOTOGRAPHER','MANAGER')"))
+
+
+class AcademyAssessment(Base):
+    __tablename__ = 'academy_assessments'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    kind: Mapped[str] = mapped_column(String(40), default='entry-v1')
+    score: Mapped[int] = mapped_column(Integer)
+    result: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (CheckConstraint('score BETWEEN 0 AND 100'),)
+
+
+class WorkChecklistCompletion(Base):
+    __tablename__ = 'work_checklist_completions'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    shift_date: Mapped[date] = mapped_column(Date)
+    item_key: Mapped[str] = mapped_column(String(80))
+    done: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (UniqueConstraint('user_id','shift_date','item_key',name='uq_checklist_user_day_item'),)
+
+
+class OperationRequest(Base):
+    """Idempotency receipt, not another financial or attendance ledger."""
+    __tablename__ = 'operation_requests'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    request_key: Mapped[str] = mapped_column(String(80))
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    result: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (UniqueConstraint('user_id','request_key',name='uq_operation_request_user_key'),)
+
+
+class GuestFeedback(Base):
+    __tablename__ = 'guest_feedback'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sale_id: Mapped[int] = mapped_column(ForeignKey('sales.id'),unique=True)
+    token_hash: Mapped[str] = mapped_column(String(64),unique=True)
+    rating: Mapped[int | None] = mapped_column(Integer,nullable=True)
+    comment: Mapped[str] = mapped_column(Text,default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime,default=utc_now)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime,nullable=True)
+    __table_args__ = (CheckConstraint('rating IS NULL OR rating BETWEEN 1 AND 5'),)
+
+
+class ShootDevelopmentReview(Base):
+    __tablename__ = 'shoot_development_reviews'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    shooting_id: Mapped[int] = mapped_column(ForeignKey('shootings.id'), index=True)
+    photographer_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    photo_ids: Mapped[str] = mapped_column(Text)
+    analyzed: Mapped[str] = mapped_column(Text, default='[]')
+    summary_parts: Mapped[str] = mapped_column(Text, default='[]', server_default='[]')
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default='PENDING', index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (UniqueConstraint('shooting_id','fingerprint',name='uq_shoot_review_fingerprint'),)
+
+
+class SalesTrainingSession(Base):
+    __tablename__ = 'sales_training_sessions'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    client_type: Mapped[str] = mapped_column(String(60))
+    transcript: Mapped[str] = mapped_column(Text, default='[]')
+    status: Mapped[str] = mapped_column(String(20), default='ACTIVE')
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    evaluation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)

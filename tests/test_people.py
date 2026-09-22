@@ -57,7 +57,9 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
         route=urlsplit(path).path
         fn=self.people.documents if route=='/documents' else self.people.listing
         if method=='POST':
-            if route.endswith('/fire'):
+            if route == '/hotels':
+                fn=self.people.create_hotel
+            elif route.endswith('/fire'):
                 fn=self.people.fire
                 req.match_info={'id':route.split('/')[-2]}
             elif route.endswith('/restore'):
@@ -97,6 +99,31 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
             assert c.execute(text("SELECT name FROM users WHERE tg_id=2001")).scalar()=='New employee'
             assert c.execute(text("SELECT COUNT(*) FROM audit_logs WHERE action='employee_created'")).scalar()==1
             assert c.execute(text("SELECT COUNT(*) FROM hotel_employees WHERE user_id=:id"),{'id':res['employee']['id']}).scalar()==1
+
+    async def test_add_hotel_in_app_and_reject_duplicates_without_bot(self):
+        status, data = await self.call('/hotels', method='POST', body={'name': '  New Hotel  '})
+        assert status == 201 and data['hotel']['name'] == 'New Hotel'
+        assert (await self.call('/hotels', method='POST', body={'name': 'new hotel'}))[0] == 409
+        assert (await self.call('/hotels', uid=1002, method='POST', body={'name': 'Admin Hotel'}))[0] == 201
+        _, people = await self.call()
+        assert data['hotel'] in people['hotels']
+        with self.engine.inner.connect() as c:
+            log = c.execute(text("SELECT details FROM audit_logs WHERE action='hotel_created' ORDER BY id LIMIT 1")).scalar()
+            assert json.loads(log)['after']['name'] == 'New Hotel'
+            assert json.loads(log)['before'] is None
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_hotel_creation_requires_current_role_and_valid_name(self):
+        for uid in (1003,1004,1006,1007):
+            assert (await self.call('/hotels', uid=uid, method='POST', body={'name': 'Denied'}))[0] == 403
+        for body in ({'name': ''}, {'name': 'a'*201}, {'name': []}, {'name': 'a\nb'}, {'name': 'Valid', 'active': True}):
+            assert (await self.call('/hotels', method='POST', body=body))[0] == 400
+        request = baseline.Request('/api/miniapp/hotels', 1001, 'POST', {'name': 'Denied after revocation'}, None)
+        request['miniapp_actor'] = await self.service.actor(request)
+        with self.engine.inner.begin() as c:
+            c.execute(text("DELETE FROM user_roles WHERE user_id=1"))
+        with pytest.raises(AccessError):
+            await self.people.create_hotel(request)
 
     async def test_protected_roles_and_self(self):
         assert (await self.edit(uid=2,actor=1002,name='Self'))[0]==403

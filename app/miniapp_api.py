@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 PREFIX = "/api/miniapp"
 ROLE_ORDER = ("OWNER", "ADMIN", "PHOTOGRAPHER", "MANAGER")
 ACTIONS = {
+    "row.insert": "Созданы данные", "row.update": "Изменены данные", "row.delete": "Удалены данные",
+    "work_call_history": "Изменён статус звонка",
     "sale_created": "Зарегистрировал продажу",
     "booking_created": "Создал запись на съёмку",
     "booking_assigned": "Назначил фотографа",
@@ -114,6 +116,7 @@ class MiniApp:
 
     async def actor(self, request):
         telegram_id = validate_init_data(request.headers.get("X-Telegram-Init-Data", ""), self.bot.token)
+        request["miniapp_telegram_id"] = telegram_id
         async with self.engine.connect() as conn:
             people = await self.rows(conn, "SELECT id,tg_id,name,active FROM users WHERE tg_id=:tg", tg=telegram_id)
             if not people or not people[0]["active"]:
@@ -130,19 +133,28 @@ class MiniApp:
     async def middleware(self, request, handler):
         if not (request.path.startswith(PREFIX) or request.path.startswith("/app/")):
             return await handler(request)
+        from .audit_context import actor_id
+        actor_token = actor_id.set(None)
         try:
             if request.path.startswith(PREFIX):
                 if any(k in request.query for k in ("role", "roles", "userId", "user_id", "employee_id", "scope")):
                     raise AccessError("Пользователь и роль определяются сервером.", 400)
                 request["miniapp_actor"] = await self.actor(request)
+                actor_id.set(request["miniapp_actor"]["id"])
             response = await handler(request)
         except AccessError as exc:
-            response = web.json_response({"error": str(exc)}, status=exc.status)
+            body = {"error": str(exc)}
+            if exc.status == 403 and request.get("miniapp_telegram_id"):
+                # Signed account identity only; never disclose a different user or roles.
+                body["telegramId"] = request["miniapp_telegram_id"]
+            response = web.json_response(body, status=exc.status)
         except web.HTTPException as exc:
             response = web.json_response({"error": "Недопустимый запрос."}, status=exc.status)
         except Exception:
             logger.exception("Mini App handler failed: %s", request.path)
             response = web.json_response({"error": "Сервис временно недоступен. Повторите попытку."}, status=503)
+        finally:
+            actor_id.reset(actor_token)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -448,7 +460,7 @@ class MiniApp:
             team = []
             if "OWNER" in actor["roles"]:
                 team = await self.rows(conn, """SELECT u.id,u.name,
-                    (SELECT COUNT(*) FROM academy_lesson_progress alp WHERE alp.user_id=u.id) AS lessons,
+                    (SELECT COUNT(*) FROM academy_lesson_progress alp WHERE alp.user_id=u.id AND alp.topic_slug NOT LIKE 'guide-%') AS lessons,
                     (SELECT COUNT(*) FROM training_assignments ta WHERE ta.user_id=u.id AND ta.status='COMPLETED') AS practices,
                     (SELECT AVG(ta.ai_score) FROM training_assignments ta WHERE ta.user_id=u.id AND ta.status='COMPLETED') AS quality,
                     (SELECT COALESCE(SUM(s.amount),0) FROM sales s WHERE s.credited_user_id=u.id AND s.created_at>=:cutoff) AS sales,
@@ -584,23 +596,20 @@ class MiniApp:
     async def handoff(self, request):
         actor = request["miniapp_actor"]
         body = await self.body(request)
-        options = {"new-booking": "➕ Новая запись", "new-sale": "🧾 Продажа", "shift": "🔄 Моя смена", "practice": "📚 Академия"}
+        # Compatibility for older clients. No Telegram messages or bot URLs.
+        options = {"new-booking": "/app/#workflow", "new-sale": "/app/#workflow",
+                   "shift": "/app/#schedule", "practice": "/app/#academy"}
         choice = body.get("action")
         if set(body) != {"action"} or not isinstance(choice, str) or choice not in options:
             raise AccessError("Действие не найдено.", 400)
         if choice == "new-booking" and not actor["permissions"]["manageBookings"]:
             raise AccessError("Создавать записи может менеджер или администратор.")
-        if choice == "shift" and "PHOTOGRAPHER" not in actor["roles"]:
-            raise AccessError("Эта отметка смены доступна фотографу. График менеджера доступен в приложении.")
-        await self.bot.send_message(actor["tg_id"], f"Продолжите в боте: нажмите «{options[choice]}» внизу.",
-            protect_content=True, reply_markup={"keyboard": [[{"text": options[choice]}], [{"text": "❌ Отменить"}]], "resize_keyboard": True})
-        me = await self.bot.me()
-        return web.json_response({"url": f"https://t.me/{me.username}"})
+        return web.json_response({"url": options[choice]})
 
     async def static_file(self, request):
         name = request.match_info.get("asset", "index.html")
-        allowed = {"index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
-                   "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
+        allowed = {"sw.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
+                   "js/development.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg"}
         if name not in allowed:
@@ -630,4 +639,12 @@ class MiniApp:
 def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/Moscow"):
     miniapp = MiniApp(engine, bot, lessons, blocks=blocks, tz_name=tz_name)
     miniapp.register(app)
+    from .insights import install_insights
+    install_insights(app, miniapp)
+    from .team import install_team
+    install_team(app, miniapp)
+    from .workday import install_workday
+    install_workday(app, miniapp)
+    from .development import install_development
+    install_development(app, miniapp)
     return miniapp

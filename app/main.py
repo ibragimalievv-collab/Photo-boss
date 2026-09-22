@@ -3,6 +3,7 @@ import contextlib
 import logging
 import os
 from pathlib import Path
+from time import monotonic
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -33,24 +34,44 @@ READY_FILE = Path(os.getenv("HEALTHCHECK_FILE", "/tmp/photo-boss.ready"))
 
 async def operations_loop(bot, interval=300):
     from .services.operations import maybe_send_daily_backup, run_operations_once
+    alerted_at = {}
     while True:
-        try:
-            async with Session() as session:
-                result = await run_operations_once(session, bot)
-                result["backups"] = await maybe_send_daily_backup(session, bot)
-                await session.commit()
-            if any(result.values()):
-                logger.info("Operations cycle: %s", result)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Operations cycle failed")
+        result, failed = {}, []
+        for name, job in (("operations", run_operations_once), ("backup", maybe_send_daily_backup)):
+            try:
+                # An export failure must not roll back or skip independent work.
+                async with Session() as session:
+                    value = await job(session, bot)
+                    await session.commit()
+                if name == "operations":
+                    result.update(value)
+                else:
+                    result["backups"] = value
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                failed.append(name)
+                logger.exception("Background job failed: %s", name)
+        if any(result.values()):
+            logger.info("Operations cycle: %s", result)
+        if not failed:
+            alerted_at.clear()
+        else:
+            now = monotonic()
+            labels = {"operations": "рабочие напоминания и контроль", "backup": "ежедневный экспорт"}
+            message = "🚨 Photo Boss: не удалось выполнить: " + ", ".join(labels[x] for x in failed)
+            message += ". Следующая попытка будет автоматически. Повторные сообщения об этом сбое — не чаще раза в час."
             for tg_id in config.admin_ids:
-                with contextlib.suppress(Exception):
-                    await bot.send_message(
-                        tg_id, "🚨 Photo Boss: фоновый процесс завершился с ошибкой. "
-                        "Проверьте логи Render; следующая попытка будет автоматически.",
-                    )
+                if tg_id in alerted_at and now - alerted_at[tg_id] < 3600:
+                    continue
+                try:
+                    async with asyncio.timeout(15):
+                        await bot.send_message(tg_id, message)
+                    alerted_at[tg_id] = now
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Could not deliver background failure notification")
         await asyncio.sleep(interval)
 
 
@@ -61,6 +82,8 @@ def create_dispatcher():
         dispatcher = Dispatcher(storage=storage, events_isolation=storage.create_isolation())
     else:
         dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
+    from .audit_context import ActorMiddleware
+    dispatcher.update.outer_middleware(ActorMiddleware())
     dispatcher.update.outer_middleware(CompactUiMiddleware())
     dispatcher.include_routers(
         common.r, receipts.r, admin.r, photographer.r, manager.r, sales.r,
@@ -102,6 +125,8 @@ async def main():
         storage = YandexDisk(token, client_id)
         if token:
             await storage.verify(write_test=True)
+        from .development import development_loop
+        development_task = asyncio.create_task(development_loop(engine,bot))
         operations_task = asyncio.create_task(operations_loop(bot))
         storage_task = asyncio.create_task(storage_loop(bot, storage)) if token else None
         try:
@@ -112,6 +137,9 @@ async def main():
                 bot, allowed_updates=dispatcher.resolve_used_update_types(), close_bot_session=False,
             )
         finally:
+            development_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await development_task
             operations_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await operations_task

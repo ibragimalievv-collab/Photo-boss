@@ -22,6 +22,7 @@ from aiohttp import web
 from sqlalchemy.exc import SQLAlchemyError
 
 from .miniapp_security import AccessError
+from .models import utc_now
 from .work_chat import positive_id
 
 MAX_PARTICIPANTS = 6
@@ -73,6 +74,8 @@ class Room:
     created: float
     members: dict = field(default_factory=dict)
     joined_once: bool = False
+    participants: dict = field(default_factory=dict)
+    connected: float | None = None
 
 
 class WorkCalls:
@@ -83,6 +86,36 @@ class WorkCalls:
         self.lock = asyncio.Lock()
         self.starts = {}
         self.notifications = set()
+
+    async def record(self, room, status, actor=None):
+        payload = {"callId": room.id, "creatorId": room.creator, "creatorName": room.creator_name,
+                   "peerId": room.peer, "mode": room.mode, "status": status,
+                   "participants": [{"id": uid, "name": name} for uid, name in room.participants.items()],
+                   "durationSeconds": int(max(0, self.clock()-room.connected)) if room.connected is not None else 0,
+                   "at": utc_now().isoformat()}
+        async with self.api.engine.begin() as conn:
+            await self.api.audit_write(conn, actor or {"id": room.creator}, "work_call_history", "work_call", None,
+                                       json.dumps(payload, ensure_ascii=False))
+
+    async def history(self, request):
+        actor, _users = await self.allowed(request)
+        async with self.api.engine.connect() as conn:
+            rows = await self.api.rows(conn, "SELECT details FROM audit_logs WHERE action='work_call_history' ORDER BY id DESC LIMIT 2000")
+        seen, items = set(), []
+        for row in rows:
+            data = json.loads(row['details'])
+            if data['callId'] in seen:
+                continue
+            seen.add(data['callId'])
+            uid = actor['id']
+            if uid not in {data['creatorId'], data['peerId']} and uid not in {p['id'] for p in data['participants']}:
+                continue
+            if data['status'] in ('ringing', 'connected') and data['callId'] not in self.rooms:
+                data['status'] = 'interrupted'
+            items.append(data)
+            if len(items) == 50:
+                break
+        return web.json_response({'items': items})
 
     async def notify_start(self, room, actor):
         try:
@@ -111,7 +144,7 @@ class WorkCalls:
             raise AccessError("Аккаунт сотрудника не активен.")
         return actor, users
 
-    def prune(self, users):
+    async def prune(self, users):
         now = self.clock()
         for rid, room in list(self.rooms.items()):
             for uid, member in list(room.members.items()):
@@ -121,6 +154,7 @@ class WorkCalls:
                      or (not room.joined_once and now - room.created > RING_TTL)
                      or (room.peer is not None and room.joined_once and len(room.members) < 2))
             if ended:
+                await self.record(room, "completed" if room.joined_once else "missed")
                 del self.rooms[rid]
         self.starts = {uid: q for uid, q in self.starts.items() if q and now - q[-1] < 60}
 
@@ -154,14 +188,17 @@ class WorkCalls:
         member = Member(uid, actor["name"], secrets.token_urlsafe(24), self.clock(),
                         video=mode == "video")
         room.members[uid] = member
+        room.participants[uid] = actor["name"]
         if len(room.members) >= 2:
             room.joined_once = True
+            if room.connected is None:
+                room.connected = self.clock()
         return member
 
     async def list_calls(self, request):
         actor, users = await self.allowed(request)
         async with self.lock:
-            self.prune(users)
+            await self.prune(users)
             rooms = [self.summary(r) for r in self.rooms.values() if self.visible(r, actor["id"])]
         return web.json_response({"calls": rooms, "maxParticipants": MAX_PARTICIPANTS})
 
@@ -176,7 +213,7 @@ class WorkCalls:
             if peer == actor["id"] or peer not in users:
                 raise AccessError("Сотрудник сейчас недоступен.", 409)
         async with self.lock:
-            self.prune(users)
+            await self.prune(users)
             if self.busy(actor["id"]):
                 raise AccessError("Сначала завершите текущий звонок.", 409)
             existing = next((r for r in self.rooms.values() if
@@ -195,6 +232,7 @@ class WorkCalls:
             room = Room(secrets.token_urlsafe(18), actor["id"], actor["name"], peer,
                         body["mode"], self.clock())
             member = self.add_member(room, actor, body["mode"])
+            await self.record(room, "ringing", actor)
             self.rooms[room.id] = room
             recent.append(self.clock())
             result = {"call": self.summary(room), "session": member.session, **ice_config(actor["id"])}
@@ -209,9 +247,10 @@ class WorkCalls:
         if set(body) != {"callId", "mode"} or body["mode"] not in ("audio", "video"):
             raise AccessError("Некорректный запрос подключения.", 400)
         async with self.lock:
-            self.prune(users)
+            await self.prune(users)
             room = self.room_for(body["callId"], actor["id"])
             member = self.add_member(room, actor, body["mode"])
+            await self.record(room, "connected", actor)
             result = {"call": self.summary(room), "session": member.session, **ice_config(actor["id"])}
         return web.json_response(result)
 
@@ -231,7 +270,7 @@ class WorkCalls:
         if type(after) is not int or after < 0 or any(type(body[k]) is not bool for k in ("audio", "video")):
             raise AccessError("Некорректный запрос звонка.", 400)
         async with self.lock:
-            self.prune(users)
+            await self.prune(users)
             room = self.room_for(body["callId"], actor["id"])
             member = self.member_for(room, actor, body)
             if after > member.sequence or (member.signals and after < member.signals[0]["seq"] - 1):
@@ -268,7 +307,7 @@ class WorkCalls:
             raise AccessError("Некорректный сигнал звонка.", 400) from None
         target_id = positive_id(body["to"])
         async with self.lock:
-            self.prune(users)
+            await self.prune(users)
             room = self.room_for(body["callId"], actor["id"])
             member = self.member_for(room, actor, body)
             target = room.members.get(target_id)
@@ -290,13 +329,14 @@ class WorkCalls:
         if set(body) != {"callId", "session", "endForAll"} or type(body["endForAll"]) is not bool:
             raise AccessError("Некорректный запрос завершения.", 400)
         async with self.lock:
-            self.prune(users)
+            await self.prune(users)
             room = self.room_for(body["callId"], actor["id"])
             self.member_for(room, actor, body)
             if body["endForAll"] and room.creator != actor["id"]:
                 raise AccessError("Завершить групповой звонок может его создатель.")
             del room.members[actor["id"]]
             if not room.members or room.peer is not None or body["endForAll"]:
+                await self.record(room, "completed" if room.joined_once else "cancelled", actor)
                 del self.rooms[room.id]
         return web.json_response({"ok": True})
 
@@ -306,10 +346,11 @@ class WorkCalls:
         if set(body) != {"callId"}:
             raise AccessError("Некорректный запрос.", 400)
         async with self.lock:
-            self.prune(users)
+            await self.prune(users)
             room = self.room_for(body["callId"], actor["id"])
             if room.peer != actor["id"] or actor["id"] in room.members:
                 raise AccessError("Этот вызов нельзя отклонить.")
+            await self.record(room, "declined", actor)
             del self.rooms[room.id]
         return web.json_response({"ok": True})
 
@@ -318,6 +359,7 @@ def install_work_calls(app, chat):
     service = WorkCalls(chat)
     app["work_calls"] = service
     app.router.add_get("/api/miniapp/chat/calls", service.list_calls)
+    app.router.add_get("/api/miniapp/chat/calls/history", service.history)
     for name in ("start", "join", "sync", "signal", "leave", "decline"):
         app.router.add_post(f"/api/miniapp/chat/calls/{name}", getattr(service, name))
     async def cleanup(_app):

@@ -97,10 +97,14 @@ async def run_operations_once(session, bot, now=None):
     leads = await create_repeat_sale_leads(session, now)
     academy_reminders = await send_academy_reminders(session, bot, now)
     certificates = await issue_academy_certificates(session)
+    from ..insights import daily_control
+    summaries = await daily_control(session, now, config.training_timezone)
+    from .control_notifications import deliver_owner_notifications
+    owner_messages = await deliver_owner_notifications(session,bot,now,config.training_timezone)
     await session.commit()
     return {"reminders": sent, "repeat_sale_leads": leads,
             "academy_reminders": academy_reminders,
-            "academy_certificates": certificates}
+            "academy_certificates": certificates, "owner_summaries": summaries, "owner_messages":owner_messages}
 
 
 async def send_academy_reminders(session, bot, now=None):
@@ -299,19 +303,31 @@ async def maybe_send_daily_backup(session, bot, now=None):
     today = local_now.date().isoformat()
     if saved and saved.value == today:
         return 0
-    payload = await backup_payload(session)
+    recipients = list(dict.fromkeys(config.admin_ids))
+    if not recipients:
+        return 0
+    pending = []
+    for tg_id in recipients:
+        marker = await session.get(Setting, f"{key}:{tg_id}")
+        if marker is None or marker.value != today:
+            pending.append((tg_id, marker))
+    payload = await backup_payload(session) if pending else b""
     delivered = 0
-    for tg_id in config.admin_ids:
+    for tg_id, marker in pending:
         try:
             await bot.send_document(
                 tg_id,
                 BufferedInputFile(payload, filename=f"photo-boss-backup-{today}.json"),
-                caption="💾 Автоматическая ежедневная резервная копия Photo Boss.",
+                caption="💾 Ежедневный экспорт Photo Boss: сотрудники, гости, брони и продажи. Это не полная копия базы данных.",
             )
+            if marker is None:
+                session.add(Setting(key=f"{key}:{tg_id}", value=today))
+            else:
+                marker.value = today
             delivered += 1
         except TelegramAPIError:
             continue
-    if delivered:
+    if delivered == len(pending):
         if saved is None:
             session.add(Setting(key=key, value=today))
         else:

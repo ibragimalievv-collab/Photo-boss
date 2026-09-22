@@ -187,7 +187,7 @@ async def backup(message, current_roles):
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M")
     await message.answer_document(
         BufferedInputFile(payload, filename=f"photo-boss-backup-{stamp}.json"),
-        caption="💾 Резервная копия бизнеса. Токены, пароли и фотографии чеков не включены.",
+        caption="💾 Экспорт сотрудников, гостей, броней и продаж. Это не полная копия базы данных. Токены, пароли и фотографии чеков не включены.",
     )
 
 

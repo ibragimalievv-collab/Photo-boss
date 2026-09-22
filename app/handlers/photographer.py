@@ -25,7 +25,9 @@ from ..services.photo_storage import (
     ensure_photo_storage,
     storage_summary,
 )
-from ..services.sale_workflow import finalize_photographer_commissions
+from ..services.sale_workflow import (
+    complete_full_upload,
+)
 from ..services.shifts import LATE_FINE, is_late, shift_now
 
 r = Router()
@@ -96,6 +98,9 @@ async def my_shift(m, state, current_roles):
             "После 09:00 автоматически начисляется штраф 500 ₽.",
             reply_markup=inline([[("▶️ Начать смену", "shift:begin")]]),
         )
+    if check_in.status == 'PENDING_REVIEW' or (check_out and check_out.status == 'PENDING_REVIEW'):
+        await state.clear()
+        return await m.answer('Офлайн-отметка сохранена и ожидает проверки руководителем в Photo Boss.')
     if check_in.status == "STARTED":
         await state.clear()
         started = shift_now(check_in.started_at)
@@ -140,6 +145,9 @@ async def begin_shift(c: CallbackQuery, state, current_roles):
             await audit(s, u, "shift_check_in_started", "shift_check_in", check_in.id)
             await s.commit()
     await c.answer()
+    if check_in.status == 'PENDING_REVIEW':
+        await state.clear()
+        return await c.message.answer('Офлайн-отметка ожидает проверки руководителем.')
     if check_in.status == "STARTED":
         await state.clear()
         return await c.message.answer("✅ Сегодняшняя смена уже начата.")
@@ -157,10 +165,11 @@ async def save_shift_location(m, state):
         if check_in is None:
             await state.clear()
             return await m.answer("Начните заново через «🔄 Моя смена».")
-        if check_in.status == "STARTED":
+        if check_in.status in ('STARTED', 'PENDING_REVIEW'):
             await state.clear()
-            return await m.answer("✅ Сегодняшняя смена уже начата.")
+            return await m.answer('Отметка уже сохранена. Проверьте её статус в Photo Boss.')
         check_in.latitude = m.location.latitude
+        check_in.offline_claimed_at = None
         check_in.longitude = m.location.longitude
         check_in.location_received_at = now
         check_in.status = "AWAITING_PHOTO"
@@ -269,6 +278,9 @@ async def end_shift(c: CallbackQuery, state, current_roles):
             await audit(s, u, "shift_check_out_started", "shift_check_out", check_out.id)
             await s.commit()
     await c.answer()
+    if check_out.status == 'PENDING_REVIEW':
+        await state.clear()
+        return await c.message.answer('Офлайн-завершение ожидает проверки руководителем.')
     if check_out.status == "FINISHED":
         await state.clear()
         return await c.message.answer("✅ Сегодняшняя смена уже завершена.")
@@ -286,7 +298,11 @@ async def save_end_location(m, state):
         if check_out is None:
             await state.clear()
             return await m.answer("Начните завершение заново через «🔄 Моя смена».")
+        if check_out.status in ('FINISHED', 'PENDING_REVIEW'):
+            await state.clear()
+            return await m.answer('Завершение уже сохранено. Проверьте его статус в Photo Boss.')
         check_out.latitude = m.location.latitude
+        check_out.offline_claimed_at = None
         check_out.longitude = m.location.longitude
         check_out.location_received_at = now
         check_out.status = "AWAITING_PHOTO"
@@ -598,48 +614,11 @@ async def finish_photo_upload(c: CallbackQuery, state):
     shooting_id = data.get("shooting_id")
     async with Session() as s:
         u = await get_user(s, c.from_user.id)
-        shooting = await s.get(Shooting, shooting_id, with_for_update=True)
-        booking = await s.get(Booking, shooting.booking_id) if shooting else None
-        if (
-            booking is None
-            or booking.photographer_id != u.id
-            or shooting.status != "READY_FOR_SALE"
-            or shooting.full_upload_completed_at is not None
-        ):
-            await state.clear()
-            return await c.answer("Загрузка уже закрыта.", show_alert=True)
-        count = await s.scalar(
-            select(func.count(Photo.id)).where(Photo.shooting_id == shooting.id)
-        )
-        if not count:
-            return await c.answer("Сначала загрузите всю съёмку.", show_alert=True)
-        declared = await s.scalar(
-            select(func.max(Sale.declared_photo_count)).where(
-                Sale.booking_id == booking.id,
-                Sale.declared_photo_count.is_not(None),
-            )
-        )
-        if declared and count < declared:
-            return await c.answer(
-                f"По продаже указано {declared} кадров, а загружено {count}. "
-                "Загрузите оставшиеся кадры перед завершением.",
-                show_alert=True,
-            )
-        sync = await storage_summary(s, shooting.id)
-        shooting.full_upload_completed_at = datetime.now(UTC).replace(tzinfo=None)
-        commission_state = await finalize_photographer_commissions(s, booking)
-        await audit(
-            s,
-            u,
-            "full_shoot_upload_completed",
-            "shooting",
-            shooting.id,
-            (
-                f"photos={count};percent={commission_state['percent']};"
-                f"sales_updated={commission_state['sales']};"
-                f"disk_pending={sync['pending']};disk_failed={sync['failed']}"
-            ),
-        )
+        try:
+            completed = await complete_full_upload(s, u, shooting_id)
+        except ValueError as exc:
+            return await c.answer(str(exc), show_alert=True)
+        count, sync, commission_state = completed.count, completed.sync, completed.commissions
         await s.commit()
     await state.clear()
     await c.answer()

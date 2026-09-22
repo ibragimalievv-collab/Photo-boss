@@ -12,6 +12,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  render-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
+      ADMIN_TELEGRAM_IDS: "5000000001"
+      DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+      MANAGER_PERCENT: "16"
+      PHOTOGRAPHER_PERCENT: "11"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: pip install -r requirements-dev.txt
+      - name: Verify the current Render Python runtime
+        run: |
+          python -m pip check
+          python -m pytest -q
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -59,6 +79,7 @@ jobs:
           node --check app/work_chat_ui/ui.js
           node --check app/work_chat_ui/camera.js
           node --check app/webapp/js/practice.js
+          for file in app/webapp/js/*.js; do node --check "$file"; done
           DATABASE_URL='sqlite+aiosqlite:///:memory:' python -m pytest -q
 
       - name: Verify PostgreSQL, bot health and restart count
@@ -72,6 +93,12 @@ jobs:
           test "$(docker inspect -f '{{.RestartCount}}' "$bot_id")" = 0
           $compose ps
           $compose logs --tail=100 bot postgres
+
+      - name: Verify additive migrations and audit on PostgreSQL
+        env:
+          PYTHONPATH: .
+          UPDATE_POSTGRES_TEST_URL: postgresql+asyncpg://postgres:ci-only-password@127.0.0.1:5432/hotel_photo_bot
+        run: python tests/update_postgres_check.py
 
       - name: Stop test stack
         if: always()
@@ -98,6 +125,15 @@ jobs:
         run: python tests/work_calls_browser_check.py
       - name: Verify Academy uploads and owner review inside the app
         run: python tests/academy_practice_browser_check.py
+      - name: Verify new mobile screens and offline replay
+        run: python tests/update_browser_check.py
+      - name: Verify cold offline start and replay of sales with photos
+        env:
+          WORKFLOW_TEST_CERT: /tmp/photo-boss-test-cert.pem
+          WORKFLOW_TEST_KEY: /tmp/photo-boss-test-key.pem
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORKFLOW_TEST_KEY" -out "$WORKFLOW_TEST_CERT" -days 1 -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1' 2>/dev/null
+          python tests/workflow_browser_check.py
       - name: Save browser evidence
         if: always()
         uses: actions/upload-artifact@v4

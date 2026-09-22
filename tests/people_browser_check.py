@@ -25,6 +25,7 @@ def fixture_handler(me, data, sent, theme):
             return r.fulfill(json={'general': 'Проект. Владелец имеет доступ ко всем рабочим чатам, включая диалоги.',
                 'version': 'draft-test', 'servicesContract': 'Не подготовлен', 'dataConsent': 'Отдельный документ.'})
         files = {'/people/people.js': ROOT/'app/people_ui/people.js', '/people/people.css': ROOT/'app/people_ui/people.css',
+                 '/app/js/localstore.js': ROOT/'app/webapp/js/localstore.js',
                  '/app/js/api.js': ROOT/'app/webapp/js/api.js', '/app/js/domain.js': ROOT/'app/webapp/js/domain.js',
                  '/app/css/styles.css': ROOT/'app/webapp/css/styles.css'}
         if path in files:
