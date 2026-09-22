@@ -261,7 +261,12 @@ class MiniApp:
 
     async def bookings_data(self, conn, actor, day):
         own = actor["permissions"]["financeScope"] == "self"
-        clause = "AND (b.photographer_id=:uid OR b.manager_id=:uid)" if own else ""
+        fields = []
+        if 'PHOTOGRAPHER' in actor['roles']:
+            fields.append('b.photographer_id=:uid')
+        if 'MANAGER' in actor['roles']:
+            fields.append('b.manager_id=:uid')
+        clause = 'AND (' + ' OR '.join(fields or ['1=0']) + ')' if own else ''
         rows = await self.rows(conn, f"""SELECT b.id,b.room,b.shoot_date,b.shoot_time,b.status,
             b.photographer_id,b.manager_id,b.hotel_id,c.name AS client,h.name AS hotel,
             p.name AS photographer,pk.name AS package,

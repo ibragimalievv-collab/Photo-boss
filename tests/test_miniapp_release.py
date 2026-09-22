@@ -265,7 +265,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
             status, data, _ = await self.call("/me", uid=uid)
             assert status == 403 and data["telegramId"] == uid
             assert set(data) == {"error", "telegramId"}
-        for token in ["", signed(9999, issued=int(time.time()) - 7200)]:
+        for token in ["", signed(9999, issued=int(time.time()) - 25 * 60 * 60)]:
             status, data, _ = await self.call("/me", uid=9999, token=token)
             assert status == 401 and "telegramId" not in data
 

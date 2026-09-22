@@ -1,5 +1,5 @@
 """Sale workflow helpers: photographer percentage is final only after full-shoot upload."""
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import func, or_, select
@@ -20,6 +20,16 @@ from ..models import (
 from .commissions import photographer_percent
 from .core import audit, setting
 from .receipts import money, operation_key, payment_totals, refresh_payment_statuses
+
+
+async def full_upload_deadline(session, booking_id):
+    first = await session.scalar(select(func.min(Sale.created_at)).where(Sale.booking_id == booking_id))
+    return first + timedelta(hours=48) if first else None
+
+
+async def require_completed_sale(session, booking_id):
+    if await full_upload_deadline(session, booking_id) is None:
+        raise ValueError('Сначала загрузите выбранные фотографии и завершите продажу.')
 
 
 async def full_shoot_state(session, booking_id: int):
@@ -80,14 +90,17 @@ async def complete_full_upload(session, actor, shooting_id, *, allow_management=
     from .core import roles_of
     from .photo_storage import storage_summary
 
-    shooting = await session.get(Shooting, shooting_id, with_for_update=True)
-    booking = await session.get(Booking, shooting.booking_id) if shooting else None
+    preview = await session.get(Shooting, shooting_id)
+    booking = await session.get(Booking, preview.booking_id, with_for_update=True) if preview else None
+    shooting = await session.get(Shooting, shooting_id, with_for_update=True, populate_existing=True)
     roles = await roles_of(session, actor)
     management = allow_management and roles & {'OWNER', 'ADMIN'}
-    if booking is None or (booking.photographer_id != actor.id and not management):
+    if (not actor.active or booking is None or not (management or
+            ('PHOTOGRAPHER' in roles and booking.photographer_id == actor.id))):
         raise ValueError('Нет доступа к съёмке.')
-    if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at is not None:
+    if booking.status != 'READY_FOR_SALE' or shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at is not None:
         raise ValueError('Загрузка уже закрыта.')
+    await require_completed_sale(session, booking.id)
     count = await session.scalar(select(func.count(Photo.id)).where(Photo.shooting_id == shooting.id))
     declared = await session.scalar(select(func.max(Sale.declared_photo_count)).where(Sale.booking_id == booking.id))
     if not count:

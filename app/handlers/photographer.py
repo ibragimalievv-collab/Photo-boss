@@ -27,8 +27,10 @@ from ..services.photo_storage import (
 )
 from ..services.sale_workflow import (
     complete_full_upload,
+    require_completed_sale,
 )
 from ..services.shifts import LATE_FINE, is_late, shift_now
+from ..services.shooting_workflow import transition_shooting
 
 r = Router()
 r.message.filter(StaffFilter("PHOTOGRAPHER"))
@@ -40,6 +42,10 @@ class ShiftFlow(StatesGroup):
     photo = State()
     end_location = State()
     workplace_photo = State()
+
+
+class ReadyReasonFlow(StatesGroup):
+    reason = State()
 
 
 class PhotoUploadFlow(StatesGroup):
@@ -382,7 +388,7 @@ async def shoots(m):
                 buttons = [[("▶️ Начать фотосессию", f"photo:start:{sh.id}", "primary")]]
             elif sh.status == "SHOOTING":
                 buttons = [[("⏹ Окончить фотосессию", f"photo:finish:{sh.id}", "primary")]]
-            elif sh.status == "SHOT":
+            elif sh.status in {"SHOT", "PROCESSING"}:
                 buttons = [[("✅ Готово к продаже", f"photo:ready:{sh.id}", "success")]]
             elif sh.status == "READY_FOR_SALE":
                 buttons = [[("💰 Оформить продажу", f"sale:start:{b.id}", "success")]]
@@ -414,17 +420,11 @@ async def action(c: CallbackQuery, state):
             raise ValueError
     except (TypeError, ValueError):
         return await c.answer("Некорректная кнопка.")
-    transitions = {
-        "pickup": ("ASSIGNED", "PICKED_UP", "accepted_at"),
-        "start": ("PICKED_UP", "SHOOTING", "started_at"),
-        "finish": ("SHOOTING", "SHOT", "completed_at"),
-        "ready": ("SHOT", "READY_FOR_SALE", "ready_for_sale_at"),
-    }
     async with Session() as s:
         u = await get_user(s, c.from_user.id)
         sh = (
             await s.execute(
-                select(Shooting).where(Shooting.id == sid).with_for_update()
+                select(Shooting).where(Shooting.id == sid)
             )
         ).scalar_one_or_none()
         if sh is None:
@@ -432,16 +432,15 @@ async def action(c: CallbackQuery, state):
         b = await s.get(Booking, sh.booking_id)
         if u is None or not u.active or b is None or b.photographer_id != u.id:
             return await c.answer("Это не ваша съёмка.")
-        expected, target, timestamp = transitions[act]
-        if sh.status != expected:
-            return await c.answer(
-                "Этот шаг уже выполнен или предыдущий ещё не завершён."
-            )
-        now = datetime.now(UTC).replace(tzinfo=None)
-        sh.status = target
-        setattr(sh, timestamp, now)
-        b.status = target
-        await audit(s, u, f"shooting_{act}", "shooting", sid)
+        if act == 'ready':
+            await state.set_state(ReadyReasonFlow.reason)
+            await state.set_data({'shooting_id': sid})
+            await c.answer()
+            return await c.message.answer('Объясните причину переноса в продажу (от 3 до 1000 символов).')
+        try:
+            await transition_shooting(s, u, sid, act)
+        except ValueError as exc:
+            return await c.answer(str(exc))
         await s.commit()
         if act == "ready":
             await notify_manager_ready_for_sale(c.bot, s, b)
@@ -480,6 +479,22 @@ async def action(c: CallbackQuery, state):
     await c.message.answer(text, reply_markup=inline(buttons))
 
 
+@r.message(ReadyReasonFlow.reason, F.text)
+async def ready_reason(m, state):
+    data = await state.get_data()
+    async with Session() as session:
+        actor = await get_user(session, m.from_user.id)
+        try:
+            shooting = await transition_shooting(session, actor, data.get('shooting_id'), 'ready', m.text)
+        except ValueError as exc:
+            return await m.answer(str(exc))
+        booking = await session.get(Booking, shooting.booking_id)
+        await session.commit()
+        await notify_manager_ready_for_sale(m.bot, session, booking)
+    await state.clear()
+    await m.answer('Съёмка готова к продаже. Сначала загрузите выбранные кадры и завершите продажу, затем всю съёмку в течение 48 часов.')
+
+
 @r.callback_query(F.data.startswith("photo:full_upload:"))
 async def start_full_upload(c: CallbackQuery, state):
     if c.message is None:
@@ -501,6 +516,10 @@ async def start_full_upload(c: CallbackQuery, state):
             or sh.status != "READY_FOR_SALE"
         ):
             return await c.answer("Съёмка недоступна для загрузки.", show_alert=True)
+        try:
+            await require_completed_sale(s, booking.id)
+        except ValueError as exc:
+            return await c.answer(str(exc), show_alert=True)
         if sh.full_upload_completed_at is not None:
             return await c.answer("Вся съёмка уже отмечена как загруженная.", show_alert=True)
     await state.set_state(PhotoUploadFlow.uploading)
@@ -546,6 +565,10 @@ async def upload_sale_photo(m, state):
             await state.clear()
             return await m.answer("Эта полная загрузка уже закрыта.")
 
+        try:
+            await require_completed_sale(s, booking.id)
+        except ValueError as exc:
+            return await m.answer(str(exc))
         existing_storage = await s.scalar(
             select(PhotoStorage).where(
                 PhotoStorage.shooting_id == shooting.id,

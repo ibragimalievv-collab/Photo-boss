@@ -1,6 +1,6 @@
 """Explainable read-only checks. Money is calculated on the server in kopecks."""
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import text
@@ -207,8 +207,8 @@ async def anomalies(api, conn):
     for r in await api.rows(conn,"SELECT id,shooting_id,last_error FROM shoot_development_reviews WHERE status='FAILED'"):
         add(f"shoot-review:{r['id']}:failed",'AI-разбор не завершён','shooting',r['shooting_id'],{'reviewId':r['id'],'reason':r['last_error']})
     for r in await api.rows(conn,'''SELECT sh.id,b.photographer_id,MIN(s.created_at) AS first_sale FROM shootings sh JOIN bookings b ON b.id=sh.booking_id
-        JOIN sales s ON s.booking_id=b.id WHERE sh.full_upload_completed_at IS NULL GROUP BY sh.id,b.photographer_id HAVING MIN(s.created_at)<:cutoff''',cutoff=lower+timedelta(days=6)):
-        add(f"shooting:{r['id']}:full-upload",'После продажи не завершена полная загрузка','shooting',r['id'],{'employeeId':r['photographer_id'],'firstSaleAt':str(r['first_sale']),'rule':'Прошёл как минимум один завершённый местный день.'})
+        JOIN sales s ON s.booking_id=b.id WHERE sh.full_upload_completed_at IS NULL GROUP BY sh.id,b.photographer_id HAVING MIN(s.created_at)<:cutoff''',cutoff=datetime.now(UTC).replace(tzinfo=None)-timedelta(hours=48)):
+        add(f"shooting:{r['id']}:full-upload",'После продажи не завершена полная загрузка','shooting',r['id'],{'employeeId':r['photographer_id'],'firstSaleAt':str(r['first_sale']),'rule':'Прошло 48 часов с первой завершённой продажи.'})
     checks = await api.rows(conn,"SELECT key,value FROM settings WHERE key LIKE 'checklist:%'")
     checks = [(r['key'],parsed(r['value'])) for r in checks if parsed(r['value']).get('active',True) and parsed(r['value']).get('required',False)]
     if checks:
