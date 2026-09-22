@@ -3,7 +3,10 @@ import asyncio
 import json
 import os
 import uuid
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -11,8 +14,18 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.audit_capture import TABLES, install_capture
 from app.audit_context import actor_id, install_actor_context
 from app.db import Base
-from app.models import AuditLog, Notification, User
+from app.models import (
+    AuditLog,
+    Booking,
+    Hotel,
+    Notification,
+    OperationRequest,
+    Package,
+    User,
+    UserRole,
+)
 from app.schema_updates import upgrade
+from app.workday import Workday
 
 
 async def main():
@@ -79,6 +92,26 @@ async def main():
             triggers = await conn.scalar(text("SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=:schema AND t.tgname LIKE 'pb_audit_%'"), {'schema': schema})
             assert triggers == len(TABLES)
         print('PostgreSQL migrations 004–008 twice, legacy data, audit actor/snapshots/rollback: PASS')
+
+        async with factory() as session:
+            session.add_all([UserRole(user_id=1, role='MANAGER'), Hotel(id=1, name='Hotel'),
+                             Package(id=1, name='Standard', price_per_photo=400)])
+            await session.commit()
+        async def rows(conn, sql, **params):
+            return list((await conn.execute(text(sql), params)).mappings())
+        api = SimpleNamespace(engine=engine, rows=rows, day=date.fromisoformat,
+                              today=lambda: date(2026, 9, 22), tz=ZoneInfo('Europe/Moscow'))
+        body = {'actorId': 1, 'kind': 'booking', 'key': 'postgres-concurrent-booking', 'date': '2026-09-22',
+                'data': {'client_name': 'Guest', 'client_phone': None, 'hotel_id': 1, 'package_id': 1,
+                         'room': '100', 'guest_count': 1, 'deposit': '0', 'shoot_date': '2026-09-22',
+                         'shoot_time': '12:00', 'photographer_id': None}}
+        work = Workday(api)
+        results = await asyncio.gather(*(work.execute({'id': 1, 'roles': ['MANAGER']}, body) for _ in range(2)))
+        assert results[0].text == results[1].text
+        async with factory() as session:
+            assert len((await session.scalars(select(Booking))).all()) == 1
+            assert len((await session.scalars(select(OperationRequest))).all()) == 1
+        print('PostgreSQL concurrent replay: one booking and one operation acknowledgement: PASS')
     finally:
         async with engine.begin() as conn:
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))

@@ -74,6 +74,34 @@ async def finalize_photographer_commissions(session, booking: Booking):
     }
 
 
+async def complete_full_upload(session, actor, shooting_id, *, allow_management=False):
+    from types import SimpleNamespace
+
+    from .core import roles_of
+    from .photo_storage import storage_summary
+
+    shooting = await session.get(Shooting, shooting_id, with_for_update=True)
+    booking = await session.get(Booking, shooting.booking_id) if shooting else None
+    roles = await roles_of(session, actor)
+    management = allow_management and roles & {'OWNER', 'ADMIN'}
+    if booking is None or (booking.photographer_id != actor.id and not management):
+        raise ValueError('Нет доступа к съёмке.')
+    if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at is not None:
+        raise ValueError('Загрузка уже закрыта.')
+    count = await session.scalar(select(func.count(Photo.id)).where(Photo.shooting_id == shooting.id))
+    declared = await session.scalar(select(func.max(Sale.declared_photo_count)).where(Sale.booking_id == booking.id))
+    if not count:
+        raise ValueError('Сначала загрузите всю съёмку.')
+    if declared and count < declared:
+        raise ValueError(f'По продаже указано {declared} кадров, а загружено {count}. Загрузите оставшиеся кадры перед завершением.')
+    sync = await storage_summary(session, shooting.id)
+    shooting.full_upload_completed_at = datetime.now(UTC).replace(tzinfo=None)
+    commissions = await finalize_photographer_commissions(session, booking)
+    await audit(session, actor, 'full_shoot_upload_completed', 'shooting', shooting.id,
+                f"photos={count};percent={commissions['percent']};sales_updated={commissions['sales']};disk_pending={sync['pending']};disk_failed={sync['failed']}")
+    return SimpleNamespace(shooting=shooting, booking=booking, count=count, sync=sync, commissions=commissions)
+
+
 ACTIVE_DRAFT_STATUSES = ("AWAITING_RECEIPT", "AWAITING_COUNTS", "AWAITING_SELECTED")
 
 async def can_sell(actor, roles, booking):

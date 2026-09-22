@@ -107,6 +107,13 @@ jobs:
         run: python tests/academy_practice_browser_check.py
       - name: Verify new mobile screens and offline replay
         run: python tests/update_browser_check.py
+      - name: Verify cold offline start and replay of sales with photos
+        env:
+          WORKFLOW_TEST_CERT: /tmp/photo-boss-test-cert.pem
+          WORKFLOW_TEST_KEY: /tmp/photo-boss-test-key.pem
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORKFLOW_TEST_KEY" -out "$WORKFLOW_TEST_CERT" -days 1 -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1' 2>/dev/null
+          python tests/workflow_browser_check.py
       - name: Save browser evidence
         if: always()
         uses: actions/upload-artifact@v4

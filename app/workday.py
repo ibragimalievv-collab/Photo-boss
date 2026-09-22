@@ -7,6 +7,7 @@ from pathlib import Path
 
 from aiohttp import web
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from .miniapp_security import AccessError, utc_bounds
 from .models import utc_now
@@ -53,10 +54,47 @@ class Workday:
     async def operation(self,request):
         """Same key + payload replays the result; different payload is a conflict."""
         a=request['miniapp_actor'];body=await self.api.body(request)
+        return await self.execute(a, body)
+
+    async def media(self, request):
+        reader = await request.multipart()
+        meta = await reader.next()
+        if meta is None or meta.name != 'operation':
+            raise AccessError('Не указана операция вложения.', 400)
+        encoded = await meta.read_chunk(8192)
+        if not meta.at_eof():
+            raise AccessError('Слишком большие метаданные.', 413)
+        try:
+            body = json.loads(encoded)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise AccessError('Некорректная операция.', 400) from exc
+        part = await reader.next()
+        if part is None or part.name != 'file':
+            raise AccessError('Не найдено вложение.', 400)
+        raw = bytearray()
+        while not part.at_eof():
+            raw.extend(await part.read_chunk(65536))
+            if len(raw) > 20 * 1024 * 1024:
+                raise AccessError('Фото должно быть не больше 20 МБ.', 413)
+        if await reader.next() is not None:
+            raise AccessError('Передавайте одно вложение за запрос.', 400)
+        return await self.execute(request['miniapp_actor'], body, bytes(raw))
+
+    async def execute(self, a, body, raw=None):
+        try:
+            return await self._execute(a, body, raw)
+        except IntegrityError as exc:
+            raise AccessError('Операция или вложение уже учтены. Обновите данные перед повтором.', 409) from exc
+
+    async def _execute(self, a, body, raw=None):
+        from .workflow import KINDS, Workflow
+        if not isinstance(body, dict):
+            raise AccessError('Некорректная операция.', 400)
         if set(body)!={'key','kind','date','data','actorId'} or not isinstance(body['key'],str) or not 16<=len(body['key'])<=80 or not isinstance(body['data'],dict): raise AccessError('Некорректная операция.',400)
-        if body['kind'] not in ('checklist','shift_report'): raise AccessError('Этот тип операции не поддерживает синхронизацию.',400)
+        if not isinstance(body['kind'], str) or body['kind'] not in KINDS | {'checklist','shift_report'}: raise AccessError('Этот тип операции не поддерживает синхронизацию.',400)
         if type(body['actorId']) is not int or body['actorId'] != a['id']: raise AccessError('Аккаунт изменился. Операция принадлежит другому сотруднику.',403)
-        digest=hashlib.sha256(json.dumps(body,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+        payload = json.dumps(body,sort_keys=True,ensure_ascii=False).encode()
+        digest=hashlib.sha256(payload + (b'\x00'+hashlib.sha256(raw).digest() if raw is not None else b'')).hexdigest()
         async with self.api.engine.begin() as conn:
             users=await self.api.rows(conn,'SELECT id,active FROM users WHERE id=:uid FOR UPDATE',uid=a['id'])
             if not users or not users[0]['active']: raise AccessError('Доступ отключён.',403)
@@ -69,7 +107,12 @@ class Workday:
             day=self.api.day(body['date'])
             if not self.api.today()-timedelta(days=7)<=day<=self.api.today(): raise AccessError('Дата требует ручной проверки; операция не применена.',409)
             data=body['data']
-            if body['kind']=='checklist':
+            extra = {}
+            if body['kind'] in KINDS:
+                extra = await Workflow(self.api).apply(conn, a | {'roles': sorted(roles)}, body['kind'], data, raw)
+            elif raw is not None:
+                raise AccessError('Вложение не поддерживается для этой операции.', 400)
+            elif body['kind']=='checklist':
                 if set(data)!={'itemKey','done'} or type(data['done']) is not bool or not isinstance(data['itemKey'],str) or data['itemKey'] not in {i['key'] for i in await self.checklist(conn,roles)}: raise AccessError('Пункт больше не доступен вашей роли.',409)
                 await conn.execute(text('''INSERT INTO work_checklist_completions(user_id,shift_date,item_key,done,updated_at) VALUES (:uid,:day,:item,:done,:now)
                     ON CONFLICT(user_id,shift_date,item_key) DO UPDATE SET done=excluded.done,updated_at=excluded.updated_at'''),{'uid':a['id'],'day':day,'item':data['itemKey'],'done':data['done'],'now':utc_now()})
@@ -81,7 +124,7 @@ class Workday:
                 if data['expectedSavedAt']!=current: raise AccessError('Отчёт уже изменён. Обновите его перед сохранением.',409)
                 await conn.execute(text('UPDATE shift_check_outs SET report_note=:note,report_saved_at=:now WHERE id=:id'),{'note':data['note'].strip(),'now':utc_now(),'id':outs[0]['id']})
                 await self.api.audit_write(conn,a,'shift_report_saved','shift_check_out',outs[0]['id'],json.dumps({'before':outs[0]['report_note'],'after':data['note'].strip()},ensure_ascii=False))
-            result={'ok':True,'status':'synced','key':body['key']}
+            result={'ok':True,'status':'synced','key':body['key'],**extra}
             await conn.execute(text('INSERT INTO operation_requests(user_id,request_key,payload_hash,result,created_at) VALUES (:uid,:key,:hash,:result,:now)'),{'uid':a['id'],'key':body['key'],'hash':digest,'result':json.dumps(result),'now':utc_now()})
         return web.json_response(result)
 
@@ -119,7 +162,8 @@ class Workday:
 
 def install_workday(app,api):
     service=Workday(api)
-    for method,path,handler in [('GET','/workday',service.state),('PUT','/workday/checklist',service.configure),('POST','/operations/sync',service.operation),('POST','/sales/{id}/feedback-link',service.feedback_link)]:
+    from .workflow import Workflow
+    for method,path,handler in [('GET','/workflow',Workflow(api).listing),('GET','/workday',service.state),('PUT','/workday/checklist',service.configure),('POST','/operations/sync',service.operation),('POST','/operations/media',service.media),('POST','/sales/{id}/feedback-link',service.feedback_link)]:
         app.router.add_route(method,'/api/miniapp'+path,handler)
     app.router.add_get('/feedback/{token}',service.feedback_page)
     app.router.add_post('/feedback/{token}',service.feedback_submit)

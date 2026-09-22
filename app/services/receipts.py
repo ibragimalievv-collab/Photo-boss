@@ -245,3 +245,13 @@ def analysis_text(receipt):
         rows.append("Сумма и дата не вызвали автоматических замечаний.")
     rows.append("Сверьте получателя и операцию в банковской выписке.")
     return "\n".join(rows)[:3300] + "\n" + LIMITATION
+
+
+async def expected_amount(session, booking, purpose):
+    if purpose == "DEPOSIT":
+        approved = await session.scalar(select(Receipt.id).where(
+            Receipt.booking_id == booking.id, Receipt.purpose == "DEPOSIT",
+            Receipt.status == "APPROVED"
+        ).limit(1))
+        return money(0 if approved else booking.deposit)
+    return (await payment_totals(session, booking.id))[2]

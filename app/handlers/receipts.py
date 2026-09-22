@@ -22,6 +22,7 @@ from ..services.receipts import (
     analysis_text,
     download_receipt,
     duplicate_receipt,
+    expected_amount,
     extract_receipt,
     money,
     operation_key,
@@ -109,14 +110,6 @@ async def find_booking(m, state, current_user, current_roles):
     await m.answer("\n".join(lines), reply_markup=inline(buttons) if buttons else None)
 
 
-async def expected_amount(session, booking, purpose):
-    if purpose == "DEPOSIT":
-        approved = await session.scalar(select(Receipt.id).where(
-            Receipt.booking_id == booking.id, Receipt.purpose == "DEPOSIT",
-            Receipt.status == "APPROVED"
-        ).limit(1))
-        return money(0 if approved else booking.deposit)
-    return (await payment_totals(session, booking.id))[2]
 
 
 @r.callback_query(F.data.startswith("receipt:upload:"))
