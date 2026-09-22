@@ -31,6 +31,7 @@ from .miniapp_security import (
     role_permissions,
     utc_bounds,
     validate_init_data,
+    validate_owner_launch_token,
 )
 from .services.academy_growth import personal_tip
 
@@ -117,15 +118,21 @@ class MiniApp:
         return list((await conn.execute(text(sql), params)).mappings())
 
     async def actor(self, request):
-        # Telegram Android may reuse the same Mini App WebView/initData when the
-        # user reopens the app. One hour was too short and caused a 401 re-login
-        # loop even for a valid Telegram-signed launch. Keep signature
-        # verification strict, but allow the signed launch for up to 24 hours.
-        telegram_id = validate_init_data(
-            request.headers.get("X-Telegram-Init-Data", ""),
-            self.bot.token,
-            max_age=MINIAPP_SESSION_MAX_AGE,
-        )
+        # Prefer Telegram's signed initData. Some Telegram Android WebViews have
+        # been observed opening the app without exposing initData at all; for
+        # owners only, allow a short-lived server-signed token issued by the bot.
+        init_data = request.headers.get("X-Telegram-Init-Data", "")
+        launch_token = request.headers.get("X-PhotoBoss-Owner-Launch", "")
+        owner_fallback = False
+        if init_data:
+            telegram_id = validate_init_data(
+                init_data,
+                self.bot.token,
+                max_age=MINIAPP_SESSION_MAX_AGE,
+            )
+        else:
+            telegram_id = validate_owner_launch_token(launch_token, self.bot.token)
+            owner_fallback = True
         request["miniapp_telegram_id"] = telegram_id
         async with self.engine.connect() as conn:
             people = await self.rows(conn, "SELECT id,tg_id,name,active FROM users WHERE tg_id=:tg", tg=telegram_id)
@@ -136,7 +143,10 @@ class MiniApp:
             actor["roles"] = [r for r in ROLE_ORDER if any(x["role"] == r for x in roles)]
             if not STAFF_ROLES & set(actor["roles"]):
                 raise AccessError("Владелец ещё не назначил вам рабочую роль.")
+            if owner_fallback and "OWNER" not in actor["roles"]:
+                raise AccessError("Резервный вход разрешён только владельцу.", 403)
             actor["permissions"] = role_permissions(actor["roles"])
+            actor["ownerFallback"] = owner_fallback
             return actor
 
     @web.middleware
@@ -222,7 +232,11 @@ class MiniApp:
         if await self.body(request):
             raise AccessError("Лишние параметры входа.", 400)
         actor = request["miniapp_actor"]
-        digest = hashlib.sha256(request.headers["X-Telegram-Init-Data"].encode()).hexdigest()
+        credential = (
+            request.headers.get("X-Telegram-Init-Data", "")
+            or request.headers.get("X-PhotoBoss-Owner-Launch", "")
+        )
+        digest = hashlib.sha256(credential.encode()).hexdigest()
         key = f"miniapp:opened:{actor['id']}"
         last_login_key = f"miniapp:last_login:{actor['id']}"
         now = datetime.now(timezone.utc).replace(tzinfo=None)
