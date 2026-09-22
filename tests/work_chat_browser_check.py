@@ -84,23 +84,30 @@ def handler(page_state, role, sent):
             if r.request.method == "POST":
                 body = json.loads(r.request.post_data)
                 sent.append(body)
-                return r.fulfill(status=201, json={"message": {
-                    "id": 2, "senderId": 1, "recipientId": body["peerId"],
+                messages = page_state.setdefault("messages", {})
+                key = body["clientId"]
+                messages.setdefault(key, {
+                    "id": 2 + len(messages), "senderId": 1, "recipientId": body["peerId"],
                     "body": body["body"], "createdAt": "2026-09-20T11:00:00",
                     "senderName": "Test", "attachment": None,
-                }})
+                })
+                if page_state.get("loseAck"):
+                    page_state["loseAck"] = False
+                    return r.abort("failed")
+                return r.fulfill(status=201, json={"message": messages[key]})
             return r.fulfill(json={"messages": [{
                 "id": 1, "senderId": 2, "recipientId": None,
                 "body": "<img src=x onerror=alert(1)>", "createdAt": "2026-09-20T10:59:00",
                 "senderName": "Employee", "attachment": None,
-            }], "deletedIds": page_state.get("deleted", []), "deletionCursor": len(page_state.get("deleted", [])), "unread": {"total": 2, "general": 0, "people": {"2": 2}}})
+            }] + list(page_state.get("messages", {}).values()) + ([page_state["attachment"]] if "attachment" in page_state else []), "deletedIds": page_state.get("deleted", []), "deletionCursor": len(page_state.get("deleted", [])), "unread": {"total": 2, "general": 0, "people": {"2": 2}}})
         if path == "/api/miniapp/chat/attachments" and r.request.method == "POST":
-            return r.fulfill(status=201, json={"message": {
+            page_state["attachment"] = {
                 "id": 9, "senderId": 1, "recipientId": None, "body": "",
                 "createdAt": "2026-09-20T11:01:00", "senderName": "Test",
                 "attachment": {"id": 7, "name": "report.pdf",
                     "mimeType": "application/pdf", "size": 1234, "isImage": False},
-            }})
+            }
+            return r.fulfill(status=201, json={"message": page_state["attachment"]})
         if path == "/api/miniapp/chat/owner/threads":
             return r.fulfill(json={"threads": [{
                 "a": {"id": 2, "name": "Employee A"}, "b": {"id": 3, "name": "Employee B"},
@@ -169,7 +176,7 @@ def main():
                 field.press('Shift+Enter')
                 field.type('Вторая строка')
                 page.locator(".pb-chat-send").click()
-                page.wait_for_function("!document.querySelector('.pb-chat-send').disabled")
+                page.wait_for_function("!document.querySelector('.pb-chat-send').disabled && !document.querySelector('.pb-chat-pending')")
                 assert sent and sent[-1]["body"] == "Тест рабочего чата\nВторая строка"
                 page.locator('input[name="file"]').set_input_files({
                     "name": "report.pdf",
@@ -178,7 +185,7 @@ def main():
                 })
                 page.get_by_text("report.pdf", exact=False).wait_for()
                 page.locator(".pb-chat-send").click()
-                page.wait_for_function("!document.querySelector('.pb-chat-send').disabled")
+                page.wait_for_function("!document.querySelector('.pb-chat-send').disabled && !document.querySelector('.pb-chat-pending')")
                 visible_error = page.locator(".pb-chat-error:not([hidden])")
                 assert visible_error.count() == 0, visible_error.first.inner_text() if visible_error.count() else ""
                 assert not errors, errors
@@ -199,6 +206,7 @@ def main():
                     field.fill('Отправлено клавишей Enter')
                     field.press('Enter')
                     expect(field).to_have_value('')
+                    page.wait_for_function("!document.querySelector('.pb-chat-pending')")
                     assert sent[-1]['body'] == 'Отправлено клавишей Enter'
                 if role == "OWNER":
                     page.locator('[data-message-id="9"] summary').click()
@@ -211,6 +219,26 @@ def main():
                     expect(page.locator('[data-message-id="9"]')).to_have_count(0)
                 else:
                     assert page.locator('[data-delete-message]').count() == 0
+                if role == "OWNER" and width == 390:
+                    field.fill("Черновик после перезагрузки")
+                    page.reload()
+                    page.locator('[data-open-chat]').click()
+                    page.locator('[data-chat="general"]').click()
+                    expect(field).to_have_value("Черновик после перезагрузки")
+                    state["loseAck"] = True
+                    field.fill("Ответ сервера потерян")
+                    page.locator('.pb-chat-send').click()
+                    expect(page.locator('[data-retry-send]')).to_be_visible()
+                    attempts_before = len(sent)
+                    request_id = sent[-1]["clientId"]
+                    page.reload()
+                    page.locator('[data-open-chat]').click()
+                    page.locator('[data-chat="general"]').click()
+                    expect(page.locator('.pb-chat-pending')).to_have_count(0)
+                    page.wait_for_function("!document.querySelector('.pb-chat-pending')")
+                    assert len(sent) == attempts_before + 1
+                    assert sent[-1]["clientId"] == request_id
+                    expect(page.locator('.pb-chat-bubble').filter(has_text="Ответ сервера потерян")).to_have_count(1)
                 page.locator('[data-chat="home"]').click()
                 page.locator('[data-peer="2"]').click()
                 page.locator("#pbChatMessages").wait_for()

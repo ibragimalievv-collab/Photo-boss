@@ -10,7 +10,7 @@ from aiohttp import web
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .miniapp_security import AccessError
+from .miniapp_security import AccessError, booking_assignment_columns
 from .models import (
     Booking,
     Hotel,
@@ -74,7 +74,8 @@ class Workflow:
         async with AsyncSession(self.api.engine) as session:
             query = select(Booking).where(Booking.status.notin_(['CANCELLED', 'REJECTED']))
             if not {'OWNER', 'ADMIN'} & set(a['roles']):
-                query = query.where(or_(Booking.manager_id == a['id'], Booking.photographer_id == a['id']))
+                assignments = booking_assignment_columns(a['roles'])
+                query = query.where(or_(False, *(getattr(Booking, column) == a['id'] for column in assignments)))
             bookings = (await session.scalars(query.order_by(Booking.shoot_date.desc()).limit(200))).all()
             packages = (await session.scalars(select(Package))).all()
             prices = {p.id: str(money(p.price_per_photo)) for p in packages}
@@ -86,7 +87,7 @@ class Workflow:
                 rows.append({'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
                     'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': prices.get(b.package_id),
                     'shootingId': shoot.id if shoot else None, 'fullUploaded': bool(shoot and shoot.full_upload_completed_at),
-                    'canUpload': b.photographer_id == a['id'] or bool({'OWNER', 'ADMIN'} & set(a['roles'])),
+                    'canUpload': ('PHOTOGRAPHER' in a['roles'] and b.photographer_id == a['id']) or bool({'OWNER', 'ADMIN'} & set(a['roles'])),
                     'draft': ({'id': draft.id, 'mine': draft.created_by_id == a['id'], 'status': draft.status,
                         'total': draft.declared_photo_count, 'sold': draft.sold_photos,
                         'selected': await selected_count(session, draft.id)} if draft else None)})
@@ -215,7 +216,9 @@ class Workflow:
         fields(data, 'booking purpose')
         bid = await target(session, actor, data['booking'], 'bookingId')
         booking = await session.get(Booking, bid, with_for_update=True)
-        if booking is None or (not roles & {'OWNER', 'ADMIN'} and actor.id not in (booking.manager_id, booking.photographer_id)):
+        if booking is None or (not roles & {'OWNER', 'ADMIN'} and not any(
+            getattr(booking, column) == actor.id for column in booking_assignment_columns(roles)
+        )):
             raise AccessError('Нет доступа к записи.', 403)
         if data['purpose'] not in ('DEPOSIT', 'PAYMENT'):
             raise AccessError('Неизвестный вид чека.', 400)
@@ -242,7 +245,9 @@ class Workflow:
         sid = await target(session, actor, data['shooting'], 'shootingId')
         shooting = await session.get(Shooting, sid, with_for_update=True)
         booking = await session.get(Booking, shooting.booking_id) if shooting else None
-        if booking is None or (booking.photographer_id != actor.id and not roles & {'OWNER', 'ADMIN'}):
+        if booking is None or (not roles & {'OWNER', 'ADMIN'} and (
+            'PHOTOGRAPHER' not in roles or booking.photographer_id != actor.id
+        )):
             raise AccessError('Нет доступа к съёмке.', 403)
         if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
             raise AccessError('Загрузка съёмки уже закрыта или ещё недоступна.', 409)

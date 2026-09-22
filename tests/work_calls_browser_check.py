@@ -108,6 +108,7 @@ async def main():
                 page.on("pageerror", lambda e: errors.append(str(e)))
                 await page.route("**/*", route)
                 await page.goto(BASE)
+                await page.evaluate("window.testStatuses=[];new MutationObserver(()=>{const s=document.querySelector('[data-call-status]')?.textContent;if(s&&testStatuses.at(-1)!==s)testStatuses.push(s)}).observe(document.body,{childList:true,subtree:true,characterData:true})")
                 await page.locator("[data-open-chat]").click()
                 await page.locator('[data-chat="general"]').click()
                 pages.append(page)
@@ -149,6 +150,40 @@ async def main():
                 assert len(files) == 1
                 assert await a.evaluate("testStreams.flatMap(s=>s.getTracks()).every(t=>t.readyState==='ended')")
             await a.locator('[data-start-call="video"]').click()
+            if os.getenv("CALLS_QA_CONTROLS_ONLY") == "1":
+                await a.locator('[data-camera]').wait_for()
+                requests = await a.evaluate('testStreams.length')
+                for _ in range(2):
+                    await a.locator('[data-camera]').click()
+                    await a.wait_for_function("testStreams.flatMap(s=>s.getVideoTracks()).filter(t=>t.readyState==='live').every(t=>!t.enabled)")
+                    await a.locator('[data-camera]').click()
+                    await a.wait_for_function("testStreams.flatMap(s=>s.getVideoTracks()).some(t=>t.readyState==='live'&&t.enabled)")
+                assert await a.evaluate('testStreams.length') == requests
+                await a.locator('[data-mic]').click()
+                assert await a.evaluate("testStreams.flatMap(s=>s.getAudioTracks()).filter(t=>t.readyState==='live').every(t=>!t.enabled)")
+                await a.locator('[data-mic]').click()
+                for facing in ('environment', 'user'):
+                    await a.locator('[data-switch-camera]').click()
+                    await a.wait_for_function("!document.querySelector('[data-switch-camera]').disabled")
+                    assert await a.evaluate('testCameraRequests.at(-1)') == facing
+                await a.locator('[data-hangup]').click()
+                await a.wait_for_function("testStreams.flatMap(s=>s.getTracks()).every(t=>t.readyState==='ended')")
+                # Inject the same exception as a denied host permission, without
+                # claiming this synthetic test exercises Android/iOS permission UI.
+                await a.evaluate("()=>{window.testCapture=navigator.mediaDevices.getUserMedia;navigator.mediaDevices.getUserMedia=async()=>{throw new DOMException('Permission denied','NotAllowedError')};}")
+                for mode in ('audio', 'video'):
+                    await a.locator(f'[data-start-call="{mode}"]').click()
+                    await a.get_by_text('Разрешите микрофон и камеру в настройках Telegram или браузера и повторите звонок.', exact=True).wait_for()
+                    assert await a.evaluate("testStreams.flatMap(s=>s.getTracks()).every(t=>t.readyState==='ended')")
+                    await a.locator('[data-call-close]').click()
+                await a.evaluate('()=>{navigator.mediaDevices.getUserMedia=testCapture;}')
+                await a.locator('[data-start-call="audio"]').click()
+                await a.locator('[data-hangup]').wait_for()
+                await a.locator('[data-hangup]').click()
+                await a.wait_for_function("testStreams.flatMap(s=>s.getTracks()).every(t=>t.readyState==='ended')")
+                assert not errors, errors
+                print(json.dumps({"controlsOnly": True, "cameraReusesGrant": True, "permissionDenial": True, "cameraSwitch": True, "devicesReleased": True}))
+                return
             for page in (b, c):
                 await page.locator('[data-incoming]').wait_for(timeout=15000)
                 await page.wait_for_function(RINGING, timeout=8000)
@@ -156,7 +191,12 @@ async def main():
                 await page.wait_for_function(SILENT, timeout=2000)
                 await page.locator('[data-answer="video"]').click()
             for page in pages:
-                await page.wait_for_function("testPCs.filter(p=>p.connectionState==='connected').length===2", timeout=30000)
+                try:
+                    await page.wait_for_function("testPCs.filter(p=>p.connectionState==='connected').length===2", timeout=30000)
+                except Exception:
+                    for diagnostic in pages:
+                        print(await diagnostic.evaluate("({statuses:testStatuses,errors:testIceErrors,states:testPCs.map(p=>({connection:p.connectionState,ice:p.iceConnectionState,signaling:p.signalingState,candidates:p.localDescription?.sdp?.split('\\r\\n').filter(x=>x.includes('candidate'))}))})"))
+                    raise
                 await wait_async(page, """async()=>{
                     for(const pc of testPCs.filter(p=>p.connectionState==='connected')) {
                         const reports=[...(await pc.getStats()).values()].filter(x=>x.type==='inbound-rtp');
@@ -208,10 +248,14 @@ async def main():
                 assert await a.evaluate("testCameraRequests.at(-1)==='user'")
             await a.locator('[data-mic]').click()
             assert await a.evaluate("testStreams.flatMap(s=>s.getAudioTracks()).filter(t=>t.readyState==='live').every(t=>!t.enabled)")
+            media_requests = await a.evaluate("testStreams.length")
             await a.locator('[data-camera]').click()
-            await a.wait_for_function("testStreams.flatMap(s=>s.getVideoTracks()).every(t=>t.readyState==='ended')")
+            await a.wait_for_function("testStreams.flatMap(s=>s.getVideoTracks()).filter(t=>t.readyState==='live').every(t=>!t.enabled)")
             await a.locator('[data-camera]').click()
-            await a.wait_for_function("testStreams.flatMap(s=>s.getVideoTracks()).some(t=>t.readyState==='live')")
+            await a.wait_for_function("testStreams.flatMap(s=>s.getVideoTracks()).some(t=>t.readyState==='live'&&t.enabled)")
+            assert await a.evaluate("testStreams.length") == media_requests
+            # Remote video is never CSS mirrored, independently from the local preview.
+            assert await b.locator('.pb-call-tile[data-local="false"] video').first.evaluate("e=>getComputedStyle(e).transform==='none'")
             await a.locator('[data-minimize-call]').click()
             await a.locator('[data-resume-call]').click()
             await a.wait_for_function("""()=>[...document.querySelectorAll('.pb-call-tile.has-video video')]

@@ -26,6 +26,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.miniapp_api import MiniApp
 from app.miniapp_security import (
+    MINIAPP_SESSION_MAX_AGE,
     AccessError,
     financial_period,
     parse_shift,
@@ -251,7 +252,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         status, data, _ = await self.call("/me", uid=1001, token=signed(1001, issued=two_hours_old))
         assert status == 200 and data["user"]["id"] == 1
 
-        older_than_one_day = int(time.time()) - 24 * 60 * 60 - 1
+        older_than_one_day = int(time.time()) - MINIAPP_SESSION_MAX_AGE - 1
         assert (await self.call("/me", uid=1001, token=signed(1001, issued=older_than_one_day)))[0] == 401
 
     async def test_no_credentials_and_inactive_users(self):
@@ -265,7 +266,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
             status, data, _ = await self.call("/me", uid=uid)
             assert status == 403 and data["telegramId"] == uid
             assert set(data) == {"error", "telegramId"}
-        for token in ["", signed(9999, issued=int(time.time()) - 86401)]:
+        for token in ["", signed(9999, issued=int(time.time()) - MINIAPP_SESSION_MAX_AGE - 1)]:
             status, data, _ = await self.call("/me", uid=9999, token=token)
             assert status == 401 and "telegramId" not in data
 
@@ -274,6 +275,37 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         assert status == 200
         assert data["sales"] == 4700000 and data["cashReceived"] == 2100000
         assert data["payroll"] == 955000
+
+    async def test_reopen_session_window_still_rechecks_access(self):
+        token = signed(1003, issued=int(time.time()) - 7200)
+        for _ in range(2):
+            status, _, _ = await self.call("/me", uid=1003, token=token)
+            assert status == 200
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("UPDATE users SET active=FALSE WHERE id=3"))
+        status, _, _ = await self.call("/me", uid=1003, token=token)
+        assert status == 403
+        status, data, _ = await self.call("/me", token=signed(1003, issued=int(time.time()) - 86401))
+        assert status == 401 and "telegramId" not in data
+
+    async def test_booking_access_tracks_current_roles_on_reopen(self):
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("UPDATE bookings SET manager_id=3 WHERE id=2"))
+        for _ in range(2):
+            status, data, _ = await self.call("/bookings", uid=1003)
+            assert status == 200
+            assert [b["id"] for b in data["items"]] == [1]
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("INSERT INTO user_roles VALUES (3,'MANAGER')"))
+        _, data, _ = await self.call("/bookings", uid=1003)
+        assert [b["id"] for b in data["items"]] == [1, 2]
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("DELETE FROM user_roles WHERE user_id=3 AND role='PHOTOGRAPHER'"))
+        _, data, _ = await self.call("/bookings", uid=1003)
+        assert [b["id"] for b in data["items"]] == [2]
+        for uid in (1001, 1002):
+            _, data, _ = await self.call("/bookings", uid=uid)
+            assert len(data["items"]) == 2
 
     async def test_staff_only_own_money_and_bookings(self):
         _, data, _ = await self.call("/finance?period=month", uid=1003)

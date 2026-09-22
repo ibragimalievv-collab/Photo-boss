@@ -552,12 +552,55 @@ class WorkChat:
             "deletionCursor": deletion_cursor,
         })
 
+    def send_key(self, value):
+        if value is None:
+            return None  # Backward compatible with already open clients.
+        if not isinstance(value, str) or not 16 <= len(value) <= 64 or not all(
+            c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in value
+        ):
+            raise AccessError("Некорректный идентификатор отправки.", 400)
+        return value
+
+    async def reserve_send(self, conn, actor, key, fingerprint):
+        if key is None:
+            return None
+        inserted = await self.api.rows(conn, """
+            INSERT INTO work_chat_send_receipts(sender_id,client_id,fingerprint,created_at)
+            VALUES (:uid,:key,:fingerprint,:now)
+            ON CONFLICT(sender_id,client_id) DO NOTHING RETURNING client_id
+        """, uid=actor["id"], key=key, fingerprint=fingerprint,
+            now=datetime.now(UTC).replace(tzinfo=None))
+        if inserted:
+            return None
+        receipt = (await self.api.rows(conn,
+            "SELECT fingerprint,message_id FROM work_chat_send_receipts WHERE sender_id=:uid AND client_id=:key",
+            uid=actor["id"], key=key))[0]
+        if receipt["fingerprint"] != fingerprint:
+            raise AccessError("Эта отправка уже использована для другого сообщения.", 409)
+        rows = await self.api.rows(conn, """
+            SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,u.name AS sender_name,
+                   a.id AS attachment_id,a.original_name,a.mime_type,a.byte_size
+            FROM work_chat_messages m JOIN users u ON u.id=m.sender_id
+            LEFT JOIN work_chat_attachments a ON a.id=m.attachment_id
+            WHERE m.id=:id AND m.sender_id=:uid
+        """, id=receipt["message_id"], uid=actor["id"])
+        if not rows:
+            raise AccessError("Сообщение было удалено. Повторная отправка отменена.", 409)
+        return web.json_response({"message": self.pack_messages(rows)[0], "replayed": True})
+
+    async def finish_send(self, conn, actor, key, message_id):
+        if key is not None:
+            await conn.execute(text("UPDATE work_chat_send_receipts SET message_id=:id "
+                "WHERE sender_id=:uid AND client_id=:key"),
+                {"id": message_id, "uid": actor["id"], "key": key})
+
     async def send(self, request):
         actor = request["miniapp_actor"]
         body = await self.api.body(request)
-        if set(body) != {"peerId", "body"}:
+        if set(body) not in ({"peerId", "body"}, {"peerId", "body", "clientId"}):
             raise AccessError("Некорректное сообщение.", 400)
         message = clean_message(body["body"])
+        key = self.send_key(body.get("clientId"))
         peer_id = None if body["peerId"] is None else positive_id(body["peerId"])
         if peer_id == actor["id"]:
             raise AccessError("Нельзя отправить сообщение самому себе.", 400)
@@ -565,6 +608,10 @@ class WorkChat:
         async with self.engine.begin() as conn:
             await self.require_rules(conn, actor)
             notification_ids = await self.notification_targets(conn, actor, peer_id)
+            fingerprint = hashlib.sha256(json.dumps([peer_id, message], ensure_ascii=False).encode()).hexdigest()
+            replay = await self.reserve_send(conn, actor, key, fingerprint)
+            if replay is not None:
+                return replay
             await self.enforce_rate(conn, actor["id"], now)
             rows = await self.api.rows(
                 conn,
@@ -577,6 +624,7 @@ class WorkChat:
                 body=message,
                 created=now,
             )
+            await self.finish_send(conn, actor, key, rows[0]["id"])
         await self.notify(
             notification_ids,
             sender_name=actor["name"],
@@ -602,6 +650,7 @@ class WorkChat:
         reader = await request.multipart()
         peer_raw = None
         caption = ""
+        key = None
         filename = None
         payload = None
         while True:
@@ -613,6 +662,8 @@ class WorkChat:
                 if len(value) > 20:
                     raise AccessError("Некорректный диалог.", 400)
                 peer_raw = value
+            elif part.name == "clientId":
+                key = self.send_key(await part.text())
             elif part.name == "caption":
                 value = await part.text()
                 caption = normalize_text(value, required=False)
@@ -634,13 +685,13 @@ class WorkChat:
         if peer_raw is None or payload is None or not payload:
             raise AccessError("Выберите файл и диалог.", 400)
         peer_id = None if peer_raw == "general" else positive_id(peer_raw)
-        return peer_id, caption, filename or "file", payload
+        return peer_id, caption, filename or "file", payload, key
 
     async def upload_attachment(self, request):
         actor = request["miniapp_actor"]
         async with self.engine.connect() as conn:
             await self.require_rules(conn, actor)
-        peer_id, caption, filename, payload = await self.read_upload(request)
+        peer_id, caption, filename, payload, key = await self.read_upload(request)
         if peer_id == actor["id"]:
             raise AccessError("Нельзя отправить файл самому себе.", 400)
         mime_type, storage_ext, preview = attachment_kind(filename, payload)
@@ -667,6 +718,12 @@ class WorkChat:
             async with self.engine.begin() as conn:
                 await self.require_rules(conn, actor)
                 notification_ids = await self.notification_targets(conn, actor, peer_id)
+                fingerprint = hashlib.sha256(json.dumps([peer_id, caption, filename, digest], ensure_ascii=False).encode()).hexdigest()
+                replay = await self.reserve_send(conn, actor, key, fingerprint)
+                if replay is not None:
+                    with contextlib.suppress(YandexDiskError):
+                        await storage.delete(storage_path)
+                    return replay
                 await self.enforce_rate(conn, actor["id"], now)
                 attachment = await self.api.rows(
                     conn,
@@ -695,7 +752,8 @@ class WorkChat:
                     body=caption,
                     created=now,
                 )
-        except SQLAlchemyError:
+                await self.finish_send(conn, actor, key, rows[0]["id"])
+        except (SQLAlchemyError, AccessError):
             with contextlib.suppress(YandexDiskError):
                 await storage.delete(storage_path)
             raise

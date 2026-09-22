@@ -12,6 +12,16 @@ from zoneinfo import ZoneInfo
 
 THEMES = frozenset({"premium", "light", "photo"})
 STAFF_ROLES = frozenset({"OWNER", "ADMIN", "MANAGER", "PHOTOGRAPHER"})
+# Telegram clients can reuse the signed WebView launch when the Mini App is
+# reopened. Keep the API and its boundary tests on one explicit policy.
+MINIAPP_SESSION_MAX_AGE = 24 * 60 * 60
+
+
+def booking_assignment_columns(roles):
+    """Trusted column names for assignments allowed by the current staff roles."""
+    return tuple(column for role, column in (
+        ("PHOTOGRAPHER", "photographer_id"), ("MANAGER", "manager_id")
+    ) if role in roles)
 
 
 class AccessError(ValueError):

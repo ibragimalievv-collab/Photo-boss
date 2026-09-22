@@ -1,3 +1,4 @@
+import {localAction} from '/app/js/localstore.js';
 import {api,ApiError} from '/app/js/api.js';
 import {esc,ROLE_NAMES} from '/app/js/domain.js';
 import {initCalls,callToolbar,handleCallClick} from '/work-chat/calls.js';
@@ -11,7 +12,50 @@ document.body.append(dialog);
 const css=document.createElement('link');css.rel='stylesheet';css.href='/work-chat/chat.css';document.head.append(css);
 
 let me=null, people=null, current={kind:'general',peer:null,title:'Общий чат'}, timer=null, unreadTimer=null, last=0, previousFocus=null;
-const drafts=new Map();
+const drafts=new Map(),outbox=new Map();
+let flushing=false;
+const outboxPrefix=()=>`pb-chat-outbox:${me.user.id}:`;
+const storedDraftKey=key=>`pb-chat-draft:${me.user.id}:${key}`;
+function saveDraft(key,value){
+ drafts.set(key,value);
+ try{if(value)localStorage.setItem(storedDraftKey(key),value);else localStorage.removeItem(storedDraftKey(key));}
+ catch{showError('Черновик хранится только до закрытия приложения: память устройства недоступна.');}
+}
+function readDraft(key){try{return drafts.get(key)??localStorage.getItem(storedDraftKey(key))??'';}catch{return drafts.get(key)||'';}}
+function renderOutbox(){
+ const host=dialog.querySelector('[data-chat-outbox]');if(!host)return;
+ host.innerHTML=[...outbox.values()].filter(x=>x.threadKey===draftKey()).map(x=>`<article class="pb-chat-pending"><span>${esc(x.body||x.file?.name||'Вложение')}</span><small role="status">${esc(x.state==='sending'?'Отправляем…':x.error||'Ожидает отправки')}</small>${x.state!=='sending'?`<button type="button" data-retry-send="${x.clientId}">Повторить</button>`:''}</article>`).join('');
+}
+async function queueMessage(thread,body,file){
+ const clientId=crypto.randomUUID();
+ const item={key:outboxPrefix()+clientId,clientId,threadKey:`${thread.kind}:${thread.peer||'general'}`,peerId:thread.kind==='general'?null:thread.peer,body,file,createdAt:Date.now(),state:'pending',retryable:true};
+ try{await localAction('snapshots','readwrite',store=>store.put(item));}
+ catch{throw new ApiError('Не удалось сохранить отправку на устройстве. Освободите память и повторите; текст и файл остаются в форме.');}
+ outbox.set(clientId,item);renderOutbox();flushOutbox();
+}
+async function flushOutbox(){
+ if(flushing||!me||!navigator.onLine)return;flushing=true;
+ try{for(const item of outbox.values()){
+  if(item.state==='error'&&!item.retryable)continue;
+  item.state='sending';renderOutbox();
+  try{
+   if(item.file)await uploadFile(item.file,item.body,item.peerId,item.clientId);
+   else await api('/chat/messages',{method:'POST',body:{peerId:item.peerId,body:item.body,clientId:item.clientId}});
+   // Remove only after server acknowledgement. A lost response retries the same ID.
+   await localAction('snapshots','readwrite',store=>store.delete(item.key));outbox.delete(item.clientId);
+   if(draftKey()===item.threadKey)await poll();
+  }catch(err){
+   item.state='error';item.error=err.message;item.retryable=!err.status||err.status>=500||err.status===429;
+   try{await localAction('snapshots','readwrite',store=>store.put(item));}catch{}
+   // Preserve order within a conversation when delivery is uncertain.
+   break;
+  }finally{renderOutbox();}
+ }}finally{flushing=false;}
+}
+async function restoreOutbox(){
+ try{const rows=await localAction('snapshots','readonly',store=>store.getAll());for(const row of rows.sort((a,b)=>(a.createdAt||0)-(b.createdAt||0)))if(row.key.startsWith(outboxPrefix())){row.state=row.state==='sending'?'pending':row.state;outbox.set(row.clientId,row);}renderOutbox();flushOutbox();}
+ catch{showError('Не удалось прочитать сохранённые отправки. Проверьте память устройства.');}
+}
 const deletePanel=document.createElement('dialog');deletePanel.className='pb-record-dialog pb-chat-delete-dialog';deletePanel.setAttribute('aria-labelledby','pbDeleteTitle');document.body.append(deletePanel);
 let pendingDelete=null,deleteFocus=null;
 const objectUrls=new Set();
@@ -79,7 +123,7 @@ function updateComposer(){
  form.classList.toggle('has-content',hasContent);form.querySelector('.pb-chat-send').hidden=!hasContent;
  for(const button of form.querySelectorAll('[data-record]'))button.hidden=hasContent;
  field.style.height='auto';field.style.height=`${Math.min(field.scrollHeight,132)}px`;
- drafts.set(draftKey(),field.value);
+ saveDraft(draftKey(),field.value);
 }
 function scrollBottom(){const box=dialog.querySelector('#pbChatMessages');if(box)box.scrollTop=box.scrollHeight;const jump=dialog.querySelector('[data-jump-bottom]');if(jump)jump.hidden=true;}
 function showError(message){const el=dialog.querySelector('[data-chat-error]');if(el){el.textContent=message;el.hidden=false;}else shell('Рабочий чат',`<p class="pb-chat-error" role="alert">${esc(message)}</p><button class="pb-chat-btn" data-chat="home">Повторить</button>`);}
@@ -149,7 +193,7 @@ async function renderMessages(items,{readonly=false,own=false}={}){
   if(previous?.dataset.sender===String(m.senderId)&&messageDay(previous.dataset.created)===day&&new Date(m.createdAt)-new Date(previous.dataset.created)<300000)el.classList.add('is-grouped');
   const clock=new Date(m.createdAt).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
   el.innerHTML=`${!mine&&(current.kind==='general'||readonly)?`<div class="pb-chat-sender">${esc(m.senderName)}</div>`:''}${attachmentMarkup(m.attachment)}${m.body?`<div class="pb-chat-bubble">${esc(m.body).replace(/\n/g,'<br>')}</div>`:''}<div class="pb-chat-meta">${mine&&!readonly&&me?.user?.roles?.includes('OWNER')?`<details class="pb-chat-message-actions"><summary aria-label="Действия с сообщением">${icon('more')}</summary><button type="button" data-delete-message="${m.id}">${icon('trash')} Удалить у всех</button></details>`:''}<time datetime="${esc(m.createdAt)}">${esc(clock)}</time>${mine?`<span aria-label="Отправлено" title="Отправлено">${icon('check')}</span>`:''}</div>`;
-  box.append(el);last=Math.max(last,m.id);added++;
+  box.append(el);added++;
   for(const img of el.querySelectorAll('[data-preview-id]'))loadImagePreview(img,Number(img.dataset.previewId));
  }
  if(!box.querySelector('[data-message-id]')&&!box.querySelector('.pb-chat-empty'))box.innerHTML=`<div class="pb-chat-empty">${icon('chat')}<strong>Здесь начинается разговор</strong><span>Напишите сообщение, отправьте фото<br>или позвоните.</span></div>`;
@@ -195,17 +239,20 @@ async function poll(){
   if(Number.isInteger(data.deletionCursor))thread.deletionCursor=data.deletionCursor;
   applyDeletions(data.deletedIds||[]);
   await renderMessages(data.messages,{readonly:thread.kind==='owner-view'});
+  // Only fetched history advances the cursor, never an individual send response.
+  for(const message of data.messages)last=Math.max(last,message.id);
+  dialog.querySelector('[data-chat-error]').hidden=true;
   if(data.unread)setUnreadBadge(data.unread.total||0);
  }catch(e){if(current===thread)showError(e.message);}finally{thread.loading=false;}
 }
 async function openThread(kind,peer=null,title='Общий чат'){
  current={kind,peer,title};last=0;stopPoll();
- shell(title,`<div class="pb-chat-history"><div id="pbChatMessages" class="pb-chat-messages" aria-live="polite" aria-label="Сообщения"></div><button class="pb-chat-jump" data-jump-bottom aria-label="К новым сообщениям" hidden>${icon('down')}</button></div><p class="pb-chat-error" data-chat-error hidden role="alert"></p><form class="pb-chat-compose" id="pbChatCompose"><div class="pb-chat-selected" data-selected-file hidden></div><div class="pb-chat-input-row"><button type="button" class="pb-chat-attach" data-attach aria-label="Прикрепить фото или файл" title="Фото или файл до 20 МБ">${icon('attach')}</button><input type="file" name="file" hidden><textarea name="body" maxlength="2000" rows="1" placeholder="Сообщение" aria-label="Сообщение"></textarea><button type="button" class="pb-chat-record" data-record="video" aria-label="Записать видеосообщение" title="Видеосообщение">${icon('video')}</button><button type="button" class="pb-chat-record" data-record="audio" aria-label="Записать голосовое сообщение" title="Голосовое сообщение">${icon('mic')}</button><button class="pb-chat-send" type="submit" aria-label="Отправить" title="Отправить" hidden>${icon('send')}</button></div></form>`);
+ shell(title,`<div class="pb-chat-history"><div id="pbChatMessages" class="pb-chat-messages" aria-live="polite" aria-label="Сообщения"></div><button class="pb-chat-jump" data-jump-bottom aria-label="К новым сообщениям" hidden>${icon('down')}</button></div><div data-chat-outbox class="pb-chat-outbox" aria-label="Отправка сообщений"></div><p class="pb-chat-error" data-chat-error hidden role="alert"></p><form class="pb-chat-compose" id="pbChatCompose"><div class="pb-chat-selected" data-selected-file hidden></div><div class="pb-chat-input-row"><button type="button" class="pb-chat-attach" data-attach aria-label="Прикрепить фото или файл" title="Фото или файл до 20 МБ">${icon('attach')}</button><input type="file" name="file" hidden><textarea name="body" maxlength="2000" rows="1" placeholder="Сообщение" aria-label="Сообщение"></textarea><button type="button" class="pb-chat-record" data-record="video" aria-label="Записать видеосообщение" title="Видеосообщение">${icon('video')}</button><button type="button" class="pb-chat-record" data-record="audio" aria-label="Записать голосовое сообщение" title="Голосовое сообщение">${icon('mic')}</button><button class="pb-chat-send" type="submit" aria-label="Отправить" title="Отправить" hidden>${icon('send')}</button></div></form>`);
  dialog.querySelector('.pb-chat-close').insertAdjacentHTML('beforebegin',callToolbar(peer,title));
  const heading=dialog.querySelector('.pb-chat-heading');
  heading.insertAdjacentHTML('beforeend',kind==='peer'?presenceMarkup(peer):'<span class="pb-chat-subtitle">Вся команда · звонки до 6 участников</span>');
  heading.querySelector('.pb-chat-presence')?.setAttribute('aria-live','polite');
- dialog.querySelector('textarea').value=drafts.get(draftKey())||'';updateComposer();
+ dialog.querySelector('textarea').value=readDraft(draftKey());updateComposer();renderOutbox();
  dialog.querySelector('#pbChatMessages').addEventListener('scroll',()=>{const box=dialog.querySelector('#pbChatMessages');if(box.scrollHeight-box.scrollTop-box.clientHeight<100)dialog.querySelector('[data-jump-bottom]').hidden=true;},{passive:true});
  renderPresence();refreshPresence();
  const thread=current;await poll();if(current===thread&&dialog.open)timer=setInterval(poll,4000);
@@ -229,10 +276,10 @@ async function showRules(){
  shell('Общие правила','<p class="pb-chat-muted" role="status">Загружаем правила…</p>');
  try{const r=await api('/chat/rules');if(current!==view)return;shell('Общие правила',`<article class="pb-chat-rules">${esc(r.text)}</article><p class="pb-chat-muted">Редакция: ${esc(r.version)} · хранение сообщений до ${r.retentionDays} дней.</p>`);}catch(e){if(current===view)showError(e.message);}
 }
-async function uploadFile(file,caption){
+async function uploadFile(file,caption,peerId,clientId){
  if(file.size>MAX_ATTACHMENT_BYTES)throw new ApiError('Файл больше 20 МБ.',413);
- const peer=current.kind==='general'?'general':String(current.peer);
- const form=new FormData();form.append('peerId',peer);form.append('caption',caption);form.append('file',file,file.name);
+ const peer=peerId===null?'general':String(peerId);
+ const form=new FormData();form.append('peerId',peer);form.append('caption',caption);form.append('clientId',clientId);form.append('file',file,file.name);
  const response=await authFetch('/chat/attachments',{method:'POST',body:form,timeout:90000});
  return response.json();
 }
@@ -255,11 +302,12 @@ dialog.addEventListener('input',e=>{
 });
 dialog.addEventListener('keydown',e=>{if(e.target.name==='body'&&e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&!matchMedia('(pointer:coarse)').matches){e.preventDefault();e.target.form.requestSubmit();}});
 dialog.addEventListener('click',async e=>{
+ const retry=e.target.closest('[data-retry-send]');if(retry){const item=outbox.get(retry.dataset.retrySend);if(item){item.retryable=true;item.state='pending';flushOutbox();}return;}
  const remove=e.target.closest('[data-delete-message]');if(remove)return askDelete(Number(remove.dataset.deleteMessage));
  if(e.target.closest('[data-attach]')){dialog.querySelector('input[name=file]').click();return;}
  if(e.target.closest('[data-remove-file]')){dialog.querySelector('input[name=file]').value='';dialog.querySelector('[data-selected-file]').hidden=true;updateComposer();return;}
  if(e.target.closest('[data-jump-bottom]')){scrollBottom();return;}
- const record=e.target.closest('[data-record]');if(record){const thread={...current};return openRecorder(record.dataset.record,async file=>{if(current.kind!==thread.kind||current.peer!==thread.peer)throw new ApiError('Диалог изменился. Откройте его заново.');const result=await uploadFile(file,'');await renderMessages([result.message],{own:true});});}
+ const record=e.target.closest('[data-record]');if(record){const thread={...current};return openRecorder(record.dataset.record,async file=>{if(current.kind!==thread.kind||current.peer!==thread.peer)throw new ApiError('Диалог изменился. Откройте его заново.');await queueMessage(thread,'',file);});}
  const play=e.target.closest('[data-load-media]');if(play){play.disabled=true;try{const blob=await fetchAttachment(Number(play.dataset.loadMedia));if(!play.isConnected)return;const url=URL.createObjectURL(blob);objectUrls.add(url);const media=play.parentElement.querySelector('[data-media-id]');media.src=url;media.hidden=false;play.hidden=true;media.play().catch(()=>{});}catch(err){play.disabled=false;showError(err.message);}return;}
  if(e.target.closest('[data-start-call],[data-join-call],[data-resume-call]'))return handleCallClick(e,current.peer,current.title);
  const download=e.target.closest('[data-download-id]');if(download){download.disabled=true;try{await downloadAttachment(Number(download.dataset.downloadId),download.dataset.downloadName);}catch(err){showError(err.message);}finally{download.disabled=false;}return;}
@@ -282,11 +330,9 @@ dialog.addEventListener('submit',async e=>{
  for(const b of form.querySelectorAll('[data-record]'))b.disabled=true;
  const attach=e.target.querySelector('.pb-chat-attach');if(attach)attach.classList.add('disabled');
  try{
-  let d;
-  if(file)d=await uploadFile(file,body);
-  else{const peerId=current.kind==='general'?null:current.peer;d=await api('/chat/messages',{method:'POST',body:{peerId,body}});}
-  if(drafts.get(key)===field.value)drafts.delete(key);field.value='';e.target.elements.file.value='';const selected=e.target.querySelector('[data-selected-file]');if(selected){selected.hidden=true;selected.textContent='';}
-  if(current===thread){dialog.querySelector('[data-chat-error]').hidden=true;await renderMessages([d.message],{own:true});updateComposer();}
+  await queueMessage(thread,body,file);
+  if(readDraft(key)===field.value)saveDraft(key,'');field.value='';e.target.elements.file.value='';const selected=e.target.querySelector('[data-selected-file]');if(selected){selected.hidden=true;selected.textContent='';}
+  if(current===thread){dialog.querySelector('[data-chat-error]').hidden=true;updateComposer();}
  }catch(err){if(current===thread)showError(err.message);}finally{delete form.dataset.sending;button.disabled=false;field.disabled=false;form.elements.file.disabled=false;for(const b of form.querySelectorAll('[data-record]'))b.disabled=false;if(attach)attach.classList.remove('disabled');if(field.isConnected&&matchMedia('(pointer:fine)').matches)field.focus();}
 });
 function inject(){
@@ -294,7 +340,7 @@ function inject(){
  const btn=document.createElement('button');btn.className='pb-chat-trigger';btn.dataset.openChat='1';btn.innerHTML=`${icon('chat')}<span>Чат</span>`;btn.setAttribute('aria-label','Рабочий чат');
  btn.addEventListener('click',home);top.append(btn);
 }
-async function boot(){try{me=await api('/me');inject();startUnreadPoll();startPresence();initCalls(me);}catch{me=null;}}
+async function boot(){try{me=await api('/me');inject();startUnreadPoll();startPresence();initCalls(me);restoreOutbox();}catch{me=null;}}
 const observer=new MutationObserver(()=>{if(me)inject();else if(document.querySelector('#topbar')?.children.length)boot();});
 observer.observe(document.querySelector('#topbar'),{childList:true});boot();
 
@@ -302,7 +348,8 @@ document.addEventListener('visibilitychange',()=>{sendHeartbeat();if(document.vi
 window.addEventListener('pagehide',()=>sendHeartbeat(false));
 window.addEventListener('pageshow',()=>{sendHeartbeat();refreshPresence();});
 window.addEventListener('offline',()=>{onlinePeople=null;renderPresence();sendHeartbeat(false);});
-window.addEventListener('online',()=>{sendHeartbeat();refreshPresence();});
+window.addEventListener('online',()=>{sendHeartbeat();refreshPresence();poll();flushOutbox();});
+setInterval(()=>{if(document.visibilityState==='visible')flushOutbox();},10000);
 document.addEventListener('pb-calls-updated',()=>{if(!dialog.open)return;const toolbar=dialog.querySelector('.pb-call-toolbar');if(toolbar)toolbar.outerHTML=callToolbar(current.peer,current.title);});
 
 // Keep the composer above the software keyboard in mobile WebViews.

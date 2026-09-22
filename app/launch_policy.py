@@ -44,7 +44,9 @@ def app_url(page="home"):
         raise ValueError("Mini App requires a trusted HTTPS base URL")
     if page not in {"home", "finance", "audit", "academy", "schedule"}:
         page = "home"
-    return base + "/app/#" + page
+    # Version the Mini App URL so Telegram opens a fresh WebView after auth
+    # fixes instead of reusing a stale owner-only session.
+    return base + "/app/?v=20260922-telegram-init#"+ page
 
 
 def app_markup(page="home"):

@@ -128,3 +128,5 @@
 .pb-chat-message-actions>button{display:flex;align-items:center;gap:8px;position:absolute;bottom:28px;right:-18px;white-space:nowrap;min-height:46px;border:1px solid var(--chat-line);border-radius:12px;background:var(--chat-panel);color:#c43149;padding:10px 14px;box-shadow:0 5px 24px #142e4530;font-size:13px}
 .pb-chat-message-actions>button .pb-icon{width:18px;height:18px;color:inherit}
 .pb-chat-delete-dialog [data-delete-confirm]{color:#fff;background:#c43149}
+
+.pb-chat-outbox{max-height:150px;overflow:auto;flex:none;padding:0 12px}.pb-chat-outbox:empty{display:none}.pb-chat-pending{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 10px;margin:4px 0;border:1px solid #8794a5;border-radius:10px;font-size:12px}.pb-chat-pending>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pb-chat-pending small{flex-basis:100%;overflow-wrap:anywhere}.pb-chat-pending button{min-height:44px;padding:6px 12px}
