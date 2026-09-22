@@ -1,6 +1,7 @@
 """Authentication and authorization shared by the production Mini App."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -61,6 +62,42 @@ def validate_init_data(raw: str, token: str, *, now: float | None = None,
         return uid
     except (ValueError, TypeError, KeyError, OverflowError) as exc:
         raise AccessError(message, 401) from exc
+
+
+def owner_launch_token(telegram_id: int, token: str, *, now: float | None = None,
+                       ttl: int = 2 * 60 * 60) -> str:
+    """Create a short-lived server-signed owner fallback token for Telegram WebViews."""
+    if type(telegram_id) is not int or not 0 < telegram_id < 2**52 or not token:
+        raise ValueError("Invalid launch token input")
+    issued = int(time.time() if now is None else now)
+    payload = f"{telegram_id}:{issued + ttl}".encode()
+    encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    secret = hmac.new(token.encode(), b"photo-boss:owner-launch:v1", hashlib.sha256).digest()
+    signature = hmac.new(secret, encoded.encode(), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def validate_owner_launch_token(raw: str, token: str, *, now: float | None = None) -> int:
+    """Validate the short-lived fallback token. Role is checked after DB lookup."""
+    try:
+        if not token or not raw or len(raw) > 512:
+            raise ValueError
+        encoded, supplied = raw.split(".", 1)
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", encoded) or not re.fullmatch(r"[a-f0-9]{64}", supplied):
+            raise ValueError
+        secret = hmac.new(token.encode(), b"photo-boss:owner-launch:v1", hashlib.sha256).digest()
+        expected = hmac.new(secret, encoded.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, supplied):
+            raise ValueError
+        padding = "=" * (-len(encoded) % 4)
+        telegram_id_text, expires_text = base64.urlsafe_b64decode(encoded + padding).decode().split(":", 1)
+        telegram_id, expires = int(telegram_id_text), int(expires_text)
+        current = int(time.time() if now is None else now)
+        if not 0 < telegram_id < 2**52 or expires < current or expires > current + 2 * 60 * 60 + 60:
+            raise ValueError
+        return telegram_id
+    except (ValueError, TypeError, UnicodeDecodeError, OverflowError) as exc:
+        raise AccessError("Ссылка входа устарела. Отправьте /app в боте и откройте новую кнопку.", 401) from exc
 
 
 def role_permissions(roles) -> dict:
