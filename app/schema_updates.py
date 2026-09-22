@@ -18,6 +18,9 @@ async def upgrade(connection):
     if 'sales' in tables:
         await add_columns(connection,'sales',{'manager_percent_applied':'VARCHAR(60)',
             'manager_payroll_entry_id':'INTEGER REFERENCES payroll_entries(id) ON DELETE SET NULL'})
+    for table in ('sale_drafts', 'sales'):
+        if table in tables:
+            await add_columns(connection, table, {'unit_price': 'NUMERIC(14,2)', 'discount_percent': 'NUMERIC(5,2)'})
     for table in ('shift_check_ins', 'shift_check_outs'):
         if table in tables:
             await add_columns(connection, table, {'offline_claimed_at': 'TIMESTAMP'})
