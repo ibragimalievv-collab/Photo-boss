@@ -127,8 +127,15 @@ class MiniApp:
         request["miniapp_telegram_id"] = telegram_id
         async with self.engine.connect() as conn:
             people = await self.rows(conn, "SELECT id,tg_id,name,active FROM users WHERE tg_id=:tg", tg=telegram_id)
-            if not people or not people[0]["active"]:
-                raise AccessError("Аккаунт сотрудника не активен. Обратитесь к владельцу.")
+            if not people:
+                raise AccessError(
+                    f"Аккаунт не найден. Ваш Telegram ID: {telegram_id}. "
+                    "Нажмите «Открыть бота», отправьте /start и передайте этот номер владельцу."
+                )
+            if not people[0]["active"]:
+                raise AccessError(
+                    f"Рабочий доступ отключён. Ваш Telegram ID: {telegram_id}. Обратитесь к владельцу."
+                )
             actor = dict(people[0])
             roles = await self.rows(conn, "SELECT role FROM user_roles WHERE user_id=:uid", uid=actor["id"])
             actor["roles"] = [r for r in ROLE_ORDER if any(x["role"] == r for x in roles)]

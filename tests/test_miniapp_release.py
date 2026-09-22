@@ -257,8 +257,12 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_credentials_and_inactive_users(self):
         status, data, headers = await self.call("/me", token="")
         assert status == 401 and "user" not in data and headers["Cache-Control"] == "no-store"
-        for uid in [9999, 1006, 1007]:
-            assert (await self.call("/me", uid=uid))[0] == 403
+        status, missing, _ = await self.call("/me", uid=9999)
+        assert status == 403 and "Аккаунт не найден" in missing["error"] and "9999" in missing["error"]
+        status, inactive, _ = await self.call("/me", uid=1006)
+        assert status == 403 and "Рабочий доступ отключён" in inactive["error"] and "1006" in inactive["error"]
+        status, no_role, _ = await self.call("/me", uid=1007)
+        assert status == 403 and "рабочую роль" in no_role["error"]
 
     async def test_access_screen_shows_only_signed_own_identity(self):
         for uid in [9999, 1006, 1007]:
