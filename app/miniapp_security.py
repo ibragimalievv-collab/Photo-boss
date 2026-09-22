@@ -21,13 +21,8 @@ class AccessError(ValueError):
 
 
 def validate_init_data(raw: str, token: str, *, now: float | None = None,
-                       max_age: int = 24 * 60 * 60) -> int:
-    """Validate signed Telegram initData, never initDataUnsafe or client roles.
-
-    Telegram mobile clients may reuse an already-open Mini App WebView for hours,
-    so a one-hour freshness window can lock out a valid signed session. Keep the
-    signature check strict while accepting initData for up to one day.
-    """
+                       max_age: int = 3600) -> int:
+    """Validate signed Telegram initData, never initDataUnsafe or client roles."""
     message = "Откройте приложение заново через Telegram."
     try:
         if not token or not raw or len(raw.encode("utf-8")) > 16384:
