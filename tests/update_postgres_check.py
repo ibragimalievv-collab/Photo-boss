@@ -167,6 +167,29 @@ async def main():
             assert len(reviews)==1 and reviews[0].summary_parts=='[]'
         print('PostgreSQL concurrent AI enqueue: one review per complete frame set: PASS')
 
+        from app.miniapp_security import AccessError
+        from app.people import People
+        async with factory() as session:
+            session.add_all([User(id=2,tg_id=9876543211,name='Admin'), UserRole(user_id=2,role='ADMIN')])
+            await session.commit()
+        async with engine.begin() as conn:
+            # The legacy fixture above seeds an explicit id; align only its sequence.
+            await conn.execute(text("SELECT setval(pg_get_serial_sequence('hotels','id'), (SELECT max(id) FROM hotels))"))
+        async def hotel_body(request):
+            return request['body']
+        api.body=hotel_body
+        api.bot=SimpleNamespace()
+        people=People(api)
+        requests=[{'miniapp_actor':{'id':uid,'roles':[role]},'body':{'name':'Concurrent Hotel'}}
+                  for uid,role in [(1,'OWNER'),(2,'ADMIN')]]
+        async with asyncio.timeout(15):
+            results=await asyncio.gather(*(people.create_hotel(request) for request in requests),return_exceptions=True)
+        assert sum(not isinstance(r,Exception) and r.status==201 for r in results)==1, results
+        assert sum(isinstance(r,AccessError) and r.status==409 for r in results)==1, results
+        async with engine.connect() as conn:
+            assert await conn.scalar(text("SELECT count(*) FROM hotels WHERE name='Concurrent Hotel'"))==1
+        print('PostgreSQL concurrent hotel additions: one hotel, duplicate rejected, audit retained: PASS')
+
 
     finally:
         async with engine.begin() as conn:

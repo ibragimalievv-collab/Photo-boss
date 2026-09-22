@@ -109,6 +109,8 @@ function install() {
   finally{if(version===generation){busy=false;draw();}}
  }
  function card() {
+  // The app clears its header when authentication or staff access is unavailable.
+  if (!document.querySelector('#topbar')?.children.length) return;
   if (!['','#home','#schedule','#more','#workflow'].includes(location.hash)) return;
   if(root.querySelector('#attendanceCard'))return;
   const panel=document.createElement('section');panel.id='attendanceCard';panel.className='att-card';panel.setAttribute('aria-label','Смена и геолокация');

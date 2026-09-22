@@ -144,6 +144,7 @@ async def main():
                     failure_mode=status_code
                     await page.reload()
                     await page.get_by_role('heading',name=title,exact=True).wait_for()
+                    assert await page.locator('#attendanceCard').count()==0
                     assert await page.locator('a[href*="t.me"],a[href^="tg:"]').count()==0
                     assert 'в боте' not in await page.locator('#app').inner_text()
                     assert await page.evaluate('window.__externalOpen.length')==0

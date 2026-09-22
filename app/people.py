@@ -183,10 +183,12 @@ class People:
             raise AccessError("Название отеля: 1–200 символов без управляющих знаков.", 400)
         name = name.strip()
         async with self.engine.begin() as conn:
-            await self.current_editor(conn, actor["id"])
             if conn.dialect.name == "postgresql":
                 # Serialize concurrent additions without changing the legacy table.
+                # Take the table lock before the actor lock: the legacy bot inserts
+                # the hotel before its audit row acquires the user foreign-key lock.
                 await conn.execute(text("LOCK TABLE hotels IN SHARE ROW EXCLUSIVE MODE"))
+            await self.current_editor(conn, actor["id"])
             existing = await self.api.rows(conn, "SELECT id,name,active FROM hotels")
             if any(row["name"].casefold() == name.casefold() for row in existing):
                 raise AccessError("Отель с таким названием уже существует. Обновите список.", 409)
