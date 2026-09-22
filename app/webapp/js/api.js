@@ -1,9 +1,18 @@
 import {readSnapshot,saveSnapshot} from './localstore.js';
 export class ApiError extends Error {constructor(message,status=0,telegramId=null){super(message);this.status=status;this.telegramId=Number.isSafeInteger(telegramId)&&telegramId>0?telegramId:null;}}
+async function telegramInitData(waitMs=2500){
+ const deadline=Date.now()+waitMs;
+ while(Date.now()<deadline){
+  const value=window.Telegram?.WebApp?.initData;
+  if(value)return value;
+  await new Promise(resolve=>setTimeout(resolve,50));
+ }
+ return window.Telegram?.WebApp?.initData||'';
+}
 export async function api(path,{body,method='GET',timeoutMs,...options}={}){
  const cfg=window.PHOTO_BOSS_CONFIG||{};
- const initData=window.Telegram?.WebApp?.initData;
- if(!initData)throw new ApiError('Откройте Photo Boss кнопкой приложения внутри Telegram.',401);
+ const initData=await telegramInitData();
+ if(!initData)throw new ApiError('Telegram не передал данные входа. Закройте окно Photo Boss и откройте его заново кнопкой приложения.',401);
  const base=String(cfg.API_BASE_URL||'').replace(/\/$/,'');
  const url=new URL(base+`/api/miniapp${path}`,location.origin);
  if(url.protocol!=='https:')throw new ApiError('Рабочее приложение должно открываться по HTTPS.');
