@@ -363,6 +363,10 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT value FROM settings WHERE key='miniapp:last_login:3'"
             )).scalar()
         assert last_login
+        with self.engine.inner.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO settings(key,value) VALUES ('miniapp:screen_capture:1','0')"
+            ))
         _, owner_me, _ = await self.call("/me", uid=1001)
         _, staff_me, _ = await self.call("/me", uid=1003)
         assert owner_me["screenCaptureAllowed"] is True
