@@ -12,6 +12,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  render-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
+      ADMIN_TELEGRAM_IDS: "5000000001"
+      DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+      MANAGER_PERCENT: "16"
+      PHOTOGRAPHER_PERCENT: "11"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: pip install -r requirements-dev.txt
+      - name: Verify the current Render Python runtime
+        run: |
+          python -m pip check
+          python -m pytest -q
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
