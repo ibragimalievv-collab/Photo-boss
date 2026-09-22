@@ -10,7 +10,7 @@ from .miniapp_security import AccessError, utc_bounds
 from .models import utc_now
 from .people import People, check_editor, positive_id
 from .services.insights import cents, parsed
-from .services.onboarding import QUIZ, guides
+from .services.onboarding import guides, quiz_for, quiz_kind
 
 STAGES = {'NEW':'Новый','CONTACTED':'Общение','INTERVIEW':'Интервью','OFFER':'Предложение','DOCUMENTS':'Оформление','HIRED':'Принят','REJECTED':'Отказ'}
 TRANSITIONS = {'NEW':{'CONTACTED','REJECTED'},'CONTACTED':{'INTERVIEW','REJECTED'},'INTERVIEW':{'OFFER','REJECTED'},'OFFER':{'DOCUMENTS','REJECTED'},'DOCUMENTS':{'REJECTED'},'REJECTED':{'NEW'},'HIRED':set()}
@@ -37,7 +37,20 @@ class Team:
         async with self.api.engine.connect() as conn:
             rows=await self.api.rows(conn,'SELECT * FROM hr_candidates ORDER BY updated_at DESC,id DESC LIMIT 300')
             staff=await self.api.rows(conn,'SELECT id,name,active FROM users ORDER BY name')
-        return web.json_response({'items':[candidate(r) for r in rows],'stages':STAGES,'employees':[dict(r) for r in staff]})
+            from .services.discipline import compare
+            end = self.api.today()-timedelta(days=1)
+            discipline = await compare(self.api,conn,end-timedelta(days=6),end)
+        return web.json_response({'items':[candidate(r) for r in rows],'stages':STAGES,'employees':[dict(r) for r in staff],'discipline':discipline})
+
+    async def discipline(self, request):
+        check_editor(request['miniapp_actor']['roles'])
+        start, end = self.api.day(request.query.get('from')), self.api.day(request.query.get('to'))
+        if not start <= end <= self.api.today() or (end-start).days > 90:
+            raise AccessError('Выберите период не длиннее 91 дня, без будущих дат.',400)
+        from .services.discipline import compare
+        async with self.api.engine.connect() as conn:
+            result = await compare(self.api,conn,start,end)
+        return web.json_response(result)
 
     async def create(self,request):
         actor=request['miniapp_actor'];check_editor(actor['roles'])
@@ -118,14 +131,39 @@ class Team:
     async def onboarding_data(self,conn,uid,roles):
         steps=guides(roles)
         completed={r['topic_slug'] for r in await self.api.rows(conn,'SELECT topic_slug FROM academy_lesson_progress WHERE user_id=:uid',uid=uid)}
-        attempts=await self.api.rows(conn,"SELECT score,result,created_at FROM academy_assessments WHERE user_id=:uid AND kind='entry-v1' ORDER BY id DESC LIMIT 5",uid=uid)
+        attempts=await self.api.rows(conn,"SELECT score,result,created_at FROM academy_assessments WHERE user_id=:uid AND kind=:kind ORDER BY id DESC LIMIT 5",uid=uid,kind=quiz_kind(roles))
         practices=await self.api.rows(conn,"SELECT id,status,ai_score FROM training_assignments WHERE user_id=:uid ORDER BY id DESC LIMIT 30",uid=uid)
+        from .services.academy import ACADEMY_LESSONS
+        lesson_count = len(completed & {lesson.slug for lesson in ACADEMY_LESSONS})
+        tasks = []
+        def task(key,title,done,route,required=True):
+            tasks.append({'key':key,'title':title,'completed':bool(done),'route':route,'required':required})
+        task('guides','Пройти инструкции своих ролей',bool(steps) and all(s['slug'] in completed for s in steps),'onboarding')
+        task('quiz','Сдать начальный тест: не менее 75%',any(a['score']>=75 for a in attempts),'onboarding')
+        if 'PHOTOGRAPHER' in roles:
+            task('lessons','Завершить первые четыре урока Академии',lesson_count>=4,'academy')
+            task('practice','Сдать первую практику в Академии',any(p['status']=='COMPLETED' for p in practices),'academy')
+        if 'MANAGER' in roles:
+            bookings = await self.api.rows(conn,'SELECT id FROM bookings WHERE manager_id=:uid LIMIT 1',uid=uid)
+            task('booking','Оформить первую рабочую бронь',bookings,'workflow')
+        if set(roles) & {'MANAGER','PHOTOGRAPHER'}:
+            training = await self.api.rows(conn,"SELECT id FROM sales_training_sessions WHERE user_id=:uid AND status='COMPLETED' LIMIT 1",uid=uid)
+            task('sales-practice','Пройти диалог в AI-тренажёре продаж',training,'development',False)
+        if 'ADMIN' in roles:
+            shifts = await self.api.rows(conn,"SELECT id FROM audit_logs WHERE user_id=:uid AND action IN ('miniapp_shift_created','shift_created') LIMIT 1",uid=uid)
+            task('schedule','Назначить первую рабочую смену',shifts,'schedule')
+        if 'OWNER' in roles:
+            acknowledged = await self.api.rows(conn,'SELECT id FROM notifications WHERE user_id=:uid AND acknowledged_at IS NOT NULL LIMIT 1',uid=uid)
+            task('control','Проверить первое событие по данным системы',acknowledged,'insights',False)
+        required = [t for t in tasks if t['required']]
+        done = sum(t['completed'] for t in required)
         return {'steps':[s|{'completed':s['slug'] in completed} for s in steps],
-                'quiz':[{'id':q['id'],'question':q['question'],'choices':q['choices']} for q in QUIZ],
+                'quiz':[{'id':q['id'],'question':q['question'],'choices':q['choices']} for q in quiz_for(roles)],
                 'attempts':[{'score':a['score'],'result':parsed(a['result']),'at':str(a['created_at'])} for a in attempts],
-                'academyLessons':sum(not slug.startswith('guide-') for slug in completed),
+                'academyLessons':lesson_count,
                 'practices':[dict(p) for p in practices],
-                'tasks':['Пройти инструкции своей роли','Сдать начальный тест: не менее 75%','Завершить первые четыре урока Академии','Сдать первую практику в Академии']}
+                'tasks':[t['title'] for t in tasks], 'taskProgress':tasks,
+                'progress':{'completed':done,'total':len(required),'percent':round(done/len(required)*100) if required else 0}}
 
     async def onboarding(self,request):
         a=request['miniapp_actor']
@@ -142,13 +180,14 @@ class Team:
 
     async def assessment(self,request):
         a=request['miniapp_actor'];body=await self.api.body(request)
+        quiz = quiz_for(a['roles'])
         answers=body.get('answers')
-        if set(body)!={'answers'} or not isinstance(answers,dict) or set(answers)!={q['id'] for q in QUIZ} or any(type(answers[q['id']]) is not int or not 0<=answers[q['id']]<len(q['choices']) for q in QUIZ): raise AccessError('Ответьте на каждый вопрос.',400)
-        errors=[{'question':q['question'],'tip':q['tip']} for q in QUIZ if answers[q['id']]!=q['answer']]
-        score=round((len(QUIZ)-len(errors))/len(QUIZ)*100)
+        if set(body)!={'answers'} or not isinstance(answers,dict) or set(answers)!={q['id'] for q in quiz} or any(type(answers[q['id']]) is not int or not 0<=answers[q['id']]<len(q['choices']) for q in quiz): raise AccessError('Ответьте на каждый вопрос.',400)
+        errors=[{'question':q['question'],'tip':q['tip']} for q in quiz if answers[q['id']]!=q['answer']]
+        score=round((len(quiz)-len(errors))/len(quiz)*100)
         result={'errors':errors,'passed':score>=75}
         async with self.api.engine.begin() as conn:
-            await conn.execute(text("INSERT INTO academy_assessments(user_id,kind,score,result,created_at) VALUES (:uid,'entry-v1',:score,:result,:now)"),{'uid':a['id'],'score':score,'result':json.dumps(result,ensure_ascii=False),'now':utc_now()})
+            await conn.execute(text("INSERT INTO academy_assessments(user_id,kind,score,result,created_at) VALUES (:uid,:kind,:score,:result,:now)"),{'uid':a['id'],'kind':quiz_kind(a['roles']),'score':score,'result':json.dumps(result,ensure_ascii=False),'now':utc_now()})
         return web.json_response({'score':score,**result})
 
     async def overview(self,request):
@@ -159,29 +198,36 @@ class Team:
             profile=await self.people.card(conn,uid)
             # Telegram ID is visible only to the employee and staff administrators.
             data=await self.onboarding_data(conn,uid,profile['roles'])
-            ins=await self.api.rows(conn,'SELECT shift_date,started_at,late,fine_amount,status FROM shift_check_ins WHERE user_id=:uid AND shift_date>=:start AND shift_date<=:end',uid=uid,start=start,end=end)
-            outs=await self.api.rows(conn,'SELECT shift_date,ended_at,status FROM shift_check_outs WHERE user_id=:uid AND shift_date>=:start AND shift_date<=:end',uid=uid,start=start,end=end)
+            from .services.discipline import compare
+            report = await compare(self.api,conn,start,end)
+            discipline = next((r for r in report['items'] if r['id']==uid), {'confirmed':0,'late':0,'missed':0,'closed':0,'pending':0,'unclosed':0,'trend':[],'missedShifts':[],'repeated':[],'changes':{}})
+            discipline |= {'previousFrom':report['previousFrom'],'previousTo':report['previousTo']}
             lo,hi=utc_bounds(start,end,self.api.tz)
-            plans=await self.api.rows(conn,"SELECT id,start_at,end_at,status,hotel_id FROM shifts WHERE user_id=:uid AND start_at>=:lo AND start_at<:hi AND status<>'CANCELLED'",uid=uid,lo=lo,hi=hi)
-            confirmed={str(i['shift_date']) for i in ins if i['status']=='STARTED'}
-            missed=[]
-            from .miniapp_api import as_utc
-            for p in plans:
-                if as_utc(p['end_at']).replace(tzinfo=None)<utc_now() and str(as_utc(p['start_at']).astimezone(self.api.tz).date()) not in confirmed: missed.append(p['id'])
             fstart=end if 'ADMIN' in a['roles'] and 'OWNER' not in a['roles'] else start
             flo,fhi=utc_bounds(fstart,end,self.api.tz)
             sales=await self.api.rows(conn,'SELECT id,amount,commission,created_at FROM sales WHERE credited_user_id=:uid AND created_at>=:lo AND created_at<:hi',uid=uid,lo=flo,hi=fhi)
             pay=await self.api.rows(conn,'SELECT kind,amount,note,created_at FROM payroll_entries WHERE user_id=:uid AND created_at>=:lo AND created_at<:hi',uid=uid,lo=flo,hi=fhi)
             ratings=await self.api.rows(conn,'SELECT f.rating FROM guest_feedback f JOIN sales s ON s.id=f.sale_id WHERE s.credited_user_id=:uid AND f.submitted_at>=:lo AND f.submitted_at<:hi AND f.rating IS NOT NULL',uid=uid,lo=lo,hi=hi)
             hotels=await self.api.rows(conn,'SELECT h.id,h.name FROM hotels h JOIN hotel_employees he ON he.hotel_id=h.id WHERE he.user_id=:uid',uid=uid)
+            bookings = await self.api.rows(conn,'SELECT id,status,shoot_date,shoot_time,hotel_id,room FROM bookings WHERE (manager_id=:uid OR photographer_id=:uid) AND shoot_date>=:start AND shoot_date<=:end ORDER BY shoot_date DESC,id DESC',uid=uid,start=start,end=end)
+            audits = await self.api.rows(conn,'SELECT id,action,entity,entity_id,created_at FROM audit_logs WHERE user_id=:uid AND created_at>=:lo AND created_at<:hi ORDER BY id DESC LIMIT 100',uid=uid,lo=flo,hi=fhi)
+            reviews = await self.api.rows(conn,'SELECT id,shooting_id,status,result,created_at FROM shoot_development_reviews WHERE photographer_id=:uid ORDER BY id DESC LIMIT 30',uid=uid)
+            training = await self.api.rows(conn,'SELECT id,client_type,status,evaluation,created_at FROM sales_training_sessions WHERE user_id=:uid ORDER BY id DESC LIMIT 30',uid=uid)
+        detailed = uid==a['id'] or 'OWNER' in a['roles']
         return web.json_response({'profile':profile,'hotels':[dict(h) for h in hotels],'from':str(start),'to':str(end),
             'feedback':{'count':len(ratings),'average':round(sum(r['rating'] for r in ratings)/len(ratings),2) if ratings else None},
-            'discipline':{'trend':[{'date':str(i['shift_date']),'late':bool(i['late']),'confirmed':i['status']=='STARTED'} for i in sorted(ins,key=lambda x:str(x['shift_date']))], 'late':sum(bool(i['late']) for i in ins),'missed':len(missed),'missedShiftIds':missed,'confirmed':len(confirmed),'checkIns':[{k:str(v) if isinstance(v,datetime) else v for k,v in i.items()}|{'shift_date':str(i['shift_date'])} for i in ins],'closed':sum(o['status']=='FINISHED' for o in outs)},
-            'finance':{'from':str(fstart),'to':str(end),'revenue':sum(cents(s['amount']) for s in sales),'sales':len(sales),'commission':sum(cents(s['commission']) for s in sales),'adjustments':sum(cents(p['amount']) for p in pay),'entries':[{'kind':p['kind'],'amount':cents(p['amount']),'note':p['note'],'at':str(p['created_at'])} for p in pay]},'onboarding':data})
+            'discipline':discipline,
+            'finance':{'from':str(fstart),'to':str(end),'revenue':sum(cents(s['amount']) for s in sales),'sales':len(sales),'commission':sum(cents(s['commission']) for s in sales),'adjustments':sum(cents(p['amount']) for p in pay),'entries':[{'kind':p['kind'],'amount':cents(p['amount']),'note':p['note'],'at':str(p['created_at'])} for p in pay],
+                'saleHistory':[{'id':s['id'],'amount':cents(s['amount']),'commission':cents(s['commission']),'at':str(s['created_at'])} for s in sales]},
+            'bookings':[dict(b)|{'shoot_date':str(b['shoot_date']),'shoot_time':str(b['shoot_time'])} for b in bookings],
+            'history':[dict(r)|{'created_at':str(r['created_at'])} for r in audits],
+            'reviews':[{'id':r['id'],'shootingId':r['shooting_id'],'status':r['status'],'result':parsed(r['result']) if detailed else {},'at':str(r['created_at'])} for r in reviews],
+            'salesTraining':[{'id':r['id'],'clientType':r['client_type'],'status':r['status'],'evaluation':parsed(r['evaluation']) if detailed else {},'at':str(r['created_at'])} for r in training],
+            'onboarding':data})
 
 
 def install_team(app,api):
     service=Team(api)
-    for method,path,handler in [('GET','/hr',service.listing),('POST','/hr',service.create),('PUT','/hr/{id}',service.update),('POST','/hr/{id}/hire',service.hire),('GET','/team/{id}/overview',service.overview),('GET','/onboarding',service.onboarding),('POST','/onboarding/progress',service.progress),('POST','/onboarding/assessment',service.assessment)]:
+    for method,path,handler in [('GET','/discipline',service.discipline),('GET','/hr',service.listing),('POST','/hr',service.create),('PUT','/hr/{id}',service.update),('POST','/hr/{id}/hire',service.hire),('GET','/team/{id}/overview',service.overview),('GET','/onboarding',service.onboarding),('POST','/onboarding/progress',service.progress),('POST','/onboarding/assessment',service.assessment)]:
         app.router.add_route(method,'/api/miniapp'+path,handler)
     return service

@@ -58,6 +58,20 @@ async def main():
                 for name,title in [('insights','Контроль бизнеса'),('team','Команда и найм'),('onboarding','Начало работы с Photo Boss'),('workday','Итоги смены'),('development','Развитие фотографа и продажи')]:
                     await page.goto(BASE+'/app/#'+name)
                     await page.get_by_role('heading',name=title,exact=True).wait_for()
+                    if name == 'team':
+                        await page.get_by_text('Дисциплина команды',exact=True).click()
+                        await page.locator('#disciplinePeriod [name=from]').fill('2026-09-14')
+                        await page.locator('#disciplinePeriod [name=to]').fill('2026-09-20')
+                        await page.locator('#disciplinePeriod button').click()
+                        await page.get_by_text('2026-09-14 — 2026-09-20; сравнение с 2026-09-07 — 2026-09-13',exact=True).wait_for()
+                        await page.get_by_role('button',name='Photo',exact=True).last.click()
+                        await page.get_by_role('heading',name='Photo',exact=True).wait_for()
+                        await page.get_by_text('История записей и съёмок',exact=True).click()
+                    if name == 'onboarding':
+                        for field in ('price','receipt','sync','flag'):
+                            await page.locator(f'#entryQuiz [name={field}][value="1"]').check()
+                        await page.locator('#entryQuiz button').click()
+                        await page.get_by_text('Результат 100/100 · зачтено',exact=True).wait_for()
                     assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth'),name
                     await page.screenshot(path=str(output/f'update-{name}-mobile.png'),full_page=True)
                 await page.goto(BASE+'/app/#workday')
