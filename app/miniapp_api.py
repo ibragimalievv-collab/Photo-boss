@@ -19,6 +19,7 @@ from aiohttp import web
 from sqlalchemy import text
 
 from .miniapp_security import (
+    MINIAPP_SESSION_MAX_AGE,
     STAFF_ROLES,
     THEMES,
     AccessError,
@@ -123,7 +124,7 @@ class MiniApp:
         telegram_id = validate_init_data(
             request.headers.get("X-Telegram-Init-Data", ""),
             self.bot.token,
-            max_age=24 * 60 * 60,
+            max_age=MINIAPP_SESSION_MAX_AGE,
         )
         request["miniapp_telegram_id"] = telegram_id
         async with self.engine.connect() as conn:
