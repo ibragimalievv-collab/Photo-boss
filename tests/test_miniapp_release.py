@@ -246,6 +246,14 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         response = await service.middleware(request, handler)
         return response.status, json.loads(response.text), response.headers
 
+    async def test_reused_telegram_webview_init_data_is_accepted_for_one_day(self):
+        two_hours_old = int(time.time()) - 2 * 60 * 60
+        status, data, _ = await self.call("/me", uid=1001, token=signed(1001, issued=two_hours_old))
+        assert status == 200 and data["user"]["id"] == 1
+
+        older_than_one_day = int(time.time()) - 24 * 60 * 60 - 1
+        assert (await self.call("/me", uid=1001, token=signed(1001, issued=older_than_one_day)))[0] == 401
+
     async def test_no_credentials_and_inactive_users(self):
         status, data, headers = await self.call("/me", token="")
         assert status == 401 and "user" not in data and headers["Cache-Control"] == "no-store"
