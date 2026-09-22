@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from aiogram import BaseMiddleware
 from aiogram.exceptions import TelegramAPIError
@@ -26,7 +26,7 @@ from sqlalchemy import select
 from .config import config
 from .db import Session, engine
 from .miniapp_api import ACTIONS, MiniApp, as_utc
-from .miniapp_security import role_permissions
+from .miniapp_security import owner_launch_token, role_permissions
 from .models import AuditLog, Booking, User
 from .services.core import get_user, roles_of
 
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 FINANCE_TEXTS = frozenset({"💰 Продажи", "📊 Отчёты", "💵 Зарплаты/выплаты"})
 
 
-def app_url(page="home"):
+def app_url(page="home", tg_id=None):
     base = os.getenv("WEBHOOK_BASE_URL", "").strip().rstrip("/")
     if not base:
         host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "photo-boss.onrender.com").strip()
@@ -44,14 +44,17 @@ def app_url(page="home"):
         raise ValueError("Mini App requires a trusted HTTPS base URL")
     if page not in {"home", "finance", "audit", "academy", "schedule"}:
         page = "home"
-    # Version the Mini App URL so Telegram opens a fresh WebView after auth
-    # fixes instead of reusing a stale owner-only session.
-    return base + "/app/?v=20260922-telegram-init#"+ page
+    # Keep the bearer token in the URL fragment so it is not sent in HTTP logs
+    # or Referer headers. The API receives it only in a dedicated request header.
+    fragment = page
+    if tg_id is not None:
+        fragment += "?" + urlencode({"owner_launch": owner_launch_token(int(tg_id), config.bot_token)})
+    return base + "/app/?v=20260922-owner-fallback#" + fragment
 
 
-def app_markup(page="home"):
+def app_markup(page="home", tg_id=None):
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="📱 Открыть Photo Boss", web_app=WebAppInfo(url=app_url(page)))
+        InlineKeyboardButton(text="📱 Открыть Photo Boss", web_app=WebAppInfo(url=app_url(page, tg_id)))
     ]])
 
 
@@ -82,7 +85,7 @@ async def protect_navigation(make_request, bot, method):
 async def reset_chat_menu(bot, chat_id):
     await bot.set_chat_menu_button(
         chat_id=chat_id,
-        menu_button=MenuButtonWebApp(text="Photo Boss", web_app=WebAppInfo(url=app_url())),
+        menu_button=MenuButtonWebApp(text="Photo Boss", web_app=WebAppInfo(url=app_url(tg_id=chat_id))),
     )
 
 
