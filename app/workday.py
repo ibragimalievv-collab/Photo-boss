@@ -9,7 +9,7 @@ from aiohttp import web
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from .miniapp_security import AccessError, utc_bounds
+from .miniapp_security import AccessError, booking_assignment_columns, utc_bounds
 from .models import utc_now
 from .people import People, positive_id
 from .services.insights import cents, parsed
@@ -28,7 +28,10 @@ class Workday:
             items=await self.checklist(conn,a['roles'])
             done={r['item_key']:bool(r['done']) for r in await self.api.rows(conn,'SELECT item_key,done FROM work_checklist_completions WHERE user_id=:uid AND shift_date=:day',uid=a['id'],day=day)}
             sale_rows=await self.api.rows(conn,'SELECT id,amount,payment_status FROM sales WHERE credited_user_id=:uid AND created_at>=:lo AND created_at<:hi',uid=a['id'],lo=lo,hi=hi)
-            bookings=await self.api.rows(conn,'SELECT id,status FROM bookings WHERE (photographer_id=:uid OR manager_id=:uid) AND shoot_date=:day',uid=a['id'],day=day)
+            personal_roles = ('PHOTOGRAPHER', 'MANAGER') if {'OWNER', 'ADMIN'} & set(a['roles']) else a['roles']
+            assignments = booking_assignment_columns(personal_roles)
+            condition = ' OR '.join(f'{column}=:uid' for column in assignments) or '1=0'
+            bookings=await self.api.rows(conn,f'SELECT id,status FROM bookings WHERE ({condition}) AND shoot_date=:day',uid=a['id'],day=day)
             close=await self.api.rows(conn,'SELECT status,ended_at,report_note,report_saved_at FROM shift_check_outs WHERE user_id=:uid AND shift_date=:day',uid=a['id'],day=day)
             config_items = [parsed(r['value'])|{'key':r['key']} for r in await self.api.rows(conn,"SELECT key,value FROM settings WHERE key LIKE 'checklist:%' ORDER BY key")] if {'OWNER','ADMIN'} & set(a['roles']) else []
         return web.json_response({'date':str(day),'timezone':str(self.api.tz),'items':[i|{'done':done.get(i['key'],False)} for i in items],

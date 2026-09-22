@@ -14,6 +14,13 @@ THEMES = frozenset({"premium", "light", "photo"})
 STAFF_ROLES = frozenset({"OWNER", "ADMIN", "MANAGER", "PHOTOGRAPHER"})
 
 
+def booking_assignment_columns(roles):
+    """Trusted column names for assignments allowed by the current staff roles."""
+    return tuple(column for role, column in (
+        ("PHOTOGRAPHER", "photographer_id"), ("MANAGER", "manager_id")
+    ) if role in roles)
+
+
 class AccessError(ValueError):
     def __init__(self, message: str, status: int = 403):
         super().__init__(message)
