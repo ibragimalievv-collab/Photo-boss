@@ -1,5 +1,5 @@
 // Cache executable shell only. Authenticated API responses never enter CacheStorage.
-const CACHE='photo-boss-shell-v3-shooting-completion';
+const CACHE='photo-boss-shell-v5-viewing-time';
 const SDK='https://telegram.org/js/telegram-web-app.js';
 const STATIC=['/app/','/app/config.js','/app/css/styles.css','/app/assets/icon.svg',
  ...['app','api','localstore','outbox','workflow','workday','domain','icons','telegram','academy','practice','development','team','insights'].map(n=>`/app/js/${n}.js`),

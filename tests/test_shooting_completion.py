@@ -48,10 +48,8 @@ def test_photographer_lifecycle_sale_then_upload_and_salary():
                     await transition_shooting(session, photographer, shooting.id, 'ready', 'Материалы готовы')
                 for action in ['start', 'finish', 'processing']:
                     await transition_shooting(session, photographer, shooting.id, action)
-                with pytest.raises(ValueError, match='причину'):
-                    await transition_shooting(session, photographer, shooting.id, 'ready', '  ')
-                await transition_shooting(session, photographer, shooting.id, 'ready', 'Обработка завершена')
-                assert await session.scalar(select(AuditLog.details).where(AuditLog.action == 'shooting_ready')) == 'Обработка завершена'
+                await transition_shooting(session, photographer, shooting.id, 'ready')
+                assert await session.scalar(select(AuditLog.details).where(AuditLog.action == 'shooting_ready')) is None
                 assert await full_upload_deadline(session, booking.id) is None
                 with pytest.raises(ValueError, match='завершите продажу'):
                     await complete_full_upload(session, photographer, shooting.id)
@@ -171,6 +169,83 @@ def test_listing_filters_by_current_role_and_preserves_overdue_upload():
             assert data['bookings'][0]['uploadOverdue']
             assert data['bookings'][0]['canUpload']
             assert data['bookings'][0]['saleCompleted']
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_viewing_time_postponement_reason_replay_and_access():
+    from datetime import UTC, datetime
+    from zoneinfo import ZoneInfo
+
+    from app.models import Booking
+    from app.workflow import Workflow
+
+    async def run():
+        engine, factory, work = await setup()
+        tz = ZoneInfo('Europe/Moscow')
+        first = (datetime.now(tz) + timedelta(hours=2)).replace(second=0, microsecond=0)
+        second = first + timedelta(days=1)
+        try:
+            async with factory() as session:
+                booking = await create_booking_record(session, await session.get(User, 1), booking_data())
+                booking.photographer_id = 2
+                shooting = await session.scalar(select(Shooting))
+                shooting.status = booking.status = 'SHOT'
+                await session.commit()
+                sid, bid = shooting.id, booking.id
+            actor = {'id': 2, 'roles': ['PHOTOGRAPHER']}
+            def packet(key, action, when, expected=None, reason=''):
+                return {'actorId': 2, 'key': 'viewing-request-' + key, 'kind': 'shoot_transition',
+                        'date': str(work.api.today()), 'data': {'shooting': {'id': sid}, 'action': action,
+                        'reason': reason, 'viewingAt': when.replace(tzinfo=None).isoformat(), 'expectedViewingAt': expected}}
+            initial = packet('initial', 'schedule_viewing', first)
+            response = json.loads((await work.execute(actor, initial)).text)
+            assert json.loads((await work.execute(actor, initial)).text) == response
+            expected = first.astimezone(UTC).replace(tzinfo=None).isoformat() + 'Z'
+            with pytest.raises(AccessError, match='изменилось'):
+                await work.execute(actor, packet('double-tap', 'schedule_viewing', first))
+            for action in ['postpone_sale', 'schedule_viewing']:
+                with pytest.raises(AccessError, match='причину'):
+                    await work.execute(actor, packet('no-reason-'+action, action, second, expected, '  '))
+            deferred = packet('defer', 'postpone_sale', second, expected, 'Гость попросил прийти завтра')
+            saved = json.loads((await work.execute(actor, deferred)).text)
+            assert json.loads((await work.execute(actor, deferred)).text) == saved
+            listing = json.loads((await Workflow(work.api).listing({'miniapp_actor': actor})).text)
+            assert listing['bookings'][0]['viewingAt'] == second.astimezone(UTC).replace(tzinfo=None).isoformat()+'Z'
+            assert listing['bookings'][0]['saleSchedule']['reason'] == 'Гость попросил прийти завтра'
+            async with factory() as session:
+                assert (await session.get(Booking, bid)).status == 'SHOT'
+                assert await session.scalar(select(func.count(Sale.id))) == 0
+                assert await session.scalar(select(func.count(AuditLog.id)).where(AuditLog.action == 'sale_postponed')) == 1
+                with pytest.raises(ValueError, match='Нет доступа'):
+                    await transition_shooting(session, await session.get(User, 1), sid, 'schedule_viewing')
+                shooting = await session.get(Shooting, sid)
+                shooting.viewing_at = datetime.now(UTC).replace(tzinfo=None)-timedelta(minutes=1)
+                await session.commit()
+            listing = json.loads((await Workflow(work.api).listing({'miniapp_actor': actor})).text)
+            assert listing['bookings'][0]['viewingOverdue']
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_viewing_migration_is_additive_and_repeatable():
+    from sqlalchemy import text
+
+    from app.schema_updates import upgrade
+
+    async def run():
+        engine, factory = await fixture()
+        try:
+            async with factory() as session:
+                await create_booking_record(session, await session.get(User, 1), booking_data())
+                await session.commit()
+            async with engine.begin() as conn:
+                await conn.execute(text('ALTER TABLE shootings DROP COLUMN viewing_at'))
+                await upgrade(conn)
+                await upgrade(conn)
+                assert (await conn.execute(text('SELECT viewing_at FROM shootings'))).one() == (None,)
         finally:
             await engine.dispose()
     asyncio.run(run())

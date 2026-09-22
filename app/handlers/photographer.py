@@ -44,10 +44,6 @@ class ShiftFlow(StatesGroup):
     workplace_photo = State()
 
 
-class ReadyReasonFlow(StatesGroup):
-    reason = State()
-
-
 class PhotoUploadFlow(StatesGroup):
     uploading = State()
 
@@ -432,11 +428,6 @@ async def action(c: CallbackQuery, state):
         b = await s.get(Booking, sh.booking_id)
         if u is None or not u.active or b is None or b.photographer_id != u.id:
             return await c.answer("Это не ваша съёмка.")
-        if act == 'ready':
-            await state.set_state(ReadyReasonFlow.reason)
-            await state.set_data({'shooting_id': sid})
-            await c.answer()
-            return await c.message.answer('Объясните причину переноса в продажу (от 3 до 1000 символов).')
         try:
             await transition_shooting(s, u, sid, act)
         except ValueError as exc:
@@ -477,22 +468,6 @@ async def action(c: CallbackQuery, state):
     }
     text, buttons = labels[act]
     await c.message.answer(text, reply_markup=inline(buttons))
-
-
-@r.message(ReadyReasonFlow.reason, F.text)
-async def ready_reason(m, state):
-    data = await state.get_data()
-    async with Session() as session:
-        actor = await get_user(session, m.from_user.id)
-        try:
-            shooting = await transition_shooting(session, actor, data.get('shooting_id'), 'ready', m.text)
-        except ValueError as exc:
-            return await m.answer(str(exc))
-        booking = await session.get(Booking, shooting.booking_id)
-        await session.commit()
-        await notify_manager_ready_for_sale(m.bot, session, booking)
-    await state.clear()
-    await m.answer('Съёмка готова к продаже. Сначала загрузите выбранные кадры и завершите продажу, затем всю съёмку в течение 48 часов.')
 
 
 @r.callback_query(F.data.startswith("photo:full_upload:"))

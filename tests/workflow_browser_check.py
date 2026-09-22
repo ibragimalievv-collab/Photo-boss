@@ -203,21 +203,32 @@ async def main():
                     photo_page = await photo_context.new_page()
                     photo_page.on('pageerror', lambda e: errors.append(str(e)))
                     await photo_page.goto(url)
-                    for label in ('Начать съёмку', 'Завершить съёмку', 'На обработке'):
+                    for label in ('Начать съёмку', 'Завершить съёмку'):
                         await photo_page.get_by_role('button', name=label, exact=True).click()
-                    reason = photo_page.locator('[data-shoot-transition] [name=reason]')
-                    await reason.wait_for()
+                    appointment = photo_page.locator('[data-step=schedule_viewing]')
+                    await appointment.wait_for()
+                    from datetime import datetime, timedelta
+                    from zoneinfo import ZoneInfo
+                    viewing = (datetime.now(ZoneInfo('Europe/Moscow'))+timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M')
+                    await appointment.locator('[name=viewingAt]').fill(viewing)
+                    await appointment.locator('button').click()
+                    await photo_page.locator('[data-step=postpone_sale]').wait_for()
                     await photo_page.reload()
-                    await reason.wait_for()
-                    await photo_page.get_by_role('button', name='Перенести в продажу', exact=True).click()
+                    await photo_page.locator('[data-step=postpone_sale]').wait_for()
+                    await photo_page.get_by_role('button', name='На обработке', exact=True).click()
+                    await photo_page.get_by_role('button', name='Готова к продаже', exact=True).click()
+                    await photo_page.locator('[data-step=ready]').wait_for(state='detached')
+                    reason = photo_page.locator('[data-step=postpone_sale] [name=reason]')
+                    await photo_page.get_by_role('button', name='Перенести продажу на следующий день', exact=True).click()
                     assert not await reason.evaluate('(el)=>el.checkValidity()')
-                    await reason.fill('Обработка завершена, материалы готовы')
-                    await photo_page.get_by_role('button', name='Перенести в продажу', exact=True).click()
-                    await reason.wait_for(state='detached')
+                    await reason.fill('Гость попросил прийти завтра')
+                    await photo_page.get_by_role('button', name='Перенести продажу на следующий день', exact=True).click()
+                    await photo_page.get_by_text('Причина переноса: Гость попросил прийти завтра', exact=True).wait_for()
                     async with factory() as session:
-                        assert (await session.get(Shooting, new_shooting.id)).status == 'READY_FOR_SALE'
+                        shoot = await session.get(Shooting, new_shooting.id)
+                        assert shoot.status == 'READY_FOR_SALE' and shoot.viewing_at is not None
                     assert not errors, errors
-                    print('PASS: cold offline start, booking + sale blobs, lost response replay, single sale/commission, offline camera shifts and owner review, no API cache, photographer stages and reason after reload')
+                    print('PASS: cold offline start, booking + sale blobs, lost response replay, single sale/commission, offline camera shifts and owner review, no API cache, photographer stages, viewing time after reload and postponement reason')
                 finally:
                     await browser.close()
     finally:

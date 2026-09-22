@@ -742,7 +742,6 @@ def test_shooting_order_ownership_start_finish_ready_and_full_upload():
             assert (await session.get(Shooting, 1)).status == "SHOT"
 
         await callback(PHOTO_B, "photo:ready:1")
-        await message(PHOTO_B, "Обработка завершена, кадры готовы")
         async with Session() as session:
             shoot = await session.get(Shooting, 1)
             assert shoot.status == "READY_FOR_SALE"

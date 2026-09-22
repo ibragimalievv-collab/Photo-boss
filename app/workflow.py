@@ -40,6 +40,7 @@ from .services.sale_workflow import (
     set_sale_counts,
     start_sale_draft,
 )
+from .services.shooting_workflow import sale_schedule
 from .yandex_disk import ROOT, YandexDisk, YandexDiskError, configured_from_env
 
 KINDS = frozenset({'booking', 'sale_start', 'sale_counts', 'sale_complete', 'sale_receipt',
@@ -90,6 +91,9 @@ class Workflow:
                 deadline = await full_upload_deadline(session, b.id)
                 rows.append({'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
                     'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': prices.get(b.package_id),
+                    'viewingAt': shoot.viewing_at.isoformat() + 'Z' if shoot and shoot.viewing_at else None,
+                    'viewingOverdue': bool(shoot and shoot.viewing_at and shoot.viewing_at <= datetime.now(UTC).replace(tzinfo=None) and shoot.status in {'SHOT', 'PROCESSING'}),
+                    'saleSchedule': await sale_schedule(session, shoot.id) if shoot else None,
                     'shootingId': shoot.id if shoot else None, 'shootingStatus': shoot.status if shoot else None,
                     'uploadDueAt': deadline.isoformat() + 'Z' if deadline else None,
                     'uploadOverdue': bool(deadline and deadline <= datetime.now(UTC).replace(tzinfo=None) and not (shoot and shoot.full_upload_completed_at)),
@@ -102,7 +106,7 @@ class Workflow:
         return web.json_response({'bookings': rows, 'hotels': [{'id': h.id, 'name': h.name} for h in hotels],
             'packages': [{'id': p.id, 'name': p.name, 'price': prices[p.id]} for p in packages if p.active],
             'canBook': bool({'OWNER', 'ADMIN', 'MANAGER'} & set(a['roles'])),
-            'date': str(self.api.today()), 'actorId': a['id']})
+            'timezone': str(getattr(self.api, 'tz', 'Europe/Moscow')), 'date': str(self.api.today()), 'actorId': a['id']})
 
     async def save_telegram(self, actor, raw, *, receipt=False):
         from aiogram.types import BufferedInputFile
@@ -250,9 +254,11 @@ class Workflow:
     async def shoot(self, session, actor, roles, kind, data, raw):
         if kind == 'shoot_transition':
             from .services.shooting_workflow import transition_shooting
-            fields(data, 'shooting action reason')
+            fields(data, 'shooting action reason viewingAt expectedViewingAt' if data.get('action') in {'postpone_sale', 'schedule_viewing'} else 'shooting action reason')
             sid = await target(session, actor, data['shooting'], 'shootingId')
-            shooting = await transition_shooting(session, actor, sid, data['action'], data['reason'])
+            shooting = await transition_shooting(session, actor, sid, data['action'], data['reason'],
+                viewing_at=data.get('viewingAt'), expected_viewing_at=data.get('expectedViewingAt'),
+                timezone=getattr(self.api, 'tz', 'Europe/Moscow'))
             return {'shootingId': sid, 'status': shooting.status}
         fields(data, 'shooting')
         sid = await target(session, actor, data['shooting'], 'shootingId')

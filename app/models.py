@@ -202,6 +202,7 @@ class Shooting(Base):
     arrived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    viewing_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ready_for_sale_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     full_upload_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="ASSIGNED")
