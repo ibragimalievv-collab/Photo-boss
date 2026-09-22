@@ -192,6 +192,7 @@ async def main():
 
         # Queue claims must remain unique across simultaneous PostgreSQL workers.
         from unittest.mock import patch
+
         from app.models import PhotoStorage
         from app.services import photo_storage
         async with factory() as session:
