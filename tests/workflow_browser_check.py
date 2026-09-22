@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import ssl
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -14,6 +15,7 @@ from playwright.async_api import async_playwright
 from sqlalchemy import func, select
 from test_miniapp_release import TOKEN, signed
 from test_workflow_services import booking_data, fixture
+from work_calls_browser_check import wait_async
 
 from app.academy_practice import install_academy_practice
 from app.attendance import install_attendance
@@ -36,7 +38,8 @@ from app.workflow import Workflow
 
 
 async def main():
-    engine, factory = await fixture()
+    temporary = tempfile.TemporaryDirectory(prefix='photo-boss-offline-')
+    engine, factory = await fixture('sqlite+aiosqlite:///' + str(Path(temporary.name) / 'workflow.db'))
     async with factory() as session:
         booking = await create_booking_record(session, await session.get(User, 1), booking_data())
         booking.photographer_id = 2
@@ -116,7 +119,7 @@ async def main():
                     await sale.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/coast.jpg')
                     await sale.locator('[name=selected]').set_input_files('app/webapp/assets/academy/family.jpg')
                     await sale.locator('button').click()
-                    await page.wait_for_function("async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length===6;}")
+                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length===6;}")
                     # A new page removes in-memory state; only SW and IndexedDB remain.
                     await page.close()
                     page = await context.new_page()
@@ -125,9 +128,9 @@ async def main():
                     await page.get_by_role('heading', name='Рабочие операции', exact=True).wait_for()
                     await page.get_by_text('Сохранено локально', exact=True).first.wait_for()
                     await context.set_offline(False)
-                    await page.wait_for_function("async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.kind==='sale_complete'&&r.status==='local'&&r.error);}")
+                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.kind==='sale_complete'&&r.status==='local'&&r.error);}")
                     await page.get_by_role('button', name='Синхронизировать сейчас').click()
-                    await page.wait_for_function("async()=>{const m=await import('/app/js/outbox.js');const rows=await m.outboxRows();return rows.length===6&&rows.every(r=>r.status==='synced'&&!r.blob);}")
+                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');const rows=await m.outboxRows();return rows.length===6&&rows.every(r=>r.status==='synced'&&!r.blob);}")
                     async with factory() as session:
                         assert await session.scalar(select(func.count(Booking.id))) == 2
                         assert await session.scalar(select(func.count(Sale.id))) == 1
@@ -146,6 +149,7 @@ async def main():
     finally:
         await server.close()
         await engine.dispose()
+        temporary.cleanup()
 
 
 if __name__ == '__main__':

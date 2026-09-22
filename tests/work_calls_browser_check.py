@@ -183,8 +183,10 @@ async def main():
                 }""", timeout=10000)
                 assert await page.evaluate("document.documentElement.scrollWidth<=innerWidth+2")
                 if RELAY_ONLY:
-                    assert await page.evaluate("""async()=>{
-                        for(const pc of testPCs.filter(p=>p.connectionState==='connected')){
+                    await wait_async(page, """async()=>{
+                        const connected=testPCs.filter(p=>p.connectionState==='connected');
+                        if(connected.length!==2)return false;
+                        for(const pc of connected){
                             const stats=await pc.getStats();
                             const pairs=[...stats.values()].filter(x=>x.type==='candidate-pair'&&x.nominated&&x.state==='succeeded');
                             if(!pairs.length||pairs.some(x=>stats.get(x.localCandidateId)?.candidateType!=='relay'))return false;
