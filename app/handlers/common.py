@@ -17,7 +17,7 @@ async def launch_button(m):
     from ..launch_policy import app_markup, reset_chat_menu
     await reset_chat_menu(m.bot, m.from_user.id)
     await m.answer("📱 Photo Boss · рабочее приложение\nСъёмки, график, касса и Академия — в одном окне.",
-                   reply_markup=app_markup(), protect_content=True)
+                   reply_markup=app_markup(tg_id=m.from_user.id), protect_content=True)
 
 
 @r.message(CommandStart())
