@@ -1,6 +1,6 @@
 export const THEMES = ['premium','light','photo'];
 export const ROLE_NAMES = { OWNER:'Владелец', ADMIN:'Администратор', PHOTOGRAPHER:'Фотограф', MANAGER:'Менеджер записи' };
-export const STATUS_NAMES = {NEW:'Новая запись',ASSIGNED:'Назначена',ACCEPTED:'Принята',ARRIVED:'На месте',IN_PROGRESS:'Идёт съёмка',COMPLETED:'Завершена',READY_FOR_SALE:'К продаже',SOLD:'Продана',REJECTED:'Отклонена',CANCELLED:'Отменена'};
+export const STATUS_NAMES = {NEW:'Новая запись',ASSIGNED:'Назначена',ACCEPTED:'Принята',ARRIVED:'На месте',IN_PROGRESS:'Идёт съёмка',COMPLETED:'Завершена',PICKED_UP:'Принята',SHOOTING:'Идёт съёмка',SHOT:'Съёмка завершена',PROCESSING:'На обработке',READY_FOR_SALE:'К продаже',SOLD:'Продана',REJECTED:'Отклонена',CANCELLED:'Отменена'};
 export function permissions(roles){
  const owner=roles.includes('OWNER'), admin=roles.includes('ADMIN');
  return {financeScope:owner?'all':admin?'today':'self',audit:owner,manageSchedule:owner||admin,manageBookings:owner||admin||roles.includes('MANAGER')};

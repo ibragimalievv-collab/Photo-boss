@@ -5,6 +5,7 @@ module never commits independently of that receipt of the operation.
 """
 import hashlib
 import json
+from datetime import UTC, datetime
 
 from aiohttp import web
 from sqlalchemy import or_, select
@@ -33,6 +34,8 @@ from .services.sale_workflow import (
     capture_draft_receipt,
     complete_full_upload,
     complete_sale,
+    full_upload_deadline,
+    require_completed_sale,
     selected_count,
     set_sale_counts,
     start_sale_draft,
@@ -40,7 +43,7 @@ from .services.sale_workflow import (
 from .yandex_disk import ROOT, YandexDisk, YandexDiskError, configured_from_env
 
 KINDS = frozenset({'booking', 'sale_start', 'sale_counts', 'sale_complete', 'sale_receipt',
-                   'sale_selected', 'booking_receipt', 'shoot_photo', 'shoot_complete'})
+                   'sale_selected', 'booking_receipt', 'shoot_photo', 'shoot_complete', 'shoot_transition'})
 MEDIA_KINDS = frozenset({'sale_receipt', 'sale_selected', 'booking_receipt', 'shoot_photo'})
 
 
@@ -84,9 +87,13 @@ class Workflow:
                 draft = await session.scalar(select(SaleDraft).where(SaleDraft.booking_id == b.id,
                     SaleDraft.status.in_(['AWAITING_RECEIPT', 'AWAITING_COUNTS', 'AWAITING_SELECTED'])).order_by(SaleDraft.id.desc()).limit(1))
                 shoot = await session.scalar(select(Shooting).where(Shooting.booking_id == b.id))
+                deadline = await full_upload_deadline(session, b.id)
                 rows.append({'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
                     'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': prices.get(b.package_id),
-                    'shootingId': shoot.id if shoot else None, 'fullUploaded': bool(shoot and shoot.full_upload_completed_at),
+                    'shootingId': shoot.id if shoot else None, 'shootingStatus': shoot.status if shoot else None,
+                    'uploadDueAt': deadline.isoformat() + 'Z' if deadline else None,
+                    'uploadOverdue': bool(deadline and deadline <= datetime.now(UTC).replace(tzinfo=None) and not (shoot and shoot.full_upload_completed_at)),
+                    'saleCompleted': bool(deadline), 'fullUploaded': bool(shoot and shoot.full_upload_completed_at),
                     'canUpload': ('PHOTOGRAPHER' in a['roles'] and b.photographer_id == a['id']) or bool({'OWNER', 'ADMIN'} & set(a['roles'])),
                     'draft': ({'id': draft.id, 'mine': draft.created_by_id == a['id'], 'status': draft.status,
                         'total': draft.declared_photo_count, 'sold': draft.sold_photos,
@@ -241,16 +248,22 @@ class Workflow:
         return {'bookingId': bid, 'receiptId': receipt.id}
 
     async def shoot(self, session, actor, roles, kind, data, raw):
+        if kind == 'shoot_transition':
+            from .services.shooting_workflow import transition_shooting
+            fields(data, 'shooting action reason')
+            sid = await target(session, actor, data['shooting'], 'shootingId')
+            shooting = await transition_shooting(session, actor, sid, data['action'], data['reason'])
+            return {'shootingId': sid, 'status': shooting.status}
         fields(data, 'shooting')
         sid = await target(session, actor, data['shooting'], 'shootingId')
-        shooting = await session.get(Shooting, sid, with_for_update=True)
-        booking = await session.get(Booking, shooting.booking_id) if shooting else None
-        if booking is None or (not roles & {'OWNER', 'ADMIN'} and (
-            'PHOTOGRAPHER' not in roles or booking.photographer_id != actor.id
-        )):
+        preview = await session.get(Shooting, sid)
+        booking = await session.get(Booking, preview.booking_id, with_for_update=True) if preview else None
+        shooting = await session.get(Shooting, sid, with_for_update=True, populate_existing=True)
+        if booking is None or not (roles & {'OWNER', 'ADMIN'} or ('PHOTOGRAPHER' in roles and booking.photographer_id == actor.id)):
             raise AccessError('Нет доступа к съёмке.', 403)
-        if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
+        if booking.status != 'READY_FOR_SALE' or shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
             raise AccessError('Загрузка съёмки уже закрыта или ещё недоступна.', 409)
+        await require_completed_sale(session, booking.id)
         if kind == 'shoot_photo':
             digest = hashlib.sha256(raw).hexdigest()
             duplicate = await session.scalar(select(PhotoStorage.photo_id).where(PhotoStorage.shooting_id == sid, PhotoStorage.sha256 == digest).limit(1))

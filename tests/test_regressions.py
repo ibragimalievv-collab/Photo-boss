@@ -742,12 +742,21 @@ def test_shooting_order_ownership_start_finish_ready_and_full_upload():
             assert (await session.get(Shooting, 1)).status == "SHOT"
 
         await callback(PHOTO_B, "photo:ready:1")
+        await message(PHOTO_B, "Обработка завершена, кадры готовы")
         async with Session() as session:
             shoot = await session.get(Shooting, 1)
             assert shoot.status == "READY_FOR_SALE"
             assert shoot.accepted_at == first_time
             assert shoot.ready_for_sale_at is not None
 
+        # The archive cannot be started before a completed sale.
+        await callback(PHOTO_B, "photo:full_upload:1")
+        assert await state_for(PHOTO_B).get_state() != PhotoUploadFlow.uploading.state
+        async with Session() as session:
+            booking = await session.get(Booking, 1)
+            session.add(Sale(booking_id=1, created_by_id=booking.photographer_id,
+                             credited_user_id=booking.photographer_id, sold_photos=1, amount=400))
+            await session.commit()
         await callback(PHOTO_B, "photo:full_upload:1")
         assert await state_for(PHOTO_B).get_state() == PhotoUploadFlow.uploading.state
         async with Session() as session:

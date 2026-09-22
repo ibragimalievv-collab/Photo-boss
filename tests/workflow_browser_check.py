@@ -189,7 +189,35 @@ async def main():
                         assert (await session.scalar(select(ShiftCheckOut))).status == 'FINISHED'
                     assert not errors, errors
                     await panel.screenshot(path=str(output/'offline-attendance-review-mobile.png'), full_page=True)
-                    print('PASS: cold offline start, booking + sale blobs, lost response replay, single sale/commission, offline camera shifts and owner review, no API cache')
+                    # Exercise the new Mini App stages as the assigned photographer.
+                    async with factory() as session:
+                        new_booking = await create_booking_record(session, await session.get(User, 1), booking_data())
+                        new_booking.photographer_id = 2
+                        new_booking.status = 'ASSIGNED'
+                        new_shooting = await session.scalar(select(Shooting).where(Shooting.booking_id == new_booking.id))
+                        new_shooting.status = 'ASSIGNED'
+                        await session.commit()
+                    photo_context = await browser.new_context(ignore_https_errors=True, viewport={'width': 390, 'height': 844}, is_mobile=True)
+                    await photo_context.add_init_script('window.Telegram={WebApp:{initData:'+json.dumps(signed(2))+',ready(){},expand(){},setHeaderColor(){},setBackgroundColor(){},onEvent(){},BackButton:{show(){},hide(){},onClick(){}}}};')
+                    await photo_context.route('https://telegram.org/**', lambda r: r.fulfill(status=200, content_type='text/javascript', body=''))
+                    photo_page = await photo_context.new_page()
+                    photo_page.on('pageerror', lambda e: errors.append(str(e)))
+                    await photo_page.goto(url)
+                    for label in ('Начать съёмку', 'Завершить съёмку', 'На обработке'):
+                        await photo_page.get_by_role('button', name=label, exact=True).click()
+                    reason = photo_page.locator('[data-shoot-transition] [name=reason]')
+                    await reason.wait_for()
+                    await photo_page.reload()
+                    await reason.wait_for()
+                    await photo_page.get_by_role('button', name='Перенести в продажу', exact=True).click()
+                    assert not await reason.evaluate('(el)=>el.checkValidity()')
+                    await reason.fill('Обработка завершена, материалы готовы')
+                    await photo_page.get_by_role('button', name='Перенести в продажу', exact=True).click()
+                    await reason.wait_for(state='detached')
+                    async with factory() as session:
+                        assert (await session.get(Shooting, new_shooting.id)).status == 'READY_FOR_SALE'
+                    assert not errors, errors
+                    print('PASS: cold offline start, booking + sale blobs, lost response replay, single sale/commission, offline camera shifts and owner review, no API cache, photographer stages and reason after reload')
                 finally:
                     await browser.close()
     finally:
