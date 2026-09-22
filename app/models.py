@@ -812,3 +812,23 @@ class SalesTrainingSession(Base):
     revision: Mapped[int] = mapped_column(Integer, default=1)
     evaluation: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class PhotoEdit(Base):
+    """Non-destructive versions; originals remain in PhotoStorage."""
+    __tablename__ = 'photo_edits'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    photo_id: Mapped[int] = mapped_column(ForeignKey('photos.id', ondelete='CASCADE'), index=True)
+    created_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    mode: Mapped[str] = mapped_column(String(10))
+    status: Mapped[str] = mapped_column(String(20), default='PENDING', index=True)
+    parameters: Mapped[str | None] = mapped_column(Text, nullable=True)
+    disk_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (
+        CheckConstraint("mode IN ('MANUAL','AI')"),
+        CheckConstraint("status IN ('PENDING','RUNNING','READY','FAILED','CANCELLED')"),
+    )

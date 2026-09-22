@@ -6,6 +6,7 @@ the app-folder namespace and provider upload URLs are never logged or returned.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -41,6 +42,16 @@ def configured_from_env() -> tuple[str, str]:
     )
 
 
+def validate_saved(metadata, payload):
+    """A successful PUT alone is not proof that the expected original was saved."""
+    if not isinstance(metadata, dict) or metadata.get('type') != 'file' or metadata.get('size') != len(payload):
+        raise YandexDiskError('Сохранение файла ещё не подтверждено: размер не совпадает.')
+    digest = metadata.get('sha256')
+    valid = digest == hashlib.sha256(payload).hexdigest() if digest else metadata.get('md5') == hashlib.md5(payload, usedforsecurity=False).hexdigest()
+    if not valid:
+        raise YandexDiskError('Сохранение файла ещё не подтверждено: контрольная сумма не совпадает.')
+
+
 class YandexDisk:
     def __init__(self, token: str, client_id: str = ""):
         self.token = token
@@ -71,8 +82,7 @@ class YandexDisk:
                 data = {}
             if response.status not in ok:
                 code = data.get("error") if isinstance(data, dict) else None
-                message = data.get("message") if isinstance(data, dict) else None
-                detail = ": ".join(x for x in (code, message) if isinstance(x, str) and x)[:300]
+                detail = code if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_]{1,100}", code) else "provider_error"
                 raise YandexDiskError(f"Yandex.Disk HTTP {response.status}" + (f": {detail}" if detail else ""))
             return data
 
@@ -105,7 +115,9 @@ class YandexDisk:
         ):
             if response.status not in (200, 201, 202):
                 raise YandexDiskError(f"Yandex.Disk upload HTTP {response.status}")
-        return await self.metadata(path)
+        metadata = await self.metadata(path)
+        validate_saved(metadata, payload)
+        return metadata
 
     async def download_bytes(self, path: str, *, max_bytes=20 * 1024 * 1024):
         path = safe_path(path)
@@ -168,8 +180,8 @@ class YandexDisk:
                 "Yandex.Disk app-folder verified: connected=%s write=%s root=%s",
                 self.state["connected"], self.state["writeVerified"], ROOT,
             )
-        except (YandexDiskError, aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            self.state["error"] = str(exc)[:300]
+        except (YandexDiskError, aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            self.state["error"] = "Хранилище недоступно или сохранение не подтверждено."
             logger.warning("Yandex.Disk verification failed: %s", self.state["error"])
         return self.public_status()
 

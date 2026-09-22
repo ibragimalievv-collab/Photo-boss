@@ -179,7 +179,9 @@ def install_workday(app,api):
     service=Workday(api)
     from .cash_control import install_cash_control
     install_cash_control(app,api)
+    from .photo_edits import PhotoFiles
     from .workflow import Workflow
+    app.router.add_get('/api/miniapp/photos/{photo}/image', PhotoFiles(api).image)
     for method,path,handler in [('GET','/workflow',Workflow(api).listing),('GET','/workday',service.state),('PUT','/workday/checklist',service.configure),('POST','/operations/sync',service.operation),('POST','/operations/media',service.media),('POST','/sales/{id}/feedback-link',service.feedback_link)]:
         app.router.add_route(method,'/api/miniapp'+path,handler)
     app.router.add_get('/feedback/{token}',service.feedback_page)

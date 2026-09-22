@@ -9,7 +9,7 @@ export async function enqueueBatch(items){
  if(!userId)throw new Error('Сначала откройте приложение при доступной сети.');
  if(!items.length)throw new Error('Нет действий для сохранения.');
  const at=Date.now(),actor=userId;
- const rows=items.map((item,i)=>({key:item.key||crypto.randomUUID(),userId:actor,kind:item.kind,date:item.date,data:item.data,blob:item.blob||null,status:'local',createdAt:at,order:i}));
+ const rows=items.map((item,i)=>({key:item.key||crypto.randomUUID(),userId:actor,kind:item.kind,date:item.date,data:item.data,blob:item.blob||null,filename:item.blob?.name||'',status:'local',createdAt:at,order:i}));
  await localAction('operations','readwrite',s=>{for(const row of rows)s.add(row);});
  changed();void flushOutbox();return rows;
 }

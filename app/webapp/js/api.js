@@ -1,6 +1,6 @@
 import {readSnapshot,saveSnapshot} from './localstore.js';
 export class ApiError extends Error {constructor(message,status=0,telegramId=null){super(message);this.status=status;this.telegramId=Number.isSafeInteger(telegramId)&&telegramId>0?telegramId:null;}}
-export async function api(path,{body,method='GET',timeoutMs,...options}={}){
+export async function api(path,{body,method='GET',timeoutMs,responseType,...options}={}){
  const cfg=window.PHOTO_BOSS_CONFIG||{};
  const initData=window.Telegram?.WebApp?.initData;
  if(!initData)throw new ApiError('Откройте Photo Boss кнопкой приложения внутри Telegram.',401);
@@ -12,6 +12,7 @@ export async function api(path,{body,method='GET',timeoutMs,...options}={}){
  try {
   const multipart=body instanceof FormData;
   const response=await fetch(url,{...options,method,signal:controller.signal,cache:'no-store',credentials:'omit',redirect:'error',headers:{...(!multipart?{'Content-Type':'application/json'}:{}),'X-Telegram-Init-Data':initData},body:body===undefined?undefined:multipart?body:JSON.stringify(body)});
+  if(response.ok&&responseType==='blob')return await response.blob();
   const data=await response.json().catch(()=>null);
   if(!response.ok)throw new ApiError(data?.error||(response.status>=500?'Сервис временно недоступен. Повторите попытку.':`Запрос отклонён (${response.status}).`),response.status,data?.telegramId);
   if(!data)throw new ApiError('Сервер вернул некорректный ответ.');

@@ -17,6 +17,7 @@ from .models import (
     OperationRequest,
     Package,
     Photo,
+    PhotoEdit,
     PhotoStorage,
     Receipt,
     SaleDraft,
@@ -40,7 +41,7 @@ from .services.sale_workflow import (
 from .yandex_disk import ROOT, YandexDisk, YandexDiskError, configured_from_env
 
 KINDS = frozenset({'booking', 'sale_start', 'sale_counts', 'sale_complete', 'sale_receipt',
-                   'sale_selected', 'booking_receipt', 'shoot_photo', 'shoot_complete'})
+                   'sale_selected', 'booking_receipt', 'shoot_photo', 'shoot_complete', 'shoot_retry', 'photo_edit'})
 MEDIA_KINDS = frozenset({'sale_receipt', 'sale_selected', 'booking_receipt', 'shoot_photo'})
 
 
@@ -74,7 +75,7 @@ class Workflow:
         async with AsyncSession(self.api.engine) as session:
             query = select(Booking).where(Booking.status.notin_(['CANCELLED', 'REJECTED']))
             if not {'OWNER', 'ADMIN'} & set(a['roles']):
-                query = query.where(or_(Booking.manager_id == a['id'], Booking.photographer_id == a['id']))
+                query = query.where(or_(Booking.manager_id == a['id'] if 'MANAGER' in a['roles'] else False, Booking.photographer_id == a['id'] if 'PHOTOGRAPHER' in a['roles'] else False))
             bookings = (await session.scalars(query.order_by(Booking.shoot_date.desc()).limit(200))).all()
             packages = (await session.scalars(select(Package))).all()
             prices = {p.id: str(money(p.price_per_photo)) for p in packages}
@@ -83,10 +84,12 @@ class Workflow:
                 draft = await session.scalar(select(SaleDraft).where(SaleDraft.booking_id == b.id,
                     SaleDraft.status.in_(['AWAITING_RECEIPT', 'AWAITING_COUNTS', 'AWAITING_SELECTED'])).order_by(SaleDraft.id.desc()).limit(1))
                 shoot = await session.scalar(select(Shooting).where(Shooting.booking_id == b.id))
-                rows.append({'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
+                files = (await session.scalars(select(PhotoStorage).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoStorage.id))).all() if shoot else []
+                edits = (await session.scalars(select(PhotoEdit).join(PhotoStorage, PhotoStorage.photo_id == PhotoEdit.photo_id).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoEdit.id))).all() if shoot else []
+                rows.append({'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
                     'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': prices.get(b.package_id),
                     'shootingId': shoot.id if shoot else None, 'fullUploaded': bool(shoot and shoot.full_upload_completed_at),
-                    'canUpload': b.photographer_id == a['id'] or bool({'OWNER', 'ADMIN'} & set(a['roles'])),
+                    'canUpload': ('PHOTOGRAPHER' in a['roles'] and b.photographer_id == a['id']) or bool({'OWNER', 'ADMIN'} & set(a['roles'])),
                     'draft': ({'id': draft.id, 'mine': draft.created_by_id == a['id'], 'status': draft.status,
                         'total': draft.declared_photo_count, 'sold': draft.sold_photos,
                         'selected': await selected_count(session, draft.id)} if draft else None)})
@@ -143,6 +146,9 @@ class Workflow:
                         raise AccessError('Некорректный фотограф.', 400)
                     booking = await create_booking_record(session, actor, data, data['photographer_id'])
                     result = {'bookingId': booking.id}
+                elif kind == 'photo_edit':
+                    from .photo_edits import apply
+                    result = await apply(session, actor_data, data)
                 elif kind.startswith('sale_'):
                     result = await self.sale(session, actor, roles, kind, data, raw)
                 elif kind == 'booking_receipt':
@@ -242,8 +248,16 @@ class Workflow:
         sid = await target(session, actor, data['shooting'], 'shootingId')
         shooting = await session.get(Shooting, sid, with_for_update=True)
         booking = await session.get(Booking, shooting.booking_id) if shooting else None
-        if booking is None or (booking.photographer_id != actor.id and not roles & {'OWNER', 'ADMIN'}):
+        if booking is None or (not roles & {'OWNER', 'ADMIN'} and not ('PHOTOGRAPHER' in roles and booking.photographer_id == actor.id)):
             raise AccessError('Нет доступа к съёмке.', 403)
+        if kind == 'shoot_retry':
+            rows = (await session.scalars(select(PhotoStorage).where(
+                PhotoStorage.shooting_id == sid, PhotoStorage.status == 'FAILED'
+            ).with_for_update())).all()
+            for row in rows:
+                row.status, row.attempts, row.last_error = 'PENDING', 0, None
+                row.started_at = None
+            return {'shootingId': sid, 'retried': len(rows)}
         if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
             raise AccessError('Загрузка съёмки уже закрыта или ещё недоступна.', 409)
         if kind == 'shoot_photo':
@@ -259,6 +273,6 @@ class Workflow:
                 file_id=file_id, file_unique_id=unique_id, source_kind='DOCUMENT')
             storage.sha256 = digest
             await audit(session, actor, 'shoot_photo_uploaded', 'shooting', sid)
-            return {'shootingId': sid, 'photoId': photo.id}
+            return {'shootingId': sid, 'photoId': photo.id, 'storageStatus': 'PENDING'}
         completed = await complete_full_upload(session, actor, sid, allow_management=True)
         return {'shootingId': sid, 'photos': completed.count, 'percent': str(completed.commissions['percent'])}

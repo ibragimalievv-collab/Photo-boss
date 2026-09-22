@@ -49,6 +49,7 @@ def valid_value(value,schema):
     kind=schema['type']
     if isinstance(kind,list): return any(valid_value(value,schema|{'type':k}) for k in kind)
     if kind=='null': return value is None
+    if kind=='number': return type(value) in (int,float) and schema.get('minimum',float('-inf')) <= value <= schema.get('maximum',float('inf'))
     if kind=='integer': return type(value) is int
     if kind=='string': return isinstance(value,str) and schema.get('minLength',0)<=len(value)<=schema.get('maxLength',1200)
     if kind=='array': return isinstance(value,list) and schema.get('minItems',0)<=len(value)<=schema.get('maxItems',1000) and all(valid_value(v,schema['items']) for v in value)
