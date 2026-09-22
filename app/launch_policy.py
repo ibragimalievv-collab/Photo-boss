@@ -46,7 +46,7 @@ def app_url(page="home"):
         page = "home"
     # Version the Mini App URL so Telegram opens a fresh WebView after auth
     # fixes instead of reusing a stale owner-only session.
-    return base + "/app/?v=20260922-owner-auth#"+ page
+    return base + "/app/?v=20260922-telegram-init#"+ page
 
 
 def app_markup(page="home"):
