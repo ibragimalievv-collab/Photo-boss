@@ -96,13 +96,11 @@ function authHeaders(kind,value){
 export async function api(path,{body,method='GET',timeoutMs,responseType,...options}={}){
  const cfg=window.PHOTO_BOSS_CONFIG||{};
  const ownerToken=HASH_OWNER_LAUNCH_TOKEN||storedOwnerLaunchToken();
- const telegram=HASH_OWNER_LAUNCH_TOKEN?{value:'',source:'none'}:await telegramInitData();
- let primary=HASH_OWNER_LAUNCH_TOKEN?{kind:'owner',value:HASH_OWNER_LAUNCH_TOKEN,source:'hash'}:
-             telegram.value?{kind:'telegram',value:telegram.value,source:telegram.source}:
-             ownerToken?{kind:'owner',value:ownerToken,source:'session'}:null;
+ const telegram=await telegramInitData();
+ let primary=telegram.value?{kind:'telegram',value:telegram.value,source:telegram.source}:
+             ownerToken?{kind:'owner',value:ownerToken,source:HASH_OWNER_LAUNCH_TOKEN?'hash':'session'}:null;
  if(!primary)throw new ApiError('Telegram не передал данные входа. Закройте окно Photo Boss и откройте приложение заново для обновления входа.',401);
- const alternate=primary.kind==='telegram'&&ownerToken?{kind:'owner',value:ownerToken,source:'session'}:
-                 primary.kind==='owner'&&telegram.value?{kind:'telegram',value:telegram.value,source:telegram.source}:null;
+ const alternate=primary.kind==='telegram'&&ownerToken?{kind:'owner',value:ownerToken,source:HASH_OWNER_LAUNCH_TOKEN?'hash':'session'}:null;
  const base=String(cfg.API_BASE_URL||'').replace(/\/$/,'');
  const url=new URL(base+`/api/miniapp${path}`,location.origin);
  if(url.protocol!=='https:')throw new ApiError('Рабочее приложение должно открываться по HTTPS.');
