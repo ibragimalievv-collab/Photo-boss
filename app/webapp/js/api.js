@@ -71,20 +71,20 @@ function rememberInitData(value){
 function forgetInitData(){sessionSet(SESSION_INIT_KEY,'');secureRemove(SECURE_INIT_KEY);}
 
 async function telegramInitData(waitMs=2500){
- const deadline=Date.now()+waitMs;
- while(Date.now()<deadline){
-  const value=window.Telegram?.WebApp?.initData||'';
-  if(value){rememberInitData(value);return {value,source:'live'};}
-  await new Promise(resolve=>setTimeout(resolve,50));
- }
- const finalValue=window.Telegram?.WebApp?.initData||'';
- if(finalValue){rememberInitData(finalValue);return {value:finalValue,source:'live'};}
+ const immediate=window.Telegram?.WebApp?.initData||'';
+ if(immediate){rememberInitData(immediate);return {value:immediate,source:'live'};}
  const sessionValue=sessionGet(SESSION_INIT_KEY);
  if(initDataFresh(sessionValue))return {value:sessionValue,source:'session'};
  sessionSet(SESSION_INIT_KEY,'');
  const secureValue=await secureGet(SECURE_INIT_KEY);
  if(initDataFresh(secureValue)){sessionSet(SESSION_INIT_KEY,secureValue);return {value:secureValue,source:'secure'};}
  if(secureValue)secureRemove(SECURE_INIT_KEY);
+ const deadline=Date.now()+waitMs;
+ while(Date.now()<deadline){
+  const value=window.Telegram?.WebApp?.initData||'';
+  if(value){rememberInitData(value);return {value,source:'live'};}
+  await new Promise(resolve=>setTimeout(resolve,50));
+ }
  return {value:'',source:'none'};
 }
 function authHeaders(kind,value){
