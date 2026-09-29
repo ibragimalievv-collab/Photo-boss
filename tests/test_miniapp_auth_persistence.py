@@ -1,6 +1,5 @@
 import pathlib
 
-
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 API_SOURCE = (ROOT / "app" / "webapp" / "js" / "api.js").read_text(encoding="utf-8")
 SECURITY_SOURCE = (ROOT / "app" / "miniapp_security.py").read_text(encoding="utf-8")
