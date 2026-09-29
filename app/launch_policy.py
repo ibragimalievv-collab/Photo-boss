@@ -49,7 +49,7 @@ def app_url(page="home", tg_id=None):
     fragment = page
     if tg_id is not None:
         fragment += "?" + urlencode({"owner_launch": owner_launch_token(int(tg_id), config.bot_token)})
-    return base + "/app/?v=20260922-owner-fallback#" + fragment
+    return base + "/app/?v=20260929-auth-recovery#" + fragment
 
 
 def app_markup(page="home", tg_id=None):
