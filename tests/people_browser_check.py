@@ -1,5 +1,6 @@
 """Browser fixtures only, no real server/token/location or personal data."""
 import json
+import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -14,6 +15,13 @@ BASE = 'https://photo-boss-test.invalid'
 def fixture_handler(me, data, sent, theme):
     def route(r):
         path = r.request.url.removeprefix(BASE).split('?', 1)[0]
+        if path.endswith('/owner-access'):
+            payload = json.loads(r.request.post_data)
+            sent.append(payload)
+            employee = data['items'][1]
+            employee['ownerAccessGranted'] = payload['allowed']
+            employee['roles'] = ['ADMIN', 'OWNER'] if payload['allowed'] else ['ADMIN']
+            return r.fulfill(json={'employee': employee})
         if r.request.method in ('POST', 'PUT'):
             sent.append(json.loads(r.request.post_data))
             return r.fulfill(json={'employee': data['items'][0]}, status=201)
@@ -36,7 +44,7 @@ def fixture_handler(me, data, sent, theme):
                 <body><header id="topbar" class="topbar"><button class="brand-link"><span class="brand-mark">PB</span>
                 <span><span class="brand-name">Photo<span>Boss</span></span><small class="brand-caption">WORKSPACE</small></span></button>
                 <div class="row"><button class="icon-button" aria-label="Тема">◐</button><button class="avatar-btn">PB</button></div></header>
-                <script>window.Telegram={{WebApp:{{initData:"fixture-only"}}}}</script><script type="module" src="/people/people.js"></script></body></html>''')
+                <script>window.Telegram={{WebApp:{{initData:"auth_date={int(time.time())}&hash=fixture-only"}}}}</script><script type="module" src="/people/people.js"></script></body></html>''')
         raise AssertionError('Unexpected request '+r.request.url)
     return route
 
@@ -54,9 +62,12 @@ def main():
                     me = {'user': {'id': 1, 'name': 'Test', 'roles': [role]},
                           'permissions': {'manageSchedule': role in ('OWNER', 'ADMIN')}}
                     data = {'items': [{'id': 3, 'name': '<script>bad()</script>', 'telegramId': 1003,
-                             'active': True, 'roles': ['PHOTOGRAPHER'], 'hotelIds': [1], 'editable': True, 'revision': 'a'*64}],
-                            'hotels': [{'id': 1, 'name': 'Test hotel'}], 'canAssignAdmin': role == 'OWNER', 'next': None}
+                             'active': True, 'roles': ['PHOTOGRAPHER'], 'hotelIds': [1], 'editable': True, 'revision': 'a'*64},
+                            {'id': 2, 'name': 'Administrator', 'telegramId': 1002, 'active': True,
+                             'roles': ['ADMIN'], 'hotelIds': [], 'editable': False, 'ownerAccessGranted': False}],
+                            'hotels': [{'id': 1, 'name': 'Test hotel'}], 'canAssignAdmin': role == 'OWNER', 'canManageOwnerAccess': role == 'OWNER', 'next': None}
                     page.route('**/*', fixture_handler(me, data, sent, theme))
+                    page.on('dialog', lambda dialog: dialog.accept())
                     page.goto(BASE)
                     page.locator('[data-open-people]').wait_for()
                     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth+2')
@@ -72,6 +83,13 @@ def main():
                         page.locator('#pbPeopleRows').wait_for()
                         assert sent and sent[0]['name']=='Test employee'
                         assert page.locator('#pbPeopleRows script').count()==0
+                        if role == 'OWNER':
+                            page.get_by_role('button', name='Разрешить права владельца', exact=True).click()
+                            page.get_by_role('button', name='Отозвать права владельца', exact=True).click()
+                            page.get_by_role('button', name='Разрешить права владельца', exact=True).wait_for()
+                            assert sent[-2:] == [{'allowed': True}, {'allowed': False}]
+                        else:
+                            assert page.locator('[data-owner-toggle]').count() == 0
                         page.screenshot(path=str(OUT/f'staff-{role}-{width}-{theme}.png'))
                         page.locator('[data-people="documents"]').click()
                     page.get_by_text('Не подписано. Подписание отключено.', exact=True).wait_for()
