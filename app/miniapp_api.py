@@ -63,6 +63,7 @@ ACTIONS = {
     "academy_location_created": "Добавил учебную локацию",
     "miniapp_theme_changed": "Изменил оформление приложения",
     "miniapp_opened": "Открыл приложение",
+    "miniapp_owner_access_changed": "Изменил права владельца у администратора",
     "miniapp_screen_capture_changed": "Изменил разрешение на скриншоты",
     "miniapp_shift_created": "Назначил смену",
     "miniapp_shift_cancelled": "Отменил запланированную смену",

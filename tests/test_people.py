@@ -68,7 +68,10 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
             else:
                 fn=self.people.create
         if method=='PUT':
-            if route.endswith('/screen-capture'):
+            if route.endswith('/owner-access'):
+                fn=self.people.set_owner_access
+                req.match_info={'id':route.split('/')[-2]}
+            elif route.endswith('/screen-capture'):
                 fn=self.people.set_screen_capture
                 req.match_info={'id':route.split('/')[-2]}
             else:
@@ -82,6 +85,34 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
         card=next(x for x in data['items'] if x['id']==uid)
         body={k:card[k] for k in ('name','roles','hotelIds','active','revision')} | changes
         return await self.call(f'/people/{uid}',uid=actor,method='PUT',body=body)
+
+    async def test_owner_grant_revoke_and_protection(self):
+        path = '/people/2/owner-access'
+        for uid in (1002, 1003, 1004):
+            assert (await self.call(path, uid=uid, method='PUT', body={'allowed': True}))[0] == 403
+        for target in (1, 3):
+            assert (await self.call(f'/people/{target}/owner-access', method='PUT', body={'allowed': True}))[0] in (403, 409)
+        assert (await self.call(path, method='PUT', body={'allowed': 'true'}))[0] == 400
+        for _ in range(2):
+            status, result = await self.call(path, method='PUT', body={'allowed': True})
+            assert status == 200 and result['employee']['ownerAccessGranted']
+            assert set(result['employee']['roles']) == {'OWNER', 'ADMIN'}
+        _, listing = await self.call(uid=1002)
+        assert not listing['canManageOwnerAccess']
+        assert listing['canViewLastLogin']
+        # Delegation cannot be forwarded, revoked by delegate, or used against owner.
+        for target in (1, 2, 3):
+            assert (await self.call(f'/people/{target}/owner-access', uid=1002, method='PUT', body={'allowed': False}))[0] == 403
+        for _ in range(2):
+            status, result = await self.call(path, method='PUT', body={'allowed': False})
+            assert status == 200 and not result['employee']['ownerAccessGranted']
+            assert result['employee']['roles'] == ['ADMIN']
+        # Same signed session immediately loses owner privileges.
+        _, listing = await self.call(uid=1002)
+        assert not listing['canViewLastLogin']
+        assert (await self.call('/people/3/screen-capture', uid=1002, method='PUT', body={'allowed': True}))[0] == 403
+        with self.engine.inner.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM audit_logs WHERE action='miniapp_owner_access_changed'")).scalar() == 2
 
     async def test_role_matrix(self):
         for uid in (1003,1004,1005,1006,1007):
