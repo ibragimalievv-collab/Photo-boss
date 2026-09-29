@@ -128,9 +128,10 @@ class People:
         setting_rows = await self.api.rows(
             conn,
             """SELECT key,value FROM settings
-               WHERE key IN (:last_login,:screen_capture)""",
+               WHERE key IN (:last_login,:screen_capture,:owner_access)""",
             last_login=f"miniapp:last_login:{uid}",
             screen_capture=f"miniapp:screen_capture:{uid}",
+            owner_access=f"miniapp:owner_access:{uid}",
         )
         settings = {row["key"]: row["value"] for row in setting_rows}
         core = {
@@ -148,6 +149,7 @@ class People:
             "hotelIds": hotel_ids,
         }
         result = dict(core)
+        result["ownerAccessGranted"] = "OWNER" in role_names and settings.get(f"miniapp:owner_access:{uid}") == "1"
         result["revision"] = revision(core)
         result["lastLoginAt"] = settings.get(f"miniapp:last_login:{uid}")
         stored_capture = settings.get(f"miniapp:screen_capture:{uid}")
@@ -165,6 +167,7 @@ class People:
         archived = request.query.get("archived") == "1"
         async with self.engine.begin() as conn:
             roles = await self.current_editor(conn, actor["id"])
+            editor = await self.card(conn, actor["id"])
             ids = await self.api.rows(
                 conn,
                 """SELECT id FROM users
@@ -183,6 +186,7 @@ class People:
             if not can_view_last_login:
                 item.pop("lastLoginAt", None)
         return web.json_response({"items": items, "hotels": [dict(h) for h in hotels],
+                                  "canManageOwnerAccess": "OWNER" in roles and not editor["ownerAccessGranted"],
                                   "canAssignAdmin": "OWNER" in roles,
                                   "canManageScreenCapture": "OWNER" in roles,
                                   "canViewLastLogin": can_view_last_login,
@@ -371,6 +375,37 @@ class People:
             pass
         return web.json_response({"employee": after})
 
+    async def set_owner_access(self, request):
+        actor = request["miniapp_actor"]
+        uid = positive_id(request.match_info["id"])
+        body = await self.api.body(request)
+        if set(body) != {"allowed"} or type(body["allowed"]) is not bool:
+            raise AccessError("Передайте только признак allowed.", 400)
+        async with self.engine.begin() as conn:
+            # Serialize grants/revocations and check authority again under lock.
+            roles = await self.current_editor(conn, actor["id"], uid)
+            editor = await self.card(conn, actor["id"])
+            if "OWNER" not in roles or editor["ownerAccessGranted"]:
+                raise AccessError("Выдавать и отзывать права может только основной владелец.", 403)
+            target = await self.card(conn, uid)
+            if uid == actor["id"] or ("OWNER" in target["roles"] and not target["ownerAccessGranted"]):
+                raise AccessError("Права основного владельца защищены.", 403)
+            allowed = body["allowed"]
+            if allowed and (not target["active"] or "ADMIN" not in target["roles"]):
+                raise AccessError("Права можно выдать только действующему администратору.", 409)
+            if allowed != target["ownerAccessGranted"]:
+                if allowed:
+                    await conn.execute(text("INSERT INTO user_roles(user_id,role) VALUES (:id,'OWNER')"), {"id": uid})
+                else:
+                    await conn.execute(text("DELETE FROM user_roles WHERE user_id=:id AND role='OWNER'"), {"id": uid})
+                await conn.execute(text("""INSERT INTO settings(key,value) VALUES (:key,:value)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value"""),
+                    {"key": f"miniapp:owner_access:{uid}", "value": "1" if allowed else "0"})
+                await self.api.audit_write(conn, actor, "miniapp_owner_access_changed", "user", uid,
+                    json.dumps({"allowed": allowed, "employee": target["name"]}, ensure_ascii=False))
+            updated = await self.card(conn, uid)
+        return web.json_response({"employee": updated})
+
     async def set_screen_capture(self, request):
         actor = request["miniapp_actor"]
         if "OWNER" not in actor["roles"]:
@@ -435,6 +470,7 @@ def install_people(app, miniapp):
     app.router.add_post("/api/miniapp/people/{id}/fire", service.fire)
     app.router.add_post("/api/miniapp/people/{id}/restore", service.restore)
     app.router.add_put("/api/miniapp/people/{id}/screen-capture", service.set_screen_capture)
+    app.router.add_put("/api/miniapp/people/{id}/owner-access", service.set_owner_access)
     app.router.add_get("/api/miniapp/documents", service.documents)
     app.router.add_get("/people/{asset}", service.static)
     return service
