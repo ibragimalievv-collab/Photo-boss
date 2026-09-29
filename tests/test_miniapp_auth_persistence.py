@@ -1,4 +1,4 @@
-from pathlib import Path
+# ruff: noqa: I001\nfrom pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,3 +35,8 @@ def test_api_no_longer_discards_same_origin_session_state():
 def test_failed_cached_credential_is_removed_instead_of_looping_forever():
     assert "forgetInitData()" in API_SOURCE
     assert "secureRemove(SECURE_INIT_KEY)" in API_SOURCE
+
+
+def test_stale_live_init_data_is_not_reused_forever():
+    assert "if(initDataFresh(immediate))" in API_SOURCE
+    assert "if(initDataFresh(value))" in API_SOURCE
