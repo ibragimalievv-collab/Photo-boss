@@ -1,7 +1,7 @@
-# ruff: noqa: I001\nfrom pathlib import Path
+import pathlib
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 API_SOURCE = (ROOT / "app" / "webapp" / "js" / "api.js").read_text(encoding="utf-8")
 SECURITY_SOURCE = (ROOT / "app" / "miniapp_security.py").read_text(encoding="utf-8")
 
