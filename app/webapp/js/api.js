@@ -72,7 +72,7 @@ function forgetInitData(){sessionSet(SESSION_INIT_KEY,'');secureRemove(SECURE_IN
 
 async function telegramInitData(waitMs=2500){
  const immediate=window.Telegram?.WebApp?.initData||'';
- if(immediate){rememberInitData(immediate);return {value:immediate,source:'live'};}
+ if(initDataFresh(immediate)){rememberInitData(immediate);return {value:immediate,source:'live'};}
  const sessionValue=sessionGet(SESSION_INIT_KEY);
  if(initDataFresh(sessionValue))return {value:sessionValue,source:'session'};
  sessionSet(SESSION_INIT_KEY,'');
@@ -82,7 +82,7 @@ async function telegramInitData(waitMs=2500){
  const deadline=Date.now()+waitMs;
  while(Date.now()<deadline){
   const value=window.Telegram?.WebApp?.initData||'';
-  if(value){rememberInitData(value);return {value,source:'live'};}
+  if(initDataFresh(value)){rememberInitData(value);return {value,source:'live'};}
   await new Promise(resolve=>setTimeout(resolve,50));
  }
  return {value:'',source:'none'};
