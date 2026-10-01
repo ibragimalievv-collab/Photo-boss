@@ -79,6 +79,8 @@ def test_personal_tip_uses_weakest_ai_criterion():
 
 def test_ai_acceptance_requires_photo_boss_threshold_and_no_reshoot():
     accepted = {
+        "frame_feedback": [{"index": i, "technical": "Резкость достаточна", "subjective": "Композиция читается",
+            "correction": f"Кадр {i}: проверьте границы", "next_task": f"Кадр {i}: смените высоту", "uncertain": False} for i in range(1,6)],
         "score": 85, "decision": "ACCEPT", "critical": False,
         "duplicate_pairs": [], "reshoot_indexes": [],
         "strengths": ["Разные ракурсы"], "issues": [],
@@ -91,3 +93,20 @@ def test_ai_acceptance_requires_photo_boss_threshold_and_no_reshoot():
     import pytest
     with pytest.raises(ValueError):
         validate(rejected)
+
+
+def test_ai_rejects_uncertainty_without_manual_review_and_invalid_frame_ids():
+    import pytest
+
+    review = {
+        'score': 85, 'decision': 'ACCEPT', 'critical': False,
+        'duplicate_pairs': [], 'reshoot_indexes': [], 'strengths': ['Разные ракурсы'],
+        'issues': [], 'next_action': 'Снимите новую серию',
+        'criteria': {'focus':18,'light':13,'composition':13,'pose':17,'emotion':12,'variety':12},
+        'frame_feedback': [{'index':i,'technical':'Недостаточно деталей для резкости',
+            'subjective':'Композиция читается','correction':'Проверьте оригинал',
+            'next_task':'Проверить фокус на глазах','uncertain':True} for i in range(1,6)]}
+    with pytest.raises(ValueError): validate(review)
+    assert validate(review | {'decision':'MANUAL_REVIEW'})['decision']=='MANUAL_REVIEW'
+    with pytest.raises(ValueError): validate(review | {'decision':'MANUAL_REVIEW','reshoot_indexes':[6]})
+    with pytest.raises(ValueError): validate(review | {'decision':'MANUAL_REVIEW','duplicate_pairs':[[1,1]]})
