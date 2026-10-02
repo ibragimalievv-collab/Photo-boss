@@ -131,6 +131,7 @@ export async function api(path,{body,method='GET',timeoutMs,responseType,...opti
   if(response.ok)serverSessionActive=true;
   if(response.status===401)serverSessionActive=false;
   if(response.ok&&primary.kind==='telegram')rememberInitData(primary.value);
+  if(response.ok&&responseType==='response')return response;
   if(response.ok&&responseType==='blob')return await response.blob();
   const data=await response.json().catch(()=>null);
   if(!response.ok)throw new ApiError(data?.error||(response.status>=500?'Сервис временно недоступен. Повторите попытку.':`Запрос отклонён (${response.status}).`),response.status,data?.telegramId);

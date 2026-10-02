@@ -132,18 +132,7 @@ function time(v){try{return new Intl.DateTimeFormat('ru-RU',{hour:'2-digit',minu
 function fileSize(bytes){if(!Number.isFinite(bytes))return '';if(bytes<1024)return `${bytes} Б`;if(bytes<1024*1024)return `${(bytes/1024).toFixed(1)} КБ`;return `${(bytes/1024/1024).toFixed(1)} МБ`;}
 
 async function authFetch(path,{method='GET',body,timeout=60000}={}){
- const initData=window.Telegram?.WebApp?.initData;
- if(!initData)throw new ApiError('Откройте Photo Boss внутри Telegram.',401);
- const url=new URL(`/api/miniapp${path}`,location.origin);
- const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),timeout);
- try{
-  const response=await fetch(url,{method,body,signal:controller.signal,cache:'no-store',credentials:'omit',redirect:'error',headers:{'X-Telegram-Init-Data':initData}});
-  if(!response.ok){
-   const data=await response.json().catch(()=>null);
-   throw new ApiError(data?.error||`Запрос отклонён (${response.status}).`,response.status);
-  }
-  return response;
- }catch(e){if(e.name==='AbortError')throw new ApiError('Загрузка заняла слишком много времени. Повторите.');if(e instanceof ApiError)throw e;throw new ApiError('Нет соединения с сервером.');}finally{clearTimeout(timer);}
+ return api(path,{method,body,timeoutMs:timeout,responseType:'response'});
 }
 async function fetchAttachment(id){const response=await authFetch(`/chat/attachments/${id}`);return response.blob();}
 async function downloadAttachment(id,name){
