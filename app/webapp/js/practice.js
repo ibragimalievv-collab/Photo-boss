@@ -11,10 +11,7 @@ function close(){cleanup();clearInterval(pollTimer);panel.close();lastFocus?.foc
 function shell(title,html){cleanup();panel.innerHTML=`<header class="practice-head"><button data-practice-home aria-label="Назад">‹</button><h2 id="practiceTitle">${esc(title)}</h2><button data-practice-close aria-label="Закрыть">×</button></header><div class="practice-body"><p class="practice-error" role="alert" hidden></p>${html}</div>`;if(!panel.open){lastFocus=document.activeElement;panel.showModal();}}
 function error(e){const el=panel.querySelector('.practice-error');if(el){el.hidden=false;el.textContent=e.message||'Не удалось загрузить практику.';}}
 async function photoFetch(path,options={}){
- const initData=window.Telegram?.WebApp?.initData;if(!initData)throw new ApiError('Откройте приложение через Telegram.',401);
- const response=await fetch(`/api/miniapp${path}`,{...options,credentials:'omit',cache:'no-store',redirect:'error',headers:{'X-Telegram-Init-Data':initData}});
- if(!response.ok){const d=await response.json().catch(()=>null);throw new ApiError(d?.error||'Фото временно недоступно.',response.status);}
- return response;
+ return api(path,{...options,responseType:'response',timeoutMs:90000});
 }
 async function loadPhotos(){
  const ticket=version;
