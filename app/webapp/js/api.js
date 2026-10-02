@@ -43,6 +43,16 @@ function initDataFresh(value){
   return Number.isFinite(issued)&&issued>0&&issued<=now+30&&issued>=now-SESSION_MAX_AGE_SECONDS;
  }catch{return false;}
 }
+// Capture Telegram's signed launch payload before hash-based navigation changes it.
+// This is only a transport fallback: the server still verifies its HMAC and age.
+function launchInitData(){
+ try{
+  const raw=location.hash.slice(1);
+  const query=raw.includes('?')?raw.slice(raw.indexOf('?')+1):raw;
+  return new URLSearchParams(query).get('tgWebAppData')||'';
+ }catch{return '';}
+}
+const LAUNCH_INIT_DATA=launchInitData();
 function secureStorage(){return window.Telegram?.WebApp?.SecureStorage||null;}
 function secureGet(key,timeoutMs=900){
  const storage=secureStorage();
@@ -72,7 +82,8 @@ function forgetInitData(){sessionSet(SESSION_INIT_KEY,'');secureRemove(SECURE_IN
 
 async function telegramInitData(waitMs=2500){
  const immediate=window.Telegram?.WebApp?.initData||'';
- if(initDataFresh(immediate)){rememberInitData(immediate);return {value:immediate,source:'live'};}
+ if(initDataFresh(immediate))return {value:immediate,source:'live'};
+ if(initDataFresh(LAUNCH_INIT_DATA))return {value:LAUNCH_INIT_DATA,source:'launch'};
  const sessionValue=sessionGet(SESSION_INIT_KEY);
  if(initDataFresh(sessionValue))return {value:sessionValue,source:'session'};
  sessionSet(SESSION_INIT_KEY,'');
@@ -82,7 +93,7 @@ async function telegramInitData(waitMs=2500){
  const deadline=Date.now()+waitMs;
  while(Date.now()<deadline){
   const value=window.Telegram?.WebApp?.initData||'';
-  if(initDataFresh(value)){rememberInitData(value);return {value,source:'live'};}
+  if(initDataFresh(value))return {value,source:'live'};
   await new Promise(resolve=>setTimeout(resolve,50));
  }
  return {value:'',source:'none'};
@@ -116,6 +127,7 @@ export async function api(path,{body,method='GET',timeoutMs,responseType,...opti
    response=await send(alternate);primary=alternate;
   }
   if(response.status===401&&primary.kind==='telegram'&&primary.source!=='live')forgetInitData();
+  if(response.ok&&primary.kind==='telegram')rememberInitData(primary.value);
   if(response.ok&&responseType==='blob')return await response.blob();
   const data=await response.json().catch(()=>null);
   if(!response.ok)throw new ApiError(data?.error||(response.status>=500?'Сервис временно недоступен. Повторите попытку.':`Запрос отклонён (${response.status}).`),response.status,data?.telegramId);
