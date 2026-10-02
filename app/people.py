@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from .miniapp_security import AccessError
+from .miniapp_sessions import revoke_sessions
 from .work_rules import WORK_RULES_TEXT, WORK_RULES_VERSION
 
 ASSIGNABLE = {"ADMIN", "MANAGER", "PHOTOGRAPHER"}
@@ -315,6 +316,7 @@ class People:
                 text("UPDATE users SET active=FALSE,terminated_at=:now WHERE id=:id"),
                 {"id": uid, "now": now},
             )
+            await revoke_sessions(conn, uid)
             for row in assigned:
                 await conn.execute(
                     text(

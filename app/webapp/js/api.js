@@ -5,6 +5,7 @@ const SECURE_INIT_KEY='photo_boss_init_data_v1';
 const SESSION_INIT_KEY='pb_init_data_v1';
 const SESSION_OWNER_KEY='pb_owner_launch_v1';
 const SESSION_MAX_AGE_SECONDS=23*60*60;
+let serverSessionActive=false;
 
 function sessionGet(key){try{return sessionStorage.getItem(key)||'';}catch{return '';}}
 function sessionSet(key,value){try{if(value)sessionStorage.setItem(key,value);else sessionStorage.removeItem(key);}catch{}}
@@ -90,6 +91,7 @@ async function telegramInitData(waitMs=2500){
  const secureValue=await secureGet(SECURE_INIT_KEY);
  if(initDataFresh(secureValue)){sessionSet(SESSION_INIT_KEY,secureValue);return {value:secureValue,source:'secure'};}
  if(secureValue)secureRemove(SECURE_INIT_KEY);
+ if(serverSessionActive)return {value:'',source:'none'};
  const deadline=Date.now()+waitMs;
  while(Date.now()<deadline){
   const value=window.Telegram?.WebApp?.initData||'';
@@ -106,11 +108,10 @@ function authHeaders(kind,value){
 
 export async function api(path,{body,method='GET',timeoutMs,responseType,...options}={}){
  const cfg=window.PHOTO_BOSS_CONFIG||{};
- const ownerToken=HASH_OWNER_LAUNCH_TOKEN||storedOwnerLaunchToken();
+ const ownerToken=ownerTokenFresh(HASH_OWNER_LAUNCH_TOKEN)?HASH_OWNER_LAUNCH_TOKEN:storedOwnerLaunchToken();
  const telegram=await telegramInitData();
  let primary=telegram.value?{kind:'telegram',value:telegram.value,source:telegram.source}:
-             ownerToken?{kind:'owner',value:ownerToken,source:HASH_OWNER_LAUNCH_TOKEN?'hash':'session'}:null;
- if(!primary)throw new ApiError('Telegram не передал данные входа. Закройте окно Photo Boss и откройте приложение заново для обновления входа.',401);
+             ownerToken?{kind:'owner',value:ownerToken,source:HASH_OWNER_LAUNCH_TOKEN?'hash':'session'}:{kind:'session',value:'',source:'cookie'};
  const alternate=primary.kind==='telegram'&&ownerToken?{kind:'owner',value:ownerToken,source:HASH_OWNER_LAUNCH_TOKEN?'hash':'session'}:null;
  const base=String(cfg.API_BASE_URL||'').replace(/\/$/,'');
  const url=new URL(base+`/api/miniapp${path}`,location.origin);
@@ -120,13 +121,15 @@ export async function api(path,{body,method='GET',timeoutMs,responseType,...opti
  try {
   const multipart=body instanceof FormData;
   const payload=body===undefined?undefined:multipart?body:JSON.stringify(body);
-  const send=credential=>fetch(url,{...options,method,signal:controller.signal,cache:'no-store',credentials:'same-origin',redirect:'error',headers:{...(!multipart?{'Content-Type':'application/json'}:{}),...authHeaders(credential.kind,credential.value)},body:payload});
+  const send=credential=>fetch(url,{...options,method,signal:controller.signal,cache:'no-store',credentials:'same-origin',redirect:'error',headers:{...(!multipart?{'Content-Type':'application/json'}:{}),'X-PhotoBoss-Session':'1',...authHeaders(credential.kind,credential.value)},body:payload});
   let response=await send(primary);
   if(response.status===401&&alternate){
    if(primary.kind==='telegram'&&primary.source!=='live')forgetInitData();
    response=await send(alternate);primary=alternate;
   }
   if(response.status===401&&primary.kind==='telegram'&&primary.source!=='live')forgetInitData();
+  if(response.ok)serverSessionActive=true;
+  if(response.status===401)serverSessionActive=false;
   if(response.ok&&primary.kind==='telegram')rememberInitData(primary.value);
   if(response.ok&&responseType==='blob')return await response.blob();
   const data=await response.json().catch(()=>null);

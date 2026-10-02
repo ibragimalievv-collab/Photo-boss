@@ -34,6 +34,7 @@ from .miniapp_security import (
     validate_owner_launch_token,
 )
 from .services.academy_growth import personal_tip
+from . import miniapp_sessions
 
 logger = logging.getLogger(__name__)
 PREFIX = "/api/miniapp"
@@ -131,9 +132,11 @@ class MiniApp:
                 self.bot.token,
                 max_age=MINIAPP_SESSION_MAX_AGE,
             )
-        else:
+        elif launch_token:
             telegram_id = validate_owner_launch_token(launch_token, self.bot.token)
             owner_fallback = True
+        else:
+            telegram_id = await miniapp_sessions.authenticate(self.engine, request)
         request["miniapp_telegram_id"] = telegram_id
         async with self.engine.connect() as conn:
             people = await self.rows(conn, "SELECT id,tg_id,name,active FROM users WHERE tg_id=:tg", tg=telegram_id)
@@ -163,6 +166,8 @@ class MiniApp:
                 request["miniapp_actor"] = await self.actor(request)
                 actor_id.set(request["miniapp_actor"]["id"])
             response = await handler(request)
+            if request.path.startswith(PREFIX) and response.status < 400:
+                await miniapp_sessions.refresh(self.engine, request, response)
         except AccessError as exc:
             body = {"error": str(exc)}
             if exc.status == 403 and request.get("miniapp_telegram_id"):
@@ -236,6 +241,7 @@ class MiniApp:
         credential = (
             request.headers.get("X-Telegram-Init-Data", "")
             or request.headers.get("X-PhotoBoss-Owner-Launch", "")
+            or miniapp_sessions.cookie(request)
         )
         digest = hashlib.sha256(credential.encode()).hexdigest()
         key = f"miniapp:opened:{actor['id']}"

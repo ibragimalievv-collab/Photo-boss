@@ -28,3 +28,14 @@ assert.equal(rejected.storage.has('pb_init_data_v1'),false);
 const preferred=await scenario({hash:'#tgWebAppData='+encodeURIComponent(fresh),live:fresh+'&query_id=live'});
 assert.equal(preferred.sent[0].headers['X-Telegram-Init-Data'],fresh+'&query_id=live');
 console.log('PASS: SDK missing, both launch formats, route change, server rejection, live precedence');
+
+const savedSession=await scenario({hash:'#home'});
+assert.equal(savedSession.sent.length,1);
+assert.equal(savedSession.sent[0].headers['X-PhotoBoss-Session'],'1');
+assert.equal(savedSession.sent[0].credentials,'same-origin');
+assert.equal(savedSession.sent[0].headers['X-Telegram-Init-Data'],undefined);
+const stale=fresh.replace(/auth_date=\d+/,`auth_date=${Math.floor(Date.now()/1000)-3*86400}`);
+const staleSession=await scenario({hash:'#home',live:stale});
+assert.equal(staleSession.sent.length,1);
+assert.equal(staleSession.sent[0].headers['X-Telegram-Init-Data'],undefined);
+console.log('PASS: no launch data and expired Telegram data use the protected server session');

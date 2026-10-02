@@ -1,3 +1,4 @@
+from ..miniapp_sessions import revoke_sessions
 import logging
 from collections import defaultdict
 from datetime import UTC, date, datetime, time, timedelta
@@ -323,6 +324,7 @@ async def employee_fire_confirm(callback, current_user, current_roles):
                 }:
                     shooting.status = "CONFIRMED"
         target.active = False
+        await revoke_sessions(session, target.id)
         target.terminated_at = datetime.now(UTC).replace(tzinfo=None)
         actor = await get_user(session, callback.from_user.id)
         await audit(session, actor, "employee_fired", "user", target.id)
@@ -460,6 +462,7 @@ async def employee_remove_role(callback, current_user, current_roles):
         remaining = target_roles - {role}
         if not remaining:
             target.active = False
+            await revoke_sessions(session, target.id)
         actor = await get_user(session, callback.from_user.id)
         await audit(
             session,
