@@ -115,7 +115,46 @@ async def run():
                 await page.locator('.schedule-person').first.wait_for()
                 assert await page.locator('.schedule-person').count() == 2
                 with fixture.engine.inner.connect() as conn:
-                    assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == (12 if mobile else 6)
+                    assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == (30 if mobile else 6)
+                # Group editor: separate templates must preserve other employees' rows.
+                await page.locator('[data-action=new-team-shift]').click()
+                await page.locator('#shiftForm').wait_for()
+                team_day = fixture.service.today()+timedelta(days=10 if mobile else 7)
+                await page.locator('#shiftForm [name=from]').fill(str(team_day))
+                await page.locator('#shiftForm [name=to]').fill(str(team_day+timedelta(days=2)))
+                await page.locator('#shiftForm summary').click()
+                await page.locator('[name=teamUser][value="3"]').check()
+                await page.locator('[name=teamUser][value="4"]').check()
+                await page.locator('[name=templateEnd]').fill('12:00')
+                await page.locator('[data-action=fill-shift-days]').click()
+                assert await page.locator('.shift-slot').count() == 6
+                await page.locator('[name=teamUser][value="3"]').uncheck()
+                await page.locator('[name=teamUser][value="4"]').uncheck()
+                await page.locator('[name=teamUser][value="5"]').check()
+                await page.locator('[name=templateHotel]').select_option('2')
+                await page.locator('[data-action=fill-shift-days]').click()
+                assert await page.locator('.shift-slot').count() == 9
+                await page.locator('[name=teamUser][value="3"]').check()
+                await page.locator('[name=teamUser][value="4"]').check()
+                await page.locator('[name=templateStart]').fill('12:00')
+                await page.locator('[name=templateEnd]').fill('18:00')
+                await page.locator('[data-action=append-shift-days]').click()
+                assert await page.locator('.shift-slot').count() == 18
+                # Different employees can share a time; a cross-hotel overlap for one cannot save.
+                await page.locator('.shift-slot').last.locator('[data-slot=start]').fill('11:00')
+                await page.locator('#shiftForm [type=submit]').click()
+                await page.locator('#formError:not([hidden])').wait_for()
+                with fixture.engine.inner.connect() as conn:
+                    assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == (30 if mobile else 6)
+                await page.locator('.shift-slot').last.locator('[data-slot=start]').fill('12:00')
+                await page.screenshot(path=str(qa/f'team-schedule-{mobile}.png'),full_page=True)
+                await page.locator('#shiftForm [type=submit]').click()
+                await page.locator('#sheet[open]').wait_for(state='hidden')
+                await page.locator('.schedule-person').first.wait_for()
+                assert await page.locator('.schedule-person').count() == 6
+                with fixture.engine.inner.connect() as conn:
+                    assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == (48 if mobile else 24)
+                assert await page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
                 # Open the profile on either layout and switch away from the owner account.
                 await page.locator('#topbar [data-go=profile]').click()
                 await page.locator('#app [data-action=switch-account]').click()
@@ -136,7 +175,7 @@ async def run():
             await browser.close()
         print(json.dumps({'status':'PASS','forms':'desktop and mobile','checks':
             ['Telegram bootstrap','personal password setup','password login','wrong password',
-             'switch account','one employee for three days and two hotels','no page errors']},ensure_ascii=False))
+             'switch account','one employee for three days and two hotels','three employees across three days and two hotels','group overlap rejected before save','no page errors']},ensure_ascii=False))
     finally:
         await runner.cleanup()
         await fixture.asyncTearDown()

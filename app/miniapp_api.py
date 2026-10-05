@@ -195,14 +195,14 @@ class MiniApp:
             )
         return response
 
-    async def body(self, request):
-        if request.content_length and request.content_length > 8192:
+    async def body(self, request, *, max_bytes=8192):
+        if request.content_length and request.content_length > max_bytes:
             raise AccessError("Слишком большой запрос.", 413)
         try:
             raw = bytearray()
             while not request.content.at_eof():
-                raw.extend(await request.content.read(8193 - len(raw)))
-                if len(raw) > 8192:
+                raw.extend(await request.content.read(max_bytes + 1 - len(raw)))
+                if len(raw) > max_bytes:
                     raise AccessError("Слишком большой запрос.", 413)
             value = json.loads(raw)
             if not isinstance(value, dict):
@@ -438,33 +438,48 @@ class MiniApp:
         ids = await self.save_shifts(request, shifts)
         return web.json_response({'ids': ids}, status=201)
 
-    async def save_shifts(self, request, payloads):
+    async def create_team_schedule(self, request):
+        require_schedule_editor(request["miniapp_actor"]["roles"])
+        payload = await self.body(request, max_bytes=131072)
+        if set(payload) != {'shifts'} or not isinstance(payload['shifts'], list) or not 1 <= len(payload['shifts']) <= 620:
+            raise AccessError('Добавьте от 1 до 620 смен в общий график.', 400)
+        if not all(isinstance(shift, dict) for shift in payload['shifts']):
+            raise AccessError('Проверьте данные каждой смены.', 400)
+        ids = await self.save_shifts(request, payload['shifts'], team=True)
+        return web.json_response({'ids': ids}, status=201)
+
+    async def save_shifts(self, request, payloads, *, team=False):
         actor = request["miniapp_actor"]
         require_schedule_editor(actor["roles"])
         parsed = [parse_shift(payload, self.tz, self.today()) for payload in payloads]
-        uid = parsed[0][0]
-        if any(row[0] != uid for row in parsed) or (max(self.day(p['date']) for p in payloads) - min(self.day(p['date']) for p in payloads)).days > 30:
-            raise AccessError('Один сотрудник и период не более 31 дня.', 400)
-        ordered = sorted(parsed, key=lambda row: row[2])
-        if any(previous[3] > following[2] for previous, following in pairwise(ordered)):
-            raise AccessError('В выбранных сменах пересекается время. Измените интервалы.', 409)
+        user_ids = sorted({row[0] for row in parsed})
+        if (not team and len(user_ids) != 1) or (max(self.day(p['date']) for p in payloads) - min(self.day(p['date']) for p in payloads)).days > 30:
+            raise AccessError('Период графика — не более 31 дня.', 400)
+        for uid in user_ids:
+            ordered = sorted((row for row in parsed if row[0] == uid), key=lambda row: row[2])
+            if any(previous[3] > following[2] for previous, following in pairwise(ordered)):
+                raise AccessError(f'У сотрудника №{uid} пересекаются выбранные смены. Измените интервалы.', 409)
         ids = []
         async with self.engine.begin() as conn:
-            users = await self.rows(conn, "SELECT id,name,active FROM users WHERE id=:uid FOR UPDATE", uid=uid)
-            if not users or not users[0]["active"]:
-                raise AccessError("Сотрудник недоступен.", 400)
-            roles = await self.rows(conn, "SELECT role FROM user_roles WHERE user_id=:uid", uid=uid)
-            if not any(r["role"] in {"PHOTOGRAPHER", "MANAGER"} for r in roles):
-                raise AccessError("Нужен фотограф или менеджер записи.", 400)
-            for payload, (_, hid, start, end) in zip(payloads, parsed):
+            names = {}
+            # Consistent lock order serializes concurrent plans without a lock-order deadlock.
+            for uid in user_ids:
+                users = await self.rows(conn, "SELECT id,name,active FROM users WHERE id=:uid FOR UPDATE", uid=uid)
+                if not users or not users[0]["active"]:
+                    raise AccessError("Сотрудник недоступен.", 400)
+                roles = await self.rows(conn, "SELECT role FROM user_roles WHERE user_id=:uid", uid=uid)
+                if not any(r["role"] in {"PHOTOGRAPHER", "MANAGER"} for r in roles):
+                    raise AccessError("Нужен фотограф или менеджер записи.", 400)
+                names[uid] = users[0]['name']
+            for payload, (uid, hid, start, end) in zip(payloads, parsed):
                 if not await self.rows(conn, "SELECT id FROM hotels WHERE id=:hid AND active=TRUE", hid=hid):
                     raise AccessError("Отель недоступен.", 400)
                 if await self.rows(conn, """SELECT id FROM shifts WHERE user_id=:uid AND status<>'CANCELLED'
                     AND start_at<:end AND end_at>:start""", uid=uid, start=start, end=end):
-                    raise AccessError(f"У сотрудника уже есть смена, пересекающая {payload['date']} {payload['start']}–{payload['end']}.", 409)
+                    raise AccessError(f"У {names[uid]} уже есть смена, пересекающая {payload['date']} {payload['start']}–{payload['end']}.", 409)
                 row = (await self.rows(conn, """INSERT INTO shifts (user_id,hotel_id,start_at,end_at,status)
                     VALUES (:uid,:hid,:start,:end,'PLANNED') RETURNING id""", uid=uid, hid=hid, start=start, end=end))[0]
-                detail = f"{users[0]['name']} · {payload['date']} {payload['start']}–{payload['end']} · отель №{hid}; новая запланированная смена"
+                detail = f"{names[uid]} · {payload['date']} {payload['start']}–{payload['end']} · отель №{hid}; новая запланированная смена"
                 await self.audit_write(conn, actor, "miniapp_shift_created", "shift", row["id"], detail)
                 ids.append(row['id'])
         return ids
@@ -694,7 +709,7 @@ class MiniApp:
         routes = [("GET", "/me", self.me), ("POST", "/session", self.session_open), ("PUT", "/preferences", self.preferences),
             ("GET", "/dashboard", self.dashboard), ("GET", "/bookings", self.bookings),
             ("GET", "/finance", self.finance), ("GET", "/schedule", self.schedule),
-            ("POST", "/schedule", self.create_shift), ("POST", "/schedule/batch", self.create_shift_batch), ("DELETE", "/schedule/{id}", self.cancel_shift),
+            ("POST", "/schedule", self.create_shift), ("POST", "/schedule/batch", self.create_shift_batch), ("POST", "/schedule/team", self.create_team_schedule), ("DELETE", "/schedule/{id}", self.cancel_shift),
             ("GET", "/audit", self.audit), ("GET", "/academy", self.academy),
             ("POST", "/academy/lessons/{slug}", self.complete_lesson),
             ("POST", "/academy/locations", self.create_academy_location),
