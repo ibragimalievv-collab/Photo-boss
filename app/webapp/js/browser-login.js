@@ -20,7 +20,7 @@ export async function startBrowserLogin(onLogin){
  const link=new URL(data.telegramUrl);
  if(link.origin!=='https://t.me'||!/^[A-Za-z0-9_]+$/.test(link.pathname.slice(1))||!/^\d{6}$/.test(data.code))throw new Error('Сервер вернул некорректные данные входа.');
  active={ticket,onLogin,expiresAt:data.expiresAt};
- document.querySelector('#app').innerHTML=`<div class="loading-screen"><h1>Вход в Photo Boss</h1><p>Подтверди вход в Telegram. Код в боте должен совпасть с кодом на этом экране.</p><p><strong>${esc(data.code)}</strong></p><a class="btn primary" href="${esc(link.href)}" target="_blank" rel="noopener noreferrer">Открыть Telegram</a><p>После подтверждения вернись в эту вкладку.</p><p id="browserLoginStatus" role="status">Ожидаем подтверждение…</p><button class="btn ghost" data-action="browser-login-check">Проверить вход</button><button class="btn ghost" data-action="browser-login">Начать заново</button></div>`;
+ document.querySelector('#app').innerHTML=`<div class="loading-screen"><h1>Вход в Photo Boss</h1><p>Подтверди вход в Telegram. Код в боте должен совпасть с кодом на этом экране.</p><p><strong>${esc(data.code)}</strong></p><a class="btn primary" href="${esc(link.href)}" target="_blank" rel="noopener noreferrer">Открыть Telegram</a><p>После подтверждения вернись в это окно Photo Boss.</p><p id="browserLoginStatus" role="status">Ожидаем подтверждение…</p><button class="btn ghost" data-action="browser-login-check">Проверить вход</button><button class="btn ghost" data-action="browser-login">Начать заново</button></div>`;
  schedule();
 }
 

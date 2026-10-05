@@ -80,6 +80,7 @@ jobs:
           node --check app/work_chat_ui/camera.js
           node --check app/webapp/js/practice.js
           for file in app/webapp/js/*.js; do node --check "$file"; done
+          node tests/install_client_check.mjs
           DATABASE_URL='sqlite+aiosqlite:///:memory:' python -m pytest -q
 
       - name: Verify PostgreSQL, bot health and restart count

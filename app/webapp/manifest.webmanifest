@@ -1,0 +1,18 @@
+{
+  "id": "/app/",
+  "name": "Photo Boss",
+  "short_name": "Photo Boss",
+  "description": "Рабочее пространство Photo Boss: команда, съёмки, результат.",
+  "lang": "ru",
+  "start_url": "/app/?source=installed#home",
+  "scope": "/app/",
+  "display": "standalone",
+  "background_color": "#f4f6fa",
+  "theme_color": "#f4f6fa",
+  "prefer_related_applications": false,
+  "icons": [
+    {"src": "./assets/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "./assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "./assets/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}
