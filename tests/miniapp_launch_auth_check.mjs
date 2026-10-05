@@ -4,7 +4,7 @@ import vm from 'node:vm';
 const source=fs.readFileSync(new URL('../app/webapp/js/api.js',import.meta.url),'utf8')
  .replace("import {readSnapshot,saveSnapshot} from './localstore.js';",'const readSnapshot=async()=>null,saveSnapshot=async()=>{};').replaceAll('export ','');
 const fresh=`auth_date=${Math.floor(Date.now()/1000)}&user=${encodeURIComponent('{"id":1001}')}&hash=${'a'.repeat(64)}`;
-async function scenario({hash,live='',status=200,afterLoadHash,options={}}){
+async function scenario({hash,live='',status=200,afterLoadHash,options={},browserLogin=false}){
  const storage=new Map(),sent=[];
  const context=vm.createContext({URL,URLSearchParams,FormData,AbortController,Date,Number,Promise,setTimeout,clearTimeout,atob,
   callOptions:options,
@@ -13,6 +13,7 @@ async function scenario({hash,live='',status=200,afterLoadHash,options={}}){
   sessionStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
   fetch:async(url,options)=>{sent.push(options);return {status,ok:status===200,json:async()=>status===200?{user:{id:1}}:{error:'Invalid signature'}};}});
  vm.runInContext(source,context);
+ if(browserLogin)vm.runInContext('preferBrowserSession()',context);
  if(afterLoadHash!==undefined)context.location.hash=afterLoadHash;
  let result;
  try{result=await vm.runInContext("api('/me',callOptions)",context);}catch(error){assert.equal(error.status,status);}
@@ -48,3 +49,9 @@ assert.equal(media.result.status,200);
 assert.equal(media.sent[0].body,upload);
 assert.equal(media.sent[0].headers['Content-Type'],undefined);
 console.log('PASS: multipart media shares authentication and returns the unconsumed response');
+
+const browser=await scenario({hash:'#home',live:fresh,browserLogin:true});
+assert.equal(browser.sent[0].headers['X-Telegram-Init-Data'],undefined);
+assert.equal(browser.sent[0].headers['X-PhotoBoss-Owner-Launch'],undefined);
+assert.equal(browser.sent[0].headers['X-PhotoBoss-Session'],'1');
+console.log('PASS: confirmed browser login uses the new session instead of old launch credentials');

@@ -8,8 +8,9 @@ import {academyScreen,academyReference} from './academy.js';
 import {openPractice} from './practice.js';
 import {icon} from './icons.js';
 import {esc,money,ROLE_NAMES,STATUS_NAMES,THEMES,defaultTheme,todayKey,addDays,dateLabel,initials} from './domain.js';
-import {api} from './api.js';
+import {api,preferBrowserSession} from './api.js';
 import {initTelegram,applyTelegramTheme,haptic} from './telegram.js';
+import {startBrowserLogin,checkBrowserLogin,stopBrowserLogin} from './browser-login.js';
 const tg=initTelegram(),$=s=>document.querySelector(s);
 const state={me:null,dashboard:null,finance:null,schedule:null,academy:null,audit:null,bookings:[],route:'home',period:'today',day:todayKey(),week:todayKey(),academyTab:'home',search:'',requestId:0};
 let toastTimer,focusBeforeDialog=null;
@@ -89,8 +90,9 @@ async function loadRoute(route=state.route){
 }
 function showError(error){
  const expired=error.status===401,denied=error.status===403;
+ const browser=expired&&!tg?.initData;
  if(expired||denied){closeSheet();state.me=null;state.dashboard=null;state.finance=null;state.audit=null;$('#topbar').innerHTML='';$('#sidebar').innerHTML='';$('#bottomNav').innerHTML='';}
- $('#app').innerHTML=`<div class="loading-screen">${icon(expired||denied?'lock':'refresh')}<h1>${expired?'Требуется повторный вход':denied?'Рабочий доступ недоступен':'Не удалось загрузить'}</h1><p>${esc(error.message)}</p>${error.telegramId?`<p>Ваш Telegram ID: <strong>${esc(error.telegramId)}</strong>. Передайте его владельцу для проверки доступа.</p>`:''}<p class="small">${expired?'Закройте и снова откройте мини-приложение Photo Boss для обновления сеанса.':denied?'После назначения доступа нажмите «Повторить».':'Проверьте соединение и повторите загрузку здесь.'}</p>${btn('Повторить','refresh','primary','refresh')}</div>`;
+ $('#app').innerHTML=`<div class="loading-screen">${icon(expired||denied?'lock':'refresh')}<h1>${browser?'Вход в Photo Boss':expired?'Требуется повторный вход':denied?'Рабочий доступ недоступен':'Не удалось загрузить'}</h1><p>${browser?'Подтверди свой аккаунт через Telegram. После входа откроется твоё рабочее пространство.':esc(error.message)}</p>${error.telegramId?`<p>Ваш Telegram ID: <strong>${esc(error.telegramId)}</strong>. Передайте его владельцу для проверки доступа.</p>`:''}<p class="small">${browser?'Вход сохраняется в этом браузере. Роль и доступ проверяет сервер.':expired?'Закройте и снова откройте мини-приложение Photo Boss для обновления сеанса.':denied?'После назначения доступа нажмите «Повторить».':'Проверьте соединение и повторите загрузку здесь.'}</p>${browser?btn('Войти через Telegram','browser-login','primary','lock'):''}${btn('Повторить','refresh',browser?'ghost':'primary','refresh')}</div>`;
 }
 
 function go(route){closeSheet();history.replaceState(null,'',`#${route}`);haptic(tg);window.scrollTo({top:0,behavior:'instant'});return loadRoute(route);}
@@ -104,6 +106,8 @@ async function shiftForm(){const s=await request(`/schedule?from=${state.me.toda
 function showBooking(id){const b=[...state.bookings,...(state.dashboard?.bookings||[])].find(x=>x.id===id);if(!b)return;showSheet(esc(b.client),`${mark(b.status)}<div class="detail-grid">${[['Запись',`№ ${b.id}`],['Когда',`${dateLabel(b.date)} · ${b.time}`],['Отель',b.hotel],['Номер',b.room],['Фотограф',b.photographer||'Не назначен'],['Кадров в съёмке',b.frames??'—']].map(([a,v])=>`<div class="detail"><small>${a}</small><b>${esc(v)}</b></div>`).join('')}</div><p class="small muted">Статусы меняются в рабочем процессе.</p><div class="section">${btn('Перейти к продаже','new-sale','primary full-width','wallet')}</div>`);}
 function employeeDetail(id){const f=state.route==='finance'?state.finance:state.dashboard?.finance;const e=f?.employees.find(x=>x.id===id);if(!e)return;showSheet(esc(e.name),`<div class="detail-grid"><div class="detail"><small>Продажи</small><b>${money(e.sales)}</b></div><div class="detail"><small>Комиссия</small><b>${money(e.commission)}</b></div><div class="detail"><small>Премии и удержания</small><b>${money(e.adjustments)}</b></div><div class="detail"><small>Начислено</small><b>${money(e.earned)}</b></div></div><p class="small">Выплата и начисление — разные операции.</p>${watermark()}`);}
 async function action(name){
+ if(name==='browser-login')return startBrowserLogin(()=>{preferBrowserSession();history.replaceState(null,'','#home');return boot();});
+ if(name==='browser-login-check')return checkBrowserLogin();
  if(['new-sale','new-booking'].includes(name)){await go('workflow');const form=$('#workflowBooking'),target=name==='new-booking'?form?.elements.client_name:$('#workflowSalePick');if(name==='new-booking'&&form)form.closest('details').open=true;target?.scrollIntoView({block:'center'});target?.focus();return;}
  if(name==='close')return closeSheet();if(name==='refresh')return state.me?loadRoute():boot();
  if(name==='themes')return showSheet('Ваш стиль',`${themeChoices()}<p class="compact-note">Только оформление. Роль и доступ к деньгам не меняются.</p>`);
@@ -155,7 +159,7 @@ for(const event of ['copy','cut','contextmenu','dragstart'])document.addEventLis
 function privacy(active){$('#privacyScreen').hidden=state.me?.screenCaptureAllowed?true:active;}
 document.addEventListener('visibilitychange',()=>privacy(!document.hidden));try{tg?.onEvent('deactivated',()=>privacy(false));tg?.onEvent('activated',()=>privacy(true));tg?.BackButton?.onClick(()=>go('home'));}catch{}
 window.addEventListener('hashchange',()=>{if(state.me)loadRoute(location.hash.slice(1)||'home');});
-async function boot(){try{state.me=await request('/me');setOutboxUser(state.me.user.id);if(!state.me._offline){await request('/session',{method:'POST',body:{}});for(const path of ['/workflow','/workday'])request(path).catch(()=>{});}state.period='today';state.day=state.me.today;state.week=state.me.today;state.dashboard=null;state.schedule=null;state.finance=null;state.academy=null;state.audit=null;state.bookings=[];state.onlyReady=false;state.search='';state.academyTab='home';setTheme(state.me.user.theme||defaultTheme(state.me.user.roles));await loadRoute(state.me._offline?'workflow':location.hash.slice(1)||'home');}catch(e){showError(e);}}
+async function boot(){stopBrowserLogin();try{state.me=await request('/me');setOutboxUser(state.me.user.id);if(!state.me._offline){await request('/session',{method:'POST',body:{}});for(const path of ['/workflow','/workday'])request(path).catch(()=>{});}state.period='today';state.day=state.me.today;state.week=state.me.today;state.dashboard=null;state.schedule=null;state.finance=null;state.academy=null;state.audit=null;state.bookings=[];state.onlyReady=false;state.search='';state.academyTab='home';setTheme(state.me.user.theme||defaultTheme(state.me.user.roles));await loadRoute(state.me._offline?'workflow':location.hash.slice(1)||'home');}catch(e){showError(e);}}
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/app/sw.js',{scope:'/app/'}).catch(()=>{});
 boot();
 

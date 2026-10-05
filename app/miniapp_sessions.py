@@ -70,31 +70,42 @@ async def refresh(engine, request, response):
             return
         if not matching and request.path != '/api/miniapp/me':
             return
-        # Serialize issuance with dismissal so an in-flight request cannot restore a revoked device.
-        user = (await conn.execute(text('SELECT active FROM users WHERE id=:id FOR UPDATE'),
-                                  {'id': actor['id']})).first()
-        if not user or not user[0]:
-            return
-        if not matching:
-            raw = f"{actor['id']}.{secrets.token_urlsafe(32)}"
-        value = {'telegram_id': actor['tg_id'], 'renewed': now, 'expires': now + TTL}
-        # Bound stored devices per user and remove expired records during issuance/renewal.
-        rows = (await conn.execute(text('SELECT key,value FROM settings WHERE key LIKE :prefix'),
-                                   {'prefix': f"miniapp:device:{actor['id']}:%"})).all()
-        live = []
-        for key, saved in rows:
-            try:
-                expires = json.loads(saved)['expires']
-            except (ValueError, KeyError, TypeError):
-                expires = 0
-            if expires <= now:
-                await conn.execute(text('DELETE FROM settings WHERE key=:key'), {'key': key})
-            elif key != session_key(raw):
-                live.append((expires, key))
-        for _, key in sorted(live)[:-9]:
+        raw = await issue(conn, actor, raw if matching else '', now)
+    if raw:
+        set_cookie(response, raw)
+
+
+async def issue(conn, actor, raw, now):
+    """Issue a device session in the caller's transaction; actor is server-verified."""
+    # Serialize issuance with dismissal so an in-flight request cannot restore a revoked device.
+    user = (await conn.execute(text('SELECT active FROM users WHERE id=:id FOR UPDATE'),
+                              {'id': actor['id']})).first()
+    if not user or not user[0]:
+        return
+    if not raw:
+        raw = f"{actor['id']}.{secrets.token_urlsafe(32)}"
+    value = {'telegram_id': actor['tg_id'], 'renewed': now, 'expires': now + TTL}
+    # Bound stored devices per user and remove expired records during issuance/renewal.
+    rows = (await conn.execute(text('SELECT key,value FROM settings WHERE key LIKE :prefix'),
+                               {'prefix': f"miniapp:device:{actor['id']}:%"})).all()
+    live = []
+    for key, saved in rows:
+        try:
+            expires = json.loads(saved)['expires']
+        except (ValueError, KeyError, TypeError):
+            expires = 0
+        if expires <= now:
             await conn.execute(text('DELETE FROM settings WHERE key=:key'), {'key': key})
-        await conn.execute(text('INSERT INTO settings(key,value) VALUES (:key,:value) '
-                                'ON CONFLICT(key) DO UPDATE SET value=excluded.value'),
-                           {'key': session_key(raw), 'value': json.dumps(value)})
+        elif key != session_key(raw):
+            live.append((expires, key))
+    for _, key in sorted(live)[:-9]:
+        await conn.execute(text('DELETE FROM settings WHERE key=:key'), {'key': key})
+    await conn.execute(text('INSERT INTO settings(key,value) VALUES (:key,:value) '
+                            'ON CONFLICT(key) DO UPDATE SET value=excluded.value'),
+                       {'key': session_key(raw), 'value': json.dumps(value)})
+    return raw
+
+
+def set_cookie(response, raw):
     response.set_cookie(COOKIE, raw, max_age=TTL, secure=True, httponly=True,
                         samesite='Strict', path='/')

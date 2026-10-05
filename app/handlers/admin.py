@@ -1,4 +1,3 @@
-from ..miniapp_sessions import revoke_sessions
 import logging
 from collections import defaultdict
 from datetime import UTC, date, datetime, time, timedelta
@@ -13,6 +12,7 @@ from ..access import StaffFilter
 from ..config import config, number
 from ..db import Session
 from ..keyboards import inline
+from ..miniapp_sessions import revoke_sessions
 from ..models import (
     AuditLog,
     Booking,

@@ -22,6 +22,9 @@ async def launch_button(m):
 
 @r.message(CommandStart())
 async def start(m, state):
+    from ..browser_login import handle_start
+    if await handle_start(m):
+        return
     await state.clear()
     async with Session() as session:
         user = await bootstrap(session, m.from_user.id, m.from_user.full_name,
@@ -61,6 +64,12 @@ async def cancel(m, state):
         user = await get_user(session, m.from_user.id)
         roles = await roles_of(session, user)
     await m.answer("Действие отменено." if roles else "Доступ отключён.")
+
+
+@r.callback_query(F.data.startswith('web-login:'))
+async def browser_login_callback(callback: CallbackQuery):
+    from ..browser_login import handle_callback
+    await handle_callback(callback)
 
 
 @r.callback_query(F.data.in_({"nav:back", "nav:home"}))
