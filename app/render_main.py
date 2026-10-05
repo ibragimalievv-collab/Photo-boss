@@ -127,6 +127,8 @@ def main():
     app.router.add_get("/health", health)
     miniapp = install_miniapp(app, engine=engine, bot=bot, lessons=ACADEMY_LESSONS,
                               blocks=ACADEMY_BLOCKS, tz_name=config.training_timezone)
+    from .browser_login import install_browser_login
+    install_browser_login(app, miniapp)
     install_attendance(app, miniapp)
     install_people(app, miniapp)
     chat = install_work_chat(app, miniapp)

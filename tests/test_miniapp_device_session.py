@@ -4,12 +4,12 @@ import time
 import unittest
 from unittest.mock import patch
 
+import test_miniapp_release as fixtures
 from sqlalchemy import text
+from test_miniapp_release import Request, signed
 
 from app import miniapp_sessions as sessions
 from app.miniapp_api import MiniApp
-import test_miniapp_release as fixtures
-from test_miniapp_release import Request, signed
 
 
 class DeviceSessionTests(unittest.IsolatedAsyncioTestCase):

@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 from aiohttp import web
 from sqlalchemy import text
 
+from . import miniapp_sessions
 from .miniapp_security import (
     MINIAPP_SESSION_MAX_AGE,
     STAFF_ROLES,
@@ -34,7 +35,6 @@ from .miniapp_security import (
     validate_owner_launch_token,
 )
 from .services.academy_growth import personal_tip
-from . import miniapp_sessions
 
 logger = logging.getLogger(__name__)
 PREFIX = "/api/miniapp"
@@ -644,7 +644,7 @@ class MiniApp:
 
     async def static_file(self, request):
         name = request.match_info.get("asset", "index.html")
-        allowed = {"sw.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
+        allowed = {"sw.js", "js/browser-login.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
                    "js/development.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg"}

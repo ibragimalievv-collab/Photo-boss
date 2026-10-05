@@ -6,6 +6,8 @@ const SESSION_INIT_KEY='pb_init_data_v1';
 const SESSION_OWNER_KEY='pb_owner_launch_v1';
 const SESSION_MAX_AGE_SECONDS=23*60*60;
 let serverSessionActive=false;
+let browserSessionOnly=false;
+export function preferBrowserSession(){browserSessionOnly=true;sessionSet(SESSION_OWNER_KEY,'');forgetInitData();}
 
 function sessionGet(key){try{return sessionStorage.getItem(key)||'';}catch{return '';}}
 function sessionSet(key,value){try{if(value)sessionStorage.setItem(key,value);else sessionStorage.removeItem(key);}catch{}}
@@ -108,8 +110,8 @@ function authHeaders(kind,value){
 
 export async function api(path,{body,method='GET',timeoutMs,responseType,...options}={}){
  const cfg=window.PHOTO_BOSS_CONFIG||{};
- const ownerToken=ownerTokenFresh(HASH_OWNER_LAUNCH_TOKEN)?HASH_OWNER_LAUNCH_TOKEN:storedOwnerLaunchToken();
- const telegram=await telegramInitData();
+ const ownerToken=browserSessionOnly?'':ownerTokenFresh(HASH_OWNER_LAUNCH_TOKEN)?HASH_OWNER_LAUNCH_TOKEN:storedOwnerLaunchToken();
+ const telegram=browserSessionOnly?{value:'',source:'none'}:await telegramInitData();
  let primary=telegram.value?{kind:'telegram',value:telegram.value,source:telegram.source}:
              ownerToken?{kind:'owner',value:ownerToken,source:HASH_OWNER_LAUNCH_TOKEN?'hash':'session'}:{kind:'session',value:'',source:'cookie'};
  const alternate=primary.kind==='telegram'&&ownerToken?{kind:'owner',value:ownerToken,source:HASH_OWNER_LAUNCH_TOKEN?'hash':'session'}:null;
