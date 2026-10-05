@@ -11,6 +11,7 @@ import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -68,6 +69,7 @@ ACTIONS = {
     "miniapp_screen_capture_changed": "Изменил разрешение на скриншоты",
     "miniapp_shift_created": "Назначил смену",
     "miniapp_shift_cancelled": "Отменил запланированную смену",
+    "miniapp_password_changed": "Настроил личный вход",
 }
 
 
@@ -222,6 +224,7 @@ class MiniApp:
         async with self.engine.connect() as conn:
             theme = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=f"miniapp:theme:{actor['id']}")
             capture = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=f"miniapp:screen_capture:{actor['id']}")
+            password = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=f"miniapp:password:{actor['id']}")
         capture_allowed = (
             True
             if "OWNER" in actor["roles"]
@@ -231,6 +234,8 @@ class MiniApp:
             "name": actor["name"], "roles": actor["roles"],
             "theme": theme[0]["value"] if theme and theme[0]["value"] in THEMES else ("premium" if "OWNER" in actor["roles"] else "light")},
             "permissions": actor["permissions"], "screenCaptureAllowed": capture_allowed,
+            "passwordConfigured": bool(password),
+            "passwordLogin": json.loads(password[0]['value'])['login'] if password else '',
             "today": self.today().isoformat(),
             "timezone": str(self.tz), "mode": "live"})
 
@@ -417,10 +422,33 @@ class MiniApp:
         return web.json_response({"items": items, "employees": employees, "hotels": hotels})
 
     async def create_shift(self, request):
+        payload = await self.body(request)
+        ids = await self.save_shifts(request, [payload])
+        return web.json_response({"id": ids[0]}, status=201)
+
+    async def create_shift_batch(self, request):
+        payload = await self.body(request)
+        if set(payload) != {'userId', 'slots'} or not isinstance(payload['slots'], list) or not 1 <= len(payload['slots']) <= 62:
+            raise AccessError('Выберите сотрудника и от 1 до 62 смен.', 400)
+        shifts = []
+        for slot in payload['slots']:
+            if not isinstance(slot, dict) or set(slot) != {'hotelId', 'date', 'start', 'end'}:
+                raise AccessError('Проверьте отель, дату и время каждой смены.', 400)
+            shifts.append({'userId': payload['userId'], **slot})
+        ids = await self.save_shifts(request, shifts)
+        return web.json_response({'ids': ids}, status=201)
+
+    async def save_shifts(self, request, payloads):
         actor = request["miniapp_actor"]
         require_schedule_editor(actor["roles"])
-        payload = await self.body(request)
-        uid, hid, start, end = parse_shift(payload, self.tz, self.today())
+        parsed = [parse_shift(payload, self.tz, self.today()) for payload in payloads]
+        uid = parsed[0][0]
+        if any(row[0] != uid for row in parsed) or (max(self.day(p['date']) for p in payloads) - min(self.day(p['date']) for p in payloads)).days > 30:
+            raise AccessError('Один сотрудник и период не более 31 дня.', 400)
+        ordered = sorted(parsed, key=lambda row: row[2])
+        if any(previous[3] > following[2] for previous, following in pairwise(ordered)):
+            raise AccessError('В выбранных сменах пересекается время. Измените интервалы.', 409)
+        ids = []
         async with self.engine.begin() as conn:
             users = await self.rows(conn, "SELECT id,name,active FROM users WHERE id=:uid FOR UPDATE", uid=uid)
             if not users or not users[0]["active"]:
@@ -428,16 +456,18 @@ class MiniApp:
             roles = await self.rows(conn, "SELECT role FROM user_roles WHERE user_id=:uid", uid=uid)
             if not any(r["role"] in {"PHOTOGRAPHER", "MANAGER"} for r in roles):
                 raise AccessError("Нужен фотограф или менеджер записи.", 400)
-            if not await self.rows(conn, "SELECT id FROM hotels WHERE id=:hid AND active=TRUE", hid=hid):
-                raise AccessError("Отель недоступен.", 400)
-            if await self.rows(conn, """SELECT id FROM shifts WHERE user_id=:uid AND status<>'CANCELLED'
-                AND start_at<:end AND end_at>:start""", uid=uid, start=start, end=end):
-                raise AccessError("У сотрудника уже есть пересекающаяся смена.", 409)
-            row = (await self.rows(conn, """INSERT INTO shifts (user_id,hotel_id,start_at,end_at,status)
-                VALUES (:uid,:hid,:start,:end,'PLANNED') RETURNING id""", uid=uid, hid=hid, start=start, end=end))[0]
-            detail = f"{users[0]['name']} · {payload['date']} {payload['start']}–{payload['end']} · отель №{hid}; новая запланированная смена"
-            await self.audit_write(conn, actor, "miniapp_shift_created", "shift", row["id"], detail)
-        return web.json_response({"id": row["id"]}, status=201)
+            for payload, (_, hid, start, end) in zip(payloads, parsed):
+                if not await self.rows(conn, "SELECT id FROM hotels WHERE id=:hid AND active=TRUE", hid=hid):
+                    raise AccessError("Отель недоступен.", 400)
+                if await self.rows(conn, """SELECT id FROM shifts WHERE user_id=:uid AND status<>'CANCELLED'
+                    AND start_at<:end AND end_at>:start""", uid=uid, start=start, end=end):
+                    raise AccessError(f"У сотрудника уже есть смена, пересекающая {payload['date']} {payload['start']}–{payload['end']}.", 409)
+                row = (await self.rows(conn, """INSERT INTO shifts (user_id,hotel_id,start_at,end_at,status)
+                    VALUES (:uid,:hid,:start,:end,'PLANNED') RETURNING id""", uid=uid, hid=hid, start=start, end=end))[0]
+                detail = f"{users[0]['name']} · {payload['date']} {payload['start']}–{payload['end']} · отель №{hid}; новая запланированная смена"
+                await self.audit_write(conn, actor, "miniapp_shift_created", "shift", row["id"], detail)
+                ids.append(row['id'])
+        return ids
 
     async def cancel_shift(self, request):
         actor = request["miniapp_actor"]
@@ -644,7 +674,7 @@ class MiniApp:
 
     async def static_file(self, request):
         name = request.match_info.get("asset", "index.html")
-        allowed = {"sw.js", "manifest.webmanifest", "js/install.js", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-maskable-512.png", "assets/apple-touch-icon.png", "js/browser-login.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
+        allowed = {"sw.js", "manifest.webmanifest", "js/install.js", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-maskable-512.png", "assets/apple-touch-icon.png", "js/browser-login.js", "js/account.js", "js/schedule-editor.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
                    "js/development.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg"}
@@ -664,7 +694,7 @@ class MiniApp:
         routes = [("GET", "/me", self.me), ("POST", "/session", self.session_open), ("PUT", "/preferences", self.preferences),
             ("GET", "/dashboard", self.dashboard), ("GET", "/bookings", self.bookings),
             ("GET", "/finance", self.finance), ("GET", "/schedule", self.schedule),
-            ("POST", "/schedule", self.create_shift), ("DELETE", "/schedule/{id}", self.cancel_shift),
+            ("POST", "/schedule", self.create_shift), ("POST", "/schedule/batch", self.create_shift_batch), ("DELETE", "/schedule/{id}", self.cancel_shift),
             ("GET", "/audit", self.audit), ("GET", "/academy", self.academy),
             ("POST", "/academy/lessons/{slug}", self.complete_lesson),
             ("POST", "/academy/locations", self.create_academy_location),

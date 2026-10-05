@@ -66,6 +66,9 @@ async def refresh(engine, request, response):
     async with engine.begin() as conn:
         value = await lookup(conn, raw, now)
         matching = value and value['telegram_id'] == actor['tg_id'] and raw.split('.', 1)[0] == str(actor['id'])
+        if raw and session_key(raw) and raw.split('.', 1)[0] == str(actor['id']) and not value:
+            # An in-flight signed /me must not replace a device revoked by logout/reset.
+            return
         if matching and now - value['renewed'] < RENEW_AFTER:
             return
         if not matching and request.path != '/api/miniapp/me':
@@ -75,16 +78,23 @@ async def refresh(engine, request, response):
         set_cookie(response, raw)
 
 
-async def issue(conn, actor, raw, now):
+async def issue(conn, actor, raw, now, *, telegram_verified_at=None):
     """Issue a device session in the caller's transaction; actor is server-verified."""
     # Serialize issuance with dismissal so an in-flight request cannot restore a revoked device.
     user = (await conn.execute(text('SELECT active FROM users WHERE id=:id FOR UPDATE'),
                               {'id': actor['id']})).first()
     if not user or not user[0]:
         return
+    previous = await lookup(conn, raw, now) if raw else None
+    if raw and not previous:
+        # Logout or password reset may have revoked it while refresh waited for the lock.
+        return
     if not raw:
         raw = f"{actor['id']}.{secrets.token_urlsafe(32)}"
     value = {'telegram_id': actor['tg_id'], 'renewed': now, 'expires': now + TTL}
+    verified_at = telegram_verified_at or (previous or {}).get('telegram_verified_at')
+    if verified_at:
+        value['telegram_verified_at'] = verified_at
     # Bound stored devices per user and remove expired records during issuance/renewal.
     rows = (await conn.execute(text('SELECT key,value FROM settings WHERE key LIKE :prefix'),
                                {'prefix': f"miniapp:device:{actor['id']}:%"})).all()
