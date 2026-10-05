@@ -181,3 +181,16 @@ class BrowserLoginTests(unittest.IsolatedAsyncioTestCase):
         response = await self.fixture.service.middleware(req, self.fixture.service.static_file)
         assert response.status == 200
         assert response.headers['Cache-Control'] == 'no-store'
+
+    async def test_lost_json_response_recovers_only_with_valid_device_cookie(self):
+        identifier, cookie, _ = await self.start()
+        await self.approve(identifier)
+        response = await self.service.endpoint(self.request('poll', cookie))
+        raw = response.cookies[sessions.COOKIE].value
+        for previous in [cookie, '']:
+            retry = self.request('poll', previous)
+            retry.cookies[sessions.COOKIE] = raw
+            assert json.loads((await self.service.endpoint(retry)).text)['status'] == 'authenticated'
+        async with self.engine.begin() as conn:
+            await sessions.revoke_sessions(conn, 1)
+        assert (await self.service.endpoint(retry)).status == 401

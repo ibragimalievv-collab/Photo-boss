@@ -112,11 +112,16 @@ class BrowserLogin:
     async def poll(self, request):
         self.guard(request)
         parts = request.cookies.get(COOKIE, '').split('.')
-        if len(parts) != 2 or not re.fullmatch(r'[A-Za-z0-9_-]{43}', parts[1]):
-            raise AccessError('Запрос входа устарел. Начните вход на сайте заново.', 401)
-        identifier, secret = parts
         async with self.engine.begin() as conn:
-            value = await self.read(conn, identifier)
+            if len(parts) != 2 or not re.fullmatch(r'[A-Za-z0-9_-]{43}', parts[1]):
+                return await self.completed(conn, request)
+            identifier, secret = parts
+            try:
+                value = await self.read(conn, identifier)
+            except AccessError:
+                # Headers/cookie may arrive while the JSON response is lost on a bad network.
+                # Recover only through a valid, active device session; never reuse approval.
+                return await self.completed(conn, request)
             if not hmac.compare_digest(value['secret'], hashlib.sha256(secret.encode()).hexdigest()):
                 raise AccessError('Запрос входа отклонён.', 401)
             if value['status'] == 'rejected':
@@ -131,6 +136,15 @@ class BrowserLogin:
             await conn.execute(text('DELETE FROM settings WHERE key=:key'), {'key': PREFIX + identifier})
         response = web.json_response({'status': 'authenticated'})
         sessions.set_cookie(response, raw)
+        response.del_cookie(COOKIE, path='/', secure=True, httponly=True, samesite='Strict')
+        return response
+
+    async def completed(self, conn, request):
+        value = await sessions.lookup(conn, sessions.cookie(request), time.time())
+        if not value:
+            raise AccessError('Запрос входа устарел. Начните вход на сайте заново.', 401)
+        await self.actor(conn, value['telegram_id'])
+        response = web.json_response({'status': 'authenticated'})
         response.del_cookie(COOKIE, path='/', secure=True, httponly=True, samesite='Strict')
         return response
 
