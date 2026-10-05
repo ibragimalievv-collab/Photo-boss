@@ -129,7 +129,7 @@ class BrowserLogin:
             if value['status'] != 'approved':
                 return web.json_response({'status': 'pending'})
             actor = await self.actor(conn, value['telegram_id'])
-            raw = await sessions.issue(conn, actor, '', int(time.time()))
+            raw = await sessions.issue(conn, actor, '', int(time.time()), telegram_verified_at=int(time.time()))
             if not raw:
                 raise AccessError('Рабочий доступ отключён.', 403)
             # Approval and device-session issuance commit together, once only.
@@ -227,3 +227,5 @@ def install_browser_login(app, api):
     service = BrowserLogin(api.engine, api.bot, app_url().split('/app/', 1)[0])
     app.router.add_post('/auth/browser/start', service.endpoint)
     app.router.add_post('/auth/browser/poll', service.endpoint)
+    from .password_login import install_password_login
+    install_password_login(app, api)

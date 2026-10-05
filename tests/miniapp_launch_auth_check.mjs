@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 const source=fs.readFileSync(new URL('../app/webapp/js/api.js',import.meta.url),'utf8')
- .replace("import {readSnapshot,saveSnapshot} from './localstore.js';",'const readSnapshot=async()=>null,saveSnapshot=async()=>{};').replaceAll('export ','');
+ .replace("import {readSnapshot,saveSnapshot,setSnapshotUser} from './localstore.js';",'const readSnapshot=async()=>null,saveSnapshot=async()=>{},setSnapshotUser=()=>{};').replaceAll('export ','');
 const fresh=`auth_date=${Math.floor(Date.now()/1000)}&user=${encodeURIComponent('{"id":1001}')}&hash=${'a'.repeat(64)}`;
 async function scenario({hash,live='',status=200,afterLoadHash,options={},browserLogin=false}){
  const storage=new Map(),sent=[];

@@ -1,4 +1,4 @@
-import {readSnapshot,saveSnapshot} from './localstore.js';
+import {readSnapshot,saveSnapshot,setSnapshotUser} from './localstore.js';
 export class ApiError extends Error {constructor(message,status=0,telegramId=null){super(message);this.status=status;this.telegramId=Number.isSafeInteger(telegramId)&&telegramId>0?telegramId:null;}}
 
 const SECURE_INIT_KEY='photo_boss_init_data_v1';
@@ -6,8 +6,9 @@ const SESSION_INIT_KEY='pb_init_data_v1';
 const SESSION_OWNER_KEY='pb_owner_launch_v1';
 const SESSION_MAX_AGE_SECONDS=23*60*60;
 let serverSessionActive=false;
-let browserSessionOnly=false;
-export function preferBrowserSession(){browserSessionOnly=true;sessionSet(SESSION_OWNER_KEY,'');forgetInitData();}
+const SESSION_BROWSER_KEY='pb_browser_session_only';
+let browserSessionOnly=sessionGet(SESSION_BROWSER_KEY)==='1';
+export function preferBrowserSession(){browserSessionOnly=true;serverSessionActive=false;setSnapshotUser(null);sessionSet(SESSION_BROWSER_KEY,'1');sessionSet(SESSION_OWNER_KEY,'');forgetInitData();}
 
 function sessionGet(key){try{return sessionStorage.getItem(key)||'';}catch{return '';}}
 function sessionSet(key,value){try{if(value)sessionStorage.setItem(key,value);else sessionStorage.removeItem(key);}catch{}}
@@ -131,13 +132,14 @@ export async function api(path,{body,method='GET',timeoutMs,responseType,...opti
   }
   if(response.status===401&&primary.kind==='telegram'&&primary.source!=='live')forgetInitData();
   if(response.ok)serverSessionActive=true;
-  if(response.status===401)serverSessionActive=false;
+  if(response.status===401){serverSessionActive=false;setSnapshotUser(null);}
   if(response.ok&&primary.kind==='telegram')rememberInitData(primary.value);
   if(response.ok&&responseType==='response')return response;
   if(response.ok&&responseType==='blob')return await response.blob();
   const data=await response.json().catch(()=>null);
   if(!response.ok)throw new ApiError(data?.error||(response.status>=500?'Сервис временно недоступен. Повторите попытку.':`Запрос отклонён (${response.status}).`),response.status,data?.telegramId);
   if(!data)throw new ApiError('Сервер вернул некорректный ответ.');
+  if(path==='/me')setSnapshotUser(data.user?.telegramId);
   if(method==='GET')try{await saveSnapshot(path,data);}catch{window.dispatchEvent(new Event('pb-local-storage-error'));}
   return data;
  }catch(e){if(method==='GET'&&!e.status)try{const cached=await readSnapshot(path);if(cached)return cached;}catch{}if(e.name==='AbortError')throw new ApiError('Сервер отвечает дольше обычного. Повторите попытку.');if(e instanceof ApiError)throw e;throw new ApiError('Нет соединения с сервером. Демо-данные не подставляются.');}finally{clearTimeout(timer);}

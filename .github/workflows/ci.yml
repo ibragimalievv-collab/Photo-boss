@@ -81,6 +81,9 @@ jobs:
           node --check app/webapp/js/practice.js
           for file in app/webapp/js/*.js; do node --check "$file"; done
           node tests/install_client_check.mjs
+          node tests/account_cache_check.mjs
+          node tests/miniapp_launch_auth_check.mjs
+          node tests/browser_login_client_check.mjs
           DATABASE_URL='sqlite+aiosqlite:///:memory:' python -m pytest -q
 
       - name: Verify PostgreSQL, bot health and restart count
@@ -138,6 +141,7 @@ jobs:
           WORKFLOW_TEST_KEY: /tmp/photo-boss-test-key.pem
         run: |
           openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORKFLOW_TEST_KEY" -out "$WORKFLOW_TEST_CERT" -days 1 -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1' 2>/dev/null
+          python tests/account_schedule_browser_check.py
           python tests/workflow_browser_check.py
           python tests/photo_storage_browser_check.py
       - name: Save browser evidence
