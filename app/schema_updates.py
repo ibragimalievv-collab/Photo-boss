@@ -16,7 +16,7 @@ async def upgrade(connection):
     if 'shoot_development_reviews' in tables:
         await add_columns(connection,'shoot_development_reviews',{'summary_parts':"TEXT NOT NULL DEFAULT '[]'"})
     if 'delivery_galleries' in tables:
-        await add_columns(connection, 'delivery_galleries', {'delivery_mode': "VARCHAR(20) NOT NULL DEFAULT 'SELECTED'"})
+        await add_columns(connection, 'delivery_galleries', {'delivery_mode': "VARCHAR(20) NOT NULL DEFAULT 'ALL'"})
     if 'delivery_photos' in tables:
         await add_columns(connection, 'delivery_photos', {'selected': 'BOOLEAN NOT NULL DEFAULT FALSE'})
     if 'sales' in tables:
