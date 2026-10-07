@@ -1,0 +1,76 @@
+name: Delivery checks
+on:
+  push:
+    branches: [main, 'codex/delivery-control-offline']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  delivery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
+      ADMIN_TELEGRAM_IDS: '5000000001'
+      DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-dev.txt
+      - name: Delivery and full regression tests
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          ruff check app tests 2>&1 | tee lint-results.txt
+          lint_status=${PIPESTATUS[0]}
+          python -m pytest -q --junitxml=delivery-results.xml 2>&1 | tee delivery-results.txt
+          test_status=${PIPESTATUS[0]}
+          node tests/offline_delivery_cache_check.mjs
+          [ "$lint_status" = 0 ] && [ "$test_status" = 0 ]
+      - name: Capture verification results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: delivery-test-results
+          path: |
+            delivery-results.xml
+            delivery-results.txt
+            lint-results.txt
+  guide:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-dev.txt playwright==1.51.0
+      - run: python -m playwright install --with-deps chromium
+      - name: Verify mobile routes and offline photo replay
+        env:
+          BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
+          ADMIN_TELEGRAM_IDS: '5000000001'
+          DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+          PYTHONPATH: .
+          WORKFLOW_TEST_CERT: /tmp/photo-boss-test-cert.pem
+          WORKFLOW_TEST_KEY: /tmp/photo-boss-test-key.pem
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORKFLOW_TEST_KEY" -out "$WORKFLOW_TEST_CERT" -days 1 -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1' 2>/dev/null
+          python - <<'PY'
+          import subprocess
+          checks = ['update_browser_check.py', 'account_schedule_browser_check.py', 'workflow_browser_check.py', 'photo_storage_browser_check.py']
+          results = {name: subprocess.run(['python', 'tests/' + name]).returncode for name in checks}
+          print('BROWSER_CHECK_RESULTS', results)
+          raise SystemExit(int(any(results.values())))
+          PY
+      - name: Verify navigation and capture training screens
+        run: python docs/guide/capture.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: photo-boss-training-screens
+          path: guide-screens

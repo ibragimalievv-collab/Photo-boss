@@ -314,6 +314,58 @@ class MiniApp:
             items = await self.bookings_data(conn, request["miniapp_actor"], day)
         return web.json_response({"items": items})
 
+    async def booking_photographers(self, request):
+        actor = request["miniapp_actor"]
+        if not {"OWNER", "ADMIN"} & set(actor["roles"]):
+            raise AccessError("Назначение доступно администратору и владельцу.")
+        async with self.engine.connect() as conn:
+            people = await self.rows(conn, """SELECT u.id,u.name FROM users u
+                WHERE u.active=TRUE AND EXISTS
+                (SELECT 1 FROM user_roles r WHERE r.user_id=u.id AND r.role='PHOTOGRAPHER')
+                ORDER BY u.name,u.id""")
+        return web.json_response({"items": [dict(p) for p in people]})
+
+    async def assign_booking_photographer(self, request):
+        actor = request["miniapp_actor"]
+        if not {"OWNER", "ADMIN"} & set(actor["roles"]):
+            raise AccessError("Назначение доступно администратору и владельцу.")
+        body = await self.body(request)
+        uid = body.get("photographerId")
+        previous = body.get("previousPhotographerId")
+        if (set(body) != {"photographerId", "previousPhotographerId"}
+                or type(uid) is not int or uid <= 0
+                or previous is not None and (type(previous) is not int or previous <= 0)):
+            raise AccessError("Выберите фотографа и обновите карточку съёмки.", 400)
+        bid = int(request.match_info["id"])
+        async with self.engine.begin() as conn:
+            rows = await self.rows(conn, "SELECT * FROM bookings WHERE id=:bid FOR UPDATE", bid=bid)
+            if not rows:
+                raise AccessError("Съёмка не найдена.", 404)
+            booking = rows[0]
+            if booking["photographer_id"] == uid:
+                return web.json_response({"ok": True, "photographerId": uid})
+            if booking["photographer_id"] != previous:
+                raise AccessError("Фотограф уже изменён другим сотрудником. Обновите карточку.", 409)
+            if booking["status"] not in {"NEW", "CONFIRMED", "PENDING_CONFIRMATION", "RESCHEDULED", "ASSIGNED"}:
+                raise AccessError("Менять фотографа можно до начала съёмки.", 409)
+            people = await self.rows(conn, """SELECT u.id FROM users u WHERE u.id=:uid AND u.active=TRUE
+                AND EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id=u.id AND r.role='PHOTOGRAPHER')
+                FOR UPDATE""", uid=uid)
+            if not people:
+                raise AccessError("Нужен активный сотрудник с ролью фотографа.", 400)
+            shoots = await self.rows(conn, "SELECT * FROM shootings WHERE booking_id=:bid FOR UPDATE", bid=bid)
+            if shoots and (shoots[0]["started_at"] or shoots[0]["completed_at"]
+                    or shoots[0]["status"] not in {"NEW", "PENDING_CONFIRMATION", "CONFIRMED", "ASSIGNED"}):
+                raise AccessError("Съёмка уже начата. Назначение менять нельзя.", 409)
+            await conn.execute(text("UPDATE bookings SET photographer_id=:uid,status='ASSIGNED' WHERE id=:bid"), {"uid": uid, "bid": bid})
+            if shoots:
+                await conn.execute(text("UPDATE shootings SET status='ASSIGNED',accepted_at=NULL WHERE booking_id=:bid"), {"bid": bid})
+            else:
+                await conn.execute(text("INSERT INTO shootings (booking_id,status) VALUES (:bid,'ASSIGNED')"), {"bid": bid})
+            await self.audit_write(conn, actor, "miniapp_photographer_assigned", "booking", bid,
+                                   f"Фотограф: {previous} → {uid}")
+        return web.json_response({"ok": True, "photographerId": uid})
+
     async def finance_data(self, conn, actor, start, end, period):
         if "ADMIN" in actor["roles"] and "OWNER" not in actor["roles"] and (start != self.today() or end != self.today()):
             raise AccessError("Общая касса за прошлые периоды доступна только владельцу.")
@@ -689,7 +741,7 @@ class MiniApp:
 
     async def static_file(self, request):
         name = request.match_info.get("asset", "index.html")
-        allowed = {"sw.js", "manifest.webmanifest", "js/install.js", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-maskable-512.png", "assets/apple-touch-icon.png", "js/browser-login.js", "js/account.js", "js/schedule-editor.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
+        allowed = {"js/delivery.js", "css/delivery-client.css", "sw.js", "manifest.webmanifest", "js/install.js", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-maskable-512.png", "assets/apple-touch-icon.png", "js/browser-login.js", "js/account.js", "js/schedule-editor.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
                    "js/development.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg"}
@@ -708,6 +760,8 @@ class MiniApp:
         app.router.add_get("/certificate/{code}", self.certificate_page)
         routes = [("GET", "/me", self.me), ("POST", "/session", self.session_open), ("PUT", "/preferences", self.preferences),
             ("GET", "/dashboard", self.dashboard), ("GET", "/bookings", self.bookings),
+            ("GET", "/booking-photographers", self.booking_photographers),
+            ("POST", r"/bookings/{id:\d+}/photographer", self.assign_booking_photographer),
             ("GET", "/finance", self.finance), ("GET", "/schedule", self.schedule),
             ("POST", "/schedule", self.create_shift), ("POST", "/schedule/batch", self.create_shift_batch), ("POST", "/schedule/team", self.create_team_schedule), ("DELETE", "/schedule/{id}", self.cancel_shift),
             ("GET", "/audit", self.audit), ("GET", "/academy", self.academy),
@@ -721,6 +775,8 @@ class MiniApp:
 def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/Moscow"):
     miniapp = MiniApp(engine, bot, lessons, blocks=blocks, tz_name=tz_name)
     miniapp.register(app)
+    from .delivery import install_delivery
+    install_delivery(app, miniapp)
     from .insights import install_insights
     install_insights(app, miniapp)
     from .team import install_team
@@ -730,3 +786,4 @@ def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/M
     from .development import install_development
     install_development(app, miniapp)
     return miniapp
+

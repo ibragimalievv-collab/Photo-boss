@@ -842,3 +842,94 @@ class PhotoEdit(Base):
         CheckConstraint("mode IN ('MANUAL','AI')"),
         CheckConstraint("status IN ('PENDING','RUNNING','READY','FAILED','CANCELLED')"),
     )
+
+
+
+class DeliveryGallery(Base):
+    __tablename__ = 'delivery_galleries'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    booking_id: Mapped[int] = mapped_column(ForeignKey('bookings.id', ondelete='CASCADE'), unique=True)
+    access_token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(120))
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    published: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    handed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class DeliveryPhoto(Base):
+    __tablename__ = 'delivery_photos'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gallery_id: Mapped[int] = mapped_column(ForeignKey('delivery_galleries.id', ondelete='CASCADE'), index=True)
+    uploaded_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    filename: Mapped[str] = mapped_column(String(160))
+    disk_path: Mapped[str] = mapped_column(String(500))
+    sha256: Mapped[str] = mapped_column(String(64))
+    byte_size: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (UniqueConstraint('gallery_id', 'sha256', name='uq_delivery_photo_digest'),)
+
+
+class DeliveryContact(Base):
+    __tablename__ = 'delivery_contacts'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tg_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    name: Mapped[str] = mapped_column(String(200))
+    username: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    marketing_opt_in: Mapped[bool] = mapped_column(Boolean, default=False)
+    blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class DeliveryClaim(Base):
+    __tablename__ = 'delivery_claims'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gallery_id: Mapped[int] = mapped_column(ForeignKey('delivery_galleries.id', ondelete='CASCADE'))
+    contact_id: Mapped[int] = mapped_column(ForeignKey('delivery_contacts.id', ondelete='CASCADE'))
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    link_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (UniqueConstraint('gallery_id', 'contact_id', name='uq_delivery_claim'),)
+
+
+class DeliveryReminder(Base):
+    __tablename__ = 'delivery_reminders'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    booking_id: Mapped[int] = mapped_column(ForeignKey('bookings.id', ondelete='CASCADE'))
+    contact_id: Mapped[int] = mapped_column(ForeignKey('delivery_contacts.id', ondelete='CASCADE'))
+    moment: Mapped[str] = mapped_column(String(40))
+    kind: Mapped[str] = mapped_column(String(10))
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (UniqueConstraint('booking_id', 'contact_id', 'moment', 'kind', name='uq_delivery_reminder'),)
+
+
+class DeliveryCampaign(Base):
+    __tablename__ = 'delivery_campaigns'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class DeliveryCampaignRecipient(Base):
+    __tablename__ = 'delivery_campaign_recipients'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey('delivery_campaigns.id', ondelete='CASCADE'))
+    contact_id: Mapped[int] = mapped_column(ForeignKey('delivery_contacts.id', ondelete='CASCADE'))
+    status: Mapped[str] = mapped_column(String(20), default='PENDING')
+    __table_args__ = (UniqueConstraint('campaign_id', 'contact_id', name='uq_delivery_campaign_recipient'),)
+
+
+class DeliveryBookingResponse(Base):
+    __tablename__ = 'delivery_booking_responses'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    booking_id: Mapped[int] = mapped_column(ForeignKey('bookings.id', ondelete='CASCADE'))
+    contact_id: Mapped[int] = mapped_column(ForeignKey('delivery_contacts.id', ondelete='CASCADE'))
+    kind: Mapped[str] = mapped_column(String(20))
+    moment: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (UniqueConstraint('booking_id', 'contact_id', 'kind', 'moment', name='uq_delivery_booking_response'),)

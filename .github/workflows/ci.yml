@@ -124,7 +124,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements-dev.txt playwright==1.51.0
-      - run: python -m playwright install --with-deps chromium
+      - run: python -m playwright install chromium
       - name: Verify camera grant reuse, controls and permission denial
         env:
           CALLS_QA_CONTROLS_ONLY: '1'
@@ -167,7 +167,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements-dev.txt playwright==1.51.0
-      - run: python -m playwright install --with-deps chromium
+      - run: python -m playwright install chromium
       - name: Start an isolated test relay
         run: |
           sudo apt-get update -qq
@@ -178,3 +178,4 @@ jobs:
       - name: Show test relay diagnostics on failure
         if: failure()
         run: tail -120 /tmp/photoboss-coturn*.log
+

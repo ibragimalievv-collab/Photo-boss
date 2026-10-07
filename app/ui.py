@@ -105,6 +105,9 @@ class CompactUiMiddleware(BaseMiddleware):
 
 
 async def remember_sent_message(make_request, bot, method):
+    # Guest delivery links must survive contact sharing, preferences and reminders.
+    if getattr(method, 'protect_content', None) is False:
+        return await make_request(bot, method)
     add_navigation(method)
     result = await make_request(bot, method)
     # The message carrying the permanent bottom menu is the chat's anchor.
@@ -123,3 +126,4 @@ async def remember_sent_message(make_request, bot, method):
 def enable_compact_ui(bot):
     bot._compact_ui_enabled = True
     bot.session.middleware(remember_sent_message)
+

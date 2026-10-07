@@ -64,7 +64,11 @@ async def main():
                 page=await context.new_page();page.on('pageerror',lambda e:errors.append(str(e)))
                 for name,title in [('insights','Контроль бизнеса'),('team','Команда и найм'),('onboarding','Начало работы с Photo Boss'),('workday','Итоги смены'),('development','Развитие фотографа и продажи')]:
                     await page.goto(BASE+'/app/#'+name)
-                    await page.get_by_role('heading',name=title,exact=True).wait_for()
+                    try:
+                        await page.get_by_role('heading',name=title,exact=True).wait_for()
+                    except Exception:
+                        print('Failed route',name,'app:',await page.locator('#app').inner_text(),'errors:',errors)
+                        raise
                     if name == 'insights':
                         await page.get_by_text('Оплаченные расходы и выплаты',exact=True).click()
                         await page.locator('#cashExpense [name=category]').select_option('OTHER')
@@ -140,7 +144,7 @@ async def main():
                 assert 'Hotel from mobile app' in await page.locator('#pbEmployeeForm').inner_text()
                 await page.screenshot(path=str(output/'update-in-app-staff-mobile.png'),full_page=True)
                 await page.locator('[data-people=close]').click()
-                for status_code,title in [(503,'Не удалось загрузить'),(401,'Требуется повторный вход'),(403,'Рабочий доступ недоступен')]:
+                for status_code,title in [(503,'Не удалось загрузить'),(401,'Вход в Photo Boss'),(403,'Рабочий доступ недоступен')]:
                     failure_mode=status_code
                     await page.reload()
                     await page.get_by_role('heading',name=title,exact=True).wait_for()
@@ -152,7 +156,11 @@ async def main():
                         assert 'Ваш Telegram ID: 1' in await page.locator('#app').inner_text()
                     await page.screenshot(path=str(output/f'update-in-app-error-{status_code}.png'),full_page=True)
                     failure_mode=None
-                    await page.get_by_role('button',name='Повторить',exact=True).click()
+                    if status_code == 401:
+                        assert await page.locator('#passwordLoginForm').count() == 1
+                        await page.reload()
+                    else:
+                        await page.get_by_role('button',name='Повторить',exact=True).click()
                     await page.get_by_role('heading',name='Всё под контролем',exact=True).wait_for()
                 assert bot.send_message.await_count==0
                 assert bot.me.await_count==0
@@ -166,7 +174,7 @@ async def main():
                 await page.get_by_role('button',name='Готово',exact=True).click()
                 await page.get_by_text('Сохранено локально',exact=True).wait_for()
                 offline=False;await context.set_offline(False)
-                await page.get_by_text('Синхронизировано',exact=True).wait_for()
+                await wait_async(page,"async ()=>(await (await import('/app/js/outbox.js')).outboxRows()).some(r=>r.kind==='checklist'&&r.status==='synced')")
                 await page.reload()
                 await page.get_by_text('Проверить резервную карту · выполнено',exact=True).wait_for()
                 assert not errors,errors
@@ -178,3 +186,4 @@ async def main():
 
 
 if __name__=='__main__': asyncio.run(main())
+

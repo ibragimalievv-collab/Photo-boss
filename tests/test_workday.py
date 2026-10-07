@@ -73,3 +73,18 @@ def test_guest_feedback_private_link_and_one_submission():
         with pytest.raises(AccessError): await svc.operation(Request(OWNER,{'actorId':1,'key':'unique-request-key-4','kind':'checklist','date':'2026-09-21','data':{}}))
         await engine.dispose()
     asyncio.run(run())
+
+
+
+def test_malformed_multipart_does_not_execute_or_create_a_retry_loop():
+    from unittest.mock import AsyncMock
+    async def run():
+        svc = Workday(SimpleNamespace())
+        svc.execute = AsyncMock()
+        reader = SimpleNamespace(next=AsyncMock(side_effect=ValueError('missing starting boundary')))
+        request = SimpleNamespace(multipart=AsyncMock(return_value=reader))
+        with pytest.raises(AccessError) as err:
+            await svc.media(request)
+        assert err.value.status == 400
+        svc.execute.assert_not_called()
+    asyncio.run(run())

@@ -23,7 +23,7 @@ export async function flushOutbox(){
   try{
    const operation={actorId:row.userId,key:row.key,kind:row.kind,date:row.date,data:row.data};
    let body=operation,path='/operations/sync';
-   if(row.blob){body=new FormData();body.append('operation',JSON.stringify(operation));body.append('file',row.blob,'upload');path='/operations/media';}
+   if(row.blob){const bytes=await row.blob.arrayBuffer();if(!bytes.byteLength){const error=new Error('Сохранённое фото пустое. Выберите файл заново.');error.status=400;throw error;}const upload=new Blob([bytes],{type:row.blob.type||'application/octet-stream'});body=new FormData();body.append('operation',JSON.stringify(operation));body.append('file',upload,row.filename||'upload');path='/operations/media';}
    row.result=await api(path,{method:'POST',body,timeoutMs:180000});row.status='synced';row.error='';row.errorStatus=0;row.blob=null;
   }catch(e){
    row.status=(!e.status||e.status>=500)?'local':'error';row.error=e.message;row.errorStatus=e.status||0;
@@ -35,3 +35,4 @@ export async function flushOutbox(){
  }}finally{running=false;}
 }
 window.addEventListener('online',()=>flushOutbox());
+

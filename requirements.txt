@@ -5,3 +5,5 @@ asyncpg==0.31.0
 python-dotenv==1.2.3
 redis==6.4.0
 Pillow==12.3.0
+
+qrcode==8.2

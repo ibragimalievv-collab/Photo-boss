@@ -52,6 +52,16 @@ async def operations_loop(bot, interval=300):
             except Exception:
                 failed.append(name)
                 logger.exception("Background job failed: %s", name)
+        from .delivery import SERVICES
+        delivery = SERVICES.get(getattr(bot, "token", ""))
+        if delivery:
+            try:
+                from .delivery_bot import run_guest_messages
+                result['guest_messages'] = await run_guest_messages(delivery.api, bot)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception('Guest delivery messages failed')
         if any(result.values()):
             logger.info("Operations cycle: %s", result)
         if not failed:
@@ -85,8 +95,9 @@ def create_dispatcher():
     from .audit_context import ActorMiddleware
     dispatcher.update.outer_middleware(ActorMiddleware())
     dispatcher.update.outer_middleware(CompactUiMiddleware())
+    from .delivery_bot import r as delivery_router
     dispatcher.include_routers(
-        common.r, receipts.r, admin.r, photographer.r, manager.r, sales.r,
+        delivery_router, common.r, receipts.r, admin.r, photographer.r, manager.r, sales.r,
         operations.r, academy.r, training.r,
     )
     return dispatcher
@@ -156,3 +167,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
