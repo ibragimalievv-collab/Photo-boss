@@ -218,11 +218,12 @@ class Delivery:
         storage = YandexDisk(token, client_id)
         client = await session.get(Client, b.client_id)
         guest = re.sub(r'[^A-Za-zА-Яа-яЁё0-9 ._()#-]', '_', (client.name if client else 'Гость'))[:60].strip(' .') or 'Гость'
-        stamp = f"booking-{b.id} - {b.shoot_date.isoformat()} {str(b.shoot_time)[:5].replace(':','-')} - {guest}"
-        folder = ROOT + '/delivery/' + stamp
+        stamp = f"{b.shoot_date.isoformat()}_{str(b.shoot_time)[:5].replace(':','-')}_{guest.replace(' ', '_')}"
+        booking_folder = ROOT + f'/delivery/booking-{b.id}'
+        folder = booking_folder + '/' + stamp
         all_folder = folder + '/Все фото'
         selected_folder = folder + '/Выбранные'
-        for directory in (ROOT, ROOT + '/delivery', folder, all_folder, selected_folder):
+        for directory in (ROOT, ROOT + '/delivery', booking_folder, folder, all_folder, selected_folder):
             await storage.ensure_dir(directory)
         path = all_folder + f'/{digest}.{ext}'
         await storage.upload_bytes(path, raw, content_type=mime)
@@ -257,11 +258,12 @@ class Delivery:
             raw = await self.bytes(p)
             client = await session.get(Client, b.client_id)
             guest = re.sub(r'[^A-Za-zА-Яа-яЁё0-9 ._()#-]', '_', (client.name if client else 'Гость'))[:60].strip(' .') or 'Гость'
-            stamp = f"{b.shoot_date.isoformat()} {str(b.shoot_time)[:5].replace(':','-')} - {guest} - {b.id}"
-            selected_folder = ROOT + '/delivery/' + stamp + '/Выбранные'
-            await storage.ensure_dir(ROOT + '/delivery')
-            await storage.ensure_dir(ROOT + '/delivery/' + stamp)
-            await storage.ensure_dir(selected_folder)
+            stamp = f"{b.shoot_date.isoformat()}_{str(b.shoot_time)[:5].replace(':','-')}_{guest.replace(' ', '_')}"
+            booking_folder = ROOT + f'/delivery/booking-{b.id}'
+            folder = booking_folder + '/' + stamp
+            selected_folder = folder + '/Выбранные'
+            for directory in (ROOT, ROOT + '/delivery', booking_folder, folder, selected_folder):
+                await storage.ensure_dir(directory)
             ext, mime = image_format(raw)
             selected_path = selected_folder + f'/{p.sha256}.{ext}'
             if body['selected']:
