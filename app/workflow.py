@@ -41,8 +41,8 @@ from .services.sale_workflow import (
 from .yandex_disk import ROOT, YandexDisk, YandexDiskError, configured_from_env
 
 KINDS = frozenset({'booking', 'sale_start', 'sale_counts', 'sale_complete', 'sale_receipt',
-                   'sale_selected', 'booking_receipt', 'shoot_photo', 'shoot_complete', 'shoot_retry', 'photo_edit'})
-MEDIA_KINDS = frozenset({'sale_receipt', 'sale_selected', 'booking_receipt', 'shoot_photo'})
+                   'sale_selected', 'booking_receipt', 'shoot_photo', 'shoot_complete', 'shoot_retry', 'photo_edit', 'delivery_photo', 'delivery_handoff'})
+MEDIA_KINDS = frozenset({'sale_receipt', 'sale_selected', 'booking_receipt', 'shoot_photo', 'delivery_photo'})
 
 
 def fields(data, expected):
@@ -147,6 +147,9 @@ class Workflow:
                         raise AccessError('Некорректный фотограф.', 400)
                     booking = await create_booking_record(session, actor, data, data['photographer_id'])
                     result = {'bookingId': booking.id}
+                elif kind.startswith('delivery_'):
+                    from .delivery import Delivery
+                    result = await Delivery(self.api).apply(session, actor_data, kind, data, raw)
                 elif kind == 'photo_edit':
                     from .photo_edits import apply
                     result = await apply(session, actor_data, data)
@@ -281,3 +284,4 @@ class Workflow:
             return {'shootingId': sid, 'photoId': photo.id, 'storageStatus': 'PENDING'}
         completed = await complete_full_upload(session, actor, sid, allow_management=True)
         return {'shootingId': sid, 'photos': completed.count, 'percent': str(completed.commissions['percent'])}
+

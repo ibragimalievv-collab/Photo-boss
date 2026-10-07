@@ -721,6 +721,8 @@ class MiniApp:
 def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/Moscow"):
     miniapp = MiniApp(engine, bot, lessons, blocks=blocks, tz_name=tz_name)
     miniapp.register(app)
+    from .delivery import install_delivery
+    install_delivery(app, miniapp)
     from .insights import install_insights
     install_insights(app, miniapp)
     from .team import install_team
@@ -730,3 +732,4 @@ def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/M
     from .development import install_development
     install_development(app, miniapp)
     return miniapp
+
