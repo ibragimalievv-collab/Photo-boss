@@ -81,7 +81,8 @@ async def refresh(engine, request, response):
 async def issue(conn, actor, raw, now, *, telegram_verified_at=None):
     """Issue a device session in the caller's transaction; actor is server-verified."""
     # Serialize issuance with dismissal so an in-flight request cannot restore a revoked device.
-    user = (await conn.execute(text('SELECT active FROM users WHERE id=:id FOR UPDATE'),
+    lock = '' if getattr(getattr(conn, 'dialect', None), 'name', None) == 'sqlite' else ' FOR UPDATE'
+    user = (await conn.execute(text('SELECT active FROM users WHERE id=:id' + lock),
                               {'id': actor['id']})).first()
     if not user or not user[0]:
         return
@@ -119,3 +120,4 @@ async def issue(conn, actor, raw, now, *, telegram_verified_at=None):
 def set_cookie(response, raw):
     response.set_cookie(COOKIE, raw, max_age=TTL, secure=True, httponly=True,
                         samesite='Strict', path='/')
+
