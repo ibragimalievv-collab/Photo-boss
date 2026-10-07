@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 API = "https://cloud-api.yandex.net/v1/disk"
 ROOT = "app:/PhotoBoss"
 SYSTEM = ROOT + "/system"
-_PATH_RE = re.compile(r"^app:/PhotoBoss(?:/[A-Za-z0-9._-]+)*$")
 
 
 class YandexDiskError(RuntimeError):
@@ -30,8 +29,19 @@ class YandexDiskError(RuntimeError):
 
 
 def safe_path(path: str) -> str:
-    if not isinstance(path, str) or not _PATH_RE.fullmatch(path) or "/../" in path or path.endswith("/.."):
+    """Validate a path inside Photo Boss app storage, including Cyrillic folder names."""
+    if not isinstance(path, str) or not path.startswith(ROOT):
         raise ValueError("Unsafe Yandex.Disk app-folder path")
+    if len(path) > 900 or "\\" in path or any(ord(ch) < 32 for ch in path):
+        raise ValueError("Unsafe Yandex.Disk app-folder path")
+    suffix = path[len(ROOT):]
+    if suffix and not suffix.startswith("/"):
+        raise ValueError("Unsafe Yandex.Disk app-folder path")
+    if "//" in suffix:
+        raise ValueError("Unsafe Yandex.Disk app-folder path")
+    for segment in suffix.split("/")[1:]:
+        if not segment or segment in {".", ".."}:
+            raise ValueError("Unsafe Yandex.Disk app-folder path")
     return path
 
 
