@@ -144,7 +144,7 @@ async def main():
                 assert 'Hotel from mobile app' in await page.locator('#pbEmployeeForm').inner_text()
                 await page.screenshot(path=str(output/'update-in-app-staff-mobile.png'),full_page=True)
                 await page.locator('[data-people=close]').click()
-                for status_code,title in [(503,'Не удалось загрузить'),(401,'Требуется повторный вход'),(403,'Рабочий доступ недоступен')]:
+                for status_code,title in [(503,'Не удалось загрузить'),(401,'Вход в Photo Boss'),(403,'Рабочий доступ недоступен')]:
                     failure_mode=status_code
                     await page.reload()
                     await page.get_by_role('heading',name=title,exact=True).wait_for()
@@ -156,7 +156,11 @@ async def main():
                         assert 'Ваш Telegram ID: 1' in await page.locator('#app').inner_text()
                     await page.screenshot(path=str(output/f'update-in-app-error-{status_code}.png'),full_page=True)
                     failure_mode=None
-                    await page.get_by_role('button',name='Повторить',exact=True).click()
+                    if status_code == 401:
+                        assert await page.locator('#passwordLoginForm').count() == 1
+                        await page.reload()
+                    else:
+                        await page.get_by_role('button',name='Повторить',exact=True).click()
                     await page.get_by_role('heading',name='Всё под контролем',exact=True).wait_for()
                 assert bot.send_message.await_count==0
                 assert bot.me.await_count==0
