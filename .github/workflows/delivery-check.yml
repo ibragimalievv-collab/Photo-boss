@@ -48,8 +48,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install playwright==1.51.0 Pillow==12.2.0
+      - run: pip install -r requirements-dev.txt playwright==1.51.0
       - run: python -m playwright install --with-deps chromium
+      - name: Verify mobile routes and offline photo replay
+        env:
+          BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
+          ADMIN_TELEGRAM_IDS: '5000000001'
+          DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+          PYTHONPATH: .
+          WORKFLOW_TEST_CERT: /tmp/photo-boss-test-cert.pem
+          WORKFLOW_TEST_KEY: /tmp/photo-boss-test-key.pem
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORKFLOW_TEST_KEY" -out "$WORKFLOW_TEST_CERT" -days 1 -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1' 2>/dev/null
+          python tests/update_browser_check.py
+          python tests/account_schedule_browser_check.py
+          python tests/workflow_browser_check.py
+          python tests/photo_storage_browser_check.py
       - name: Verify navigation and capture training screens
         run: python docs/guide/capture.py
       - uses: actions/upload-artifact@v4

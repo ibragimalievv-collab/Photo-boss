@@ -67,6 +67,12 @@ class Workday:
         return await self.execute(a, body)
 
     async def media(self, request):
+        try:
+            return await self.read_media(request)
+        except (ValueError, AssertionError) as exc:
+            raise AccessError('Не удалось прочитать вложение. Повторите отправку; если ошибка повторится, выберите файл заново.', 400) from exc
+
+    async def read_media(self, request):
         reader = await request.multipart()
         meta = await reader.next()
         if meta is None or meta.name != 'operation':
@@ -190,3 +196,4 @@ def install_workday(app,api):
     app.router.add_get('/feedback/{token}',service.feedback_page)
     app.router.add_post('/feedback/{token}',service.feedback_submit)
     return service
+
