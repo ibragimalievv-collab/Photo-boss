@@ -854,6 +854,7 @@ class DeliveryGallery(Base):
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     published: Mapped[bool] = mapped_column(Boolean, default=False)
+    delivery_mode: Mapped[str] = mapped_column(String(20), default='SELECTED')
     created_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
     opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -870,6 +871,7 @@ class DeliveryPhoto(Base):
     disk_path: Mapped[str] = mapped_column(String(500))
     sha256: Mapped[str] = mapped_column(String(64))
     byte_size: Mapped[int] = mapped_column(Integer)
+    selected: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     __table_args__ = (UniqueConstraint('gallery_id', 'sha256', name='uq_delivery_photo_digest'),)
 
