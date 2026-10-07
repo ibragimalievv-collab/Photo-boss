@@ -854,7 +854,7 @@ class DeliveryGallery(Base):
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     published: Mapped[bool] = mapped_column(Boolean, default=False)
-    delivery_mode: Mapped[str] = mapped_column(String(20), default='SELECTED')
+    delivery_mode: Mapped[str] = mapped_column(String(20), default='ALL')
     created_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
     opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
