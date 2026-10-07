@@ -103,7 +103,7 @@ class Delivery:
         base = f'/api/miniapp/delivery/{b.id}'
         result = {'bookingId': b.id, 'photographer': user.name if user else None, 'canEdit': can_edit(actor, b),
                   'title': g.title if g else 'Ваши фотографии', 'published': bool(g and g.published),
-                  'deliveryMode': (g.delivery_mode if g else 'SELECTED'),
+                  'deliveryMode': (g.delivery_mode if g else 'ALL'),
                   'passwordEnabled': bool(g and g.password_hash), 'expiresAt': g.expires_at.isoformat() if g and g.expires_at else None,
                   'openedAt': g.opened_at.isoformat() if g and g.opened_at else None,
                   'downloadedAt': g.downloaded_at.isoformat() if g and g.downloaded_at else None,
@@ -218,7 +218,7 @@ class Delivery:
         storage = YandexDisk(token, client_id)
         client = await session.get(Client, b.client_id)
         guest = re.sub(r'[^A-Za-zА-Яа-яЁё0-9 ._()#-]', '_', (client.name if client else 'Гость'))[:60].strip(' .') or 'Гость'
-        stamp = f"{b.shoot_date.isoformat()} {str(b.shoot_time)[:5].replace(':','-')} - {guest} - {b.id}"
+        stamp = f"booking-{b.id} - {b.shoot_date.isoformat()} {str(b.shoot_time)[:5].replace(':','-')} - {guest}"
         folder = ROOT + '/delivery/' + stamp
         all_folder = folder + '/Все фото'
         selected_folder = folder + '/Выбранные'
