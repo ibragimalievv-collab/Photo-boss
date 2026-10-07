@@ -1,7 +1,7 @@
 """Disposable database and fake storage/bot; no messages or photos leave the test."""
 import asyncio
 import io
-from datetime import date, datetime, time, timedelta
+from datetime import date, time, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.db import Base
 from app.delivery import can_edit, install_delivery, password_hash, password_matches
-from app.delivery_bot import start, phone, preference
+from app.delivery_bot import phone, preference, start
 from app.miniapp_security import AccessError
 from app.models import (
     Booking,
@@ -47,7 +47,7 @@ async def setup(monkeypatch):
         session.add_all([User(id=i,tg_id=i,name=f'User {i}') for i in ACTORS])
         session.add_all([Client(id=1,name='Guest'),Hotel(id=1,name='Hotel'),Package(id=1,name='Package',price_per_photo=400)])
         await session.flush()
-        session.add(Booking(id=1,hotel_id=1,client_id=1,package_id=1,room='200',manager_id=5,photographer_id=2,shoot_date=date.today(),shoot_time=time(12),status='ASSIGNED'))
+        session.add(Booking(id=1,hotel_id=1,client_id=1,package_id=1,room='200',manager_id=5,photographer_id=2,shoot_date=utc_now().date(),shoot_time=time(12),status='ASSIGNED'))
         await session.commit()
     bot=SimpleNamespace(token='123456:fake-delivery-test-token',me=AsyncMock(return_value=SimpleNamespace(username='PhotoBossTest')),send_message=AsyncMock())
     async def body(request):
