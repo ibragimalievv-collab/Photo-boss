@@ -241,6 +241,7 @@ class PhotoStorage(Base):
     telegram_file_id: Mapped[str] = mapped_column(String(300))
     telegram_unique_id: Mapped[str] = mapped_column(String(300), index=True)
     source_kind: Mapped[str] = mapped_column(String(20))
+    collection: Mapped[str] = mapped_column(String(20), default="ALL", index=True)
     status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     disk_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -256,6 +257,7 @@ class PhotoStorage(Base):
             "shooting_id", "telegram_unique_id", name="uq_photo_storage_shooting_unique_file"
         ),
         CheckConstraint("source_kind IN ('PHOTO', 'DOCUMENT')"),
+        CheckConstraint("collection IN ('ALL', 'SELECTED')"),
         CheckConstraint("status IN ('PENDING', 'UPLOADING', 'STORED', 'FAILED')"),
         CheckConstraint("attempts >= 0"),
     )
