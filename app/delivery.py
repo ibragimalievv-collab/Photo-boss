@@ -103,11 +103,12 @@ class Delivery:
         base = f'/api/miniapp/delivery/{b.id}'
         result = {'bookingId': b.id, 'photographer': user.name if user else None, 'canEdit': can_edit(actor, b),
                   'title': g.title if g else 'Ваши фотографии', 'published': bool(g and g.published),
+                  'deliveryMode': (g.delivery_mode if g else 'ALL'),
                   'passwordEnabled': bool(g and g.password_hash), 'expiresAt': g.expires_at.isoformat() if g and g.expires_at else None,
                   'openedAt': g.opened_at.isoformat() if g and g.opened_at else None,
                   'downloadedAt': g.downloaded_at.isoformat() if g and g.downloaded_at else None,
                   'handedAt': g.handed_at.isoformat() if g and g.handed_at else None,
-                  'photos': [{'id': p.id, 'name': p.filename, 'bytes': p.byte_size,
+                  'photos': [{'id': p.id, 'name': p.filename, 'bytes': p.byte_size, 'selected': bool(p.selected),
                               'url': base + f'/photos/{p.id}'} for p in photos]}
         if g:
             claims = (await session.scalars(select(DeliveryClaim).where(DeliveryClaim.gallery_id == g.id))).all()
@@ -132,7 +133,7 @@ class Delivery:
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
             b = await self.booking(session, a, request.match_info['booking'], edit=True)
             g = await self.ensure(session, a, b)
-            allowed = {'title', 'published', 'password', 'expiresDays', 'rotate'}
+            allowed = {'title', 'published', 'password', 'expiresDays', 'rotate', 'deliveryMode'}
             if set(body) - allowed:
                 raise AccessError('Неизвестная настройка галереи.', 400)
             if 'title' in body:
@@ -149,11 +150,20 @@ class Delivery:
                 if type(days) is not int or not 0 <= days <= 365:
                     raise AccessError('Срок доступа: от 0 до 365 дней.', 400)
                 g.expires_at = utc_now() + timedelta(days=days) if days else None
+            if 'deliveryMode' in body:
+                mode = body['deliveryMode']
+                if mode not in {'ALL', 'SELECTED'}:
+                    raise AccessError('Выберите: все фото или выбранные.', 400)
+                g.delivery_mode = mode
             if 'published' in body:
                 if type(body['published']) is not bool:
                     raise AccessError('Неверный статус галереи.', 400)
-                if body['published'] and not await session.scalar(select(DeliveryPhoto.id).where(DeliveryPhoto.gallery_id == g.id).limit(1)):
-                    raise AccessError('Сначала загрузите готовые фотографии.', 409)
+                if body['published']:
+                    q = select(DeliveryPhoto.id).where(DeliveryPhoto.gallery_id == g.id)
+                    if g.delivery_mode == 'SELECTED':
+                        q = q.where(DeliveryPhoto.selected.is_(True))
+                    if not await session.scalar(q.limit(1)):
+                        raise AccessError('Сначала загрузите фотографии для выбранного режима выдачи.', 409)
                 g.published = body['published']
             if 'rotate' in body:
                 if type(body['rotate']) is not bool:
@@ -165,7 +175,8 @@ class Delivery:
             return web.json_response(await self.describe(session, a, b))
 
     async def apply(self, session, actor, kind, data, raw=None):
-        if set(data) != ({'booking', 'filename'} if kind == 'delivery_photo' else {'booking', 'delivered'}):
+        photo_fields = {'booking', 'filename'} <= set(data) <= {'booking', 'filename', 'selected'}
+        if not (photo_fields if kind == 'delivery_photo' else set(data) == {'booking', 'delivered'}):
             raise AccessError('Некорректные поля выдачи.', 400)
         if type(data['booking']) is not int:
             raise AccessError('Некорректная съёмка.', 400)
@@ -205,17 +216,64 @@ class Delivery:
         if not token:
             raise AccessError('Яндекс Диск недоступен. Фото остаётся в очереди.', 503)
         storage = YandexDisk(token, client_id)
-        for path in (ROOT, ROOT + '/delivery', ROOT + f'/delivery/booking-{b.id}'):
-            await storage.ensure_dir(path)
-        path = ROOT + f'/delivery/booking-{b.id}/{digest}.{ext}'
+        client = await session.get(Client, b.client_id)
+        guest = re.sub(r'[^A-Za-zА-Яа-яЁё0-9 ._()#-]', '_', (client.name if client else 'Гость'))[:60].strip(' .') or 'Гость'
+        stamp = f"{b.shoot_date.isoformat()}_{str(b.shoot_time)[:5].replace(':','-')}_{guest.replace(' ', '_')}"
+        booking_folder = ROOT + f'/delivery/booking-{b.id}'
+        folder = booking_folder + '/' + stamp
+        all_folder = folder + '/Все фото'
+        selected_folder = folder + '/Выбранные'
+        for directory in (ROOT, ROOT + '/delivery', booking_folder, folder, all_folder, selected_folder):
+            await storage.ensure_dir(directory)
+        path = all_folder + f'/{digest}.{ext}'
         await storage.upload_bytes(path, raw, content_type=mime)
+        selected = bool(data.get('selected', False))
+        if selected:
+            await storage.upload_bytes(selected_folder + f'/{digest}.{ext}', raw, content_type=mime)
         name = re.sub(r'[^\w .()-]', '_', name)[:140] or 'photo.' + ext
         photo = DeliveryPhoto(gallery_id=g.id, uploaded_by_id=actor['id'], filename=name,
-                              disk_path=path, sha256=digest, byte_size=len(raw))
+                              disk_path=path, sha256=digest, byte_size=len(raw), selected=selected)
         session.add(photo)
         await session.flush()
         await audit(session, await session.get(User, actor['id']), 'delivery_photo_uploaded', 'booking', b.id)
-        return {'bookingId': b.id, 'photoId': photo.id}
+        return {'bookingId': b.id, 'photoId': photo.id, 'selected': selected}
+
+    async def select_photo(self, request):
+        actor = request['miniapp_actor']
+        body = await self.api.body(request)
+        if set(body) != {'selected'} or type(body['selected']) is not bool:
+            raise AccessError('Некорректный выбор фотографии.', 400)
+        async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
+            b = await self.booking(session, actor, request.match_info['booking'], edit=True)
+            p = await session.get(DeliveryPhoto, int(request.match_info['photo']))
+            g = await session.get(DeliveryGallery, p.gallery_id) if p else None
+            if not g or g.booking_id != b.id:
+                raise AccessError('Фото не найдено.', 404)
+            if p.selected == body['selected']:
+                return web.json_response({'photoId': p.id, 'selected': p.selected})
+            token, client_id = configured_from_env()
+            if not token:
+                raise AccessError('Яндекс Диск недоступен.', 503)
+            storage = YandexDisk(token, client_id)
+            raw = await self.bytes(p)
+            client = await session.get(Client, b.client_id)
+            guest = re.sub(r'[^A-Za-zА-Яа-яЁё0-9 ._()#-]', '_', (client.name if client else 'Гость'))[:60].strip(' .') or 'Гость'
+            stamp = f"{b.shoot_date.isoformat()}_{str(b.shoot_time)[:5].replace(':','-')}_{guest.replace(' ', '_')}"
+            booking_folder = ROOT + f'/delivery/booking-{b.id}'
+            folder = booking_folder + '/' + stamp
+            selected_folder = folder + '/Выбранные'
+            for directory in (ROOT, ROOT + '/delivery', booking_folder, folder, selected_folder):
+                await storage.ensure_dir(directory)
+            ext, mime = image_format(raw)
+            selected_path = selected_folder + f'/{p.sha256}.{ext}'
+            if body['selected']:
+                await storage.upload_bytes(selected_path, raw, content_type=mime)
+            else:
+                await storage.delete(selected_path)
+            p.selected = body['selected']
+            await audit(session, await session.get(User, actor['id']), 'delivery_photo_selected', 'booking', b.id)
+            await session.commit()
+            return web.json_response({'photoId': p.id, 'selected': p.selected})
 
     async def staff_photo(self, request):
         a = request['miniapp_actor']
@@ -291,7 +349,10 @@ class Delivery:
             except web.HTTPUnauthorized:
                 body = '<form method="post" action="/g/' + g.access_token + '/unlock"><label>Пароль альбома<input type="password" name="password" maxlength="100" required autocomplete="current-password"></label><button>Открыть фотографии</button></form>'
                 return web.Response(text=self.document(g.title, body), content_type='text/html')
-            files = (await session.scalars(select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id).order_by(DeliveryPhoto.id))).all()
+            q = select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id)
+            if g.delivery_mode == 'SELECTED':
+                q = q.where(DeliveryPhoto.selected.is_(True))
+            files = (await session.scalars(q.order_by(DeliveryPhoto.id))).all()
             if not g.opened_at:
                 g.opened_at = utc_now()
                 await session.commit()
@@ -314,7 +375,7 @@ class Delivery:
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
             g = await self.public_gallery(request, session)
             p = await session.get(DeliveryPhoto, int(request.match_info['photo']))
-            if not p or p.gallery_id != g.id:
+            if not p or p.gallery_id != g.id or (g.delivery_mode == 'SELECTED' and not p.selected):
                 raise web.HTTPNotFound()
             raw = await self.bytes(p)
             download = request.query.get('download') == '1'
@@ -329,7 +390,10 @@ class Delivery:
     async def archive(self, request):
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
             g = await self.public_gallery(request, session)
-            files = (await session.scalars(select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id).order_by(DeliveryPhoto.id))).all()
+            q = select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id)
+            if g.delivery_mode == 'SELECTED':
+                q = q.where(DeliveryPhoto.selected.is_(True))
+            files = (await session.scalars(q.order_by(DeliveryPhoto.id))).all()
             if not files or len(files) > MAX_PHOTOS or sum(p.byte_size for p in files) > MAX_ALBUM_BYTES:
                 raise web.HTTPBadRequest(text='Альбом недоступен для скачивания целиком.')
             async with request.app['delivery_archive_slot']:
@@ -357,11 +421,11 @@ class Delivery:
         async with AsyncSession(self.api.engine) as session:
             b = await self.booking(session, actor, request.match_info['booking'])
             data = await self.describe(session, actor, b)
-            if not data.get('botUrl'):
-                raise AccessError('Сначала создайте ссылку для гостя.', 409)
+            if not data.get('published') or not data.get('clientUrl'):
+                raise AccessError('Сначала опубликуйте фотографии для гостя.', 409)
         import qrcode
         output = io.BytesIO()
-        qrcode.make(data['botUrl']).save(output, format='PNG')
+        qrcode.make(data['clientUrl']).save(output, format='PNG')
         return web.Response(body=output.getvalue(), content_type='image/png')
 
     async def contacts(self, request):
@@ -465,6 +529,7 @@ def install_delivery(app, api):
     app.router.add_get(r'/api/miniapp/delivery/{booking:\d+}', service.listing)
     app.router.add_post(r'/api/miniapp/delivery/{booking:\d+}', service.configure)
     app.router.add_get(r'/api/miniapp/delivery/{booking:\d+}/photos/{photo:\d+}', service.staff_photo)
+    app.router.add_post(r'/api/miniapp/delivery/{booking:\d+}/photos/{photo:\d+}/selected', service.select_photo)
     app.router.add_get('/g/{token}', service.page)
     app.router.add_post('/g/{token}/unlock', service.unlock)
     app.router.add_get(r'/g/{token}/photos/{photo:\d+}', service.client_photo)
