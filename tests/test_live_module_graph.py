@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from aiohttp import web
 
+from app.delivery import Delivery
 from app.miniapp_api import MiniApp
 
 
@@ -28,4 +29,9 @@ def test_live_module_graph_is_accessible_through_static_handler():
                 dependency = (root / name).parent.joinpath(match.group(1)).resolve().relative_to(root)
                 pending.append(dependency.as_posix())
         assert 'js/delivery.js' in visited
+        document = Delivery(SimpleNamespace()).document('Example', '<p>Example</p>')
+        for match in re.finditer(r'href="(/app/[^"]+\.css)"', document):
+            name = match.group(1).removeprefix('/app/')
+            response = await api.static_file(SimpleNamespace(match_info={'asset': name}))
+            assert isinstance(response, web.FileResponse), name
     asyncio.run(run())
