@@ -60,10 +60,13 @@ jobs:
           WORKFLOW_TEST_KEY: /tmp/photo-boss-test-key.pem
         run: |
           openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORKFLOW_TEST_KEY" -out "$WORKFLOW_TEST_CERT" -days 1 -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1' 2>/dev/null
-          python tests/update_browser_check.py
-          python tests/account_schedule_browser_check.py
-          python tests/workflow_browser_check.py
-          python tests/photo_storage_browser_check.py
+          python - <<'PY'
+          import subprocess
+          checks = ['update_browser_check.py', 'account_schedule_browser_check.py', 'workflow_browser_check.py', 'photo_storage_browser_check.py']
+          results = {name: subprocess.run(['python', 'tests/' + name]).returncode for name in checks}
+          print('BROWSER_CHECK_RESULTS', results)
+          raise SystemExit(int(any(results.values())))
+          PY
       - name: Verify navigation and capture training screens
         run: python docs/guide/capture.py
       - uses: actions/upload-artifact@v4

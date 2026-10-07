@@ -174,7 +174,7 @@ async def main():
                 await page.get_by_role('button',name='Готово',exact=True).click()
                 await page.get_by_text('Сохранено локально',exact=True).wait_for()
                 offline=False;await context.set_offline(False)
-                await page.get_by_text('Синхронизировано',exact=True).wait_for()
+                await wait_async(page,"async ()=>(await (await import('/app/js/outbox.js')).outboxRows()).some(r=>r.kind==='checklist'&&r.status==='synced')")
                 await page.reload()
                 await page.get_by_text('Проверить резервную карту · выполнено',exact=True).wait_for()
                 assert not errors,errors
