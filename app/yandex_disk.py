@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 API = "https://cloud-api.yandex.net/v1/disk"
 ROOT = "app:/PhotoBoss"
 SYSTEM = ROOT + "/system"
-_PATH_RE = re.compile(r"^app:/PhotoBoss(?:/[A-Za-zА-Яа-яЁё0-9 ._()#-]+)*$")
+_PATH_RE = re.compile(r"^app:/PhotoBoss(?:/[A-Za-zА-Яа-яЁё0-9._()#-]+|/Все фото)*$")
 
 
 class YandexDiskError(RuntimeError):
@@ -33,7 +33,7 @@ def safe_path(path: str) -> str:
     if not isinstance(path, str) or not _PATH_RE.fullmatch(path):
         raise ValueError("Unsafe Yandex.Disk app-folder path")
     parts = path[len("app:/PhotoBoss"):].split("/")
-    if any(part in {".", ".."} or part.endswith(" ") for part in parts if part):
+    if any(part in {".", ".."} for part in parts if part):
         raise ValueError("Unsafe Yandex.Disk app-folder path")
     return path
 
