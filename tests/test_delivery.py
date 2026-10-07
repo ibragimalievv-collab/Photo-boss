@@ -17,8 +17,18 @@ from app.db import Base
 from app.delivery import can_edit, install_delivery, password_hash, password_matches
 from app.delivery_bot import start, phone, preference
 from app.miniapp_security import AccessError
-from app.models import (Booking, Client, DeliveryClaim, DeliveryContact, DeliveryGallery,
-                        DeliveryPhoto, Hotel, Package, User)
+from app.models import (
+    Booking,
+    Client,
+    DeliveryClaim,
+    DeliveryContact,
+    DeliveryGallery,
+    DeliveryPhoto,
+    Hotel,
+    Package,
+    User,
+    utc_now,
+)
 
 ACTORS = {1:{'id':1,'roles':['OWNER']},2:{'id':2,'roles':['PHOTOGRAPHER']},3:{'id':3,'roles':['PHOTOGRAPHER']},4:{'id':4,'roles':['ADMIN']},5:{'id':5,'roles':['MANAGER']}}
 
@@ -118,7 +128,7 @@ def test_private_album_publication_password_expiry_rotation_and_cross_album_acce
             assert new!=token and (await client.get('/g/'+token)).status==404
             async with AsyncSession(engine) as session:
                 g=await session.scalar(select(DeliveryGallery))
-                g.expires_at=datetime.utcnow()-timedelta(seconds=1)
+                g.expires_at=utc_now()-timedelta(seconds=1)
                 await session.commit()
             assert (await client.get('/g/'+new)).status==404
         finally:

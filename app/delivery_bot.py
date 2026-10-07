@@ -1,18 +1,33 @@
 """Guest delivery in the existing Telegram bot; guests never become staff accounts."""
 import logging
-from datetime import datetime
 
 from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .delivery import SERVICES
-from .models import (Booking, DeliveryCampaign, DeliveryCampaignRecipient, DeliveryClaim,
-                     DeliveryContact, DeliveryGallery, DeliveryReminder, DeliveryBookingResponse, User)
+from .models import (
+    Booking,
+    DeliveryBookingResponse,
+    DeliveryCampaign,
+    DeliveryCampaignRecipient,
+    DeliveryClaim,
+    DeliveryContact,
+    DeliveryGallery,
+    DeliveryReminder,
+    User,
+    utc_now,
+)
 
 logger = logging.getLogger(__name__)
 r = Router()
@@ -50,7 +65,7 @@ async def start(message, command):
     registering = command.args.startswith('booking_')
     async with AsyncSession(svc.api.engine, expire_on_commit=False) as session:
         g = await session.scalar(select(DeliveryGallery).where(DeliveryGallery.access_token == token))
-        if not g or (not registering and not g.published) or (g.expires_at and g.expires_at <= datetime.utcnow()):
+        if not g or (not registering and not g.published) or (g.expires_at and g.expires_at <= utc_now()):
             return await message.answer('Ссылка недействительна. Попросите фотографа показать новый QR-код.', protect_content=False)
         contact = await contact_record(session, message.from_user)
         claim = await session.scalar(select(DeliveryClaim).where(DeliveryClaim.gallery_id == g.id, DeliveryClaim.contact_id == contact.id))
@@ -66,7 +81,7 @@ async def start(message, command):
             await message.answer('Ваши готовые фотографии: ' + g.title,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Открыть и скачать фотографии', url=url)]]),
             protect_content=False)
-            claim.link_sent_at = datetime.utcnow()
+            claim.link_sent_at = utc_now()
             await session.commit()
     await message.answer('Телефон можно оставить для связи по этой съёмке. Это необязательно; фото доступны по кнопке выше.',
         reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text='Поделиться контактом', request_contact=True)]], resize_keyboard=True, one_time_keyboard=True),
@@ -151,11 +166,14 @@ async def booking_response(callback):
 
 
 async def run_guest_messages(api, bot):
-    from .services.operations import ACTIVE_BOOKING_STATUSES, reminder_kind
-    from .services.operations import booking_moment
+    from .services.operations import (
+        ACTIVE_BOOKING_STATUSES,
+        booking_moment,
+        reminder_kind,
+    )
     sent = 0
     async with AsyncSession(api.engine, expire_on_commit=False) as session:
-        now = datetime.utcnow()
+        now = utc_now()
         rows = (await session.execute(select(Booking, DeliveryContact).join(DeliveryGallery, DeliveryGallery.booking_id == Booking.id)
             .join(DeliveryClaim, DeliveryClaim.gallery_id == DeliveryGallery.id)
             .join(DeliveryContact, DeliveryContact.id == DeliveryClaim.contact_id)
@@ -181,11 +199,11 @@ async def run_guest_messages(api, bot):
             sent += 1
         pending = (await session.execute(select(DeliveryClaim, DeliveryGallery, DeliveryContact).join(DeliveryGallery, DeliveryGallery.id == DeliveryClaim.gallery_id).join(DeliveryContact, DeliveryContact.id == DeliveryClaim.contact_id).where(DeliveryClaim.link_sent_at.is_(None), DeliveryGallery.published.is_(True), DeliveryContact.blocked.is_(False)).limit(20))).all()
         for claim, g, c in pending:
-            if g.expires_at and g.expires_at <= datetime.utcnow():
+            if g.expires_at and g.expires_at <= utc_now():
                 continue
             try:
                 await bot.send_message(c.tg_id, 'Ваши готовые фотографии: ' + g.title, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='Смотреть и скачать',url=service(bot).origin()+'/g/'+g.access_token)]]), protect_content=False)
-                claim.link_sent_at = datetime.utcnow()
+                claim.link_sent_at = utc_now()
                 await session.commit()
                 sent += 1
             except TelegramForbiddenError:

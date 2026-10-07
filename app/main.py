@@ -53,7 +53,7 @@ async def operations_loop(bot, interval=300):
                 failed.append(name)
                 logger.exception("Background job failed: %s", name)
         from .delivery import SERVICES
-        delivery = SERVICES.get(bot.token)
+        delivery = SERVICES.get(getattr(bot, "token", ""))
         if delivery:
             try:
                 from .delivery_bot import run_guest_messages

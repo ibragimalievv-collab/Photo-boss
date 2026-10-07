@@ -42,10 +42,14 @@ jobs:
             lint-results.txt
       - name: Package test runtime for isolated local verification
         if: always()
-        run: pip install --target /tmp/delivery-test-runtime -r requirements.txt aiosqlite==0.22.1 pytest==9.1.1
+        run: pip install --no-compile --target /tmp/delivery-test-runtime -r requirements.txt aiosqlite==0.22.1 pytest==9.1.1 ruff==0.16.7
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: delivery-test-runtime
-          path: /tmp/delivery-test-runtime
+          path: |
+            /tmp/delivery-test-runtime
+            !/tmp/delivery-test-runtime/PIL
+            !/tmp/delivery-test-runtime/pillow.libs
+            !/tmp/delivery-test-runtime/pillow-*.dist-info
           retention-days: 1

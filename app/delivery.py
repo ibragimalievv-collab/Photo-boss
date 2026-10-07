@@ -15,8 +15,22 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .miniapp_security import AccessError
-from .models import (Booking, Client, DeliveryGallery, DeliveryPhoto, Hotel, Sale, Shooting, User,
-                     DeliveryClaim, DeliveryContact, DeliveryCampaign, DeliveryCampaignRecipient, DeliveryBookingResponse)
+from .models import (
+    Booking,
+    Client,
+    DeliveryBookingResponse,
+    DeliveryCampaign,
+    DeliveryCampaignRecipient,
+    DeliveryClaim,
+    DeliveryContact,
+    DeliveryGallery,
+    DeliveryPhoto,
+    Hotel,
+    Sale,
+    Shooting,
+    User,
+    utc_now,
+)
 from .services.core import audit
 from .services.photo_storage import image_format
 from .yandex_disk import ROOT, YandexDisk, YandexDiskError, configured_from_env
@@ -134,7 +148,7 @@ class Delivery:
                 days = body['expiresDays']
                 if type(days) is not int or not 0 <= days <= 365:
                     raise AccessError('Срок доступа: от 0 до 365 дней.', 400)
-                g.expires_at = datetime.utcnow() + timedelta(days=days) if days else None
+                g.expires_at = utc_now() + timedelta(days=days) if days else None
             if 'published' in body:
                 if type(body['published']) is not bool:
                     raise AccessError('Неверный статус галереи.', 400)
@@ -160,11 +174,14 @@ class Delivery:
         if kind == 'delivery_handoff':
             if type(data['delivered']) is not bool:
                 raise AccessError('Некорректная отметка выдачи.', 400)
-            g.handed_at = datetime.utcnow() if data['delivered'] else None
+            g.handed_at = utc_now() if data['delivered'] else None
             await audit(session, await session.get(User, actor['id']), 'delivery_handoff', 'booking', b.id)
             return {'bookingId': b.id, 'delivered': bool(g.handed_at)}
         if not raw or len(raw) > 20 * 1024 * 1024:
             raise AccessError('Фото: не более 20 МБ.', 413)
+        name = data['filename']
+        if not isinstance(name, str) or not name or len(name)>250:
+            raise AccessError('Некорректное имя фото.', 400)
         ext, mime = image_format(raw)
         # Verify the actual image rather than accepting a filename or magic bytes alone.
         from PIL import Image
@@ -192,9 +209,6 @@ class Delivery:
             await storage.ensure_dir(path)
         path = ROOT + f'/delivery/booking-{b.id}/{digest}.{ext}'
         await storage.upload_bytes(path, raw, content_type=mime)
-        name = data['filename']
-        if not isinstance(name, str):
-            raise AccessError('Некорректное имя фото.', 400)
         name = re.sub(r'[^\w .()-]', '_', name)[:140] or 'photo.' + ext
         photo = DeliveryPhoto(gallery_id=g.id, uploaded_by_id=actor['id'], filename=name,
                               disk_path=path, sha256=digest, byte_size=len(raw))
@@ -212,6 +226,8 @@ class Delivery:
             if not g or g.booking_id != b.id:
                 raise AccessError('Фото не найдено.', 404)
             raw = await self.bytes(p)
+            if request.query.get('preview')=='1':
+                raw = await asyncio.to_thread(self.preview, raw)
             return web.Response(body=raw, content_type=image_format(raw)[1])
 
     async def bytes(self, photo):
@@ -226,7 +242,7 @@ class Delivery:
         if not re.fullmatch(r'[A-Za-z0-9_-]{32}', token):
             raise web.HTTPNotFound()
         g = await session.scalar(select(DeliveryGallery).where(DeliveryGallery.access_token == token))
-        if not g or not g.published or (g.expires_at and g.expires_at <= datetime.utcnow()):
+        if not g or not g.published or (g.expires_at and g.expires_at <= utc_now()):
             raise web.HTTPNotFound(text='Галерея недоступна или срок доступа истёк.')
         if unlocked and g.password_hash:
             cookie = request.cookies.get('pb_gallery_' + str(g.id), '')
@@ -239,7 +255,7 @@ class Delivery:
 
     async def unlock(self, request):
         remote = request.remote or 'unknown'
-        now = datetime.utcnow()
+        now = utc_now()
         attempts, until = self.failures.get(remote, (0, now))
         if until <= now:
             attempts = 0
@@ -277,12 +293,22 @@ class Delivery:
                 return web.Response(text=self.document(g.title, body), content_type='text/html')
             files = (await session.scalars(select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id).order_by(DeliveryPhoto.id))).all()
             if not g.opened_at:
-                g.opened_at = datetime.utcnow()
+                g.opened_at = utc_now()
                 await session.commit()
             base = '/g/' + g.access_token
             cards = ''.join('<figure><a href="' + base + '/photos/' + str(p.id) + '"><img loading="lazy" src="' + base + '/photos/' + str(p.id) + '?preview=1" alt="' + html.escape(p.filename, quote=True) + '"></a><figcaption>' + html.escape(p.filename) + '</figcaption><a class="button" href="' + base + '/photos/' + str(p.id) + '?download=1">Скачать оригинал</a></figure>' for p in files)
             body = '<p>Ваши готовые фотографии. Нажмите на снимок для просмотра.</p><a class="button" href="' + base + '/album.zip">Скачать весь альбом ZIP</a><div class="gallery">' + cards + '</div>'
             return web.Response(text=self.document(g.title, body), content_type='text/html')
+
+    @staticmethod
+    def preview(raw):
+        from PIL import Image, ImageOps
+        with Image.open(io.BytesIO(raw)) as image:
+            image = ImageOps.exif_transpose(image).convert('RGB')
+            image.thumbnail((900,900))
+            output=io.BytesIO()
+            image.save(output,format='JPEG',quality=80)
+            return output.getvalue()
 
     async def client_photo(self, request):
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
@@ -293,18 +319,10 @@ class Delivery:
             raw = await self.bytes(p)
             download = request.query.get('download') == '1'
             if download and not g.downloaded_at:
-                g.downloaded_at = datetime.utcnow()
+                g.downloaded_at = utc_now()
                 await session.commit()
             if request.query.get('preview') == '1':
-                from PIL import Image, ImageOps
-                def resize():
-                    with Image.open(io.BytesIO(raw)) as image:
-                        image = ImageOps.exif_transpose(image).convert('RGB')
-                        image.thumbnail((900, 900))
-                        output = io.BytesIO()
-                        image.save(output, format='JPEG', quality=80)
-                        return output.getvalue()
-                raw = await asyncio.to_thread(resize)
+                raw = await asyncio.to_thread(self.preview, raw)
             headers = {'Content-Disposition': f'attachment; filename="photo-{p.id}.{image_format(raw)[0]}"'} if download else {}
             return web.Response(body=raw, content_type=image_format(raw)[1], headers=headers)
 
@@ -330,7 +348,7 @@ class Delivery:
                         await response.write(chunk)
                     await response.write_eof()
             if not g.downloaded_at:
-                g.downloaded_at = datetime.utcnow()
+                g.downloaded_at = utc_now()
                 await session.commit()
             return response
 
