@@ -10,7 +10,7 @@ async def main():
   browser=await p.chromium.launch(args=['--no-sandbox'])
   context=await browser.new_context(viewport={'width':1280,'height':900},device_scale_factor=1,service_workers='block')
   await context.add_init_script(Path(__file__).with_name('demo-bootstrap.js').read_text())
-  page=await context.new_page(); errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
+  page=await context.new_page(); errors=[];page.on('pageerror',lambda e:errors.append(e.stack))
   async def intercept(route):
    path=route.request.url.split('photos.example')[-1];plain=path.split('?')[0]
    if not route.request.url.startswith('https://photos.example'):
@@ -41,7 +41,7 @@ async def main():
     if file.is_file():return await route.fulfill(body=file.read_bytes(),content_type=mimetypes.guess_type(file.name)[0] or 'application/octet-stream')
    return await route.fulfill(body='',content_type='application/javascript' if plain.endswith('.js') else 'text/plain')
   await context.route('**/*',intercept)
-  await page.goto('https://photos.example/app/');await page.wait_for_timeout(1500)
+  await page.goto('https://photos.example/app/');await page.wait_for_selector('#topbar .avatar-btn');await page.wait_for_selector('#app .booking-row')
   for name in ['home','shootings','schedule','workflow','control','contacts','finance','insights','team','academy','development','onboarding','workday','audit','profile','more']:
    await page.evaluate('(name)=>document.querySelector(`[data-go="${name}"]`)?.click()',name)
    # Use the module's own navigation button, including destinations in More.
@@ -50,8 +50,12 @@ async def main():
    await page.wait_for_timeout(700)
    await page.screenshot(path=str(OUT/f'{name}.png'))
    print(name,await page.locator('#app').inner_text() if False else (await page.locator('#app').inner_text())[:60])
+  await page.evaluate('()=>{let b=document.createElement("button");b.dataset.booking="501";document.body.append(b);b.click();b.remove();}')
+  await page.locator('[data-assign-photographer]').click();await page.wait_for_selector('#photographerAssignment');await page.screenshot(path=str(OUT/'assignment.png'))
+  await page.locator('#closeSheet').click()
   await page.evaluate('()=>{let b=document.createElement("button");b.dataset.galleryBooking="501";document.body.append(b);b.click();b.remove();}')
   await page.wait_for_timeout(1000);await page.screenshot(path=str(OUT/'gallery.png'))
+  await page.locator('[data-delivery-qr]').scroll_into_view_if_needed();await page.screenshot(path=str(OUT/'gallery-qr.png'))
   assert await page.locator('.delivery-sheet h2').inner_text()=='Галерея съёмки №501'
   print('BROWSER_ERRORS',errors)
   (OUT/'browser-report.json').write_text(json.dumps({'errors':errors},ensure_ascii=False))
