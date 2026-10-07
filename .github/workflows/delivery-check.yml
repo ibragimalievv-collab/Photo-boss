@@ -1,0 +1,51 @@
+name: Delivery checks
+on:
+  push:
+    branches: [main, 'codex/delivery-control-offline']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  delivery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
+      ADMIN_TELEGRAM_IDS: '5000000001'
+      DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-dev.txt
+      - name: Delivery and full regression tests
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          ruff check app tests 2>&1 | tee lint-results.txt
+          lint_status=${PIPESTATUS[0]}
+          python -m pytest -q --junitxml=delivery-results.xml 2>&1 | tee delivery-results.txt
+          test_status=${PIPESTATUS[0]}
+          node tests/offline_delivery_cache_check.mjs
+          [ "$lint_status" = 0 ] && [ "$test_status" = 0 ]
+      - name: Capture verification results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: delivery-test-results
+          path: |
+            delivery-results.xml
+            delivery-results.txt
+            lint-results.txt
+      - name: Package test runtime for isolated local verification
+        if: always()
+        run: pip install --target /tmp/delivery-test-runtime -r requirements.txt aiosqlite==0.22.1 pytest==9.1.1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: delivery-test-runtime
+          path: /tmp/delivery-test-runtime
+          retention-days: 1
