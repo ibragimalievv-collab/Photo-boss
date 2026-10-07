@@ -64,7 +64,11 @@ async def main():
                 page=await context.new_page();page.on('pageerror',lambda e:errors.append(str(e)))
                 for name,title in [('insights','Контроль бизнеса'),('team','Команда и найм'),('onboarding','Начало работы с Photo Boss'),('workday','Итоги смены'),('development','Развитие фотографа и продажи')]:
                     await page.goto(BASE+'/app/#'+name)
-                    await page.get_by_role('heading',name=title,exact=True).wait_for()
+                    try:
+                        await page.get_by_role('heading',name=title,exact=True).wait_for()
+                    except Exception:
+                        print('Failed route',name,'app:',await page.locator('#app').inner_text(),'errors:',errors)
+                        raise
                     if name == 'insights':
                         await page.get_by_text('Оплаченные расходы и выплаты',exact=True).click()
                         await page.locator('#cashExpense [name=category]').select_option('OTHER')
@@ -178,3 +182,4 @@ async def main():
 
 
 if __name__=='__main__': asyncio.run(main())
+
