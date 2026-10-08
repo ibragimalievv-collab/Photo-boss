@@ -106,7 +106,7 @@ class Delivery:
                   'openedAt': g.opened_at.isoformat() if g and g.opened_at else None,
                   'downloadedAt': g.downloaded_at.isoformat() if g and g.downloaded_at else None,
                   'handedAt': g.handed_at.isoformat() if g and g.handed_at else None,
-                  'photos': [{'id': p.id, 'name': p.filename, 'bytes': p.byte_size, 'selected': bool(p.selected),
+                  'photos': [{'id': p.id, 'name': p.filename, 'bytes': p.byte_size, 'selected': bool(p.selected), 'uploadSet': p.upload_set,
                               'url': base + f'/photos/{p.id}'} for p in photos]}
         if g:
             claims = (await session.scalars(select(DeliveryClaim).where(DeliveryClaim.gallery_id == g.id))).all()
@@ -150,19 +150,21 @@ class Delivery:
                 g.expires_at = utc_now() + timedelta(days=days) if days else None
             if 'deliveryMode' in body:
                 mode = body['deliveryMode']
-                if mode not in {'ALL', 'SELECTED'}:
+                if not isinstance(mode, str) or mode not in {'ALL', 'SELECTED'}:
                     raise AccessError('Выберите: все фото или выбранные.', 400)
                 g.delivery_mode = mode
             if 'published' in body:
                 if type(body['published']) is not bool:
                     raise AccessError('Неверный статус галереи.', 400)
-                if body['published']:
-                    q = select(DeliveryPhoto.id).where(DeliveryPhoto.gallery_id == g.id)
-                    if g.delivery_mode == 'SELECTED':
-                        q = q.where(DeliveryPhoto.selected.is_(True))
-                    if not await session.scalar(q.limit(1)):
-                        raise AccessError('Сначала загрузите фотографии для выбранного режима выдачи.', 409)
                 g.published = body['published']
+            if g.published and {'published', 'deliveryMode'} & set(body):
+                q = select(DeliveryPhoto.id).where(DeliveryPhoto.gallery_id == g.id)
+                if g.delivery_mode == 'ALL':
+                    q = q.where(DeliveryPhoto.upload_set == 'ALL')
+                else:
+                    q = q.where(DeliveryPhoto.selected.is_(True))
+                if not await session.scalar(q.limit(1)):
+                    raise AccessError('Сначала загрузите фотографии для выбранного режима выдачи.', 409)
             if 'rotate' in body:
                 if type(body['rotate']) is not bool:
                     raise AccessError('Некорректная настройка ссылки.', 400)
@@ -173,11 +175,14 @@ class Delivery:
             return web.json_response(await self.describe(session, a, b))
 
     async def apply(self, session, actor, kind, data, raw=None):
-        photo_fields = {'booking', 'filename'} <= set(data) <= {'booking', 'filename', 'selected'}
+        photo_fields = {'booking', 'filename'} <= set(data) <= {'booking', 'filename', 'selected', 'photoSet'}
         if not (photo_fields if kind == 'delivery_photo' else set(data) == {'booking', 'delivered'}):
             raise AccessError('Некорректные поля выдачи.', 400)
         if type(data['booking']) is not int:
             raise AccessError('Некорректная съёмка.', 400)
+        photo_set = data.get('photoSet', 'ALL')
+        if not isinstance(photo_set, str) or photo_set not in {'ALL', 'SELECTED'} or ('selected' in data and type(data['selected']) is not bool) or ('photoSet' in data and 'selected' in data):
+            raise AccessError('Выберите папку: все фотографии или выбранные фотографии.', 400)
         b = await self.booking(session, actor, data['booking'], edit=True)
         g = await self.ensure(session, actor, b)
         if kind == 'delivery_handoff':
@@ -204,7 +209,7 @@ class Delivery:
         except Exception as exc:
             raise AccessError('Не удалось прочитать фотографию. Нужен JPEG или PNG.', 400) from exc
         digest = hashlib.sha256(raw).hexdigest()
-        old = await session.scalar(select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id, DeliveryPhoto.sha256 == digest))
+        old = await session.scalar(select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id, DeliveryPhoto.sha256 == digest, DeliveryPhoto.upload_set == photo_set))
         if old:
             return {'bookingId': b.id, 'photoId': old.id, 'duplicate': True}
         token, client_id = configured_from_env()
@@ -220,18 +225,18 @@ class Delivery:
         selected_folder = folder + '/Выбранные'
         for directory in (ROOT, ROOT + '/delivery', booking_folder, folder, all_folder, selected_folder):
             await storage.ensure_dir(directory)
-        path = all_folder + f'/{digest}.{ext}'
+        path = (selected_folder if photo_set == 'SELECTED' else all_folder) + f'/{digest}.{ext}'
         await storage.upload_bytes(path, raw, content_type=mime)
-        selected = bool(data.get('selected', False))
-        if selected:
+        selected = photo_set == 'SELECTED' or data.get('selected', False)
+        if selected and photo_set == 'ALL':
             await storage.upload_bytes(selected_folder + f'/{digest}.{ext}', raw, content_type=mime)
         name = re.sub(r'[^\w .()-]', '_', name)[:140] or 'photo.' + ext
         photo = DeliveryPhoto(gallery_id=g.id, uploaded_by_id=actor['id'], filename=name,
-                              disk_path=path, sha256=digest, byte_size=len(raw), selected=selected)
+                              disk_path=path, sha256=digest, byte_size=len(raw), selected=selected, upload_set=photo_set)
         session.add(photo)
         await session.flush()
         await audit(session, await session.get(User, actor['id']), 'delivery_photo_uploaded', 'booking', b.id)
-        return {'bookingId': b.id, 'photoId': photo.id, 'selected': selected}
+        return {'bookingId': b.id, 'photoId': photo.id, 'selected': selected, 'uploadSet': photo_set}
 
     async def select_photo(self, request):
         actor = request['miniapp_actor']
@@ -244,6 +249,8 @@ class Delivery:
             g = await session.get(DeliveryGallery, p.gallery_id) if p else None
             if not g or g.booking_id != b.id:
                 raise AccessError('Фото не найдено.', 404)
+            if p.upload_set == 'SELECTED':
+                raise AccessError('Фотография загружена отдельно в папку «Выбранные».', 409)
             if p.selected == body['selected']:
                 return web.json_response({'photoId': p.id, 'selected': p.selected})
             token, client_id = configured_from_env()
@@ -264,7 +271,11 @@ class Delivery:
             if body['selected']:
                 await storage.upload_bytes(selected_path, raw, content_type=mime)
             else:
-                await storage.delete(selected_path)
+                independent = await session.scalar(select(DeliveryPhoto.id).where(
+                    DeliveryPhoto.gallery_id == g.id, DeliveryPhoto.sha256 == p.sha256,
+                    DeliveryPhoto.upload_set == 'SELECTED').limit(1))
+                if not independent:
+                    await storage.delete(selected_path)
             p.selected = body['selected']
             await audit(session, await session.get(User, actor['id']), 'delivery_photo_selected', 'booking', b.id)
             await session.commit()
@@ -345,7 +356,9 @@ class Delivery:
                 body = '<form method="post" action="/g/' + g.access_token + '/unlock"><label>Пароль альбома<input type="password" name="password" maxlength="100" required autocomplete="current-password"></label><button>Открыть фотографии</button></form>'
                 return web.Response(text=self.document(g.title, body), content_type='text/html')
             q = select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id)
-            if g.delivery_mode == 'SELECTED':
+            if g.delivery_mode == 'ALL':
+                q = q.where(DeliveryPhoto.upload_set == 'ALL')
+            else:
                 q = q.where(DeliveryPhoto.selected.is_(True))
             files = (await session.scalars(q.order_by(DeliveryPhoto.id))).all()
             if not g.opened_at:
@@ -370,7 +383,7 @@ class Delivery:
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
             g = await self.public_gallery(request, session)
             p = await session.get(DeliveryPhoto, int(request.match_info['photo']))
-            if not p or p.gallery_id != g.id or (g.delivery_mode == 'SELECTED' and not p.selected):
+            if not p or p.gallery_id != g.id or (g.delivery_mode == 'SELECTED' and not p.selected) or (g.delivery_mode == 'ALL' and p.upload_set != 'ALL'):
                 raise web.HTTPNotFound()
             raw = await self.bytes(p)
             download = request.query.get('download') == '1'
@@ -386,7 +399,9 @@ class Delivery:
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
             g = await self.public_gallery(request, session)
             q = select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id)
-            if g.delivery_mode == 'SELECTED':
+            if g.delivery_mode == 'ALL':
+                q = q.where(DeliveryPhoto.upload_set == 'ALL')
+            else:
                 q = q.where(DeliveryPhoto.selected.is_(True))
             files = (await session.scalars(q.order_by(DeliveryPhoto.id))).all()
             if not files:

@@ -75,7 +75,15 @@ jobs:
           PYTHONPATH: .
         run: python tests/academy_coach_browser_check.py
       - name: Verify navigation and capture training screens
+        if: success()
         run: python docs/guide/capture.py
+      - name: Verify independent delivery uploads on mobile
+        env:
+          BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
+          ADMIN_TELEGRAM_IDS: '5000000001'
+          DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+          PYTHONPATH: .
+        run: python tests/delivery_sets_browser_check.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
