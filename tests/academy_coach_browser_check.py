@@ -25,6 +25,9 @@ async def main():
     completed = set()
     session = None
     plan_calls = []
+    delay_photo = False
+    photo_started = asyncio.Event()
+    release_photo = asyncio.Event()
     photo_lessons = [{'slug': l.slug, 'title': l.title, 'body': l.body, 'day': l.day, 'block': l.block,
                       'locked': False, 'duration': 'Короткий урок'} for l in ACADEMY_LESSONS]
     async with async_playwright() as p:
@@ -65,6 +68,9 @@ async def main():
                         'comparison': [{'id': 1, 'assignmentId': 1, 'score': 65, 'photos': [{'index': 1, 'url': '/academy/coach/reviews/1/photos/1'}]},
                                        {'id': 2, 'assignmentId': 1, 'score': 90, 'photos': [{'index': 1, 'url': '/academy/coach/reviews/2/photos/1'}]}] if not booking else []}
             elif endpoint == '/academy/coach/plan':
+                if delay_photo and not booking:
+                    photo_started.set()
+                    await release_photo.wait()
                 plan_calls.append('booking' if booking else 'photographer')
                 data = {'plan': {'id': len(plan_calls), 'title': 'AI: отработка возражений' if booking else 'AI: улучшить свет',
                                  'focus': 'objections' if booking else 'light', 'reason': 'По предыдущей AI-проверке',
@@ -129,8 +135,18 @@ async def main():
         assert completed == {'booking-approach'}
         assert 'booking' in plan_calls and 'photographer' in plan_calls
         assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth+2')
+        # A slow photographer plan must not block the manager's independent plan.
+        delay_photo = True
+        later = await context.new_page()
+        later.on('pageerror', lambda e: errors.append(str(e)))
+        await later.goto(BASE + '/app/#academy')
+        await asyncio.wait_for(photo_started.wait(), timeout=10)
+        await later.locator('[data-coach-track="booking"]').click()
+        await expect(later.get_by_role('heading', name='AI: отработка возражений')).to_be_visible()
+        release_photo.set()
+        await later.close()
         assert not errors, errors
-        print('PASS: mobile AI plans, archived-photo comparison, real-shoot queue, manager quizzes and AI guest dialogue; no live messages')
+        print('PASS: mobile AI plans, archived-photo comparison, real-shoot queue, manager quizzes, AI guest dialogue and independent pending plans; no live messages')
         await browser.close()
 
 
