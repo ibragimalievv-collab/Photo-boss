@@ -872,8 +872,9 @@ class DeliveryPhoto(Base):
     sha256: Mapped[str] = mapped_column(String(64))
     byte_size: Mapped[int] = mapped_column(Integer)
     selected: Mapped[bool] = mapped_column(Boolean, default=False)
+    upload_set: Mapped[str] = mapped_column(String(20), default='ALL', server_default='ALL')
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
-    __table_args__ = (UniqueConstraint('gallery_id', 'sha256', name='uq_delivery_photo_digest'),)
+    __table_args__ = (UniqueConstraint('gallery_id', 'sha256', 'upload_set', name='uq_delivery_photo_set_digest'),)
 
 
 class DeliveryContact(Base):

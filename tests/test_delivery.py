@@ -33,9 +33,9 @@ from app.models import (
 ACTORS = {1:{'id':1,'roles':['OWNER']},2:{'id':2,'roles':['PHOTOGRAPHER']},3:{'id':3,'roles':['PHOTOGRAPHER']},4:{'id':4,'roles':['ADMIN']},5:{'id':5,'roles':['MANAGER']}}
 
 
-def image():
+def image(color='orange'):
     output = io.BytesIO()
-    Image.new('RGB',(40,30),'orange').save(output,format='PNG')
+    Image.new('RGB',(40,30),color).save(output,format='PNG')
     return output.getvalue()
 
 
@@ -204,6 +204,271 @@ def test_large_album_upload_and_archive_above_previous_total_limits(monkeypatch)
             import zipfile
             with zipfile.ZipFile(io.BytesIO(await response.read())) as archive:
                 assert len(archive.namelist()) == 303
+        finally:
+            await client.close()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_photo_sets_upload_independently_and_deduplicate_within_their_own_folder(monkeypatch):
+    from app import delivery
+    monkeypatch.setattr(delivery, 'configured_from_env', lambda: ('fake-token', 'fake-client'))
+    monkeypatch.setattr(delivery.YandexDisk, 'ensure_dir', AsyncMock())
+    upload = AsyncMock()
+    monkeypatch.setattr(delivery.YandexDisk, 'upload_bytes', upload)
+
+    async def run():
+        engine, svc, client, _ = await setup(monkeypatch)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as session:
+                # A selected set can be uploaded directly before there is a full set.
+                chosen = await svc.apply(session, ACTORS[2], 'delivery_photo',
+                    {'booking': 1, 'filename': 'retouched.png', 'photoSet': 'SELECTED'}, image())
+                await session.commit()
+                assert upload.await_count == 1
+                assert '/Выбранные/' in upload.await_args.args[0]
+                assert '/Все фото/' not in upload.await_args.args[0]
+                assert await session.scalar(select(func.count(DeliveryPhoto.id))) == 1
+                # The same source file must also be allowed in the full set.
+                full = await svc.apply(session, ACTORS[2], 'delivery_photo',
+                    {'booking': 1, 'filename': 'source.png', 'photoSet': 'ALL'}, image())
+                await session.commit()
+                assert chosen['photoId'] != full['photoId']
+                assert upload.await_count == 2
+                assert '/Все фото/' in upload.await_args.args[0]
+                for photo_set, expected in [('ALL', full), ('SELECTED', chosen)]:
+                    result = await svc.apply(session, ACTORS[2], 'delivery_photo',
+                        {'booking': 1, 'filename': 'renamed.png', 'photoSet': photo_set}, image())
+                    assert result['duplicate'] and result['photoId'] == expected['photoId']
+                assert upload.await_count == 2
+                rows = (await session.scalars(select(DeliveryPhoto).order_by(DeliveryPhoto.id))).all()
+                assert len(rows) == 2
+                assert [(p.upload_set, p.selected) for p in rows] == [('SELECTED', True), ('ALL', False)]
+                assert rows[0].sha256 == rows[1].sha256 and rows[0].disk_path != rows[1].disk_path
+            data = await (await client.get('/api/miniapp/delivery/1', headers={'X-Test-Actor': '4'})).json()
+            assert [(p['uploadSet'], p['name']) for p in data['photos']] == [
+                ('SELECTED', 'retouched.png'), ('ALL', 'source.png')]
+        finally:
+            await client.close()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_client_pages_photos_and_archives_follow_independent_photo_sets(monkeypatch):
+    import zipfile
+
+    from app import delivery
+    monkeypatch.setattr(delivery, 'configured_from_env', lambda: ('fake-token', 'fake-client'))
+    monkeypatch.setattr(delivery.YandexDisk, 'ensure_dir', AsyncMock())
+    stored = {}
+
+    async def upload(self, path, raw, **kwargs):
+        stored[path] = raw
+
+    async def download(photo):
+        return stored[photo.disk_path]
+
+    monkeypatch.setattr(delivery.YandexDisk, 'upload_bytes', upload)
+
+    async def run():
+        engine, svc, client, _ = await setup(monkeypatch)
+        monkeypatch.setattr(svc, 'bytes', download)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as session:
+                full = await svc.apply(session, ACTORS[2], 'delivery_photo',
+                    {'booking': 1, 'filename': 'all-source.png', 'photoSet': 'ALL'}, image())
+                chosen = await svc.apply(session, ACTORS[2], 'delivery_photo',
+                    {'booking': 1, 'filename': 'client-retouched.png', 'photoSet': 'SELECTED'}, image('blue'))
+                # Existing marked photos still belong to the full folder and are
+                # available in the selected client view for older published albums.
+                legacy = await svc.apply(session, ACTORS[2], 'delivery_photo',
+                    {'booking': 1, 'filename': 'legacy-chosen.png', 'selected': True}, image('green'))
+                await session.commit()
+            headers = {'X-Test-Actor': '4'}
+            response = await client.post('/api/miniapp/delivery/1', headers=headers,
+                json={'published': True, 'deliveryMode': 'SELECTED'})
+            assert response.status == 200
+            token = (await response.json())['clientUrl'].rsplit('/', 1)[1]
+            base = '/g/' + token
+            for mode, allowed, forbidden in [
+                ('SELECTED', [(chosen, 'client-retouched.png', image('blue')),
+                              (legacy, 'legacy-chosen.png', image('green'))],
+                 [(full, 'all-source.png')]),
+                ('ALL', [(full, 'all-source.png', image()),
+                         (legacy, 'legacy-chosen.png', image('green'))],
+                 [(chosen, 'client-retouched.png')]),
+            ]:
+                response = await client.post('/api/miniapp/delivery/1', headers=headers,
+                    json={'deliveryMode': mode})
+                assert response.status == 200
+                page = await (await client.get(base)).text()
+                for photo, name, expected in allowed:
+                    assert name in page
+                    response = await client.get(base + '/photos/' + str(photo['photoId']) + '?download=1')
+                    assert response.status == 200 and await response.read() == expected
+                for photo, name in forbidden:
+                    assert name not in page
+                    for suffix in ['', '?preview=1', '?download=1']:
+                        assert (await client.get(base + '/photos/' + str(photo['photoId']) + suffix)).status == 404
+                archive = await client.get(base + '/album.zip')
+                assert archive.status == 200
+                with zipfile.ZipFile(io.BytesIO(await archive.read())) as zipped:
+                    assert set(zipped.namelist()) == {str(p['photoId']) + '-' + name for p, name, _ in allowed}
+                    for photo, name, expected in allowed:
+                        assert zipped.read(str(photo['photoId']) + '-' + name) == expected
+        finally:
+            await client.close()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_independent_upload_requires_assignment_and_valid_set_before_publishing(monkeypatch):
+    from app import delivery
+    monkeypatch.setattr(delivery, 'configured_from_env', lambda: ('fake-token', 'fake-client'))
+    monkeypatch.setattr(delivery.YandexDisk, 'ensure_dir', AsyncMock())
+    upload = AsyncMock()
+    monkeypatch.setattr(delivery.YandexDisk, 'upload_bytes', upload)
+
+    async def run():
+        engine, svc, client, _ = await setup(monkeypatch)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as session:
+                for actor in [3, 5]:
+                    with pytest.raises(AccessError) as denied:
+                        await svc.apply(session, ACTORS[actor], 'delivery_photo',
+                            {'booking': 1, 'filename': 'chosen.png', 'photoSet': 'SELECTED'}, image())
+                    assert denied.value.status == 403
+                for invalid in ['OTHER', '', None, True, ['SELECTED']]:
+                    with pytest.raises(AccessError) as rejected:
+                        await svc.apply(session, ACTORS[2], 'delivery_photo',
+                            {'booking': 1, 'filename': 'chosen.png', 'photoSet': invalid}, image())
+                    assert rejected.value.status == 400
+                assert upload.await_count == 0
+                # Administrator and owner may upload for another photographer.
+                chosen = await svc.apply(session, ACTORS[4], 'delivery_photo',
+                    {'booking': 1, 'filename': 'chosen.png', 'photoSet': 'SELECTED'}, image())
+                await session.commit()
+            headers = {'X-Test-Actor': '1'}
+            response = await client.post('/api/miniapp/delivery/1', headers=headers,
+                json={'published': True, 'deliveryMode': 'ALL'})
+            assert response.status == 409
+            response = await client.post('/api/miniapp/delivery/1', headers=headers,
+                json={'published': True, 'deliveryMode': 'SELECTED'})
+            assert response.status == 200
+            # A partial settings update must not expose an empty folder while
+            # leaving the gallery marked as published.
+            response = await client.post('/api/miniapp/delivery/1', headers=headers,
+                json={'deliveryMode': 'ALL'})
+            assert response.status == 409
+            data = await (await client.get('/api/miniapp/delivery/1', headers=headers)).json()
+            assert data['published'] and data['deliveryMode'] == 'SELECTED'
+            # Independent files cannot be moved by the legacy checkbox endpoint.
+            response = await client.post('/api/miniapp/delivery/1/photos/' + str(chosen['photoId']) + '/selected',
+                headers=headers, json={'selected': False})
+            assert response.status == 409
+            async with AsyncSession(engine, expire_on_commit=False) as session:
+                await svc.apply(session, ACTORS[1], 'delivery_photo',
+                    {'booking': 1, 'filename': 'full.png', 'photoSet': 'ALL'}, image())
+                await session.commit()
+                booking = await session.get(Booking, 1)
+                booking.photographer_id = 3
+                await session.commit()
+                with pytest.raises(AccessError) as denied:
+                    await svc.apply(session, ACTORS[2], 'delivery_photo',
+                        {'booking': 1, 'filename': 'late.png', 'photoSet': 'SELECTED'}, image('blue'))
+                assert denied.value.status == 403
+            assert upload.await_count == 2
+        finally:
+            await client.close()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_legacy_unselect_preserves_a_shared_independently_uploaded_file(monkeypatch):
+    import zipfile
+
+    from app import delivery
+    monkeypatch.setattr(delivery, 'configured_from_env', lambda: ('fake-token', 'fake-client'))
+    monkeypatch.setattr(delivery.YandexDisk, 'ensure_dir', AsyncMock())
+    stored, deleted = {}, []
+
+    async def upload(self, path, raw, **kwargs):
+        stored[path] = raw
+
+    async def delete(self, path):
+        deleted.append(path)
+        del stored[path]
+
+    async def download(photo):
+        return stored[photo.disk_path]
+
+    monkeypatch.setattr(delivery.YandexDisk, 'upload_bytes', upload)
+    monkeypatch.setattr(delivery.YandexDisk, 'delete', delete)
+
+    async def run():
+        engine, svc, client, _ = await setup(monkeypatch)
+        monkeypatch.setattr(svc, 'bytes', download)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as session:
+                legacy = await svc.apply(session, ACTORS[2], 'delivery_photo',
+                    {'booking': 1, 'filename': 'legacy.png', 'selected': True}, image())
+                chosen = await svc.apply(session, ACTORS[2], 'delivery_photo',
+                    {'booking': 1, 'filename': 'separate.png', 'photoSet': 'SELECTED'}, image())
+                unshared = await svc.apply(session, ACTORS[2], 'delivery_photo',
+                    {'booking': 1, 'filename': 'legacy-only.png', 'selected': True}, image('blue'))
+                await session.commit()
+                chosen_row = await session.get(DeliveryPhoto, chosen['photoId'])
+                chosen_path = chosen_row.disk_path
+                legacy_only_row = await session.get(DeliveryPhoto, unshared['photoId'])
+                legacy_only_path = legacy_only_row.disk_path.replace('/Все фото/', '/Выбранные/')
+            headers = {'X-Test-Actor': '4'}
+            response = await client.post('/api/miniapp/delivery/1', headers=headers,
+                json={'published': True, 'deliveryMode': 'SELECTED'})
+            assert response.status == 200
+            base = '/g/' + (await response.json())['clientUrl'].rsplit('/', 1)[1]
+
+            async def visible_files(expected):
+                page = await (await client.get(base)).text()
+                assert page.count('<figure>') == len(expected)
+                assert page.count('<figcaption>separate.png</figcaption>') == 1
+                assert '<figcaption>legacy.png</figcaption>' not in page
+                archive = await client.get(base + '/album.zip')
+                assert archive.status == 200
+                with zipfile.ZipFile(io.BytesIO(await archive.read())) as zipped:
+                    assert set(zipped.namelist()) == {str(p['photoId']) + '-' + name for p, name, _ in expected}
+                    for photo, name, contents in expected:
+                        assert zipped.read(str(photo['photoId']) + '-' + name) == contents
+
+            # Prefer the independent upload over the identical legacy marked
+            # frame in both client lists, while keeping old direct links valid.
+            await visible_files([(chosen, 'separate.png', image()),
+                                 (unshared, 'legacy-only.png', image('blue'))])
+            response = await client.get(base + '/photos/' + str(legacy['photoId']) + '?download=1')
+            assert response.status == 200 and await response.read() == image()
+            for photo in [legacy, unshared]:
+                response = await client.post('/api/miniapp/delivery/1/photos/' + str(photo['photoId']) + '/selected',
+                    headers=headers, json={'selected': False})
+                assert response.status == 200
+            # Clean up obsolete legacy copies, but retain the original file owned
+            # by the direct SELECTED upload even when its digest is identical.
+            assert deleted == [legacy_only_path]
+            assert stored[chosen_path] == image()
+            response = await client.get(base + '/photos/' + str(chosen['photoId']) + '?download=1')
+            assert response.status == 200 and await response.read() == image()
+            for photo in [legacy, unshared]:
+                assert (await client.get(base + '/photos/' + str(photo['photoId']))).status == 404
+            page = await (await client.get(base)).text()
+            assert 'separate.png' in page and 'legacy.png' not in page and 'legacy-only.png' not in page
+            response = await client.get('/api/miniapp/delivery/1/photos/' + str(legacy['photoId']), headers=headers)
+            assert response.status == 200 and await response.read() == image()
+            # An old still-open application can mark its full-set copy again;
+            # selected clients must continue to receive only one frame per SHA.
+            response = await client.post('/api/miniapp/delivery/1/photos/' + str(legacy['photoId']) + '/selected',
+                headers=headers, json={'selected': True})
+            assert response.status == 200
+            await visible_files([(chosen, 'separate.png', image())])
+            response = await client.get(base + '/photos/' + str(legacy['photoId']) + '?download=1')
+            assert response.status == 200 and await response.read() == image()
         finally:
             await client.close()
             await engine.dispose()
