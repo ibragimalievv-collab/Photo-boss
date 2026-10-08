@@ -1,7 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, FSInputFile
 from sqlalchemy import case, func, select
 
@@ -10,6 +9,7 @@ from ..db import Session
 from ..keyboards import inline
 from ..models import (
     AcademyLessonProgress,
+    AcademyQuizAttempt,
     AcademyReview,
     Booking,
     PayrollEntry,
@@ -23,7 +23,6 @@ from ..services.academy import (
     ACADEMY_LESSONS,
     BLOCK_BY_NUMBER,
     LESSON_BY_SLUG,
-    REVIEW_TEMPLATES,
     block_lessons,
     block_practice_done,
     lesson_is_unlocked,
@@ -139,7 +138,7 @@ async def photographer_counts(session, user_id):
         )
         or 0
     )
-    points = lessons * 10 + practice * 50 + strong_reviews * 20 + min(shootings, 500) * 2
+    points = lessons * 10 + practice * 100
     return shootings, avg_check, lessons, practice, strong_reviews, points
 
 
@@ -306,6 +305,9 @@ async def academy_lesson_done(callback: CallbackQuery):
     created = False
     async with Session() as session:
         user = await get_user(session, callback.from_user.id)
+        passed = await session.scalar(select(AcademyQuizAttempt.id).where(AcademyQuizAttempt.user_id == user.id, AcademyQuizAttempt.topic_slug == slug, AcademyQuizAttempt.passed.is_(True)).limit(1))
+        if not passed:
+            return await callback.answer("Пройдите короткий тест в Академии приложения.", show_alert=True)
         completed, accepted, _ = await academy_program_state(session, user.id)
         if not lesson_is_unlocked(slug, completed, accepted):
             return await callback.answer(
@@ -576,7 +578,7 @@ async def academy_review_queue(callback: CallbackQuery, current_roles):
     if callback.message:
         await callback.message.answer(
             "🧑‍🏫 Разбор реальных работ\n\n"
-            "Последние рабочие кадры. Откройте фотографию и выберите главный вывод для сотрудника.",
+            "Последние рабочие кадры. AI-разборы доступны в Академии приложения.",
             reply_markup=inline(buttons),
         )
 
@@ -601,120 +603,11 @@ async def academy_review_photo(callback: CallbackQuery, current_roles):
     if row is None:
         return await callback.answer("Фотография не найдена.", show_alert=True)
     photo, photographer = row
-    template_buttons = [
-        [
-            (REVIEW_TEMPLATES["strong"].title, f"academy:review_apply:{photo_id}:strong"),
-            (REVIEW_TEMPLATES["light"].title, f"academy:review_apply:{photo_id}:light"),
-        ],
-        [
-            (REVIEW_TEMPLATES["horizon"].title, f"academy:review_apply:{photo_id}:horizon"),
-            (REVIEW_TEMPLATES["pose"].title, f"academy:review_apply:{photo_id}:pose"),
-        ],
-        [
-            (REVIEW_TEMPLATES["emotion"].title, f"academy:review_apply:{photo_id}:emotion"),
-            (REVIEW_TEMPLATES["angle"].title, f"academy:review_apply:{photo_id}:angle"),
-        ],
-        [(REVIEW_TEMPLATES["color"].title, f"academy:review_apply:{photo_id}:color")],
-        [("⬅️ К очереди", "academy:review_queue")],
-    ]
     await callback.answer()
     if callback.message:
-        await callback.message.answer_photo(
-            photo.file_id,
-            caption=f"Рабочий кадр #{photo.id}\nФотограф: {photographer.name}\n\nВыберите главный вывод:",
-            reply_markup=inline(template_buttons),
-        )
+        await callback.message.answer_photo(photo.file_id, caption=f"Рабочий кадр #{photo.id} · {photographer.name}\nРазбор делает AI-помощник. Запустите разбор съёмки в Академии приложения.")
 
 
 @r.callback_query(F.data.startswith("academy:review_apply:"))
 async def academy_review_apply(callback: CallbackQuery, current_roles):
-    if not {"OWNER", "ADMIN"} & set(current_roles):
-        return await callback.answer("Недостаточно прав.", show_alert=True)
-    try:
-        _, _, raw_photo_id, template_slug = callback.data.split(":", 3)
-    except (AttributeError, ValueError):
-        return await callback.answer("Некорректная кнопка.", show_alert=True)
-    photo_id = parse_positive_int(raw_photo_id)
-    template = REVIEW_TEMPLATES.get(template_slug)
-    if photo_id is None or template is None:
-        return await callback.answer("Некорректная оценка.", show_alert=True)
-    async with Session() as session:
-        row = (
-            await session.execute(
-                select(Photo, User)
-                .join(Shooting, Shooting.id == Photo.shooting_id)
-                .join(Booking, Booking.id == Shooting.booking_id)
-                .join(User, User.id == Booking.photographer_id)
-                .where(Photo.id == photo_id)
-            )
-        ).one_or_none()
-        reviewer = await get_user(session, callback.from_user.id)
-        if row is None or reviewer is None:
-            return await callback.answer("Фотография не найдена.", show_alert=True)
-        photo, photographer = row
-        review = await session.scalar(
-            select(AcademyReview).where(AcademyReview.photo_id == photo.id)
-        )
-        if review is None:
-            review = AcademyReview(
-                user_id=photographer.id,
-                photo_id=photo.id,
-                reviewer_user_id=reviewer.id,
-                file_id=photo.file_id,
-                composition_score=template.composition,
-                light_score=template.light,
-                pose_score=template.pose,
-                emotion_score=template.emotion,
-                color_score=template.color,
-                quality_score=template.quality,
-                strengths=template.strengths,
-                issues=template.issues,
-                recommendation=template.recommendation,
-            )
-            session.add(review)
-            await session.flush()
-        else:
-            review.reviewer_user_id = reviewer.id
-            review.composition_score = template.composition
-            review.light_score = template.light
-            review.pose_score = template.pose
-            review.emotion_score = template.emotion
-            review.color_score = template.color
-            review.quality_score = template.quality
-            review.strengths = template.strengths
-            review.issues = template.issues
-            review.recommendation = template.recommendation
-            review.created_at = datetime.now(UTC).replace(tzinfo=None)
-        await audit(
-            session,
-            reviewer,
-            "academy_real_work_reviewed",
-            "academy_review",
-            review.id,
-            f"photo={photo.id};template={template.slug}",
-        )
-        await session.commit()
-        photographer_tg = photographer.tg_id
-    notice = (
-        f"📚 Новый разбор реальной работы\n\n"
-        f"{template.title}\n"
-        f"Оценка качества: {template.quality}/10\n\n"
-        f"✅ Хорошо: {template.strengths}\n"
-        f"{'⚠️ Исправить: ' + template.issues + chr(10) if template.issues else ''}"
-        f"→ {template.recommendation}"
-    )
-    try:
-        await callback.bot.send_message(photographer_tg, notice)
-    except TelegramAPIError:
-        pass
-    await callback.answer("Разбор сохранён.")
-    if callback.message:
-        await callback.message.answer(
-            "✅ Разбор сохранён и добавлен фотографу в «Мои ошибки».\n\n" + notice,
-            reply_markup=inline(
-                [
-                    [("📷 Следующий кадр", "academy:review_queue")],
-                    [("🏠 Академия", "academy:home")],
-                ]
-            ),
-        )
+    await callback.answer("Разбор фотографий делает только AI-помощник. Откройте Академию приложения.", show_alert=True)

@@ -74,12 +74,14 @@ def personal_tip(assignments):
             continue
         try:
             review = json.loads(assignment.ai_analysis)
+            review = review.get("review", review)
             criteria = review.get("criteria", {})
             weakest = min(
-                (key for key in TIP_BY_CRITERION if isinstance(criteria.get(key), int)),
-                key=lambda key: criteria[key],
+                (key for key in TIP_BY_CRITERION if type(criteria.get(key)) is int),
+                key=lambda key: criteria[key] / {"focus": 20, "light": 15, "composition": 15, "pose": 20, "emotion": 15, "variety": 15}[key],
             )
             return {"criterion": weakest, "text": TIP_BY_CRITERION[weakest]}
         except (ValueError, TypeError, KeyError):
             continue
     return None
+

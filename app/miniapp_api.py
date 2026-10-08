@@ -62,6 +62,7 @@ ACTIONS = {
     "employee_restored": "Восстановил доступ сотруднику",
     "employee_role_removed": "Снял роль сотрудника",
     "academy_lesson_completed": "Завершил урок Академии",
+    "academy_ai_plan": "AI подготовил персональное учебное задание",
     "academy_location_created": "Добавил учебную локацию",
     "miniapp_theme_changed": "Изменил оформление приложения",
     "miniapp_opened": "Открыл приложение",
@@ -585,8 +586,10 @@ class MiniApp:
         cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
         async with self.engine.connect() as conn:
             completed = await self.rows(conn, "SELECT topic_slug FROM academy_lesson_progress WHERE user_id=:uid", uid=uid)
-            practices = await self.rows(conn, "SELECT id,category_slug,status FROM training_assignments WHERE user_id=:uid ORDER BY id DESC LIMIT 30", uid=uid)
+            practices = await self.rows(conn, "SELECT id,category_slug,status FROM training_assignments WHERE user_id=:uid ORDER BY id DESC", uid=uid)
             reviews = await self.rows(conn, "SELECT id,quality_score,issues,recommendation FROM academy_reviews WHERE user_id=:uid ORDER BY id DESC LIMIT 30", uid=uid)
+            ai_reviews = await self.rows(conn, """SELECT r.id,r.result FROM academy_practice_reviews r
+                JOIN training_assignments a ON a.id=r.assignment_id WHERE a.user_id=:uid ORDER BY r.id DESC LIMIT 30""", uid=uid)
             certificate = await self.rows(conn, "SELECT certificate_no,verification_code,final_score,issued_at FROM academy_certificates WHERE user_id=:uid AND revoked_at IS NULL", uid=uid)
             locations = await self.rows(conn, "SELECT id,name,description,shot_plan FROM academy_locations WHERE active=TRUE ORDER BY name")
             tip_rows = await self.rows(conn, "SELECT ai_analysis FROM training_assignments WHERE user_id=:uid AND ai_analysis IS NOT NULL ORDER BY id DESC LIMIT 10", uid=uid)
@@ -620,12 +623,23 @@ class MiniApp:
                         (b["lessonsDone"] < b["lessonsTotal"] or not b["practiceDone"])),
                        blocks[-1] if blocks else None)
         tip = personal_tip([SimpleNamespace(ai_analysis=r["ai_analysis"]) for r in tip_rows])
+        from .academy_coach import review_data
+        fresh_reviews = []
+        for row in ai_reviews:
+            result = review_data(row["result"])
+            score = result.get("score")
+            if type(score) is int and 0 <= score <= 100:
+                fresh_reviews.append({"id": f"ai-{row['id']}", "score": score / 10, "source": "AI",
+                    "strengths": "; ".join(result.get("strengths", [])), "issues": "; ".join(result.get("issues", [])),
+                    "recommendation": result.get("next_action", "")})
         cert = certificate[0] if certificate else None
         return web.json_response({"lessons": lessons, "blocks": blocks,
             "currentBlock": current["number"] if current else None,
             "carryOver": True, "completed": done, "points": len(done)*10,
+            "totalPoints": len(done)*10 + sum(p["status"] == "COMPLETED" for p in practices)*100,
+            "acceptedCount": sum(p["status"] == "COMPLETED" for p in practices),
             "practices": [{"id": p["id"], "category": p["category_slug"], "status": p["status"]} for p in practices],
-            "reviews": [{"id": r["id"], "score": r["quality_score"], "issues": r["issues"], "recommendation": r["recommendation"]} for r in reviews],
+            "reviews": fresh_reviews + [{"id": r["id"], "score": r["quality_score"], "issues": r["issues"], "recommendation": r["recommendation"], "source": "ARCHIVE"} for r in reviews],
             "personalTip": tip,
             "certificate": ({"number": cert["certificate_no"], "score": cert["final_score"],
                 "issuedAt": as_utc(cert["issued_at"]).isoformat(),
@@ -671,10 +685,15 @@ class MiniApp:
 
     async def complete_lesson(self, request):
         actor, slug = request["miniapp_actor"], request.match_info["slug"]
-        lesson = next((l for l in self.lessons if l["slug"] == slug), None)
+        from .services.academy_curriculum import MANAGER_LESSONS
+        lesson = next((l for l in [*self.lessons, *MANAGER_LESSONS] if l["slug"] == slug), None)
         if lesson is None:
             raise AccessError("Урок не найден.", 404)
         async with self.engine.begin() as conn:
+            if len(self.lessons) == 28 or slug.startswith("booking-"):
+                passed = await self.rows(conn, "SELECT id FROM academy_quiz_attempts WHERE user_id=:uid AND topic_slug=:slug AND passed=TRUE LIMIT 1", uid=actor["id"], slug=slug)
+                if not passed:
+                    raise AccessError("Сначала пройдите короткий тест по уроку.", 409)
             completed = {r["topic_slug"] for r in await self.rows(
                 conn, "SELECT topic_slug FROM academy_lesson_progress WHERE user_id=:uid",
                 uid=actor["id"])}
@@ -742,7 +761,7 @@ class MiniApp:
     async def static_file(self, request):
         name = request.match_info.get("asset", "index.html")
         allowed = {"js/delivery.js", "css/delivery-client.css", "sw.js", "manifest.webmanifest", "js/install.js", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-maskable-512.png", "assets/apple-touch-icon.png", "js/browser-login.js", "js/account.js", "js/schedule-editor.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
-                   "js/development.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
+                   "js/development.js", "js/academy-coach.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg"}
         if name not in allowed:
@@ -770,6 +789,8 @@ class MiniApp:
             ("POST", "/handoff", self.handoff)]
         for method, path, handler in routes:
             app.router.add_route(method, PREFIX + path, handler)
+        from .academy_coach import install_academy_coach
+        install_academy_coach(app, self)
 
 
 def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/Moscow"):

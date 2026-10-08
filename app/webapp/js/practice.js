@@ -23,7 +23,7 @@ async function loadPhotos(){
 function analysisMarkup(data){
  const a=data.analysis;if(!a)return '';
  if(a.status==='owner')return `<div class="practice-feedback"><strong>Решение владельца</strong><p>${esc(a.comment||'Набор принят.')}</p></div>`;
- if(a.status!=='completed')return '<p class="practice-feedback">Работу проверит владелец. Результат появится здесь.</p>';
+ if(a.status!=='completed')return '<p class="practice-feedback">AI-проверка временно недоступна. Фотографии сохранены; повторите проверку.</p>';
  const r=a.review;
  return `<div class="practice-feedback"><h3>Разбор: ${esc(r.score)}/100</h3>${r.strengths?.length?`<p>${esc(r.strengths.join(' · '))}</p>`:''}${r.issues?.length?`<ul>${r.issues.map(i=>`<li>${esc(i)}</li>`).join('')}</ul>`:''}<p>${esc(r.next_action)}</p></div>`;
 }
@@ -32,12 +32,13 @@ function renderAssignment(data){
  const editable=data.own&&data.status==='ACTIVE';
  shell(data.title,`<p>${esc(data.userName)} · <strong data-practice-status>${esc(labels[data.status]||data.status)}</strong></p>
   <p>Загружено ${data.shots.filter(s=>s.uploaded).length}/5. Для каждого кадра показаны референс и задание.</p>
-  ${data.status==='PENDING_REVIEW'?`<p>${data.reviewSource==='AI_PENDING'?'ИИ проверяет фотографии…':'Ожидаем решения владельца.'} Результат обновится автоматически.</p>`:''}
-  ${analysisMarkup(data)}<div class="practice-shots">${data.shots.map(s=>`<article class="practice-shot"><h3>Кадр ${s.index}/5</h3><p>${esc(s.instruction)}</p>
+  ${data.status==='PENDING_REVIEW'?`<p>${data.reviewSource==='AI_PENDING'?'ИИ проверяет фотографии…':'AI-проверку нужно повторить.'} Результат обновится автоматически.</p>`:''}
+  ${data.personalInstructions?.length?`<section class="practice-feedback"><h3>Ваше AI-задание</h3><ol>${data.personalInstructions.map(x=>`<li>${esc(x)}</li>`).join('')}</ol></section>`:''}${analysisMarkup(data)}<div class="practice-shots">${data.shots.map(s=>`<article class="practice-shot"><h3>Кадр ${s.index}/5</h3><p>${esc(s.instruction)}</p>
   <div class="practice-pair"><figure><img data-practice-photo="${esc(s.reference)}" alt="Учебный референс ${s.index}"><figcaption>Референс</figcaption></figure>
   ${s.photo?`<figure><img data-practice-photo="${esc(s.photo)}" alt="Работа фотографа ${s.index}"><figcaption>Ваш кадр сохранён</figcaption></figure>`:'<p class="practice-missing">Кадр ещё не загружен</p>'}</div>
   ${editable&&!s.uploaded?`<label class="practice-upload">Загрузить кадр ${s.index}<input type="file" accept="image/jpeg,image/png,image/webp" data-practice-upload="${s.index}"></label>`:''}</article>`).join('')}</div>
   ${editable?'<p>Выберите фото из галереи или камеры. Приложение подготовит JPEG до 8 МБ. После пятого кадра набор автоматически отправится на проверку.</p>':''}
+  ${data.canRetry?`<button class="btn primary" data-practice-retry>Повторить AI-проверку</button>`:''}
   ${data.canReview?`<form id="practiceReview"><h3>Проверка владельца</h3><p>Отметьте кадры только для пересъёмки.</p><div class="practice-checks">${data.shots.map(s=>`<label><input type="checkbox" name="index" value="${s.index}"> Кадр ${s.index}</label>`).join('')}</div><label>Комментарий<textarea name="comment" maxlength="2000" rows="3"></textarea></label><div class="practice-actions"><button type="submit" name="decision" value="accept">Принять 5/5</button><button type="submit" name="decision" value="revision">Вернуть на пересъёмку</button></div></form>`:''}
   <button class="practice-refresh" data-practice-refresh>Обновить</button>`);
  loadPhotos();
@@ -46,13 +47,13 @@ async function showAssignment(id){const data=await api(`/academy/practice/${id}`
 async function home(){
  current=null;
  const data=await api('/academy/practice');
- shell('Практика Академии',`${data.assignment?`<button class="practice-refresh" data-practice-open="${data.assignment.id}">Продолжить: ${esc(data.assignment.title)} · ${esc(labels[data.assignment.status])}</button>`:data.todayDone?'<p>Практика принята. Новый набор откроется завтра.</p>':!data.ready?'<p>Завершите четыре урока текущего блока, чтобы открыть практику.</p>':`<p>Выберите категорию и повторите пять кадров. Задание и результаты останутся в приложении.</p><div class="practice-menu">${data.categories.map(c=>`<button data-practice-start="${esc(c.slug)}">${esc(c.title)}</button>`).join('')}</div>`}
+ shell('Практика Академии',`${data.assignment?`<button class="practice-refresh" data-practice-open="${data.assignment.id}">Продолжить: ${esc(data.assignment.title)} · ${esc(labels[data.assignment.status])}</button>`:data.todayDone?'<p>Практика принята. Новый набор откроется завтра.</p>':!data.ready?'<p>Завершите четыре урока текущего блока, чтобы открыть практику.</p>':`<p>AI-наставник назначает практику по вашим результатам и текущему блоку.</p><button class="btn primary" data-practice-plan>Открыть персональное AI-задание</button>`}
  ${data.queue.length?`<h3>Проверить работы команды</h3><div class="practice-menu">${data.queue.map(a=>`<button data-practice-open="${a.id}">${esc(a.name)} · ${esc(a.title)}</button>`).join('')}</div>`:''}
  ${data.history.length?`<h3>Мои задания</h3><div class="practice-menu">${data.history.map(a=>`<button data-practice-open="${a.id}">${esc(a.title)} · ${esc(labels[a.status]||a.status)}</button>`).join('')}</div>`:''}`);
 }
-export async function openPractice(id=null){
+export async function openPractice(id=null,category=null){
  shell('Практика Академии','<p>Загружаем задание…</p>');
- try{if(id)await showAssignment(id);else await home();}catch(e){error(e);}
+ try{if(id)await showAssignment(id);else if(category)renderAssignment(await api('/academy/practice/start',{method:'POST',body:{category}}));else await home();}catch(e){error(e);}
  clearInterval(pollTimer);pollTimer=setInterval(async()=>{
   if(!panel.open||!current||current.status!=='PENDING_REVIEW'||busy||document.hidden)return;
   try{const data=await api(`/academy/practice/${current.id}`);if(panel.open&&current?.id===data.id&&JSON.stringify(data)!==JSON.stringify(current))renderAssignment(data);}catch(e){error(e);}
@@ -84,6 +85,8 @@ panel.addEventListener('click',async e=>{
  if(b.hasAttribute('data-practice-close'))return close();
  if(busy)return;
  try{
+  if(b.hasAttribute('data-practice-retry')){await api(`/academy/practice/${current.id}/retry`,{method:'POST',body:{}});return await showAssignment(current.id);}
+  if(b.hasAttribute('data-practice-plan')){close();document.dispatchEvent(new CustomEvent('pb-open-academy-coach'));return;}
   if(b.hasAttribute('data-practice-home'))return await home();
   if(b.dataset.practiceOpen)return await showAssignment(Number(b.dataset.practiceOpen));
   if(b.hasAttribute('data-practice-refresh'))return current?await showAssignment(current.id):await home();
@@ -99,3 +102,4 @@ panel.addEventListener('submit',async e=>{
  catch(err){error(err);}finally{busy=false;}
 });
 panel.addEventListener('cancel',e=>{e.preventDefault();close();});
+

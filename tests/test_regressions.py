@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -56,7 +56,6 @@ from app.models import (
     ShiftCheckOut,
     Shooting,
     TrainingAssignment,
-    TrainingSubmission,
     User,
     UserRole,
 )
@@ -970,6 +969,11 @@ def test_training_is_available_to_every_staff_role(tg_id):
 
 def test_training_category_sends_a_real_reference_photo():
     async def scenario():
+        async with Session() as session:
+            from app.models import AcademyCoachingPlan
+            owner = await get_user(session, OWNER)
+            session.add(AcademyCoachingPlan(user_id=owner.id, track="photographer", fingerprint="fixture-plan", data='{"category":"family"}'))
+            await session.commit()
         await callback(OWNER, "training:family")
         photo_calls = [call for call in telegram.calls if isinstance(call, SendPhoto)]
         assert len(photo_calls) == 5
@@ -1382,99 +1386,23 @@ def test_each_training_category_has_five_distinct_photos():
         assert len(digests) == 5
 
 
-def test_training_is_locked_until_owner_reviews_and_rejected_pose_is_repeated():
+def test_manual_training_buttons_cannot_accept_or_reject_ai_work():
     async def scenario():
-        await callback(PHOTO_A, "training:woman")
-        await callback(PHOTO_A, "training:man")
         async with Session() as session:
-            assert (
-                await session.scalar(select(func.count(TrainingAssignment.id)))
-            ) == 1
-
-        for index in range(1, 6):
-            await photo(PHOTO_A, f"training-upload-{index}")
-        async with Session() as session:
-            assignment = (await session.scalars(select(TrainingAssignment))).one()
-            assert assignment.status == "PENDING_REVIEW"
-            assert (
-                await session.scalar(select(func.count(TrainingSubmission.id)))
-            ) == 5
-
-        await callback(ADMIN, f"training_approve:{assignment.id}")
-        async with Session() as session:
-            assert (await session.get(TrainingAssignment, assignment.id)).status == (
-                "PENDING_REVIEW"
-            )
-
-        await callback(OWNER, f"training_review:{assignment.id}")
-        review_photos = [call for call in telegram.calls if isinstance(call, SendPhoto)]
-        assert len(review_photos) >= 16
-
-        await callback(OWNER, f"training_reject:{assignment.id}:3")
-        async with Session() as session:
-            current = await session.get(TrainingAssignment, assignment.id)
-            assert current.status == "ACTIVE"
-            indexes = set(
-                (
-                    await session.scalars(
-                        select(TrainingSubmission.pose_index).where(
-                            TrainingSubmission.assignment_id == assignment.id
-                        )
-                    )
-                ).all()
-            )
-            assert indexes == {1, 2, 4, 5}
-
-        await photo(PHOTO_A, "training-upload-3-redone")
-        async with Session() as session:
-            assert (await session.get(TrainingAssignment, assignment.id)).status == (
-                "PENDING_REVIEW"
-            )
-
-        await callback(OWNER, f"training_approve:{assignment.id}")
-        async with Session() as session:
-            approved = await session.get(TrainingAssignment, assignment.id)
-            assert approved.status == "COMPLETED"
-            assert approved.completed_at is not None
-
-        await callback(PHOTO_A, "training:man")
-        async with Session() as session:
-            assert (
-                await session.scalar(select(func.count(TrainingAssignment.id)))
-            ) == 1
-
-        async with Session() as session:
-            approved = await session.get(TrainingAssignment, assignment.id)
-            approved.assigned_date = training_day() - timedelta(days=1)
-            approved.completed_at = datetime.now(timezone.utc).replace(
-                tzinfo=None
-            ) - timedelta(days=1)
+            trainee = await get_user(session, PHOTO_A)
+            assignment = TrainingAssignment(user_id=trainee.id, assigned_date=training_day(), category_slug="woman", status="PENDING_REVIEW", review_source="AI_FAILED")
+            session.add(assignment)
             await session.commit()
-        await callback(PHOTO_A, "training:woman")
+            aid = assignment.id
+        for tg_id in (OWNER, ADMIN, PHOTO_A):
+            await callback(tg_id, f"training_approve:{aid}")
+            await callback(tg_id, f"training_reject:{aid}:3")
         async with Session() as session:
-            assert (
-                await session.scalar(select(func.count(TrainingAssignment.id)))
-            ) == 1
+            current = await session.get(TrainingAssignment, aid)
+            assert current.status == "PENDING_REVIEW" and current.completed_at is None
         await callback(PHOTO_A, "training:man")
         async with Session() as session:
-            assignments = (
-                await session.scalars(
-                    select(TrainingAssignment).order_by(TrainingAssignment.id)
-                )
-            ).all()
-            assert [item.category_slug for item in assignments] == ["woman", "man"]
-
-        await callback(PHOTO_B, "training:woman")
-        async with Session() as session:
-            assert (
-                await session.scalar(
-                    select(func.count(TrainingAssignment.id)).where(
-                        TrainingAssignment.user_id
-                        == (await get_user(session, PHOTO_B)).id
-                    )
-                )
-            ) == 1
-
+            assert await session.scalar(select(func.count(TrainingAssignment.id))) == 1
     run(scenario())
 
 
@@ -1519,3 +1447,4 @@ def test_photographer_assignment_is_owner_or_admin_only():
             async with Session() as session:
                 assert (await session.get(Booking, 1)).photographer_id == photographer.id
     run(scenario())
+

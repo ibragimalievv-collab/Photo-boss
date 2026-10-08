@@ -15,7 +15,7 @@ function identity(){
  try{if(sessionStorage.getItem('pb_browser_session_only')==='1')return null;}catch{}
  try{return JSON.parse(new URLSearchParams(window.Telegram?.WebApp?.initData||'').get('user')||'null')?.id||null;}catch{return null;}
 }
-const cachedPaths=new Set(['/me','/workflow','/workday','/attendance','/onboarding','/dashboard','/shoot-control','/academy']);
+const cachedPaths=new Set(['/me','/workflow','/workday','/attendance','/onboarding','/dashboard','/shoot-control','/academy','/academy/coach?track=photographer','/academy/coach?track=booking']);
 function cacheable(path){return cachedPaths.has(path)||/^\/bookings\?day=\d{4}-\d{2}-\d{2}$/.test(path)||/^\/schedule\?from=\d{4}-\d{2}-\d{2}&to=\d{4}-\d{2}-\d{2}$/.test(path)||/^\/shoot-control\?from=\d{4}-\d{2}-\d{2}&to=\d{4}-\d{2}-\d{2}$/.test(path)||/^\/delivery\/\d+$/.test(path);}
 export async function saveSnapshot(path,data){const id=identity();if(id&&cacheable(path))await localAction('snapshots','readwrite',s=>s.put({key:`${id}:${path}`,data,at:Date.now()}));}
 export async function readSnapshot(path){const id=identity();if(!id||!cacheable(path))return null;const row=await localAction('snapshots','readonly',s=>s.get(`${id}:${path}`));if(!row||Date.now()-row.at>7*86400000)return null;return {...row.data,_offline:true,_cachedAt:row.at};}

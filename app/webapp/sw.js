@@ -1,9 +1,9 @@
 // Cache executable shell only. Authenticated API responses never enter CacheStorage.
-const CACHE='photo-boss-shell-v16-delivery-offline';
+const CACHE='photo-boss-shell-v17-academy-coach';
 const SDK='https://telegram.org/js/telegram-web-app.js';
 const STATIC=['/app/','/app/config.js','/app/manifest.webmanifest','/app/css/styles.css','/app/assets/icon.svg',
  ...['icon-192','icon-512','icon-maskable-512','apple-touch-icon'].map(n=>`/app/assets/${n}.png`),
- ...['delivery','app','api','browser-login','account','schedule-editor','install','localstore','outbox','workflow','workday','domain','icons','telegram','academy','practice','development','team','insights'].map(n=>`/app/js/${n}.js`),
+ ...['academy-coach','delivery','app','api','browser-login','account','schedule-editor','install','localstore','outbox','workflow','workday','domain','icons','telegram','academy','practice','development','team','insights'].map(n=>`/app/js/${n}.js`),
  '/shift/attendance.js','/shift/attendance.css','/people/people.js','/people/people.css',
  ...['chat','calls','ringtone','recorder','ui','camera'].map(n=>`/work-chat/${n}.js`),'/work-chat/chat.css'];
 self.addEventListener('install',event=>event.waitUntil((async()=>{const cache=await caches.open(CACHE);await Promise.all([...STATIC,SDK].map(async p=>{try{const response=await fetch(p,{cache:'reload',signal:AbortSignal.timeout(15000),...(p===SDK?{mode:'no-cors'}:{})});if(response.ok||response.type==='opaque')await cache.put(p,response);}catch{}}));await self.skipWaiting();})()));

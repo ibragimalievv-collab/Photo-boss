@@ -13,7 +13,7 @@ from aiohttp import web
 from sqlalchemy import text
 
 from .config import config
-from .miniapp_security import AccessError, require_owner
+from .miniapp_security import AccessError
 from .services.training import CATEGORY_BY_SLUG, TRAINING_CATEGORIES, training_day
 from .services.training_ai import MAX_IMAGE_BYTES, analyze_training_set
 from .work_chat import positive_id
@@ -46,7 +46,7 @@ class AcademyPractice:
     async def assignment(self, conn, actor, aid, *, lock=False):
         rows = await self.api.rows(conn,
             "SELECT * FROM training_assignments WHERE id=:id" + (" FOR UPDATE" if lock else ""), id=aid)
-        if not rows or (rows[0]["user_id"] != actor["id"] and "OWNER" not in actor["roles"]):
+        if not rows or (rows[0]["user_id"] != actor["id"] and not {"OWNER", "ADMIN"} & set(actor["roles"])):
             raise AccessError("Задание не найдено.", 404)
         return rows[0]
 
@@ -61,9 +61,12 @@ class AcademyPractice:
             analysis = json.loads(row["ai_analysis"] or "null")
         except ValueError:
             analysis = None
-        return {"id": aid, "category": category.slug, "title": category.title,
+        plans = await self.api.rows(conn, "SELECT data FROM academy_coaching_plans WHERE user_id=:uid AND track='photographer' ORDER BY id DESC LIMIT 1", uid=row["user_id"])
+        plan = json.loads(plans[0]["data"]) if plans else {}
+        return {"id": aid, "personalInstructions": plan.get("instructions", []) if plan.get("category") == category.slug else [], "category": category.slug, "title": category.title,
                 "userName": user[0]["name"], "own": row["user_id"] == actor["id"],
-                "canReview": "OWNER" in actor["roles"] and row["status"] == "PENDING_REVIEW",
+                "canReview": False,
+                "canRetry": row["status"] == "PENDING_REVIEW" and row["review_source"] != "AI_PENDING",
                 "status": row["status"], "reviewSource": row["review_source"],
                 "score": row["ai_score"], "analysis": analysis,
                 "shots": [{"index": i, "instruction": instruction, "uploaded": i in uploaded,
@@ -92,14 +95,14 @@ class AcademyPractice:
             if not allowed:
                 allowed = set(CATEGORY_BY_SLUG)
             queue = []
-            if "OWNER" in actor["roles"]:
+            if {"OWNER", "ADMIN"} & set(actor["roles"]):
                 queue = await self.api.rows(conn, """SELECT a.id,u.name,a.category_slug
                     FROM training_assignments a JOIN users u ON u.id=a.user_id
                     WHERE a.status='PENDING_REVIEW' ORDER BY a.id LIMIT 100""")
             result = {"assignment": await self.detail_data(conn, actor, active["id"]) if active else None,
                 "ready": ready and not today_done, "todayDone": today_done,
                 "categories": [{"slug": c.slug, "title": c.title} for c in TRAINING_CATEGORIES
-                               if c.slug in allowed and (not latest or c.slug != latest["category_slug"])],
+                               if c.slug in allowed],
                 "history": [{"id": r["id"], "title": CATEGORY_BY_SLUG[r["category_slug"]].title,
                              "status": r["status"]} for r in assignments[:30]],
                 "queue": [{"id": r["id"], "name": r["name"],
@@ -115,6 +118,10 @@ class AcademyPractice:
         async with self.lock, self.engine.begin() as conn:
             # Serialize with the existing bot workflow as well as other app tabs.
             await self.api.rows(conn, "SELECT id FROM users WHERE id=:id FOR UPDATE", id=actor["id"])
+            if len(self.api.lessons) == 28:
+                plans = await self.api.rows(conn, "SELECT data FROM academy_coaching_plans WHERE user_id=:uid AND track='photographer' ORDER BY id DESC LIMIT 1", uid=actor["id"])
+                if not plans or json.loads(plans[0]["data"]).get("category") != body["category"]:
+                    raise AccessError("Откройте AI-наставника: он назначит практику по вашим результатам.", 409)
             catalog = json.loads((await self.catalog(request)).text)
             if catalog["assignment"]:
                 return web.json_response(catalog["assignment"])
@@ -212,34 +219,19 @@ class AcademyPractice:
         return web.json_response(result, status=201)
 
     async def review(self, request):
+        raise AccessError("Практику проверяет AI-помощник. Ручное принятие отключено.", 403)
+
+    async def retry(self, request):
         actor = request["miniapp_actor"]
-        require_owner(actor["roles"])
         aid = positive_id(request.match_info["id"])
-        body = await self.api.body(request)
-        if (set(body) != {"decision", "indexes", "comment"} or body["decision"] not in {"accept", "revision"}
-                or not isinstance(body["indexes"], list) or len(body["indexes"]) > 5
-                or any(type(i) is not int or i not in range(1, 6) for i in body["indexes"])
-                or not isinstance(body["comment"], str) or len(body["comment"]) > 2000
-                or (body["decision"] == "revision" and (not body["indexes"] or not body["comment"].strip()))):
-            raise AccessError("Для пересъёмки выберите кадры и напишите, что исправить.", 400)
+        if await self.api.body(request) != {}:
+            raise AccessError("Некорректный запрос.", 400)
         async with self.lock, self.engine.begin() as conn:
             row = await self.assignment(conn, actor, aid, lock=True)
             if row["status"] != "PENDING_REVIEW":
-                raise AccessError("Задание уже обработано.", 409)
-            accepted = body["decision"] == "accept"
-            if not accepted:
-                for index in set(body["indexes"]):
-                    await conn.execute(text("DELETE FROM training_submissions WHERE assignment_id=:id AND pose_index=:pose"),
-                                       {"id": aid, "pose": index})
-            await conn.execute(text("""UPDATE training_assignments SET status=:status,review_source='OWNER',
-                completed_at=:completed,ai_analysis=:analysis WHERE id=:id"""),
-                {"id": aid, "status": "COMPLETED" if accepted else "ACTIVE",
-                 "completed": datetime.now(UTC).replace(tzinfo=None) if accepted else None,
-                 "analysis": json.dumps({"status": "owner", **body}, ensure_ascii=False)})
-            await self.api.audit_write(conn, actor, "training_approved" if accepted else "training_rejected",
-                                       "training_assignment", aid, body["comment"])
-            data = await self.detail_data(conn, actor, aid)
-        return web.json_response(data)
+                raise AccessError("Это задание не ожидает проверки.", 409)
+            await conn.execute(text("UPDATE training_assignments SET review_source='AI_PENDING' WHERE id=:id"), {"id": aid})
+        return web.json_response({"ok": True})
 
     async def process_pending(self, storage):
         async with self.engine.connect() as conn:
@@ -249,7 +241,7 @@ class AcademyPractice:
             result = {"status": "unavailable"}
             try:
                 async with self.engine.connect() as conn:
-                    shots = await self.api.rows(conn, """SELECT submitted_file_id FROM training_submissions
+                    shots = await self.api.rows(conn, """SELECT pose_index,submitted_file_id FROM training_submissions
                         WHERE assignment_id=:id ORDER BY pose_index""", id=row["id"])
                 category = CATEGORY_BY_SLUG[row["category_slug"]]
                 if config.openai_api_key:
@@ -265,13 +257,19 @@ class AcademyPractice:
                 if not current or current[0]["status"] != "PENDING_REVIEW" or current[0]["review_source"] != "AI_PENDING":
                     continue
                 status = "COMPLETED" if decision == "ACCEPT" else "ACTIVE" if decision == "REVISION" and reshoot else "PENDING_REVIEW"
+                if review:
+                    await conn.execute(text("""INSERT INTO academy_practice_reviews
+                        (assignment_id,result,photos,created_at) VALUES (:id,:result,:photos,:now)"""),
+                        {"id": row["id"], "result": json.dumps(result, ensure_ascii=False),
+                         "photos": json.dumps([{"index": s["pose_index"], "file": s["submitted_file_id"]} for s in shots]),
+                         "now": datetime.now(UTC).replace(tzinfo=None)})
                 if status == "ACTIVE":
                     for index in reshoot:
                         await conn.execute(text("DELETE FROM training_submissions WHERE assignment_id=:id AND pose_index=:pose"),
                                            {"id": row["id"], "pose": index})
                 await conn.execute(text("""UPDATE training_assignments SET status=:status,review_source=:source,
                     ai_score=:score,ai_analysis=:analysis,completed_at=:completed WHERE id=:id"""),
-                    {"id": row["id"], "status": status, "source": "OWNER" if status == "PENDING_REVIEW" else "AI",
+                    {"id": row["id"], "status": status, "source": "AI_FAILED" if status == "PENDING_REVIEW" else "AI",
                      "score": review.get("score"), "analysis": json.dumps(result, ensure_ascii=False),
                      "completed": datetime.now(UTC).replace(tzinfo=None) if status == "COMPLETED" else None})
 
@@ -295,4 +293,6 @@ def install_academy_practice(app, miniapp):
     app.router.add_get(prefix + "/{id}/photos/{pose}", service.photo)
     app.router.add_post(prefix + "/{id}/photos/{pose}", service.upload)
     app.router.add_post(prefix + "/{id}/review", service.review)
+    app.router.add_post(prefix + "/{id}/retry", service.retry)
     return service
+

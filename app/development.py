@@ -104,11 +104,11 @@ class Development:
     def __init__(self,api): self.api=api
 
     async def listing(self,request):
-        a=request['miniapp_actor'];owner='OWNER' in a['roles']
+        a=request['miniapp_actor'];owner=bool({'OWNER','ADMIN'} & set(a['roles']))
         async with self.api.engine.connect() as conn:
             reviews=await self.api.rows(conn,'SELECT * FROM shoot_development_reviews '+('' if owner else 'WHERE photographer_id=:uid ')+'ORDER BY id DESC LIMIT 50',uid=a['id'])
             sessions=await self.api.rows(conn,'SELECT * FROM sales_training_sessions WHERE user_id=:uid ORDER BY id DESC LIMIT 30',uid=a['id'])
-        return web.json_response({'configured':bool(config.openai_api_key),'rules':ai.SALES_RULES,'scenarios':ai.SALES_SCENARIOS,
+        return web.json_response({'configured':bool(config.openai_api_key),'rules':ai.SALES_RULES,'scenarios':ai.SALES_SCENARIOS,'bookingScenarios':ai.BOOKING_SCENARIOS,
             'reviews':[{'id':r['id'],'shootingId':r['shooting_id'],'photographerId':r['photographer_id'],'status':r['status'],
                 'total':len(json.loads(r['photo_ids'])),'analyzed':sum(len(b['frames']) for b in json.loads(r['analyzed'])),
                 'summaryParts':len(json.loads(r['summary_parts'])),'batches':json.loads(r['analyzed']),'result':parsed(r['result']),'error':r['last_error'],'at':str(r['created_at'])} for r in reviews],
@@ -116,9 +116,9 @@ class Development:
 
     async def start(self,request):
         a=request['miniapp_actor'];body=await self.api.body(request)
-        if set(body)!={'clientType'} or not isinstance(body['clientType'],str) or body['clientType'] not in {s['type'] for s in ai.SALES_SCENARIOS}: raise AccessError('Выберите сценарий.',400)
+        if set(body)!={'clientType'} or not isinstance(body['clientType'],str) or body['clientType'] not in {s['type'] for s in [*ai.SALES_SCENARIOS,*ai.BOOKING_SCENARIOS]}: raise AccessError('Выберите сценарий.',400)
         if not config.openai_api_key: raise AccessError('AI-тренажёр не подключён. Учебные материалы доступны.',503)
-        scenario=next(s for s in ai.SALES_SCENARIOS if s['type']==body['clientType'])
+        scenario=next(s for s in [*ai.SALES_SCENARIOS,*ai.BOOKING_SCENARIOS] if s['type']==body['clientType'])
         async with self.api.engine.begin() as conn:
             rows=await self.api.rows(conn,"INSERT INTO sales_training_sessions(user_id,client_type,transcript,status,revision,created_at) VALUES (:uid,:type,:transcript,'ACTIVE',1,:now) RETURNING id",uid=a['id'],type=body['clientType'],transcript=json.dumps([{'role':'client','text':scenario['opening']}],ensure_ascii=False),now=utc_now())
         return web.json_response({'id':rows[0]['id']},status=201)
@@ -137,7 +137,7 @@ class Development:
             response=await ai.roleplay(s['client_type'],transcript,body['finish'])
             if response['status']!='completed': raise AccessError('AI временно недоступен. Ваш ход не потерян в форме; попробуйте снова.',503)
             result=response['data']
-            if not ai.valid_roleplay(result,body['finish']): raise AccessError('AI вернул некорректную оценку; повторите попытку.',503)
+            if not (ai.valid_booking_roleplay(result,body['finish']) if s['client_type'].startswith('booking-') else ai.valid_roleplay(result,body['finish'])): raise AccessError('AI вернул некорректную оценку; повторите попытку.',503)
             transcript.append({'role':'coach' if body['finish'] else 'client','text':result['reply']})
             await conn.execute(text('UPDATE sales_training_sessions SET transcript=:transcript,status=:status,revision=revision+1,evaluation=:evaluation WHERE id=:id'),{'transcript':json.dumps(transcript,ensure_ascii=False),'status':'COMPLETED' if body['finish'] else 'ACTIVE','evaluation':json.dumps(result,ensure_ascii=False) if body['finish'] else None,'id':sid})
         return web.json_response({'ok':True})
@@ -147,7 +147,7 @@ class Development:
         async with self.api.engine.begin() as conn:
             rows=await self.api.rows(conn,'SELECT photographer_id,status FROM shoot_development_reviews WHERE id=:id',id=rid)
             if not rows: raise AccessError('Разбор не найден.',404)
-            if a['id']!=rows[0]['photographer_id'] and 'OWNER' not in a['roles']: raise AccessError('Нет доступа.',403)
+            if a['id']!=rows[0]['photographer_id'] and not {'OWNER','ADMIN'} & set(a['roles']): raise AccessError('Нет доступа.',403)
             await conn.execute(text("UPDATE shoot_development_reviews SET status='PENDING',attempts=0,claimed_at=NULL WHERE id=:id AND status IN ('FAILED','RETRY')"),{'id':rid})
         return web.json_response({'ok':True})
 
@@ -170,3 +170,4 @@ def install_development(app,api):
     for method,path,handler in [('GET','/academy/development',service.listing),('POST','/academy/sales-training',service.start),('POST','/academy/sales-training/{id}/turn',service.turn),('POST','/academy/shoot-reviews/{id}/retry',service.retry)]:
         app.router.add_route(method,'/api/miniapp'+path,handler)
     return service
+

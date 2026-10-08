@@ -67,6 +67,13 @@ jobs:
           print('BROWSER_CHECK_RESULTS', results)
           raise SystemExit(int(any(results.values())))
           PY
+      - name: Verify AI Academy on mobile
+        env:
+          BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
+          ADMIN_TELEGRAM_IDS: '5000000001'
+          DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+          PYTHONPATH: .
+        run: python tests/academy_coach_browser_check.py
       - name: Verify navigation and capture training screens
         run: python docs/guide/capture.py
       - uses: actions/upload-artifact@v4
