@@ -134,6 +134,7 @@ class Development:
             transcript=json.loads(s['transcript'])
             if len(transcript)>=40 and not body['finish']: raise AccessError('Пора завершить тренировку и получить рекомендации.',409)
             if body['text'].strip(): transcript.append({'role':'employee','text':body['text'].strip()})
+            if body['finish'] and not any(t['role']=='employee' for t in transcript): raise AccessError('Сначала ответьте гостю, затем завершите тренировку.',409)
             response=await ai.roleplay(s['client_type'],transcript,body['finish'])
             if response['status']!='completed': raise AccessError('AI временно недоступен. Ваш ход не потерян в форме; попробуйте снова.',503)
             result=response['data']

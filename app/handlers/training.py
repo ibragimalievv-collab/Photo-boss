@@ -19,7 +19,6 @@ from ..models import (
     TrainingAssignment,
     TrainingSubmission,
     User,
-    UserRole,
 )
 from ..services.core import ROLES, audit, get_user
 from ..services.training import (
@@ -196,32 +195,6 @@ async def ai_review_assignment(bot, assignment_id):
                          f"{shot_instruction(category, indexes[0])}"),
             )
     return True
-
-
-async def notify_owners(bot, assignment_id, trainee_name, category_title):
-    async with Session() as session:
-        owner_ids = (
-            await session.scalars(
-                select(User.tg_id)
-                .join(UserRole, UserRole.user_id == User.id)
-                .where(User.active.is_(True), UserRole.role == "OWNER")
-            )
-        ).all()
-    for owner_id in set(owner_ids):
-        try:
-            await bot.send_message(
-                owner_id,
-                "📥 Новое обучение на проверку\n\n"
-                f"Сотрудник: {trainee_name}\nКатегория: {category_title}\n"
-                "Сравните пять повторов с эталонами.",
-                reply_markup=inline(
-                    [[("👀 Открыть проверку", f"training_review:{assignment_id}")]]
-                ),
-            )
-        except TelegramAPIError as exc:
-            logger.warning(
-                "Could not notify training owner %s: %s", owner_id, type(exc).__name__
-            )
 
 
 @r.message(F.text == "🎓 Обучение")

@@ -91,7 +91,9 @@ class AcademyPractice:
             latest = assignments[0] if assignments else None
             today_done = bool(latest and latest["status"] == "COMPLETED" and latest["completed_at"]
                               and training_day(datetime.fromisoformat(str(latest["completed_at"]))) == training_day())
-            allowed = set(block["practiceCategories"]) if block else set(CATEGORY_BY_SLUG)
+            course_done = all(l["slug"] in completed for l in self.api.lessons) and all(
+                not b["practiceCategories"] or bool(set(b["practiceCategories"]) & accepted) for b in self.api.blocks)
+            allowed = set(CATEGORY_BY_SLUG) if course_done else set(block["practiceCategories"]) if block else set(CATEGORY_BY_SLUG)
             if not allowed:
                 allowed = set(CATEGORY_BY_SLUG)
             queue = []

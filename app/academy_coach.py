@@ -67,11 +67,11 @@ def plan_schema(track, lessons, categories):
 class AcademyCoach:
     def __init__(self, api):
         self.api, self.engine = api, api.engine
-        self.locks = {track: asyncio.Lock() for track in ('photographer', 'booking')}
+        self.locks = {}
 
     def track(self, request):
         track = request.query.get('track', 'photographer')
-        if track not in self.locks:
+        if track not in ('photographer', 'booking'):
             raise AccessError('Выберите направление обучения.', 400)
         return track
 
@@ -151,7 +151,7 @@ class AcademyCoach:
         actor, track = request['miniapp_actor'], self.track(request)
         if await self.api.body(request) != {}:
             raise AccessError('Задание формируется по сохранённым результатам.', 400)
-        async with self.locks[track]:
+        async with self.locks.setdefault((actor['id'], track), asyncio.Lock()):
             data = await self.evidence(actor['id'], track)
             if not data['stale']:
                 return web.json_response({'plan': data['plan'], 'diagnostic': data['diagnostic']})

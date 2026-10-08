@@ -39,7 +39,6 @@ function renderAssignment(data){
   ${editable&&!s.uploaded?`<label class="practice-upload">Загрузить кадр ${s.index}<input type="file" accept="image/jpeg,image/png,image/webp" data-practice-upload="${s.index}"></label>`:''}</article>`).join('')}</div>
   ${editable?'<p>Выберите фото из галереи или камеры. Приложение подготовит JPEG до 8 МБ. После пятого кадра набор автоматически отправится на проверку.</p>':''}
   ${data.canRetry?`<button class="btn primary" data-practice-retry>Повторить AI-проверку</button>`:''}
-  ${data.canReview?`<form id="practiceReview"><h3>Проверка владельца</h3><p>Отметьте кадры только для пересъёмки.</p><div class="practice-checks">${data.shots.map(s=>`<label><input type="checkbox" name="index" value="${s.index}"> Кадр ${s.index}</label>`).join('')}</div><label>Комментарий<textarea name="comment" maxlength="2000" rows="3"></textarea></label><div class="practice-actions"><button type="submit" name="decision" value="accept">Принять 5/5</button><button type="submit" name="decision" value="revision">Вернуть на пересъёмку</button></div></form>`:''}
   <button class="practice-refresh" data-practice-refresh>Обновить</button>`);
  loadPhotos();
 }
@@ -92,14 +91,6 @@ panel.addEventListener('click',async e=>{
   if(b.hasAttribute('data-practice-refresh'))return current?await showAssignment(current.id):await home();
   if(b.dataset.practiceStart){busy=true;b.disabled=true;renderAssignment(await api('/academy/practice/start',{method:'POST',body:{category:b.dataset.practiceStart}}));}
  }catch(err){error(err);b.disabled=false;}finally{busy=false;}
-});
-panel.addEventListener('submit',async e=>{
- if(e.target.id!=='practiceReview')return;e.preventDefault();if(busy)return;
- const decision=e.submitter?.value,indexes=[...e.target.querySelectorAll('input:checked')].map(i=>Number(i.value)),comment=e.target.elements.comment.value.trim();
- if(decision==='revision'&&(!indexes.length||!comment))return error(new Error('Выберите кадры и напишите, что исправить.'));
- busy=true;
- try{renderAssignment(await api(`/academy/practice/${current.id}/review`,{method:'POST',body:{decision,indexes,comment}}));}
- catch(err){error(err);}finally{busy=false;}
 });
 panel.addEventListener('cancel',e=>{e.preventDefault();close();});
 
