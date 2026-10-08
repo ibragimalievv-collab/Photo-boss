@@ -52,9 +52,10 @@ async def main():
         'canEdit': True, 'photographer': 'Фотограф съёмки', 'title': 'Независимые папки',
         'published': False, 'expiresAt': None, 'deliveryMode': 'ALL',
         'photos': [
-            {'id': 1, 'name': 'all-original.png', 'selected': False, 'uploadSet': 'ALL'},
-            {'id': 2, 'name': 'selected-original.png', 'selected': True, 'uploadSet': 'SELECTED'},
-            {'id': 3, 'name': 'legacy-selected.png', 'selected': True, 'uploadSet': 'ALL'},
+            {'id': 1, 'name': 'all-original.png', 'selected': False, 'uploadSet': 'ALL', 'digest': 'all-only'},
+            {'id': 2, 'name': 'selected-original.png', 'selected': True, 'uploadSet': 'SELECTED', 'digest': 'same-photo'},
+            {'id': 3, 'name': 'legacy-duplicate.png', 'selected': True, 'uploadSet': 'ALL', 'digest': 'same-photo'},
+            {'id': 4, 'name': 'legacy-selected.png', 'selected': True, 'uploadSet': 'ALL', 'digest': 'legacy-only'},
         ],
     }
 
@@ -101,8 +102,10 @@ async def main():
         await expect(all_gallery.locator('h3')).to_contain_text('Все фотографии')
         await expect(selected_gallery.locator('h3')).to_contain_text('Выбранные фотографии')
         await expect(all_gallery.locator('[data-photo="1"]')).to_have_count(1)
+        await expect(all_gallery.locator('[data-photo="3"]')).to_have_count(1)
         await expect(selected_gallery.locator('[data-photo="2"]')).to_have_count(1)
-        await expect(selected_gallery.locator('[data-photo="3"]')).to_have_count(1)
+        await expect(selected_gallery.locator('[data-photo="3"]')).to_have_count(0)
+        await expect(selected_gallery.locator('[data-photo="4"]')).to_have_count(1)
         assert await page.locator('[data-delivery="select"]').count() == 0
         assert await page.locator('select[name="target"]').count() == 0
         assert await page.locator('dialog.delivery-sheet').evaluate('el => el.scrollWidth <= el.clientWidth + 2')
@@ -136,7 +139,10 @@ async def main():
         viewer = await viewer_context.new_page()
         viewer.on('pageerror', lambda e: errors.append(str(e)))
         await viewer.goto(BASE + '/app/delivery-test')
-        await expect(viewer.locator('[data-delivery-set="SELECTED"] [data-photo="3"]')).to_have_count(1)
+        await expect(viewer.locator('[data-delivery-set="SELECTED"] [data-photo="2"]')).to_have_count(1)
+        await expect(viewer.locator('[data-delivery-set="SELECTED"] [data-photo="3"]')).to_have_count(0)
+        await expect(viewer.locator('[data-delivery-set="SELECTED"] [data-photo="4"]')).to_have_count(1)
+        await expect(viewer.locator('[data-delivery-set="ALL"] [data-photo="3"]')).to_have_count(1)
         assert await viewer.locator('#deliveryAllUploadForm, #deliverySelectedUploadForm').count() == 0
         assert await viewer.locator('[data-delivery="select"]').count() == 0
         assert await viewer.locator('dialog.delivery-sheet').evaluate('el => el.scrollWidth <= el.clientWidth + 2')

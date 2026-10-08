@@ -10,7 +10,8 @@ function message(text){const el=dialog?.querySelector('[data-delivery-status]');
 const queueLabels={local:'Сохранено на устройстве',syncing:'Отправляется',synced:'Сохранено на сервере',error:'Ошибка'};
 function photoSetSection(a,set){
  const title=set==='ALL'?'Все фотографии':'Выбранные фотографии';
- const photos=a.photos.filter(p=>set==='ALL'?(p.uploadSet||'ALL')==='ALL':(p.uploadSet==='SELECTED'||p.selected));
+ const independent=new Set(a.photos.filter(p=>p.uploadSet==='SELECTED'&&p.digest).map(p=>p.digest));
+ const photos=a.photos.filter(p=>set==='ALL'?(p.uploadSet||'ALL')==='ALL':(p.uploadSet==='SELECTED'||(p.selected&&(!p.digest||!independent.has(p.digest)))));
  const formId=set==='ALL'?'deliveryAllUploadForm':'deliverySelectedUploadForm';
  return `<section class="section" data-delivery-set="${set}"><h3>${title} · ${photos.length}</h3><p class="small">${set==='ALL'?'Загрузите полную серию этой съёмки.':'Загрузите отдельные готовые файлы с устройства.'}</p>${a.canEdit?`<form id="${formId}" class="form-grid"><label class="field"><span>${title}: JPEG или PNG до 20 МБ</span><input class="input" name="photos" type="file" accept="image/jpeg,image/png" multiple required></label><button class="btn primary">${set==='ALL'?'Загрузить все фотографии':'Загрузить выбранные фотографии'}</button></form>`:''}<div class="delivery-grid">${photos.map(p=>`<figure><button class="btn ghost" data-delivery="view" data-photo="${p.id}"><img data-server-photo="${p.id}" alt="${esc(p.name)}" loading="lazy"><span>${esc(p.name)}</span></button></figure>`).join('')||'<p>В этой папке ещё нет фотографий.</p>'}</div></section>`;
 }

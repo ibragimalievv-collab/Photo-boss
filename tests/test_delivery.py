@@ -385,6 +385,8 @@ def test_independent_upload_requires_assignment_and_valid_set_before_publishing(
 
 
 def test_legacy_unselect_preserves_a_shared_independently_uploaded_file(monkeypatch):
+    import zipfile
+
     from app import delivery
     monkeypatch.setattr(delivery, 'configured_from_env', lambda: ('fake-token', 'fake-client'))
     monkeypatch.setattr(delivery.YandexDisk, 'ensure_dir', AsyncMock())
@@ -424,6 +426,25 @@ def test_legacy_unselect_preserves_a_shared_independently_uploaded_file(monkeypa
                 json={'published': True, 'deliveryMode': 'SELECTED'})
             assert response.status == 200
             base = '/g/' + (await response.json())['clientUrl'].rsplit('/', 1)[1]
+
+            async def visible_files(expected):
+                page = await (await client.get(base)).text()
+                assert page.count('<figure>') == len(expected)
+                assert page.count('<figcaption>separate.png</figcaption>') == 1
+                assert '<figcaption>legacy.png</figcaption>' not in page
+                archive = await client.get(base + '/album.zip')
+                assert archive.status == 200
+                with zipfile.ZipFile(io.BytesIO(await archive.read())) as zipped:
+                    assert set(zipped.namelist()) == {str(p['photoId']) + '-' + name for p, name, _ in expected}
+                    for photo, name, contents in expected:
+                        assert zipped.read(str(photo['photoId']) + '-' + name) == contents
+
+            # Prefer the independent upload over the identical legacy marked
+            # frame in both client lists, while keeping old direct links valid.
+            await visible_files([(chosen, 'separate.png', image()),
+                                 (unshared, 'legacy-only.png', image('blue'))])
+            response = await client.get(base + '/photos/' + str(legacy['photoId']) + '?download=1')
+            assert response.status == 200 and await response.read() == image()
             for photo in [legacy, unshared]:
                 response = await client.post('/api/miniapp/delivery/1/photos/' + str(photo['photoId']) + '/selected',
                     headers=headers, json={'selected': False})
@@ -439,6 +460,14 @@ def test_legacy_unselect_preserves_a_shared_independently_uploaded_file(monkeypa
             page = await (await client.get(base)).text()
             assert 'separate.png' in page and 'legacy.png' not in page and 'legacy-only.png' not in page
             response = await client.get('/api/miniapp/delivery/1/photos/' + str(legacy['photoId']), headers=headers)
+            assert response.status == 200 and await response.read() == image()
+            # An old still-open application can mark its full-set copy again;
+            # selected clients must continue to receive only one frame per SHA.
+            response = await client.post('/api/miniapp/delivery/1/photos/' + str(legacy['photoId']) + '/selected',
+                headers=headers, json={'selected': True})
+            assert response.status == 200
+            await visible_files([(chosen, 'separate.png', image())])
+            response = await client.get(base + '/photos/' + str(legacy['photoId']) + '?download=1')
             assert response.status == 200 and await response.read() == image()
         finally:
             await client.close()
