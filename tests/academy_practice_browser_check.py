@@ -78,6 +78,7 @@ async def main():
             await owner.locator('[data-practice-open]').first.click()
             assert await owner.locator('#practiceReview').count() == 0
             await owner.locator('[data-practice-retry]').click()
+            await expect(owner.locator('.practice-body')).to_contain_text('ИИ проверяет фотографии')
             revision = {'status': 'completed', 'review': {'decision': 'REVISION', 'score': 75,
                         'reshoot_indexes': [2], 'issues': ['Другой ракурс'], 'strengths': [],
                         'next_action': 'Переснимите второй кадр'}}
