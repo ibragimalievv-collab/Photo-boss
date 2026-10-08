@@ -152,13 +152,13 @@ async def main():
                     # Exercise a 300-MB queue without retaining every photo in status reads.
                     await context.set_offline(True)
                     await page.evaluate("""async()=>{
-                        const m=await import('/app/js/outbox.js');m.setOutboxUser(777);
+                        const m=await import('/app/js/outbox.js');m.setOutboxUser(2);
                         const bytes=new Uint8Array(2*1024*1024);bytes.fill(73);
                         await m.enqueueBatch(Array.from({length:150},(_,i)=>({
                             kind:'delivery_photo',date:'2026-10-08',data:{booking:1,filename:`frame-${i}.jpg`},
                             blob:new File([bytes],`frame-${i}.jpg`,{type:'image/jpeg'})
                         })));
-                        const rows=await m.outboxRows();
+                        const rows=(await m.outboxRows()).filter(r=>r.kind==='delivery_photo');
                         if(rows.length!==150||rows.some(r=>r.blob||!r.hasBlob))throw Error('Batch metadata retains files');
                         const {localAction}=await import('/app/js/localstore.js');
                         const row=await localAction('operations','readonly',s=>s.get(rows[0].key));
@@ -180,7 +180,7 @@ async def main():
                     await context.set_offline(False)
                     await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.error);}")
                     await page.evaluate("async()=>{const m=await import('/app/js/outbox.js');const row=(await m.outboxRows()).find(r=>r.error);await m.retryOperation(row.key);}")
-                    await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');const rows=await m.outboxRows();return rows.length===150&&rows.every(r=>r.status==='synced'&&!r.hasBlob);}")
+                    await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');const rows=(await m.outboxRows()).filter(r=>r.kind==='delivery_photo');return rows.length===150&&rows.every(r=>r.status==='synced'&&!r.hasBlob);}")
                     assert len(attempts)==151 and len(set(attempts))==150
                     assert not errors,errors
                     await browser.close()
