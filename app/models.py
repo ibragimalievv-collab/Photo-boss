@@ -935,3 +935,35 @@ class DeliveryBookingResponse(Base):
     moment: Mapped[str] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     __table_args__ = (UniqueConstraint('booking_id', 'contact_id', 'kind', 'moment', name='uq_delivery_booking_response'),)
+
+
+class AcademyCoachingPlan(Base):
+    __tablename__ = 'academy_coaching_plans'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True)
+    track: Mapped[str] = mapped_column(String(20))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    data: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (UniqueConstraint('user_id', 'track', 'fingerprint', name='uq_academy_plan_evidence'),)
+
+
+class AcademyQuizAttempt(Base):
+    __tablename__ = 'academy_quiz_attempts'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True)
+    topic_slug: Mapped[str] = mapped_column(String(50))
+    score: Mapped[int] = mapped_column(Integer)
+    answers: Mapped[str] = mapped_column(Text)
+    passed: Mapped[bool] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (CheckConstraint('score BETWEEN 0 AND 100', name='ck_academy_quiz_score'),)
+
+
+class AcademyPracticeReview(Base):
+    __tablename__ = 'academy_practice_reviews'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    assignment_id: Mapped[int] = mapped_column(ForeignKey('training_assignments.id', ondelete='CASCADE'), index=True)
+    result: Mapped[str] = mapped_column(Text)
+    photos: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)

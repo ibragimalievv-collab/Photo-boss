@@ -109,25 +109,38 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
         assert (await self.request(f"/{aid}/photos/2", payload=payload[:-2]+b"2\xff\xd9"))[0] == 503
         assert sum(s["uploaded"] for s in (await self.request(f"/{aid}"))[1]["shots"]) == 1
 
-    async def test_owner_review_reshoot_and_progress_unlock(self):
+    async def test_ai_only_review_retry_reshoot_and_archived_originals(self):
         aid = await self.start()
         data = await self.upload_all(aid)
         assert data["status"] == "PENDING_REVIEW"
         await self.practice.process_pending(self.storage)
-        assert (await self.request(f"/{aid}"))[1]["reviewSource"] == "OWNER"
-        assert (await self.request(uid=1))[1]["queue"][0]["id"] == aid
-        body = {"decision": "revision", "indexes": [2], "comment": "Измените ракурс второго кадра."}
-        assert (await self.request(f"/{aid}/review", body=body, uid=3))[0] == 403
-        _, revised = await self.request(f"/{aid}/review", body=body, uid=1)
+        assert (await self.request(f"/{aid}"))[1]["reviewSource"] == "AI_FAILED"
+        body = {"decision": "accept", "indexes": [], "comment": "Manual"}
+        for uid in (1, 2, 3):
+            assert (await self.request(f"/{aid}/review", body=body, uid=uid))[0] == 403
+        assert (await self.request(f"/{aid}/retry", body={}, uid=4))[0] == 404
+        assert (await self.request(f"/{aid}/retry", body={}))[0] == 200
+        revised_result = {"status": "completed", "review": {"decision": "REVISION", "score": 75,
+                          "reshoot_indexes": [2], "issues": ["Другой ракурс"], "strengths": [], "next_action": "Переснимите второй кадр"}}
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), \
+                patch("app.academy_practice.analyze_training_set", AsyncMock(return_value=revised_result)):
+            await self.practice.process_pending(self.storage)
+        revised = (await self.request(f"/{aid}"))[1]
         assert revised["status"] == "ACTIVE"
         assert [s["index"] for s in revised["shots"] if not s["uploaded"]] == [2]
-        assert revised["analysis"]["comment"] == body["comment"]
+        with self.engine.inner.begin() as conn:
+            import json
+            archive = conn.execute(text("SELECT photos FROM academy_practice_reviews WHERE assignment_id=:id"), {"id": aid}).scalar()
+            assert len(json.loads(archive)) == 5
+            assert all(p['file'][len('academy-disk:'):] in self.files for p in json.loads(archive))
         await self.request(f"/{aid}/photos/2", payload=b"\xff\xd8\xffreshoot\xff\xd9")
-        body = {"decision": "accept", "indexes": [], "comment": "Отлично"}
-        _, accepted = await self.request(f"/{aid}/review", body=body, uid=1)
-        assert accepted["status"] == "COMPLETED"
+        accepted_result = {"status": "completed", "review": {"decision": "ACCEPT", "score": 90,
+                          "reshoot_indexes": [], "issues": [], "strengths": ["Разные планы"], "next_action": "Следующий блок"}}
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), \
+                patch("app.academy_practice.analyze_training_set", AsyncMock(return_value=accepted_result)):
+            await self.practice.process_pending(self.storage)
+        assert (await self.request(f"/{aid}"))[1]["status"] == "COMPLETED"
         assert (await self.request())[1]["todayDone"] is True
-        assert (await self.request("/start", body={"category": "child"}))[0] == 409
         assert self.bot.send_message.await_count == 0
 
     async def test_ai_review_saves_result_without_sending_user_out_of_app(self):
@@ -142,3 +155,4 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
         assert data["status"] == "COMPLETED" and data["score"] == 90
         assert data["analysis"] == result
         assert self.bot.send_message.await_count == 0
+

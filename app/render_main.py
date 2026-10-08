@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.14-chat-design"
+RELEASE = "miniapp-3.15-academy-ai-coach"
 
 
 async def health(request):
@@ -85,6 +85,7 @@ async def on_startup(app):
             await reset_chat_menu(bot, tg_id)
         logger.info("Mini App menu configured: %s", app_url())
     logger.info("Telegram bot @%s is authenticated", me.username)
+    logger.info("Academy AI configured=%s; tracks=photographer,booking", bool(config.openai_api_key))
     logger.info("Authenticated Telegram webhook configured")
     storage_status = await app["yandex_disk"].verify(write_test=True)
     if not storage_status["connected"] or not storage_status["writeVerified"]:
@@ -151,3 +152,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -13,7 +13,13 @@ from ..access import StaffFilter
 from ..config import config
 from ..db import Session
 from ..keyboards import inline
-from ..models import TrainingAssignment, TrainingSubmission, User, UserRole
+from ..models import (
+    AcademyCoachingPlan,
+    AcademyPracticeReview,
+    TrainingAssignment,
+    TrainingSubmission,
+    User,
+)
 from ..services.core import ROLES, audit, get_user
 from ..services.training import (
     CATEGORY_BY_SLUG,
@@ -148,6 +154,8 @@ async def ai_review_assignment(bot, assignment_id):
         locked = await session.get(TrainingAssignment, assignment_id, with_for_update=True)
         if locked is None or locked.status != "PENDING_REVIEW":
             return True
+        session.add(AcademyPracticeReview(assignment_id=assignment_id, result=json.dumps(result, ensure_ascii=False),
+            photos=json.dumps([{"index": x.pose_index, "file": x.submitted_file_id} for x in submissions])))
         locked.ai_score = review["score"]
         locked.ai_analysis = json.dumps(result, ensure_ascii=False)
         locked.review_source = "AI"
@@ -163,6 +171,7 @@ async def ai_review_assignment(bot, assignment_id):
                 await session.delete(row)
             locked.status = "ACTIVE"
         else:
+            locked.review_source = "AI_FAILED"
             await session.commit()
             return False
         await session.commit()
@@ -188,32 +197,6 @@ async def ai_review_assignment(bot, assignment_id):
     return True
 
 
-async def notify_owners(bot, assignment_id, trainee_name, category_title):
-    async with Session() as session:
-        owner_ids = (
-            await session.scalars(
-                select(User.tg_id)
-                .join(UserRole, UserRole.user_id == User.id)
-                .where(User.active.is_(True), UserRole.role == "OWNER")
-            )
-        ).all()
-    for owner_id in set(owner_ids):
-        try:
-            await bot.send_message(
-                owner_id,
-                "📥 Новое обучение на проверку\n\n"
-                f"Сотрудник: {trainee_name}\nКатегория: {category_title}\n"
-                "Сравните пять повторов с эталонами.",
-                reply_markup=inline(
-                    [[("👀 Открыть проверку", f"training_review:{assignment_id}")]]
-                ),
-            )
-        except TelegramAPIError as exc:
-            logger.warning(
-                "Could not notify training owner %s: %s", owner_id, type(exc).__name__
-            )
-
-
 @r.message(F.text == "🎓 Обучение")
 async def training_menu(message):
     async with Session() as session:
@@ -224,7 +207,7 @@ async def training_menu(message):
             category = CATEGORY_BY_SLUG.get(unfinished.category_slug)
             if unfinished.status == "PENDING_REVIEW":
                 return await message.answer(
-                    "⏳ Ваши 5 фотографий отправлены владельцу на проверку. "
+                    "⏳ Ваши 5 фотографий отправлены AI-помощнику на проверку. "
                     "До решения другой набор выбрать нельзя."
                 )
             await message.answer(
@@ -272,13 +255,16 @@ async def training_reference(callback: CallbackQuery):
     async with Session() as session:
         user = await get_user(session, callback.from_user.id)
         await session.get(User, user.id, with_for_update=True)
+        plan = await session.scalar(select(AcademyCoachingPlan).where(AcademyCoachingPlan.user_id == user.id, AcademyCoachingPlan.track == "photographer").order_by(AcademyCoachingPlan.id.desc()).limit(1))
+        if not plan or json.loads(plan.data).get("category") != category.slug:
+            return await callback.answer("AI назначает категорию по вашим результатам. Откройте AI-наставника в Академии приложения.", show_alert=True)
         unfinished = await latest_assignment(
             session, user.id, unfinished_only=True, lock=True
         )
         if unfinished is not None:
             if unfinished.status == "PENDING_REVIEW":
                 return await callback.answer(
-                    "Задание уже отправлено владельцу на проверку.", show_alert=True
+                    "Задание уже отправлено AI-помощнику на проверку.", show_alert=True
                 )
             await callback.answer(
                 "Сначала завершите выбранную категорию.", show_alert=True
@@ -336,14 +322,14 @@ async def training_submission(message):
             )
         if assignment.status == "PENDING_REVIEW":
             return await message.answer(
-                "⏳ Пять фотографий уже отправлены владельцу на проверку."
+                "⏳ Пять фотографий уже отправлены AI-помощнику на проверку."
             )
         indexes = await submission_indexes(session, assignment.id)
         pose_index = next_pose_index(indexes)
         if pose_index is None:
             assignment.status = "PENDING_REVIEW"
             await session.commit()
-            return await message.answer("⏳ Задание ожидает проверки владельца.")
+            return await message.answer("⏳ Задание ожидает AI-проверки.")
         category = CATEGORY_BY_SLUG.get(assignment.category_slug)
         if category is None:
             return await message.answer("Категория задания не найдена.")
@@ -358,6 +344,7 @@ async def training_submission(message):
         submitted_all = len(indexes) == 4
         if submitted_all:
             assignment.status = "PENDING_REVIEW"
+            assignment.review_source = "AI_PENDING"
             await audit(
                 session,
                 user,
@@ -374,12 +361,14 @@ async def training_submission(message):
         )
         if await ai_review_assignment(message.bot, assignment.id):
             return
-        await message.answer(
-            "⏳ Автоматическая проверка сейчас недоступна или требует решения человека. "
-            "Набор передан владельцу."
-        )
-        return await notify_owners(
-            message.bot, assignment.id, user.name, category.title
+        async with Session() as session:
+            pending = await session.get(TrainingAssignment, assignment.id, with_for_update=True)
+            if pending and pending.status == "PENDING_REVIEW":
+                pending.review_source = "AI_FAILED"
+                await session.commit()
+        return await message.answer(
+            "⏳ AI-проверка временно недоступна или не уверена в результате. "
+            "Фото сохранены. Повторите AI-проверку в Академии приложения."
         )
     indexes.add(pose_index)
     await message.answer(
@@ -440,115 +429,14 @@ async def training_review(callback: CallbackQuery, current_roles):
         if photo.startswith(DISK_PREFIX):
             photo = BufferedInputFile(await download_training_photo(callback.bot, photo), filename=f"practice-{pose}.jpg")
         await callback.message.answer_photo(photo, caption=f"Повтор сотрудника {pose}/5")
-    await callback.message.answer(
-        "Примите весь набор или верните конкретный кадр на пересъёмку.",
-        reply_markup=inline(
-            [
-                [("✅ Принять 5/5", f"training_approve:{assignment.id}")],
-                [
-                    ("🔁 1", f"training_reject:{assignment.id}:1"),
-                    ("🔁 2", f"training_reject:{assignment.id}:2"),
-                    ("🔁 3", f"training_reject:{assignment.id}:3"),
-                ],
-                [
-                    ("🔁 4", f"training_reject:{assignment.id}:4"),
-                    ("🔁 5", f"training_reject:{assignment.id}:5"),
-                ],
-            ]
-        ),
-    )
+    await callback.message.answer("Оценку и пересъёмку назначает только AI-помощник. Повтор проверки доступен в Академии приложения.")
 
 
 @r.callback_query(F.data.startswith("training_approve:"))
 async def training_approve(callback: CallbackQuery, current_roles):
-    if "OWNER" not in current_roles:
-        return await callback.answer(
-            "Подтвердить может только владелец.", show_alert=True
-        )
-    assignment_id = callback_id(callback.data, "training_approve:")
-    if assignment_id is None:
-        return await callback.answer("Некорректная кнопка.", show_alert=True)
-    async with Session() as session:
-        assignment = await session.get(
-            TrainingAssignment, assignment_id, with_for_update=True
-        )
-        if assignment is None or assignment.status != "PENDING_REVIEW":
-            return await callback.answer("Задание уже обработано.", show_alert=True)
-        trainee = await session.get(User, assignment.user_id)
-        assignment.status = "COMPLETED"
-        assignment.completed_at = datetime.now(UTC).replace(tzinfo=None)
-        assignment.review_source = "OWNER"
-        await audit(
-            session,
-            await get_user(session, callback.from_user.id),
-            "training_approved",
-            "training_assignment",
-            assignment.id,
-        )
-        await session.commit()
-    await callback.bot.send_message(
-        trainee.tg_id,
-        "✅ Владелец принял обучение: 5/5. Новые позы откроются завтра.",
-    )
-    await callback.answer("Обучение принято.")
-    if callback.message:
-        await callback.message.answer("✅ Набор принят: 5/5.")
+    await callback.answer("Практику принимает только AI-помощник. Ручная оценка отключена.", show_alert=True)
 
 
 @r.callback_query(F.data.startswith("training_reject:"))
 async def training_reject(callback: CallbackQuery, current_roles):
-    if "OWNER" not in current_roles:
-        return await callback.answer(
-            "Вернуть кадр может только владелец.", show_alert=True
-        )
-    try:
-        _, raw_assignment_id, raw_pose = callback.data.split(":", 2)
-        assignment_id = int(raw_assignment_id)
-        pose_index = int(raw_pose)
-        if not 0 < assignment_id <= 2**31 - 1 or pose_index not in range(1, 6):
-            raise ValueError
-    except (AttributeError, TypeError, ValueError):
-        return await callback.answer("Некорректная кнопка.", show_alert=True)
-    async with Session() as session:
-        assignment = await session.get(
-            TrainingAssignment, assignment_id, with_for_update=True
-        )
-        if assignment is None or assignment.status != "PENDING_REVIEW":
-            return await callback.answer("Задание уже обработано.", show_alert=True)
-        submission = (
-            await session.scalars(
-                select(TrainingSubmission).where(
-                    TrainingSubmission.assignment_id == assignment.id,
-                    TrainingSubmission.pose_index == pose_index,
-                )
-            )
-        ).one_or_none()
-        if submission is None:
-            return await callback.answer("Этот кадр уже возвращён.", show_alert=True)
-        trainee = await session.get(User, assignment.user_id)
-        category = CATEGORY_BY_SLUG.get(assignment.category_slug)
-        await session.delete(submission)
-        assignment.status = "ACTIVE"
-        assignment.review_source = "OWNER"
-        await audit(
-            session,
-            await get_user(session, callback.from_user.id),
-            "training_rejected",
-            "training_assignment",
-            assignment.id,
-            f"pose={pose_index}",
-        )
-        await session.commit()
-    await callback.bot.send_message(
-        trainee.tg_id,
-        f"🔁 Владелец вернул позу {pose_index}/5 на пересъёмку.",
-    )
-    if category is not None:
-        await callback.bot.send_photo(
-            trainee.tg_id,
-            FSInputFile(category.image_paths[pose_index - 1]),
-            caption=f"Поза {pose_index}/5. Повторите кадр заново и пришлите сюда.",
-        )
-    await callback.answer("Кадр возвращён на пересъёмку.")
-    if callback.message:
-        await callback.message.answer(f"🔁 Поза {pose_index}/5 возвращена сотруднику.")
+    await callback.answer("Пересъёмку назначает только AI-помощник. Откройте Академию приложения.", show_alert=True)

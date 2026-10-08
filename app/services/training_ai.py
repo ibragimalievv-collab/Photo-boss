@@ -37,6 +37,9 @@ SCHEMA = {
 
 
 def validate(result):
+    from .development_ai import valid_value
+    if not valid_value(result, SCHEMA):
+        raise ValueError("Invalid Academy review structure")
     if not isinstance(result, dict) or set(result) != set(SCHEMA["required"]):
         raise ValueError("Unexpected Academy analysis")
     score = result["score"]
@@ -50,8 +53,12 @@ def validate(result):
         raise ValueError("Invalid criterion")
     if sum(criteria.values()) != score:
         raise ValueError("Score mismatch")
-    if result["decision"] == "ACCEPT" and (score < 85 or result["critical"] or result["reshoot_indexes"]):
+    if result["decision"] == "ACCEPT" and (score < 85 or result["critical"] or result["reshoot_indexes"] or result["duplicate_pairs"]):
         raise ValueError("Unsafe acceptance")
+    if len(set(result["reshoot_indexes"])) != len(result["reshoot_indexes"]) or any(a == b for a, b in result["duplicate_pairs"]):
+        raise ValueError("Invalid reshoot indexes")
+    if result["decision"] == "REVISION" and not result["reshoot_indexes"]:
+        raise ValueError("Revision needs specific frames")
     return result
 
 
@@ -109,13 +116,13 @@ async def analyze_training_set(category, references, submissions):
         text = "".join(part["text"] for item in result.get("output", []) if item.get("type") == "message" for part in item.get("content", []) if part.get("type") == "output_text")
         return {"status": "completed", "review": validate(json.loads(text))}
     except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-        logger.warning("Academy AI analysis unavailable; owner review required")
+        logger.warning("Academy AI analysis unavailable; retry required")
         return {"status": "unavailable"}
 
 
 def review_text(data):
     if data.get("status") != "completed":
-        return "ИИ-проверка временно недоступна. Задание передано владельцу."
+        return "ИИ-проверка временно недоступна. Фото сохранены. Повторите AI-проверку в приложении."
     review = data["review"]
     c = review["criteria"]
     rows = [f"🤖 Проверка Photo Boss: {review['score']}/100",
@@ -126,3 +133,4 @@ def review_text(data):
     if review["duplicate_pairs"]: rows.append("\nПохожие ракурсы: " + ", ".join(f"{a}–{b}" for a,b in review["duplicate_pairs"]))
     rows.append("\nСледующее действие: " + review["next_action"])
     return "\n".join(rows)
+

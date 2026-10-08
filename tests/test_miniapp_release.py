@@ -213,6 +213,11 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                 "CREATE TABLE shift_check_ins(id INTEGER PRIMARY KEY,user_id INTEGER,shift_date DATE,started_at DATETIME)",
                 "CREATE TABLE shift_check_outs(id INTEGER PRIMARY KEY,user_id INTEGER,shift_date DATE,ended_at DATETIME)",
                 "CREATE TABLE audit_logs(id INTEGER PRIMARY KEY,user_id INTEGER,action TEXT,entity TEXT,entity_id INTEGER,details TEXT,created_at DATETIME)",
+                "CREATE TABLE shoot_development_reviews(id INTEGER PRIMARY KEY,shooting_id INTEGER,photographer_id INTEGER,fingerprint TEXT,photo_ids TEXT,status TEXT,analyzed TEXT,summary_parts TEXT,attempts INTEGER,result TEXT,created_at DATETIME,UNIQUE(shooting_id,fingerprint))",
+                "CREATE TABLE sales_training_sessions(id INTEGER PRIMARY KEY,user_id INTEGER,client_type TEXT,transcript TEXT,status TEXT,revision INTEGER,evaluation TEXT,created_at DATETIME)",
+                "CREATE TABLE academy_coaching_plans(id INTEGER PRIMARY KEY,user_id INTEGER,track TEXT,fingerprint TEXT,data TEXT,created_at DATETIME,UNIQUE(user_id,track,fingerprint))",
+                "CREATE TABLE academy_quiz_attempts(id INTEGER PRIMARY KEY,user_id INTEGER,topic_slug TEXT,score INTEGER,answers TEXT,passed BOOLEAN,created_at DATETIME)",
+                "CREATE TABLE academy_practice_reviews(id INTEGER PRIMARY KEY,assignment_id INTEGER,result TEXT,photos TEXT,created_at DATETIME)",
                 "CREATE TABLE academy_lesson_progress(id INTEGER PRIMARY KEY,user_id INTEGER,topic_slug TEXT,completed_at DATETIME,UNIQUE(user_id,topic_slug))",
                 "CREATE TABLE training_assignments(id INTEGER PRIMARY KEY,user_id INTEGER,category_slug TEXT,status TEXT,ai_score INTEGER,ai_analysis TEXT)",
                 "CREATE TABLE academy_reviews(id INTEGER PRIMARY KEY,user_id INTEGER,quality_score INTEGER,issues TEXT,recommendation TEXT)",
@@ -506,3 +511,4 @@ def test_runtime_entry_points_install_policy():
     source = (ROOT / "app" / "render_main.py").read_text()
     assert source.count("secret_token=webhook_secret(config.bot_token)") == 2
     assert "drop_pending_updates=False" in source
+
