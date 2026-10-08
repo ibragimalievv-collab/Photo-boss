@@ -23,7 +23,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .miniapp_security import AccessError
 from .models import utc_now
-from .work_chat import positive_id
+from .work_chat import iso, positive_id
 
 MAX_PARTICIPANTS = 6
 HEARTBEAT_TTL = 60
@@ -93,7 +93,7 @@ class WorkCalls:
                    "peerId": room.peer, "mode": room.mode, "status": status,
                    "participants": [{"id": uid, "name": name} for uid, name in room.participants.items()],
                    "durationSeconds": int(max(0, self.clock()-room.connected)) if room.connected is not None else 0,
-                   "at": utc_now().isoformat()}
+                   "at": iso(utc_now())}
         async with self.api.engine.begin() as conn:
             await self.api.audit_write(conn, actor or {"id": room.creator}, "work_call_history", "work_call", None,
                                        json.dumps(payload, ensure_ascii=False))
@@ -206,8 +206,10 @@ class WorkCalls:
     async def start(self, request):
         actor, users = await self.allowed(request)
         body = await self.api.body(request)
-        if set(body) != {"peerId", "mode"} or body["mode"] not in ("audio", "video"):
+        if set(body) not in ({"peerId", "mode"}, {"peerId", "mode", "expectedUserId"}) or body["mode"] not in ("audio", "video"):
             raise AccessError("Выберите аудио- или видеозвонок.", 400)
+        if "expectedUserId" in body and positive_id(body["expectedUserId"]) != actor["id"]:
+            raise AccessError("Аккаунт изменился. Откройте чат заново.", 409)
         peer = body["peerId"]
         if peer is not None:
             peer = positive_id(peer)
@@ -245,8 +247,10 @@ class WorkCalls:
     async def join(self, request):
         actor, users = await self.allowed(request)
         body = await self.api.body(request)
-        if set(body) != {"callId", "mode"} or body["mode"] not in ("audio", "video"):
+        if set(body) not in ({"callId", "mode"}, {"callId", "mode", "expectedUserId"}) or body["mode"] not in ("audio", "video"):
             raise AccessError("Некорректный запрос подключения.", 400)
+        if "expectedUserId" in body and positive_id(body["expectedUserId"]) != actor["id"]:
+            raise AccessError("Аккаунт изменился. Откройте чат заново.", 409)
         async with self.lock:
             await self.prune(users)
             room = self.room_for(body["callId"], actor["id"])
@@ -383,3 +387,4 @@ def install_work_calls(app, chat):
         service.rooms.clear()
     app.on_cleanup.append(cleanup)
     return service
+

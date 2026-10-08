@@ -10,9 +10,8 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from aiohttp import web
+from aiohttp import ClientError, web
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -27,6 +26,8 @@ RETENTION_DAYS = 365
 MAX_MESSAGE = 2000
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 RATE_LIMIT_PER_MINUTE = 30
+MESSAGE_PAGE_SIZE = 100
+NOTIFICATION_TIMEOUT_SECONDS = 3
 BLOCKED_EXTENSIONS = {
     ".apk", ".app", ".bat", ".cmd", ".com", ".exe", ".hta", ".html", ".htm",
     ".js", ".jar", ".msi", ".ps1", ".scr", ".sh", ".svg", ".vbs",
@@ -52,7 +53,14 @@ def cursor_id(value):
 
 
 def iso(value):
-    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+    if not isinstance(value, datetime):
+        try:
+            value = datetime.fromisoformat(str(value))
+        except (ValueError, TypeError):
+            return str(value)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def normalize_text(value, *, required=True):
@@ -129,7 +137,7 @@ class WorkChat:
                 disable_notification=False,
             )
             return True
-        except TelegramAPIError as exc:
+        except Exception as exc:  # noqa: BLE001 - best-effort push cannot invalidate committed messages
             logger.info(
                 "Work-chat Telegram notification unavailable for tg_id=%s (%s)",
                 tg_id, type(exc).__name__,
@@ -158,7 +166,15 @@ class WorkChat:
             async with semaphore:
                 return await self._notify_one(tg_id, text_value)
 
-        await asyncio.gather(*(send(tg_id) for tg_id in targets))
+        # A message is already committed at this point. Failed or slow push
+        # notifications must not turn its acknowledgement into a failed send.
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(send(tg_id) for tg_id in targets)),
+                timeout=NOTIFICATION_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - notification failures cannot invalidate a committed send
+            logger.warning("Work-chat notification unavailable (%s)", type(exc).__name__)
 
     async def acceptance(self, conn, user_id):
         rows = await self.api.rows(
@@ -232,7 +248,7 @@ class WorkChat:
                     ensure_ascii=False,
                 ),
             )
-        return web.json_response({"ok": True, "acceptedAt": now.isoformat()})
+        return web.json_response({"ok": True, "acceptedAt": iso(now)})
 
     @staticmethod
     def scope_key(peer_id):
@@ -298,6 +314,8 @@ class WorkChat:
                 AND r.scope_key=('peer:' || CAST(m.sender_id AS TEXT))
                WHERE m.recipient_id=:uid
                  AND m.id>COALESCE(r.last_read_message_id,0)
+                 AND EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id=u.id
+                     AND ur.role IN ('OWNER','ADMIN','MANAGER','PHOTOGRAPHER'))
                GROUP BY m.sender_id""",
             uid=user_id,
         )
@@ -326,6 +344,8 @@ class WorkChat:
                 conn,
                 """SELECT id,name FROM users
                    WHERE active=TRUE AND id<>:uid
+                     AND EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id=users.id
+                         AND ur.role IN ('OWNER','ADMIN','MANAGER','PHOTOGRAPHER'))
                    ORDER BY name,id LIMIT 500""",
                 uid=actor["id"],
             )
@@ -382,7 +402,9 @@ class WorkChat:
         if peer_id is not None:
             target = await self.api.rows(
                 conn,
-                "SELECT id,tg_id FROM users WHERE id=:id AND active=TRUE",
+                """SELECT id,tg_id FROM users WHERE id=:id AND active=TRUE
+                   AND EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id=users.id
+                       AND ur.role IN ('OWNER','ADMIN','MANAGER','PHOTOGRAPHER'))""",
                 id=peer_id,
             )
             if not target:
@@ -429,7 +451,7 @@ class WorkChat:
                 JOIN users u ON u.id=m.sender_id
                 LEFT JOIN work_chat_attachments a ON a.id=m.attachment_id
                 WHERE {clause} AND m.id>:after
-                ORDER BY m.id ASC LIMIT 100""",
+                ORDER BY m.id ASC LIMIT 101""",
             **params,
         )
 
@@ -469,12 +491,14 @@ class WorkChat:
             rows = await self.api.rows(conn,
                 f"SELECT COALESCE(MAX(id),0) AS cursor FROM work_chat_deletions WHERE {scope}",
                 **params)
-            return [], int(rows[0]["cursor"])
+            return [], int(rows[0]["cursor"]), False
         rows = await self.api.rows(conn,
             f"SELECT id,message_id FROM work_chat_deletions WHERE {scope} "
-            "AND id>:cursor ORDER BY id ASC LIMIT 100",
+            "AND id>:cursor ORDER BY id ASC LIMIT 101",
             **params, cursor=cursor_id(cursor))
-        return [r["message_id"] for r in rows], int(rows[-1]["id"] if rows else cursor_id(cursor))
+        has_more = len(rows) > MESSAGE_PAGE_SIZE
+        rows = rows[:MESSAGE_PAGE_SIZE]
+        return [r["message_id"] for r in rows], int(rows[-1]["id"] if rows else cursor_id(cursor)), has_more
 
     async def delete_message(self, request):
         actor = request["miniapp_actor"]
@@ -521,6 +545,9 @@ class WorkChat:
         peer_raw = request.query.get("peer", "general")
         peer_id = None if peer_raw == "general" else positive_id(peer_raw)
         after = cursor_id(request.query.get("after"))
+        mark_read = request.query.get("markRead", "1")
+        if mark_read not in {"0", "1"}:
+            raise AccessError("Некорректное подтверждение прочтения.", 400)
         if peer_id == actor["id"]:
             raise AccessError("Нельзя открыть диалог с самим собой.", 400)
         async with self.engine.begin() as conn:
@@ -531,13 +558,15 @@ class WorkChat:
                 )
                 if not person:
                     raise AccessError("Сотрудник не найден.", 404)
-            deleted_ids, deletion_cursor = await self.deletion_updates(
+            deleted_ids, deletion_cursor, deleted_has_more = await self.deletion_updates(
                 conn, actor["id"], peer_id, request.query.get("deletedAfter")
             )
             rows = await self._messages(
                 conn, actor_id=actor["id"], peer_id=peer_id, after=after
             )
-            if rows:
+            has_more = len(rows) > MESSAGE_PAGE_SIZE
+            rows = rows[:MESSAGE_PAGE_SIZE]
+            if rows and mark_read == "1":
                 await self.mark_read(
                     conn,
                     actor["id"],
@@ -550,7 +579,44 @@ class WorkChat:
             "unread": unread,
             "deletedIds": deleted_ids,
             "deletionCursor": deletion_cursor,
+            "hasMore": has_more,
+            "deletedHasMore": deleted_has_more,
         })
+
+    @staticmethod
+    def require_expected_actor(actor, value):
+        if value is not None and positive_id(value) != actor["id"]:
+            raise AccessError("Аккаунт изменился. Откройте чат заново.", 409)
+
+    async def read(self, request):
+        """Acknowledge only a message actually rendered in this conversation."""
+        actor = request["miniapp_actor"]
+        body = await self.api.body(request)
+        if not {"peerId", "lastReadMessageId"} <= set(body) or set(body) - {
+            "peerId", "lastReadMessageId", "expectedUserId"
+        }:
+            raise AccessError("Некорректное подтверждение прочтения.", 400)
+        self.require_expected_actor(actor, body.get("expectedUserId"))
+        peer_id = None if body["peerId"] is None else positive_id(body["peerId"])
+        message_id = positive_id(body["lastReadMessageId"])
+        if peer_id == actor["id"]:
+            raise AccessError("Нельзя открыть диалог с самим собой.", 400)
+        params = {"uid": actor["id"], "peer": peer_id, "mid": message_id}
+        scope = "recipient_id IS NULL" if peer_id is None else (
+            "((sender_id=:uid AND recipient_id=:peer) "
+            "OR (sender_id=:peer AND recipient_id=:uid))"
+        )
+        async with self.engine.begin() as conn:
+            await self.require_rules(conn, actor)
+            rows = await self.api.rows(conn,
+                f"SELECT id FROM work_chat_messages WHERE id=:mid AND {scope} "
+                f"UNION ALL SELECT message_id AS id FROM work_chat_deletions "
+                f"WHERE message_id=:mid AND {scope}", **params)
+            if not rows:
+                raise AccessError("Сообщение в этом диалоге не найдено.", 404)
+            await self.mark_read(conn, actor["id"], peer_id, message_id)
+            unread = await self.unread_counts(conn, actor["id"])
+        return web.json_response({"ok": True, "unread": unread})
 
     def send_key(self, value):
         if value is None:
@@ -572,9 +638,17 @@ class WorkChat:
             now=datetime.now(UTC).replace(tzinfo=None))
         if inserted:
             return None
-        receipt = (await self.api.rows(conn,
+        return await self.replay_send(conn, actor, key, fingerprint)
+
+    async def replay_send(self, conn, actor, key, fingerprint):
+        if key is None:
+            return None
+        receipts = await self.api.rows(conn,
             "SELECT fingerprint,message_id FROM work_chat_send_receipts WHERE sender_id=:uid AND client_id=:key",
-            uid=actor["id"], key=key))[0]
+            uid=actor["id"], key=key)
+        if not receipts:
+            return None
+        receipt = receipts[0]
         if receipt["fingerprint"] != fingerprint:
             raise AccessError("Эта отправка уже использована для другого сообщения.", 409)
         rows = await self.api.rows(conn, """
@@ -597,8 +671,11 @@ class WorkChat:
     async def send(self, request):
         actor = request["miniapp_actor"]
         body = await self.api.body(request)
-        if set(body) not in ({"peerId", "body"}, {"peerId", "body", "clientId"}):
+        if not {"peerId", "body"} <= set(body) or set(body) - {
+            "peerId", "body", "clientId", "expectedUserId"
+        }:
             raise AccessError("Некорректное сообщение.", 400)
+        self.require_expected_actor(actor, body.get("expectedUserId"))
         message = clean_message(body["body"])
         key = self.send_key(body.get("clientId"))
         peer_id = None if body["peerId"] is None else positive_id(body["peerId"])
@@ -607,11 +684,11 @@ class WorkChat:
         now = datetime.now(UTC).replace(tzinfo=None)
         async with self.engine.begin() as conn:
             await self.require_rules(conn, actor)
-            notification_ids = await self.notification_targets(conn, actor, peer_id)
             fingerprint = hashlib.sha256(json.dumps([peer_id, message], ensure_ascii=False).encode()).hexdigest()
             replay = await self.reserve_send(conn, actor, key, fingerprint)
             if replay is not None:
                 return replay
+            notification_ids = await self.notification_targets(conn, actor, peer_id)
             await self.enforce_rate(conn, actor["id"], now)
             rows = await self.api.rows(
                 conn,
@@ -653,19 +730,40 @@ class WorkChat:
         key = None
         filename = None
         payload = None
+        seen = set()
+
+        async def field_text(part, max_bytes):
+            data = bytearray()
+            while True:
+                chunk = await part.read_chunk(size=64 * 1024)
+                if not chunk:
+                    break
+                data.extend(chunk)
+                if len(data) > max_bytes:
+                    raise AccessError("Слишком большое поле вложения.", 413)
+            try:
+                return data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise AccessError("Некорректный текст вложения.", 400) from exc
+
         while True:
             part = await reader.next()
             if part is None:
                 break
+            if part.name in seen:
+                raise AccessError("Поля вложения не должны повторяться.", 400)
+            seen.add(part.name)
             if part.name == "peerId":
-                value = (await part.text()).strip()
+                value = (await field_text(part, 80)).strip()
                 if len(value) > 20:
                     raise AccessError("Некорректный диалог.", 400)
                 peer_raw = value
             elif part.name == "clientId":
-                key = self.send_key(await part.text())
+                key = self.send_key(await field_text(part, 64))
+            elif part.name == "expectedUserId":
+                self.require_expected_actor(request["miniapp_actor"], await field_text(part, 32))
             elif part.name == "caption":
-                value = await part.text()
+                value = await field_text(part, MAX_MESSAGE * 4)
                 caption = normalize_text(value, required=False)
             elif part.name == "file":
                 if payload is not None:
@@ -695,35 +793,48 @@ class WorkChat:
         if peer_id == actor["id"]:
             raise AccessError("Нельзя отправить файл самому себе.", 400)
         mime_type, storage_ext, preview = attachment_kind(filename, payload)
-        storage = request.app["yandex_disk"]
-        if not storage.state.get("connected"):
-            state = await storage.verify(write_test=False)
-            if not state.get("connected"):
-                raise AccessError("Хранилище файлов временно недоступно.", 503)
         now = datetime.now(UTC).replace(tzinfo=None)
+        digest = hashlib.sha256(payload).hexdigest()
+        fingerprint = hashlib.sha256(json.dumps(
+            [peer_id, caption, filename, digest], ensure_ascii=False
+        ).encode()).hexdigest()
+        # A lost response is retried without re-uploading the same bytes. This
+        # must work even if the disk is temporarily offline after the commit.
+        async with self.engine.connect() as conn:
+            await self.require_rules(conn, actor)
+            replay = await self.replay_send(conn, actor, key, fingerprint)
+            if replay is not None:
+                return replay
+            await self.notification_targets(conn, actor, peer_id)
+            await self.enforce_rate(conn, actor["id"], now)
+        storage = request.app.get("yandex_disk")
+        if storage is None:
+            raise AccessError("Хранилище файлов временно недоступно.", 503)
         month = now.strftime("%Y%m")
-        await storage.ensure_dir(ROOT + "/chat")
-        await storage.ensure_dir(ROOT + "/chat/" + month)
         storage_path = (
             ROOT + "/chat/" + month + "/" + secrets.token_hex(16) + "." + storage_ext
         )
-        digest = hashlib.sha256(payload).hexdigest()
         try:
+            if not storage.state.get("connected"):
+                state = await storage.verify(write_test=False)
+                if not state.get("connected"):
+                    raise AccessError("Хранилище файлов временно недоступно.", 503)
+            await storage.ensure_dir(ROOT + "/chat")
+            await storage.ensure_dir(ROOT + "/chat/" + month)
             await storage.upload_bytes(storage_path, payload, content_type=mime_type)
-        except YandexDiskError as exc:
+        except (YandexDiskError, ClientError, OSError, TimeoutError) as exc:
             logger.warning("Work-chat attachment upload failed (%s)", type(exc).__name__)
             raise AccessError("Не удалось сохранить файл. Повторите отправку.", 503) from exc
 
         try:
             async with self.engine.begin() as conn:
                 await self.require_rules(conn, actor)
-                notification_ids = await self.notification_targets(conn, actor, peer_id)
-                fingerprint = hashlib.sha256(json.dumps([peer_id, caption, filename, digest], ensure_ascii=False).encode()).hexdigest()
                 replay = await self.reserve_send(conn, actor, key, fingerprint)
                 if replay is not None:
-                    with contextlib.suppress(YandexDiskError):
+                    with contextlib.suppress(YandexDiskError, ClientError, OSError, TimeoutError):
                         await storage.delete(storage_path)
                     return replay
+                notification_ids = await self.notification_targets(conn, actor, peer_id)
                 await self.enforce_rate(conn, actor["id"], now)
                 attachment = await self.api.rows(
                     conn,
@@ -754,7 +865,7 @@ class WorkChat:
                 )
                 await self.finish_send(conn, actor, key, rows[0]["id"])
         except (SQLAlchemyError, AccessError):
-            with contextlib.suppress(YandexDiskError):
+            with contextlib.suppress(YandexDiskError, ClientError, OSError, TimeoutError):
                 await storage.delete(storage_path)
             raise
 
@@ -809,11 +920,13 @@ class WorkChat:
         if not allowed:
             raise AccessError("Нет доступа к этому файлу.")
         storage = request.app["yandex_disk"]
+        if storage is None:
+            raise AccessError("Файл временно недоступен.", 503)
         try:
             payload = await storage.download_bytes(
                 row["storage_path"], max_bytes=MAX_ATTACHMENT_BYTES
             )
-        except YandexDiskError as exc:
+        except (YandexDiskError, ClientError, OSError, TimeoutError) as exc:
             logger.warning("Work-chat attachment download failed (%s)", type(exc).__name__)
             raise AccessError("Файл временно недоступен.", 503) from exc
         preview = row["mime_type"] in {"image/jpeg", "image/png", "image/webp", "audio/webm",
@@ -846,9 +959,14 @@ class WorkChat:
                    JOIN users s ON s.id=m.sender_id
                    JOIN users r ON r.id=m.recipient_id
                    LEFT JOIN work_chat_attachments a ON a.id=m.attachment_id
-                   WHERE m.recipient_id IS NOT NULL
-                     AND m.sender_id<>:owner AND m.recipient_id<>:owner
-                   ORDER BY m.id DESC LIMIT 1000""",
+                   WHERE m.id IN (
+                       SELECT MAX(id) FROM work_chat_messages
+                       WHERE recipient_id IS NOT NULL
+                         AND sender_id<>:owner AND recipient_id<>:owner
+                       GROUP BY CASE WHEN sender_id<recipient_id THEN sender_id ELSE recipient_id END,
+                                CASE WHEN sender_id<recipient_id THEN recipient_id ELSE sender_id END
+                   )
+                   ORDER BY m.id DESC LIMIT 100""",
                 owner=actor["id"],
             )
         seen = set()
@@ -903,7 +1021,7 @@ class WorkChat:
             )
             if len(people) != 2:
                 raise AccessError("Диалог не найден.", 404)
-            deleted_ids, deletion_cursor = await self.deletion_updates(
+            deleted_ids, deletion_cursor, deleted_has_more = await self.deletion_updates(
                 conn, a_id, b_id, request.query.get("deletedAfter")
             )
             rows = await self.api.rows(
@@ -917,11 +1035,13 @@ class WorkChat:
                    WHERE ((m.sender_id=:a AND m.recipient_id=:b)
                       OR (m.sender_id=:b AND m.recipient_id=:a))
                      AND m.id>:after
-                   ORDER BY m.id ASC LIMIT 100""",
+                   ORDER BY m.id ASC LIMIT 101""",
                 a=a_id,
                 b=b_id,
                 after=after,
             )
+            has_more = len(rows) > MESSAGE_PAGE_SIZE
+            rows = rows[:MESSAGE_PAGE_SIZE]
             if after == 0:
                 await self.api.audit_write(
                     conn,
@@ -937,6 +1057,8 @@ class WorkChat:
             "readOnly": True,
             "deletedIds": deleted_ids,
             "deletionCursor": deletion_cursor,
+            "hasMore": has_more,
+            "deletedHasMore": deleted_has_more,
         })
 
     async def static(self, request):
@@ -959,7 +1081,7 @@ async def cleanup_orphan_attachments(engine, storage, attachment_id=None):
     for row in rows:
         try:
             await storage.delete(row["storage_path"])
-        except (YandexDiskError, OSError):
+        except (YandexDiskError, ClientError, OSError, TimeoutError):
             logger.warning("Deleted work-chat attachment cleanup will be retried")
             continue
         async with engine.begin() as conn:
@@ -976,19 +1098,23 @@ async def cleanup_expired_chat(engine, storage=None):
                     WHERE m.created_at<:cutoff"""),
             {"cutoff": cutoff},
         )).mappings())
+    deleted_attachments = []
     if storage is not None:
         for row in rows:
-            with contextlib.suppress(YandexDiskError):
+            try:
                 await storage.delete(row["storage_path"])
+                deleted_attachments.append(row["id"])
+            except (YandexDiskError, ClientError, OSError, TimeoutError):
+                logger.warning("Expired work-chat attachment cleanup will be retried")
     async with engine.begin() as conn:
         result = await conn.execute(
             text("DELETE FROM work_chat_messages WHERE created_at<:cutoff"),
             {"cutoff": cutoff},
         )
-        for row in rows:
+        for attachment_id in deleted_attachments:
             await conn.execute(
                 text("DELETE FROM work_chat_attachments WHERE id=:id"),
-                {"id": row["id"]},
+                {"id": attachment_id},
             )
         await conn.execute(text("DELETE FROM work_chat_deletions WHERE deleted_at<:cutoff"),
             {"cutoff": cutoff})
@@ -1005,7 +1131,7 @@ async def cleanup_loop(engine, storage=None):
                 logger.info("Expired work-chat messages removed: %s", deleted)
         except asyncio.CancelledError:
             raise
-        except (OSError, SQLAlchemyError, YandexDiskError):
+        except (ClientError, OSError, TimeoutError, SQLAlchemyError, YandexDiskError):
             logger.exception("Work-chat retention cleanup failed")
         await asyncio.sleep(24 * 60 * 60)
 
@@ -1021,6 +1147,7 @@ def install_work_chat(app, miniapp):
     app.router.add_get("/api/miniapp/chat/unread", service.unread)
     app.router.add_get("/api/miniapp/chat/messages", service.messages)
     app.router.add_post("/api/miniapp/chat/messages", service.send)
+    app.router.add_post("/api/miniapp/chat/read", service.read)
     app.router.add_delete("/api/miniapp/chat/messages/{id}", service.delete_message)
     app.router.add_post("/api/miniapp/chat/attachments", service.upload_attachment)
     app.router.add_get("/api/miniapp/chat/attachments/{id}", service.attachment)
@@ -1028,3 +1155,4 @@ def install_work_chat(app, miniapp):
     app.router.add_get("/api/miniapp/chat/owner/messages", service.owner_messages)
     app.router.add_get("/work-chat/{asset}", service.static)
     return service
+

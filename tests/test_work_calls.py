@@ -1,5 +1,6 @@
 """Real HTTP signaling tests with signed fixture users and no Telegram traffic."""
 import asyncio
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -13,6 +14,7 @@ from app.work_calls import (
     HEARTBEAT_TTL,
     MAX_DURATION,
     RING_TTL,
+    WorkCalls,
     ice_config,
     install_work_calls,
 )
@@ -112,7 +114,7 @@ class CallsTests(unittest.IsolatedAsyncioTestCase):
         assert (await self.sync(joined, 4, receiver["cursor"]))[1]["signals"] == []
         assert (await self.request("/signal", 3, {**payload, "data": {"type": "offer", "sdp": "changed"}}))[0] == 409
 
-    async def test_attachment_retry_is_atomic_and_removes_redundant_upload(self):
+    async def test_attachment_retry_is_atomic_without_redundant_upload(self):
         from types import SimpleNamespace
 
         from aiohttp import FormData
@@ -130,9 +132,11 @@ class CallsTests(unittest.IsolatedAsyncioTestCase):
         first, second = await upload(), await upload()
         assert first[0] == 201 and second[0] == 200
         assert first[1]["message"] == second[1]["message"]
-        assert storage.delete.await_count == 1
+        assert storage.upload_bytes.await_count == 1
+        assert storage.delete.await_count == 0
         assert (await upload("changed"))[0] == 409
-        assert storage.delete.await_count == 2
+        assert storage.upload_bytes.await_count == 1
+        assert storage.delete.await_count == 0
         with self.engine.inner.connect() as conn:
             assert conn.scalar(text("SELECT count(*) FROM work_chat_messages")) == 1
             assert conn.scalar(text("SELECT count(*) FROM work_chat_attachments")) == 1
@@ -222,9 +226,73 @@ class CallsTests(unittest.IsolatedAsyncioTestCase):
         assert (await self.request('/history', 3))[1]['items'][0]['status'] == 'interrupted'
 
 
+class CallsAccountGuardTests(unittest.IsolatedAsyncioTestCase):
+    """Direct authenticated checks also run where listening sockets are disabled."""
+
+    async def asyncSetUp(self):
+        await chat_tests.WorkChatTests.asyncSetUp(self)
+        with self.engine.inner.begin() as conn:
+            for uid in (3, 4, 5):
+                conn.execute(text("""INSERT INTO work_rule_acceptances
+                    (user_id,version,text_sha256) VALUES (:uid,:version,:sha)"""),
+                    {"uid": uid, "version": WORK_RULES_VERSION, "sha": work_rules_hash()})
+        self.calls = WorkCalls(self.chat)
+        self.calls.notify_start = AsyncMock()
+
+    async def asyncTearDown(self):
+        tasks = list(self.calls.notifications)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await chat_tests.WorkChatTests.asyncTearDown(self)
+
+    async def request(self, endpoint, *, uid=3, body):
+        request = baseline.Request("/api/miniapp/chat/calls/" + endpoint,
+            uid + 1000, "POST", body, None)
+        response = await self.service.middleware(request, getattr(self.calls, endpoint))
+        return response.status, json.loads(response.text)
+
+    async def test_expected_account_start_mismatch_does_not_create_call(self):
+        status, _ = await self.request("start", uid=4,
+            body={"peerId": 5, "mode": "audio", "expectedUserId": 3})
+        assert status == 409 and not self.calls.rooms
+        self.calls.notify_start.assert_not_awaited()
+        with self.engine.inner.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM audit_logs WHERE action='work_call_history'")).scalar() == 0
+
+    async def test_expected_account_join_mismatch_does_not_join_call(self):
+        status, call = await self.request("start", body={"peerId": 4, "mode": "audio", "expectedUserId": 3})
+        assert status == 201
+        rid = call["call"]["id"]
+        status, _ = await self.request("join", uid=4,
+            body={"callId": rid, "mode": "audio", "expectedUserId": 5})
+        assert status == 409 and set(self.calls.rooms[rid].members) == {3}
+        status, joined = await self.request("join", uid=4,
+            body={"callId": rid, "mode": "audio", "expectedUserId": 4})
+        assert status == 200 and {p["id"] for p in joined["call"]["participants"]} == {3, 4}
+
+    async def test_legacy_clients_can_start_and_join_without_expected_account(self):
+        status, call = await self.request("start", body={"peerId": 4, "mode": "video"})
+        assert status == 201
+        status, joined = await self.request("join", uid=4,
+            body={"callId": call["call"]["id"], "mode": "audio"})
+        assert status == 200 and len(joined["call"]["participants"]) == 2
+        with self.engine.inner.connect() as conn:
+            records = conn.execute(text("SELECT details FROM audit_logs WHERE action='work_call_history'"))
+            assert all(json.loads(row[0])["at"].endswith("Z") for row in records)
+
+    async def test_invalid_expected_account_and_unknown_fields_are_rejected(self):
+        for value in (None, True, 0, -1, [], 2**31):
+            assert (await self.request("start", body={"peerId": 4, "mode": "audio", "expectedUserId": value}))[0] == 400
+            assert (await self.request("join", uid=4, body={"callId": "unknown", "mode": "audio", "expectedUserId": value}))[0] == 400
+        assert (await self.request("start", body={"peerId": 4, "mode": "audio", "expectedUserId": 3, "extra": True}))[0] == 400
+        assert not self.calls.rooms
+
+
 def test_turn_credentials_are_generated_only_on_server_and_expire():
     with patch.dict("os.environ", {"CALLS_TURN_URLS": "turns:relay.example:5349", "CALLS_TURN_SECRET": "fixture-secret"}):
         data = ice_config(3)
     assert data["relayConfigured"] is True
     assert "fixture-secret" not in str(data)
     assert data["iceServers"][1]["username"].endswith(":pb-3")
+

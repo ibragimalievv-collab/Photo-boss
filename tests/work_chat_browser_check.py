@@ -46,6 +46,8 @@ def handler(page_state, role, sent):
             )
         if path == "/api/miniapp/chat/calls":
             return r.fulfill(json={"calls": [], "maxParticipants": 6})
+        if path == "/api/miniapp/chat/read":
+            return r.fulfill(json={"ok": True})
         if path == "/api/miniapp/chat/presence":
             if r.request.method == "POST":
                 page_state["heartbeat"] = json.loads(r.request.post_data)
@@ -265,3 +267,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

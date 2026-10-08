@@ -8,6 +8,7 @@ on:
       - 'app/webapp/index.html'
       - 'tests/test_work_chat.py'
       - 'tests/work_chat_browser_check.py'
+      - 'tests/chat_*_browser_check.py'
       - '.github/workflows/work-chat-check.yml'
 permissions:
   contents: read
@@ -27,9 +28,13 @@ jobs:
       - run: pip install playwright
       - run: python -m playwright install --with-deps chromium
       - run: python tests/work_chat_browser_check.py
+      - run: python tests/chat_reliability_browser_check.py
+      - run: python tests/chat_media_browser_check.py
+      - run: python tests/chat_calls_session_browser_check.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: work-chat-browser
           path: qa-work-chat/
           retention-days: 7
+
