@@ -166,6 +166,50 @@ def test_upload_is_deduplicated_rechecks_assignment_and_keeps_originals_separate
     asyncio.run(run())
 
 
+def test_large_album_upload_and_archive_above_previous_total_limits(monkeypatch):
+    from app import delivery
+    monkeypatch.setattr(delivery, 'configured_from_env', lambda: ('fake-token', 'fake-client'))
+    monkeypatch.setattr(delivery.YandexDisk, 'ensure_dir', AsyncMock())
+    upload = AsyncMock()
+    monkeypatch.setattr(delivery.YandexDisk, 'upload_bytes', upload)
+    async def run():
+        engine, svc, client, _ = await setup(monkeypatch)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as session:
+                booking = await session.get(Booking, 1)
+                gallery = await svc.ensure(session, ACTORS[2], booking)
+                gallery.published = True
+                token = gallery.access_token
+                # 150 ordinary 2-MB frames already exceed the former 200-MB cap.
+                session.add_all([DeliveryPhoto(gallery_id=gallery.id, uploaded_by_id=2,
+                    filename=f'frame-{i}.png', disk_path=f'app:/PhotoBoss/delivery/{i}.png',
+                    sha256=f'{i:064x}', byte_size=2*1024*1024) for i in range(150)])
+                await session.commit()
+                result = await svc.apply(session, ACTORS[2], 'delivery_photo',
+                    {'booking': 1, 'filename': 'next.png'}, image())
+                await session.commit()
+                assert result['photoId'] and upload.await_count == 1
+                assert await session.scalar(select(func.count(DeliveryPhoto.id))) == 151
+                # The former count cap must not prevent subsequent uploads either.
+                session.add_all([DeliveryPhoto(gallery_id=gallery.id, uploaded_by_id=2,
+                    filename=f'frame-{i}.png', disk_path=f'app:/PhotoBoss/delivery/{i}.png',
+                    sha256=f'{i:064x}', byte_size=2*1024*1024) for i in range(150, 301)])
+                await session.commit()
+                await svc.apply(session, ACTORS[2], 'delivery_photo',
+                    {'booking': 1, 'filename': 'another.png'}, image()+b'next-frame')
+                await session.commit()
+            monkeypatch.setattr(svc, 'bytes', AsyncMock(return_value=image()))
+            response = await client.get('/g/'+token+'/album.zip')
+            assert response.status == 200
+            import zipfile
+            with zipfile.ZipFile(io.BytesIO(await response.read())) as archive:
+                assert len(archive.namelist()) == 303
+        finally:
+            await client.close()
+            await engine.dispose()
+    asyncio.run(run())
+
+
 def test_bot_keeps_guests_out_of_staff_tables_and_saves_only_their_own_contact(monkeypatch):
     async def run():
         engine,svc,client,bot=await setup(monkeypatch)

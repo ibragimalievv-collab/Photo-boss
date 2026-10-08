@@ -149,6 +149,39 @@ async def main():
                     await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).every(r=>r.status==='synced');}")
                     async with factory() as session:
                         assert (await session.scalar(select(PhotoEdit))).status == 'CANCELLED'
+                    # Exercise a 300-MB queue without retaining every photo in status reads.
+                    await context.set_offline(True)
+                    await page.evaluate("""async()=>{
+                        const m=await import('/app/js/outbox.js');m.setOutboxUser(777);
+                        const bytes=new Uint8Array(2*1024*1024);bytes.fill(73);
+                        await m.enqueueBatch(Array.from({length:150},(_,i)=>({
+                            kind:'delivery_photo',date:'2026-10-08',data:{booking:1,filename:`frame-${i}.jpg`},
+                            blob:new File([bytes],`frame-${i}.jpg`,{type:'image/jpeg'})
+                        })));
+                        const rows=await m.outboxRows();
+                        if(rows.length!==150||rows.some(r=>r.blob||!r.hasBlob))throw Error('Batch metadata retains files');
+                        const {localAction}=await import('/app/js/localstore.js');
+                        const row=await localAction('operations','readonly',s=>s.get(rows[0].key));
+                        if(row.blob.size!==bytes.length)throw Error('Queued original missing');
+                    }""")
+                    attempts=[]
+                    failed=False
+                    async def bulk_upload(route):
+                        nonlocal failed
+                        body=route.request.post_data_buffer
+                        assert 2*1024*1024 < len(body) < 2*1024*1024+4096
+                        attempts.append(body.split(b'filename="',1)[1].split(b'"',1)[0])
+                        if not failed:
+                            failed=True
+                            await route.fulfill(status=503,content_type='application/json',body='{"error":"temporary outage"}')
+                        else:
+                            await route.fulfill(status=200,content_type='application/json',body='{"ok":true}')
+                    await context.route('**/api/miniapp/operations/media',bulk_upload)
+                    await context.set_offline(False)
+                    await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.error);}")
+                    await page.evaluate("async()=>{const m=await import('/app/js/outbox.js');const row=(await m.outboxRows()).find(r=>r.error);await m.retryOperation(row.key);}")
+                    await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');const rows=await m.outboxRows();return rows.length===150&&rows.every(r=>r.status==='synced'&&!r.hasBlob);}")
+                    assert len(attempts)==151 and len(set(attempts))==150
                     assert not errors,errors
                     await browser.close()
                     print('PASS: offline batch/reopen, lost upload response replay, dedupe, quota recovery, original-preserving manual copy, comparison, cancellation, access denial, 360px layout')
@@ -158,3 +191,4 @@ async def main():
 
 
 if __name__ == '__main__': asyncio.run(main())
+
