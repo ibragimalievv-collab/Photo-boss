@@ -40,14 +40,16 @@ async def check_delivery_photo_set_upgrade(connection):
             AFTER INSERT ON delivery_photos BEGIN
                 INSERT INTO delivery_insert_events(photo_id) VALUES (NEW.id);
             END"""))
+    legacy_columns = ('id,gallery_id,uploaded_by_id,filename,disk_path,sha256,'
+                      'byte_size,selected,created_at,source_note')
     originals = [dict(row) for row in (await connection.execute(
-        text('SELECT * FROM delivery_photos ORDER BY id')
+        text(f'SELECT {legacy_columns} FROM delivery_photos ORDER BY id')
     )).mappings()]
 
     await upgrade(connection)
     await upgrade(connection)
     migrated = [dict(row) for row in (await connection.execute(
-        text('SELECT * FROM delivery_photos ORDER BY id')
+        text(f'SELECT {legacy_columns},upload_set FROM delivery_photos ORDER BY id')
     )).mappings()]
     assert len(migrated) == 2
     assert all(row.pop('upload_set') == 'ALL' for row in migrated)
