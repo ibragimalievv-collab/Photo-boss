@@ -75,6 +75,26 @@ def test_plan_schema_rejects_unknown_lessons_scenarios_and_wrong_ranges():
     assert not valid_value(101, {'type': 'integer', 'minimum': 0, 'maximum': 100})
 
 
+def test_large_original_is_reduced_for_ai_without_changing_saved_bytes():
+    import io
+    import random
+
+    from PIL import Image
+
+    from app.services.development_ai import coaching_image
+    image = Image.frombytes('RGB', (2500, 2500), random.Random(7).randbytes(2500*2500*3))
+    stream = io.BytesIO()
+    image.save(stream, format='JPEG', quality=100)
+    raw = stream.getvalue()
+    assert 8*1024*1024 < len(raw) < 20*1024*1024
+    prepared = coaching_image(raw)
+    assert len(prepared) < 8*1024*1024 and raw == stream.getvalue()
+    with Image.open(io.BytesIO(prepared)) as result:
+        assert max(result.size) <= 2048
+    with pytest.raises(ValueError):
+        coaching_image(b'not-an-image')
+
+
 class CoachingTests(unittest.IsolatedAsyncioTestCase):
     call = baseline.MiniAppTests.call
     asyncTearDown = baseline.MiniAppTests.asyncTearDown
@@ -91,6 +111,7 @@ class CoachingTests(unittest.IsolatedAsyncioTestCase):
         _, data, _ = await self.call('/academy', uid=1003)
         assert data['blocks'][0]['practiceDone'] and not data['lessons'][1]['locked']
         assert data['totalPoints'] == 110 and data['acceptedCount'] == 1
+        assert json.loads((await self.coach.listing(Request())).text)['practiceReady'] is True
 
     async def test_personal_results_are_isolated_and_reshoot_images_are_archived(self):
         with self.engine.inner.begin() as conn:
@@ -101,6 +122,7 @@ class CoachingTests(unittest.IsolatedAsyncioTestCase):
         own = json.loads((await self.coach.listing(Request())).text)
         other = json.loads((await self.coach.listing(Request(uid=5))).text)
         assert own['skills'][1]['score'] == 60 and len(own['comparison']) == 2
+        assert own['practiceReady'] is False
         assert all(s['score'] is None for s in other['skills']) and not other['comparison']
         req = Request(uid=5); req.match_info = {'id': '1', 'index': '1'}
         with pytest.raises(AccessError) as error:
@@ -146,6 +168,14 @@ class CoachingTests(unittest.IsolatedAsyncioTestCase):
         assert data['completed'] == [slug] and len(data['lessons']) == 8
         with pytest.raises(AccessError):
             await self.service.complete_lesson(Request(uid=3, slug=slug))
+
+    async def test_learning_team_view_is_admin_only_and_excludes_financial_data(self):
+        with pytest.raises(AccessError) as error:
+            await self.coach.team(Request())
+        assert error.value.status == 403
+        data = json.loads((await self.coach.team(Request(uid=2, roles=['ADMIN']))).text)
+        assert {r['track'] for r in data['items']} == {'photographer', 'booking'}
+        assert all(not {'sales', 'amount', 'payroll'} & set(r) for r in data['items'])
 
     async def test_real_shoot_queue_is_private_and_duplicate_requests_reuse_review(self):
         with self.engine.inner.begin() as conn:

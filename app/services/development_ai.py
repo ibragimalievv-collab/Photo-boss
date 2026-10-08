@@ -1,8 +1,10 @@
 """Post-sale photo coaching and sales roleplay, with explicit provider failures."""
 import base64
+import io
 import json
 
 import aiohttp
+from PIL import Image, ImageOps
 
 from ..config import config
 from .academy_curriculum import BOOKING_RULES, BOOKING_SCENARIOS
@@ -67,10 +69,30 @@ def valid_roleplay(data,finish):
     return data['score'] is None and not data['errors'] and not data['recommendations']
 
 
+def coaching_image(raw):
+    """Bound AI payload size without altering the stored original."""
+    if not raw.startswith((b'\xff\xd8\xff', b'\x89PNG')) or len(raw)>20*1024*1024:
+        raise ValueError('Invalid analysis image')
+    if len(raw)<=8*1024*1024:
+        return raw
+    with Image.open(io.BytesIO(raw)) as image:
+        if image.width*image.height>40_000_000:
+            raise ValueError('Analysis image exceeds pixel limit')
+        image=ImageOps.exif_transpose(image)
+        image.thumbnail((2048, 2048))
+        output=io.BytesIO()
+        image.convert('RGB').save(output, format='JPEG', quality=90)
+        result=output.getvalue()
+    if len(result)>8*1024*1024:
+        raise ValueError('Analysis image exceeds byte limit')
+    return result
+
+
 async def analyze_batch(images):
     content=[{'type':'input_text','text':'Разбери каждый кадр проданной съёмки для развития фотографа. Ничего не исправляй в продажах или зарплате.'}]
     for pid,raw in images:
-        if not raw.startswith((b'\xff\xd8\xff',b'\x89PNG')) or len(raw)>8*1024*1024: return {'status':'invalid_image'}
+        try: raw=coaching_image(raw)
+        except (ValueError, OSError, Image.DecompressionBombError): return {'status':'invalid_image'}
         mime='image/png' if raw.startswith(b'\x89PNG') else 'image/jpeg'
         content += [{'type':'input_text','text':f'photo_id={pid}'},{'type':'input_image','detail':'high','image_url':f'data:{mime};base64,'+base64.b64encode(raw).decode()}]
     response=await structured('Оцени только видимое: повторяющиеся ракурсы, свет, резкость, композицию, позу. Не оценивай личность, привлекательность, здоровье или эмоции как факт. Не выдумывай EXIF, условия съёмки и детали. Для каждого кадра оцени criteria: focus 0–20, light 0–15, composition 0–15, pose 0–20, emotion 0–15 (только выразительность наблюдаемого кадра), variety 0–15 (различие с остальными кадрами пакета). Укажи неопределённость; предполагаемые дубли группируй по photo_id.',content,BATCH_SCHEMA,'shoot_frames')

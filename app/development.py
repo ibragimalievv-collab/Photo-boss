@@ -21,7 +21,7 @@ from .services.insights import parsed
 
 class LimitedImage(io.BytesIO):
     def write(self,data):
-        if self.tell()+len(data)>8*1024*1024: raise ValueError('Image exceeds analysis size limit')
+        if self.tell()+len(data)>20*1024*1024: raise ValueError('Image exceeds analysis size limit')
         return super().write(data)
 
 
@@ -68,7 +68,7 @@ async def review_one(factory,bot):
         await session.commit()
     error=None;response=None
     try:
-        if len(ids)>1000: raise ValueError('Полная съёмка превышает лимит 1000 кадров; требуется ручной разбор, выборка не выдаётся за полный анализ.')
+        if len(ids)>1000: raise ValueError('Полная съёмка превышает лимит 1000 кадров; AI-разбор не завершён, выборка не выдаётся за полный анализ.')
         if pending:
             if len(photos)!=len(pending): raise ValueError('Часть исходных фотографий недоступна.')
             images=[]

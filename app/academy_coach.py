@@ -57,7 +57,7 @@ def plan_schema(track, lessons, categories):
     return obj({'title': {**STR, 'minLength': 1, 'maxLength': 160},
                 'focus': {'type': 'string', 'enum': list(PHOTO_SKILLS if track == 'photographer' else BOOKING_SKILLS)},
                 'reason': {**STR, 'minLength': 1},
-                'lessonSlugs': {'type': 'array', 'items': {'type': 'string', 'enum': [x['slug'] for x in lessons]}, 'minItems': 1, 'maxItems': 3},
+                'lessonSlugs': {'type': 'array', 'items': {'type': 'string', 'enum': [x['slug'] for x in lessons]}, 'minItems': 1, 'maxItems': 4},
                 'category': {'type': 'string', 'enum': categories or ['']},
                 'scenario': {'type': 'string', 'enum': [x['type'] for x in BOOKING_SCENARIOS] if track == 'booking' else ['']},
                 'instructions': {**STRINGS, 'minItems': 3, 'maxItems': 5},
@@ -83,6 +83,7 @@ class AcademyCoach:
             shoot = []
             comparison = []
             allowed = []
+            practice_ready = True
             if track == 'photographer':
                 snapshots = await self.api.rows(conn, '''SELECT r.id,r.assignment_id,r.result,r.photos,r.created_at
                     FROM academy_practice_reviews r JOIN training_assignments a ON a.id=r.assignment_id
@@ -105,6 +106,7 @@ class AcademyCoach:
                 accepted = {r['category_slug'] for r in assignments if r['status'] == 'COMPLETED'}
                 block_number = self.api.academy_state(completed, accepted)
                 block = next((b for b in self.api.blocks if b['number'] == block_number), None)
+                practice_ready = all(x["slug"] in completed for x in lessons if x["block"] == block_number) or any(a["status"] in {"ACTIVE", "PENDING_REVIEW"} for a in assignments)
                 course_done = all(x['slug'] in completed for x in lessons) and all(
                     not b['practiceCategories'] or bool(set(b['practiceCategories']) & accepted) for b in self.api.blocks)
                 allowed = list(CATEGORY_BY_SLUG) if course_done else list(block['practiceCategories']) if block else list(CATEGORY_BY_SLUG)
@@ -130,11 +132,11 @@ class AcademyCoach:
             done = sorted({r['topic_slug'] for r in progress} & {x['slug'] for x in lessons})
             evidence = {'track': track, 'skills': skills, 'reviews': reviews[-10:],
                         'shoots': [{'id': r['id'], 'result': parsed(r['result'])} for r in shoot], 'completed': done,
-                        'allowedCategories': sorted(allowed), 'version': 1}
+                        'allowedCategories': sorted(allowed), 'practiceReady': practice_ready, 'version': 1}
             fingerprint = hashlib.sha256(json.dumps(evidence, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
             plans = await self.api.rows(conn, '''SELECT id,data,fingerprint FROM academy_coaching_plans
                 WHERE user_id=:uid AND track=:track ORDER BY id DESC LIMIT 1''', uid=uid, track=track)
-        return {'track': track, 'configured': bool(config.openai_api_key), 'skills': skills,
+        return {'track': track, 'practiceReady': practice_ready, 'configured': bool(config.openai_api_key), 'skills': skills,
                 'lessons': lessons, 'completed': done, 'passedQuizzes': [r['topic_slug'] for r in quizzes],
                 'comparison': comparison, 'plan': ({'id': plans[0]['id'], **parsed(plans[0]['data'])} if plans else None),
                 'stale': not plans or plans[0]['fingerprint'] != fingerprint,
@@ -163,7 +165,7 @@ class AcademyCoach:
                 'Ты AI-наставник Photo Boss. Сам назначь одно конкретное упражнение по подтверждённым слабым местам. '
                 'Сравнивай критерии в процентах: они имеют разный максимальный балл. '
                 'При отсутствии оценок дай диагностическое упражнение, не называй выдуманные слабости. '
-                'Используй только доступные уроки, категорию текущего блока и существующие сценарии. '
+                'Используй только доступные уроки, категорию текущего блока и существующие сценарии. Если practiceReady=false, предложи сначала непройденные уроки текущего блока. '
                 'Задание фотографа включает пять различных кадров по плану категории; дополнительные указания развивают слабый критерий. '
                 'Задание менеджера по записи — диалог с гостем до записи, а не продажа фотографий. '
                 'Уважай отказ, объясняй условия и согласие на контакт. Не обещай скидок. '
