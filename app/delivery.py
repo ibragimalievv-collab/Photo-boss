@@ -35,8 +35,6 @@ from .services.core import audit
 from .services.photo_storage import image_format
 from .yandex_disk import ROOT, YandexDisk, YandexDiskError, configured_from_env
 
-MAX_PHOTOS = 300
-MAX_ALBUM_BYTES = 200 * 1024 * 1024
 SERVICES = {}
 
 
@@ -209,9 +207,6 @@ class Delivery:
         old = await session.scalar(select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id, DeliveryPhoto.sha256 == digest))
         if old:
             return {'bookingId': b.id, 'photoId': old.id, 'duplicate': True}
-        count, size = (await session.execute(select(func.count(DeliveryPhoto.id), func.coalesce(func.sum(DeliveryPhoto.byte_size), 0)).where(DeliveryPhoto.gallery_id == g.id))).one()
-        if count >= MAX_PHOTOS or size + len(raw) > MAX_ALBUM_BYTES:
-            raise AccessError('Альбом: до 300 фото и 200 МБ.', 409)
         token, client_id = configured_from_env()
         if not token:
             raise AccessError('Яндекс Диск недоступен. Фото остаётся в очереди.', 503)
@@ -394,7 +389,7 @@ class Delivery:
             if g.delivery_mode == 'SELECTED':
                 q = q.where(DeliveryPhoto.selected.is_(True))
             files = (await session.scalars(q.order_by(DeliveryPhoto.id))).all()
-            if not files or len(files) > MAX_PHOTOS or sum(p.byte_size for p in files) > MAX_ALBUM_BYTES:
+            if not files:
                 raise web.HTTPBadRequest(text='Альбом недоступен для скачивания целиком.')
             async with request.app['delivery_archive_slot']:
                 with tempfile.TemporaryFile() as output:
