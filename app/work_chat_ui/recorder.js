@@ -6,10 +6,13 @@ let generation=0,stream=null,recorder=null,parts=[],blob=null,url=null,timer=nul
 const MAX_BYTES=19*1024*1024;
 function setPhase(value){phase=value;panel.dataset.phase=value;}
 function release(){clearInterval(timer);timer=null;stream?.getTracks().forEach(t=>t.stop());stream=null;}
-function cleanup(){generation++;if(recorder?.state==='recording')recorder.stop();recorder=null;release();parts=[];blob=null;if(url)URL.revokeObjectURL(url);url=null;}
-function close(){setPhase('closed');cleanup();panel.close();previousFocus?.focus?.();}
+function discardRecorder(){const r=recorder;recorder=null;if(!r)return;r.ondataavailable=null;r.onerror=null;r.onstop=null;if(r.state!=='inactive'){try{r.stop();}catch{/* A device may already have stopped the recorder. */}}}
+function cleanup(){generation++;discardRecorder();release();for(const media of panel.querySelectorAll('audio,video')){media.pause();media.srcObject=null;media.removeAttribute('src');media.load();}parts=[];blob=null;if(url)URL.revokeObjectURL(url);url=null;sendFile=null;}
+export function closeRecorder(){const focus=previousFocus;previousFocus=null;setPhase('closed');cleanup();if(panel.open)panel.close();if(focus?.isConnected)focus.focus();}
+function close(){closeRecorder();}
 function error(message){const el=panel.querySelector('[data-record-error]');if(el){el.hidden=false;el.textContent=message;}}
-function stop(){if(recorder?.state==='recording')recorder.stop();}
+function fail(message){discardRecorder();release();parts=[];blob=null;setPhase('error');const live=panel.querySelector('[data-record-live]');if(live){live.srcObject=null;live.hidden=true;}for(const button of panel.querySelectorAll('[data-record-start],[data-record-camera],[data-record-stop],[data-record-send]'))button.hidden=true;panel.querySelector('[data-record-state]').textContent='Запись недоступна';error(message);}
+function stop(){if(recorder?.state==='recording'){panel.querySelector('[data-record-stop]').disabled=true;try{recorder.stop();}catch(e){fail(e.message);}}}
 function extension(type){return type.includes('mp4')?(mode==='audio'?'m4a':'mp4'):type.includes('ogg')?'ogg':mode==='audio'?'weba':'webm';}
 function start(){
  if(!stream||!['ready','loading'].includes(phase))return;
@@ -22,21 +25,21 @@ function start(){
   recorder=r;parts=[];bytes=0;started=Date.now();setPhase('recording');
   panel.querySelector('[data-record-start]').hidden=true;panel.querySelector('[data-record-camera]').hidden=true;
   panel.querySelector('[data-record-error]').hidden=true;
-  r.ondataavailable=e=>{if(ticket!==generation||!e.data.size)return;parts.push(e.data);bytes+=e.data.size;if(bytes>=MAX_BYTES)stop();};
-  r.onerror=()=>{release();setPhase('error');error('Запись прервалась. Закройте окно и попробуйте ещё раз.');};
+  r.ondataavailable=e=>{if(ticket!==generation||recorder!==r||!e.data.size)return;parts.push(e.data);bytes+=e.data.size;if(bytes>=MAX_BYTES)stop();};
+  r.onerror=()=>{if(ticket===generation&&recorder===r)fail('Запись прервалась. Закройте окно и попробуйте ещё раз.');};
   r.onstop=()=>{
-   if(ticket!==generation)return;
-   release();setPhase('preview');live.srcObject=null;live.hidden=true;
+   if(ticket!==generation||recorder!==r)return;
+   recorder=null;release();setPhase('preview');live.srcObject=null;live.hidden=true;
    panel.querySelector('[data-record-stop]').hidden=true;
    blob=new Blob(parts,{type:r.mimeType});parts=[];
-   if(!blob.size||blob.size>20*1024*1024){error('Запись не сохранилась или больше 20 МБ. Попробуйте записать короче.');return;}
+   if(!blob.size||blob.size>20*1024*1024){fail('Запись не сохранилась или больше 20 МБ. Попробуйте записать короче.');return;}
    url=URL.createObjectURL(blob);const preview=panel.querySelector('[data-record-preview]');preview.src=url;preview.hidden=false;
    panel.querySelector('[data-record-send]').hidden=false;
    panel.querySelector('[data-record-state]').textContent='Запись готова. Проверьте её перед отправкой.';
   };
-  const update=()=>{const seconds=Math.floor((Date.now()-started)/1000);panel.querySelector('[data-record-state]').textContent=`Идёт запись · ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;if(seconds>=(mode==='audio'?300:60))stop();};
+  const update=()=>{if(ticket!==generation||phase!=='recording')return;const seconds=Math.floor((Date.now()-started)/1000);panel.querySelector('[data-record-state]').textContent=`Идёт запись · ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;if(seconds>=(mode==='audio'?300:60))stop();};
   r.start(250);const button=panel.querySelector('[data-record-stop]');button.hidden=false;button.disabled=false;update();timer=setInterval(update,500);
- }catch(e){release();setPhase('error');error(e.message);}
+ }catch(e){if(ticket===generation)fail(e.message);}
 }
 export async function openRecorder(kind,onSend){
  if(phase!=='closed')return;
@@ -55,7 +58,7 @@ export async function openRecorder(kind,onSend){
    panel.querySelector('[data-record-start]').hidden=false;panel.querySelector('[data-record-camera]').hidden=false;
    panel.querySelector('[data-record-state]').textContent='Проверьте кадр и выберите камеру';
   }
- }catch(e){if(ticket!==generation)return;release();setPhase('error');error(e.name==='NotAllowedError'?'Разрешите доступ к микрофону и камере в настройках Telegram.':e.name==='NotFoundError'?'Микрофон или камера не найдены.':e.message);}
+ }catch(e){if(ticket!==generation)return;fail(e.name==='NotAllowedError'?`Разрешите доступ ${mode==='audio'?'к микрофону':'к микрофону и камере'} в настройках Telegram или браузера.`:e.name==='NotFoundError'?'Микрофон или камера не найдены.':e.message);}
 }
 async function switchCamera(){
  if(phase!=='ready')return;
@@ -69,7 +72,7 @@ async function switchCamera(){
   const live=panel.querySelector('[data-record-live]');live.srcObject=stream;await live.play().catch(()=>{});
  };
  try{await install(next,true);}
- catch{if(ticket===generation){try{await install(before,false);}catch{release();setPhase('error');}error('Другая камера недоступна. Попробуйте выбрать её ещё раз.');}}
+ catch{if(ticket===generation){try{await install(before,false);}catch{if(ticket===generation)fail('Камера недоступна. Закройте окно и попробуйте ещё раз.');}if(ticket===generation&&phase!=='error')error('Другая камера недоступна. Предыдущая камера снова включена.');}}
  finally{if(ticket===generation){if(stream){setPhase('ready');startButton.disabled=false;}flip.disabled=false;flip.setAttribute('aria-label',facing==='environment'?'Включить переднюю камеру':'Включить заднюю камеру');}}
 }
 panel.addEventListener('click',async e=>{
@@ -78,11 +81,13 @@ panel.addEventListener('click',async e=>{
  if(e.target.closest('[data-record-camera]'))return switchCamera();
  if(e.target.closest('[data-record-stop]'))return stop();
  const send=e.target.closest('[data-record-send]');if(!send||phase!=='preview'||!blob)return;
+ const ticket=generation,onSend=sendFile;
  setPhase('sending');send.disabled=true;panel.querySelector('[data-record-close]').disabled=true;
  panel.querySelector('[data-record-state]').textContent='Отправляем запись…';
- try{const file=new File([blob],`${mode==='audio'?'voice':'video'}-${Date.now()}.${extension(blob.type)}`,{type:blob.type});await sendFile(file);close();}
- catch(err){setPhase('preview');send.disabled=false;panel.querySelector('[data-record-close]').disabled=false;error(err.message);}
+ try{const file=new File([blob],`${mode==='audio'?'voice':'video'}-${Date.now()}.${extension(blob.type)}`,{type:blob.type});await onSend(file);if(ticket===generation)close();}
+ catch(err){if(ticket!==generation)return;setPhase('preview');send.disabled=false;panel.querySelector('[data-record-close]').disabled=false;panel.querySelector('[data-record-state]').textContent='Запись не отправлена. Можно повторить отправку.';error(err.message);}
 });
 panel.addEventListener('cancel',e=>{e.preventDefault();if(phase!=='sending')close();});
 window.addEventListener('pagehide',close);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)return;if(phase==='recording')stop();else if(['loading','ready','switching'].includes(phase))close();});
+

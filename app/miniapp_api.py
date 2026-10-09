@@ -170,7 +170,12 @@ class MiniApp:
                 actor_id.set(request["miniapp_actor"]["id"])
             response = await handler(request)
             if request.path.startswith(PREFIX) and response.status < 400:
-                await miniapp_sessions.refresh(self.engine, request, response)
+                try:
+                    await miniapp_sessions.refresh(self.engine, request, response)
+                except Exception:
+                    # The handler may have committed a message or another operation.
+                    # Extending the session must not turn that acknowledgement into an error.
+                    logger.warning("Mini App session refresh failed: %s", request.path, exc_info=True)
         except AccessError as exc:
             body = {"error": str(exc)}
             if exc.status == 403 and request.get("miniapp_telegram_id"):

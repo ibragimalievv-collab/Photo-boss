@@ -18,6 +18,9 @@ import {scheduleEditor,scheduleEditorAction,schedulePayload} from './schedule-ed
 const tg=initTelegram(),$=s=>document.querySelector(s);
 const state={me:null,dashboard:null,finance:null,schedule:null,academy:null,audit:null,bookings:[],route:'home',period:'today',day:todayKey(),week:todayKey(),academyTab:'home',search:'',requestId:0};
 let toastTimer,focusBeforeDialog=null;
+let bootGeneration=0;
+const initWorkChat=me=>document.dispatchEvent(new CustomEvent('pb-chat-account-ready',{detail:me}));
+const resetWorkChat=()=>document.dispatchEvent(new Event('pb-chat-account-reset'));
 const request=api;
 const NAV=[['home','home','Сегодня'],['shootings','camera','Съёмки'],['schedule','calendar','График'],['academy','cap','Академия'],['more','more','Ещё']];
 const names={control:'Контроль съёмок',contacts:'Контакты клиентов',workflow:'Рабочие операции',home:'Рабочий день',shootings:'Съёмки и записи',schedule:'График команды',academy:'Академия Photo Boss',more:'Ваше пространство',profile:'Мой профиль',finance:'Касса и начисления',audit:'Аудит действий',insights:'Контроль бизнеса',team:'Команда и HR',onboarding:'Начало работы',workday:'Итоги смены',development:'AI-развитие и продажи'};
@@ -97,7 +100,7 @@ async function loadRoute(route=state.route){
 function showError(error){
  const expired=error.status===401,denied=error.status===403;
  const browser=expired;setOutboxUser(null);
- if(expired||denied){closeSheet();state.me=null;state.dashboard=null;state.finance=null;state.audit=null;$('#topbar').innerHTML='';$('#sidebar').innerHTML='';$('#bottomNav').innerHTML='';}
+ if(expired||denied){bootGeneration++;state.requestId++;resetWorkChat();closeSheet();state.me=null;state.dashboard=null;state.finance=null;state.audit=null;$('#topbar').innerHTML='';$('#sidebar').innerHTML='';$('#bottomNav').innerHTML='';}
  if(browser){$('#app').innerHTML=loginView();return;}
  $('#app').innerHTML=`<div class="loading-screen">${icon(expired||denied?'lock':'refresh')}<h1>${browser?'Вход в Photo Boss':expired?'Требуется повторный вход':denied?'Рабочий доступ недоступен':'Не удалось загрузить'}</h1><p>${browser?'Подтверди свой аккаунт через Telegram. После входа откроется твоё рабочее пространство.':esc(error.message)}</p>${error.telegramId?`<p>Ваш Telegram ID: <strong>${esc(error.telegramId)}</strong>. Передайте его владельцу для проверки доступа.</p>`:''}<p class="small">${browser?'Вход сохраняется в этом браузере. Роль и доступ проверяет сервер.':expired?'Закройте и снова откройте мини-приложение Photo Boss для обновления сеанса.':denied?'После назначения доступа нажмите «Повторить».':'Проверьте соединение и повторите загрузку здесь.'}</p>${browser?btn('Войти через Telegram','browser-login','primary','lock'):''}${btn('Повторить','refresh',browser?'ghost':'primary','refresh')}</div>`;
 }
@@ -116,7 +119,7 @@ function employeeDetail(id){const f=state.route==='finance'?state.finance:state.
 async function action(name){
  if(['browser-login','browser-password'].includes(name)){closeSheet();return startBrowserLogin(async()=>{preferBrowserSession();history.replaceState(null,'','#home');await boot();if(state.me&&(name==='browser-password'||!state.me.passwordConfigured))showSheet('Личный пароль',passwordForm(state.me));});}
  if(name==='password-settings')return showSheet('Личный пароль',passwordForm(state.me));
- if(name==='switch-account'){setOutboxUser(null);preferBrowserSession();try{await accountCall('logout');stopBrowserLogin();accountChanged();}catch(error){setOutboxUser(state.me.user.id);resetAcademyCoach(state.me.user.id,state.me.user.roles);throw error;}return;}
+ if(name==='switch-account'){bootGeneration++;state.requestId++;resetWorkChat();setOutboxUser(null);preferBrowserSession();try{await accountCall('logout');stopBrowserLogin();accountChanged();}catch(error){setOutboxUser(state.me.user.id);resetAcademyCoach(state.me.user.id,state.me.user.roles);initWorkChat(state.me);throw error;}return;}
  if(name==='browser-login-check')return checkBrowserLogin();
  if(['new-sale','new-booking'].includes(name)){await go('workflow');const form=$('#workflowBooking'),target=name==='new-booking'?form?.elements.client_name:$('#workflowSalePick');if(name==='new-booking'&&form)form.closest('details').open=true;target?.scrollIntoView({block:'center'});target?.focus();return;}
  if(name==='close')return closeSheet();if(name==='refresh')return state.me?loadRoute():boot();
@@ -174,7 +177,8 @@ for(const event of ['copy','cut','contextmenu','dragstart'])document.addEventLis
 function privacy(active){$('#privacyScreen').hidden=state.me?.screenCaptureAllowed?true:active;}
 document.addEventListener('visibilitychange',()=>privacy(!document.hidden));try{tg?.onEvent('deactivated',()=>privacy(false));tg?.onEvent('activated',()=>privacy(true));tg?.BackButton?.onClick(()=>go('home'));}catch{}
 window.addEventListener('hashchange',()=>{if(state.me)loadRoute(location.hash.slice(1)||'home');});
-async function boot(){stopBrowserLogin();try{state.me=await request('/me');setOutboxUser(state.me.user.id);resetAcademyCoach(state.me.user.id,state.me.user.roles);if(!state.me._offline){await request('/session',{method:'POST',body:{}});for(const path of ['/workflow','/workday','/dashboard','/shoot-control',`/bookings?day=${state.me.today}`,`/schedule?from=${state.me.today}&to=${addDays(state.me.today,6)}`])request(path).catch(()=>{});}state.period='today';state.day=state.me.today;state.week=state.me.today;state.dashboard=null;state.schedule=null;state.finance=null;state.academy=null;state.audit=null;state.bookings=[];state.onlyReady=false;state.search='';state.academyTab='home';setTheme(state.me.user.theme||defaultTheme(state.me.user.roles));await loadRoute(location.hash.slice(1)||'home');}catch(e){showError(e);}}
+async function boot(){const ticket=++bootGeneration;stopBrowserLogin();try{const nextMe=await request('/me');if(ticket!==bootGeneration)return;state.me=nextMe;initWorkChat(state.me);setOutboxUser(state.me.user.id);resetAcademyCoach(state.me.user.id,state.me.user.roles);if(!state.me._offline){await request('/session',{method:'POST',body:{}});if(ticket!==bootGeneration)return;for(const path of ['/workflow','/workday','/dashboard','/shoot-control',`/bookings?day=${state.me.today}`,`/schedule?from=${state.me.today}&to=${addDays(state.me.today,6)}`])request(path).catch(()=>{});}state.period='today';state.day=state.me.today;state.week=state.me.today;state.dashboard=null;state.schedule=null;state.finance=null;state.academy=null;state.audit=null;state.bookings=[];state.onlyReady=false;state.search='';state.academyTab='home';setTheme(state.me.user.theme||defaultTheme(state.me.user.roles));await loadRoute(location.hash.slice(1)||'home');}catch(e){if(ticket===bootGeneration)showError(e);}}
+window.addEventListener('storage',event=>{if(event.key==='pb-account-changed'){bootGeneration++;state.requestId++;resetWorkChat();}});
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/app/sw.js',{scope:'/app/'}).catch(()=>{});
 boot();
 

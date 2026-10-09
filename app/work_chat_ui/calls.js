@@ -18,8 +18,10 @@ banner.setAttribute('role', 'status'); document.body.append(banner);
 
 let me, active = null, available = [], selected = null, listTimer, syncTimer;
 let starting = false, polling = false, controlsBusy = false, lastFocus;
+let generation = 0, pendingStream = null;
 const ignored = new Set();
-const callApi = (path, body) => api(`/chat/calls${path}`, body === undefined ? {} : {method:'POST', body});
+const callApi = (path, body) => api(`/chat/calls${path}`, body === undefined ? {} : {method:'POST', body:
+    ['/start','/join'].includes(path)?{...body,expectedUserId:me?.user?.id}:body});
 const status = text => { const e = panel.querySelector('[data-call-status]'); if(e) e.textContent = text; };
 const mediaMessage = e => ({NotAllowedError:'Разрешите микрофон и камеру в настройках Telegram или браузера и повторите звонок.',
     NotFoundError:'Микрофон или камера не найдены. Проверьте устройство.',
@@ -56,16 +58,33 @@ function setBanner() {
 }
 async function refresh() {
     if(!me) return;
+    const ticket=generation;
     try {
-        const data = await callApi(''); available = data.calls; setBanner();
+        const data = await callApi(''); if(ticket!==generation||!me)return;
+        available = data.calls; setBanner();
         for(const id of ignored) if(!available.some(r => r.id === id)) ignored.delete(id);
         document.dispatchEvent(new CustomEvent('pb-calls-updated'));
     } catch { /* The existing chat displays authentication and rules errors. */ }
 }
 export function initCalls(user) {
+    if(me?.user?.id!==user?.user?.id)resetCalls();
     me = user;
     if(listTimer) return;
     refresh(); listTimer = setInterval(refresh, 5000);
+}
+export function resetCalls() {
+    generation++;
+    clearInterval(listTimer);clearInterval(syncTimer);listTimer=null;syncTimer=null;
+    const c=active;active=null;
+    pendingStream?.getTracks().forEach(t=>t.stop());pendingStream=null;
+    if(c){c.closed=true;c.stream.getTracks().forEach(t=>t.stop());for(const p of c.peers.values())p.pc.close();}
+    panel.querySelectorAll('video,audio').forEach(v=>{v.pause();v.srcObject=null;});
+    panel.close();panel.innerHTML='';banner.hidden=true;banner.dataset.room='';banner.innerHTML='';
+    document.body.append(banner);
+    document.querySelector('[data-top-call]')?.remove();stopIncomingRingtone();
+    window.Telegram?.WebApp?.disableClosingConfirmation?.();
+    me=null;available=[];selected=null;ignored.clear();lastFocus=null;
+    starting=false;polling=false;controlsBusy=false;
 }
 export function callToolbar(peer, name) {
     selected = {peer, title:name};
@@ -124,14 +143,18 @@ function tile(id, name, stream, local = false) {
     return card;
 }
 async function begin({peer=null, room=null, mode='audio', name=''} = {}) {
-    if(starting) return;
+    if(starting||!me) return;
     if(active) {resumeCall(); return;}
+    const ticket=generation;
     starting=true; let stream=null, result=null;
     stopIncomingRingtone();
     try {
         if(!room) selected={peer,title:name};
         stream=await media(mode);
+        if(ticket!==generation){stream.getTracks().forEach(t=>t.stop());return;}
+        pendingStream=stream;
         result=await callApi(room ? '/join' : '/start', room ? {callId:room.id,mode} : {peerId:peer,mode});
+        if(ticket!==generation){stream.getTracks().forEach(t=>t.stop());return;}
         const c={room:result.call,session:result.session,stream,peers:new Map(),cursor:0,
             audio:true,video:mode==='video',facing:stream.getVideoTracks()[0]?.getSettings?.().facingMode||'user',iceServers:result.iceServers,relayConfigured:result.relayConfigured,
             lastSync:Date.now(),closed:false};
@@ -140,8 +163,9 @@ async function begin({peer=null, room=null, mode='audio', name=''} = {}) {
         syncTimer=setInterval(sync,1000); await sync(); refresh();
     } catch(e) {
         stream?.getTracks().forEach(t=>t.stop());
+        if(ticket!==generation)return;
         if(active) await hangup(false,mediaMessage(e)); else fail(mediaMessage(e));
-    } finally {starting=false;}
+    } finally {if(pendingStream===stream)pendingStream=null;if(ticket===generation)starting=false;}
 }
 function send(c, peer, data) {
     const signalId=crypto.randomUUID();
@@ -150,6 +174,7 @@ function send(c, peer, data) {
         while(!c.closed && active===c && c.peers.get(peer.id)===peer){
             try{return await callApi('/signal',{callId:c.room.id,session:c.session,to:peer.id,toSession:peer.session,data,signalId});}
             catch(e){
+                if(c.closed||active!==c||c.peers.get(peer.id)!==peer)return;
                 if((e.status&&e.status<500&&e.status!==429)||Date.now()>deadline)throw e;
                 status('Восстанавливаем соединение…');
                 await new Promise(resolve=>setTimeout(resolve,1000));
@@ -183,7 +208,7 @@ async function ensurePeer(c,member) {
         p.videoSender=pc.addTransceiver(video||'video',{direction:'sendrecv',streams:[c.stream]}).sender;
     }
     tile(p.id,member.name,p.stream);
-    pc.ontrack=e=>{if(!p.stream.getTracks().includes(e.track))p.stream.addTrack(e.track); tile(p.id,member.name,p.stream);};
+    pc.ontrack=e=>{if(c.closed||active!==c)return;if(!p.stream.getTracks().includes(e.track))p.stream.addTrack(e.track); tile(p.id,member.name,p.stream);};
     pc.onicecandidate=e=>{if(e.candidate) send(c,p,{type:'candidate',candidate:e.candidate.toJSON()});};
     pc.onconnectionstatechange=()=>{
         if(c.closed) return;
@@ -251,7 +276,7 @@ function updateTiles(c) {
 }
 async function sync() {
     const c=active; if(!c || c.closed || polling) return;
-    polling=true;
+    polling=c;
     try {
         const d=await callApi('/sync',{callId:c.room.id,session:c.session,after:c.cursor,audio:c.audio,video:c.video});
         if(active!==c || c.closed) return;
@@ -259,33 +284,37 @@ async function sync() {
         for(const [id,p] of c.peers) if(!d.call.participants.some(m=>m.id===id && m.session===p.session)) {
             p.pc.close();c.peers.delete(id);panel.querySelector(`[data-participant="${id}"]`)?.remove();
         }
-        for(const m of d.call.participants) if(m.id!==me.user.id) await ensurePeer(c,m);
-        for(const s of d.signals) {await receive(c,s); c.cursor=s.seq;}
+        for(const m of d.call.participants){if(active!==c||c.closed)return;if(m.id!==me.user.id)await ensurePeer(c,m);}
+        for(const s of d.signals) {if(active!==c||c.closed)return;await receive(c,s);if(active!==c||c.closed)return;c.cursor=s.seq;}
+        if(active!==c||c.closed)return;
         c.cursor=d.cursor;
         for(const p of c.peers.values()){
+            if(active!==c||c.closed)return;
             if(['failed','disconnected'].includes(p.pc.connectionState)&&me.user.id<p.id&&p.restarts<3&&
                Date.now()-(p.lastRestart||0)>5000&&Date.now()-(p.disconnectedAt||p.created)>2000){
                 p.lastRestart=Date.now();p.restarts++;await offer(c,p,true);
             }
         }
+        if(active!==c||c.closed)return;
         updateTiles(c);
     } catch(e) {
         if(active!==c || c.closed) return;
         if([401,403,404,409,428].includes(e.status)) await hangup(false,e.status===404 ? 'Звонок завершён.' : e.message);
         else if(Date.now()-c.lastSync>50000) await hangup(false,'Связь прервалась. Подключитесь к звонку заново.');
         else status('Восстанавливаем соединение…');
-    } finally {polling=false;}
+    } finally {if(polling===c)polling=false;}
 }
 async function hangup(endForAll=false,message='') {
     const c=active; if(!c) return;
+    const ticket=generation;
     // Release devices immediately, even if the network is down.
-    active=null;c.closed=true; clearInterval(syncTimer);
+    active=null;c.closed=true; clearInterval(syncTimer);polling=false;controlsBusy=false;
     c.stream.getTracks().forEach(t=>t.stop()); for(const p of c.peers.values())p.pc.close();
     panel.querySelectorAll('video,audio').forEach(v=>{v.pause();v.srcObject=null;});
     window.Telegram?.WebApp?.disableClosingConfirmation?.();
     if(message) fail(message); else {panel.close();lastFocus?.focus?.();}
     try {await callApi('/leave',{callId:c.room.id,session:c.session,endForAll});} catch { /* Server heartbeat removes stale sessions. */ }
-    refresh();
+    if(ticket===generation)refresh();
 }
 async function toggleCamera() {
     const c=active; if(!c || controlsBusy)return; controlsBusy=true;
@@ -305,8 +334,8 @@ async function toggleCamera() {
         }
         updateControls(c);
         updateTiles(c); sync();
-    } catch(e) {fresh?.getTracks().forEach(t=>t.stop());status(mediaMessage(e));}
-    finally {controlsBusy=false;if(active===c)updateControls(c);}
+    } catch(e) {fresh?.getTracks().forEach(t=>t.stop());if(active===c)status(mediaMessage(e));}
+    finally {if(active===c){controlsBusy=false;updateControls(c);}}
 }
 async function switchCamera(){
  const c=active;if(!c||!c.video||controlsBusy)return;
@@ -314,10 +343,11 @@ async function switchCamera(){
  const existing=c.stream.getVideoTracks()[0];
  if(existing?.applyConstraints){
   try{await existing.applyConstraints(cameraConstraints(next,true));
-   if(active!==c||c.closed){controlsBusy=false;return;}
+   if(active!==c||c.closed)return;
    if(existing.getSettings?.().facingMode===next){c.facing=next;controlsBusy=false;updateControls(c);updateTiles(c);return;}
   }catch{/* Fall back only when the current track cannot change its physical source. */}
  }
+ if(active!==c||c.closed)return;
  // Mobile browsers may only open one camera at a time; keep the microphone live.
  for(const track of c.stream.getVideoTracks()){track.stop();c.stream.removeTrack(track);}
  const install=async (facing,exact)=>{
@@ -328,7 +358,7 @@ async function switchCamera(){
  };
  try{await install(next,true);}
  catch(e){if(active===c&&!c.closed){try{if(e.name==='NotAllowedError')throw e;await install(before,false);}catch{c.video=false;}const warning=panel.querySelector('[data-camera-error]');if(warning){warning.hidden=false;warning.textContent='Другая камера недоступна. '+(c.video?'Предыдущая камера снова включена.':'Можно продолжить разговор без видео.');}}}
- finally{controlsBusy=false;if(active===c){updateControls(c);updateTiles(c);sync();}}
+ finally{if(active===c){controlsBusy=false;updateControls(c);updateTiles(c);sync();}}
 }
 export async function handleCallClick(e, peer, name) {
     const start=e.target.closest('[data-start-call]');
@@ -345,7 +375,7 @@ function invite(room) {
 }
 panel.addEventListener('click',async e=>{
     const decline=e.target.closest('[data-decline-room]');
-    if(decline){const room=available.find(r=>r.id===decline.dataset.declineRoom);if(!room){panel.close();return;}decline.disabled=true;try{if(!room.group)await callApi('/decline',{callId:room.id});ignored.add(room.id);stopIncomingRingtone();panel.close();refresh();}catch(err){fail(err.message);}return;}
+    if(decline){const ticket=generation;const room=available.find(r=>r.id===decline.dataset.declineRoom);if(!room){panel.close();return;}decline.disabled=true;try{if(!room.group)await callApi('/decline',{callId:room.id});if(ticket!==generation)return;ignored.add(room.id);stopIncomingRingtone();panel.close();refresh();}catch(err){if(ticket===generation)fail(err.message);}return;}
     const answer=e.target.closest('[data-answer]');
     if(answer) {const room=available.find(r=>r.id===answer.dataset.room);if(room) await begin({room,mode:answer.dataset.answer}); else fail('Звонок уже завершён.');return;}
     if(e.target.closest('[data-hangup]')) return hangup();
@@ -372,4 +402,5 @@ document.addEventListener('visibilitychange',()=>{if(document.visibilityState===
 window.addEventListener('pagehide',()=>{if(active)hangup();});
 window.addEventListener('online',()=>{refresh();sync();});
 
-document.addEventListener('click',async e=>{if(!e.target.closest('[data-call-history]'))return;if(active){resumeCall();return;}try{const d=await callApi('/history');const labels={ringing:'Вызов',connected:'На связи',completed:'Завершён',missed:'Не отвечен',declined:'Отклонён',cancelled:'Отменён',interrupted:'Прерван'};showPanel(`<h2 id="pbCallTitle">История вызовов</h2>${d.items.map(x=>`<article class="pb-call-note"><strong>${esc(x.creatorName)} · ${x.mode==='video'?'Видео':'Аудио'}</strong><p>${esc(labels[x.status]||x.status)} · ${x.durationSeconds} сек.</p><p>${esc(new Date(x.at+'Z').toLocaleString('ru-RU'))}</p></article>`).join('')||'<p>Звонков пока нет.</p>'}<button data-call-close>Закрыть</button>`);}catch(err){fail(err.message);}});
+document.addEventListener('click',async e=>{if(!e.target.closest('[data-call-history]'))return;if(active){resumeCall();return;}if(!me)return;const ticket=generation;try{const d=await callApi('/history');if(ticket!==generation)return;const labels={ringing:'Вызов',connected:'На связи',completed:'Завершён',missed:'Не отвечен',declined:'Отклонён',cancelled:'Отменён',interrupted:'Прерван'};showPanel(`<h2 id="pbCallTitle">История вызовов</h2>${d.items.map(x=>`<article class="pb-call-note"><strong>${esc(x.creatorName)} · ${x.mode==='video'?'Видео':'Аудио'}</strong><p>${esc(labels[x.status]||x.status)} · ${x.durationSeconds} сек.</p><p>${esc(new Date(/[zZ]$|[+-]\d{2}:\d{2}$/.test(x.at)?x.at:x.at+'Z').toLocaleString('ru-RU'))}</p></article>`).join('')||'<p>Звонков пока нет.</p>'}<button data-call-close>Закрыть</button>`);}catch(err){if(ticket===generation)fail(err.message);}});
+
