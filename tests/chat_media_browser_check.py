@@ -84,7 +84,7 @@ async def main():
 
             # Cancel a slow permission prompt: a late stream must be stopped.
             await page.evaluate("()=>{captureMode='pending';window.opening=openFixture('audio');}")
-            await page.wait_for_function("window.pendingCapture")
+            await page.wait_for_function("() => typeof window.pendingCapture === 'function'")
             await page.locator("[data-record-close]").click()
             await page.evaluate("pendingCapture();opening.then(()=>{captureMode='normal';})")
             await page.wait_for_function("captureMode==='normal'")
