@@ -765,7 +765,7 @@ class MiniApp:
 
     async def static_file(self, request):
         name = request.match_info.get("asset", "index.html")
-        allowed = {"js/delivery.js", "css/delivery-client.css", "sw.js", "manifest.webmanifest", "js/install.js", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-maskable-512.png", "assets/apple-touch-icon.png", "js/browser-login.js", "js/account.js", "js/schedule-editor.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
+        allowed = {"js/guest.js", "js/companies.js", "css/guest.css", "js/delivery.js", "css/delivery-client.css", "sw.js", "manifest.webmanifest", "js/install.js", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-maskable-512.png", "assets/apple-touch-icon.png", "js/browser-login.js", "js/account.js", "js/schedule-editor.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
                    "js/development.js", "js/academy-coach.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg"}
@@ -802,7 +802,11 @@ def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/M
     miniapp = MiniApp(engine, bot, lessons, blocks=blocks, tz_name=tz_name)
     miniapp.register(app)
     from .delivery import install_delivery
-    install_delivery(app, miniapp)
+    delivery = install_delivery(app, miniapp)
+    from .guest_portal import install_guest_portal
+    install_guest_portal(app, miniapp, delivery)
+    from .companies import install_companies
+    install_companies(app, miniapp)
     from .insights import install_insights
     install_insights(app, miniapp)
     from .team import install_team
