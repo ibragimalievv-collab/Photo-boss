@@ -485,7 +485,9 @@ def test_bot_keeps_guests_out_of_staff_tables_and_saves_only_their_own_contact(m
             user=SimpleNamespace(id=100001,full_name='Guest Client',username='guest')
             message=SimpleNamespace(bot=bot,from_user=user,answer=AsyncMock())
             await start(message,SimpleNamespace(args='gallery_'+token))
-            assert message.answer.call_count==3
+            assert message.answer.call_count==4
+            guest_button = message.answer.call_args.kwargs['reply_markup'].inline_keyboard[0][0]
+            assert guest_button.web_app.url == 'https://photos.example/guest/'
             async with AsyncSession(engine) as session:
                 assert await session.scalar(select(func.count(User.id)))==5
                 assert await session.scalar(select(func.count(DeliveryContact.id)))==1

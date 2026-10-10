@@ -11,6 +11,7 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    WebAppInfo,
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,6 +57,24 @@ def preferences_keyboard():
         InlineKeyboardButton(text='Отписаться', callback_data='delivery:optout')]])
 
 
+async def guest_button(message, svc):
+    await message.answer('Личный кабинет Photo Boss: ваши альбомы и семейные слайд-шоу.',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text='Открыть личный кабинет', web_app=WebAppInfo(url=svc.origin()+'/guest/'))]]),
+        protect_content=False)
+
+
+@r.message(CommandStart(deep_link=True, magic=F.args == 'guest'))
+async def guest_start(message):
+    svc = service(message.bot)
+    if not svc:
+        return await message.answer('Личный кабинет временно недоступен.')
+    async with AsyncSession(svc.api.engine) as session:
+        await contact_record(session, message.from_user)
+        await session.commit()
+    await guest_button(message, svc)
+
+
 @r.message(CommandStart(deep_link=True, magic=F.args.regexp(r'^(gallery_|booking_)[A-Za-z0-9_-]{32}$')))
 async def start(message, command):
     svc = service(message.bot)
@@ -88,6 +107,7 @@ async def start(message, command):
         protect_content=False)
     await message.answer('Сохранён ваш Telegram ID для выдачи фото и напоминаний о съёмке. Получать другие предложения можно по желанию. Отписка: /stop.',
         reply_markup=preferences_keyboard(), protect_content=False)
+    await guest_button(message, svc)
 
 
 @r.message(F.contact)

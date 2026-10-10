@@ -1,5 +1,6 @@
 """Client delivery uses a separate, explicitly published album, never all shoot originals."""
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import html
@@ -113,7 +114,7 @@ class Delivery:
         photos = (await session.scalars(select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id).order_by(DeliveryPhoto.id))).all() if g else []
         user = await session.get(User, b.photographer_id) if b.photographer_id else None
         base = f'/api/miniapp/delivery/{b.id}'
-        result = {'bookingId': b.id, 'photographer': user.name if user else None, 'canEdit': can_edit(actor, b),
+        result = {'bookingId': b.id, 'galleryId': g.id if g else None, 'photographer': user.name if user else None, 'canEdit': can_edit(actor, b),
                   'title': g.title if g else 'Ваши фотографии', 'published': bool(g and g.published),
                   'deliveryMode': (g.delivery_mode if g else 'ALL'),
                   'passwordEnabled': bool(g and g.password_hash), 'expiresAt': g.expires_at.isoformat() if g and g.expires_at else None,
@@ -373,6 +374,11 @@ class Delivery:
             base = '/g/' + g.access_token
             cards = ''.join('<figure><a href="' + base + '/photos/' + str(p.id) + '"><img loading="lazy" src="' + base + '/photos/' + str(p.id) + '?preview=1" alt="' + html.escape(p.filename, quote=True) + '"></a><figcaption>' + html.escape(p.filename) + '</figcaption><a class="button" href="' + base + '/photos/' + str(p.id) + '?download=1">Скачать оригинал</a></figure>' for p in files)
             body = '<p>Ваши готовые фотографии. Нажмите на снимок для просмотра.</p><a class="button" href="' + base + '/album.zip">Скачать весь альбом ZIP</a><div class="gallery">' + cards + '</div>'
+            with contextlib.suppress(Exception):
+                bot = await self.api.bot.me()
+                if bot.username and re.fullmatch(r'[A-Za-z0-9_]{5,32}', bot.username):
+                    body += '<p><a class="button" href="https://t.me/' + bot.username + '?start=gallery_' + g.access_token + '">Сохранить альбом в личном кабинете</a></p><p>Регистрация через подтверждённый Telegram аккаунт. После регистрации можно настроить вход по паролю.</p>'
+            body += '<a href="/guest/">Мой кабинет и семейные слайд-шоу</a>'
             return web.Response(text=self.document(g.title, body), content_type='text/html')
 
     @staticmethod

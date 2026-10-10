@@ -862,6 +862,72 @@ class DeliveryGallery(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class PhotoCompany(Base):
+    """Owner-managed registry. External staff onboarding is deliberately not enabled yet."""
+    __tablename__ = 'photo_companies'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(150))
+    country: Mapped[str] = mapped_column(String(2), default='RU')
+    timezone: Mapped[str] = mapped_column(String(80), default='Europe/Moscow')
+    currency: Mapped[str] = mapped_column(String(3), default='RUB')
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class CompanyGallery(Base):
+    __tablename__ = 'company_galleries'
+    gallery_id: Mapped[int] = mapped_column(ForeignKey('delivery_galleries.id', ondelete='CASCADE'), primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey('photo_companies.id', ondelete='RESTRICT'), index=True)
+
+
+class GuestAccount(Base):
+    """Global Photo Boss identity, independent of company, booking and staff users."""
+    __tablename__ = 'guest_accounts'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tg_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), default='Гость')
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class GuestSession(Base):
+    __tablename__ = 'guest_sessions'
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    guest_id: Mapped[int] = mapped_column(ForeignKey('guest_accounts.id', ondelete='CASCADE'), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
+class GuestAlbum(Base):
+    __tablename__ = 'guest_albums'
+    guest_id: Mapped[int] = mapped_column(ForeignKey('guest_accounts.id', ondelete='CASCADE'), primary_key=True)
+    gallery_id: Mapped[int] = mapped_column(ForeignKey('delivery_galleries.id', ondelete='CASCADE'), primary_key=True)
+    unlock_stamp: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class GuestFilm(Base):
+    __tablename__ = 'guest_films'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guest_id: Mapped[int] = mapped_column(ForeignKey('guest_accounts.id', ondelete='CASCADE'), index=True)
+    request_key: Mapped[str] = mapped_column(String(64))
+    gallery_id: Mapped[int] = mapped_column(ForeignKey('delivery_galleries.id', ondelete='CASCADE'))
+    photo_ids: Mapped[str] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(String(100))
+    family_names: Mapped[str] = mapped_column(String(300), default='')
+    family_story: Mapped[str] = mapped_column(Text, default='')
+    lyrics: Mapped[str] = mapped_column(Text, default='')
+    format: Mapped[str] = mapped_column(String(20), default='VERTICAL')
+    status: Mapped[str] = mapped_column(String(20), default='DRAFT', index=True)
+    audio_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    video_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    run_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    __table_args__ = (UniqueConstraint('guest_id', 'request_key', name='uq_guest_film_request'),)
+
+
 class DeliveryPhoto(Base):
     __tablename__ = 'delivery_photos'
     id: Mapped[int] = mapped_column(primary_key=True)
