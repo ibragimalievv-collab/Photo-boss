@@ -311,6 +311,21 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         status, data, _ = await self.call("/me", token=signed(1003, issued=int(time.time()) - 86401))
         assert status == 401 and "telegramId" not in data
 
+    async def test_hotel_sections_list_includes_empty_hotels_for_supervisors_only(self):
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("INSERT INTO hotels(id,name,active) VALUES(3,'Город мира',TRUE)"))
+        for uid in (1001, 1002):
+            status, data, _ = await self.call("/bookings", uid=uid)
+            assert status == 200
+            assert {h["name"] for h in data["hotels"]} == {
+                "Test hotel", "Other hotel", "Город мира"}
+            assert {b["hotelId"] for b in data["items"]} == {1, 2}
+        for uid in (1003, 1004, 1005):
+            status, data, _ = await self.call("/bookings", uid=uid)
+            assert status == 200
+            assert data["hotels"] == []
+            assert "hotelId" in data["items"][0]
+
     async def test_shooting_actions_match_bot_statuses_and_are_idempotent(self):
         _, data, _ = await self.call("/bookings", uid=1003)
         assert data["items"][0]["shootingId"] == 1
