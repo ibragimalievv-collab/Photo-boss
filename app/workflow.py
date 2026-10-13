@@ -101,12 +101,26 @@ class Workflow:
             'date': str(self.api.today()), 'actorId': a['id']})
 
     async def save_telegram(self, actor, raw, *, receipt=False):
+        from aiogram.exceptions import TelegramBadRequest
         from aiogram.types import BufferedInputFile
         ext, _ = image_format(raw)
         upload = BufferedInputFile(raw, filename=f'photo-boss.{ext}')
         if receipt:
-            message = await self.api.bot.send_photo(actor.tg_id, upload, caption='Photo Boss · чек на проверку', protect_content=True)
-            attachment = message.photo[-1]
+            try:
+                message = await self.api.bot.send_photo(
+                    actor.tg_id, upload, caption='Photo Boss · чек на проверку', protect_content=True,
+                )
+                attachment = message.photo[-1]
+            except TelegramBadRequest as exc:
+                # Receipts with unusual dimensions cannot be Telegram photos.
+                # Preserve their original bytes as a document, without blocking queued shoots.
+                if 'PHOTO_INVALID_DIMENSIONS' not in str(exc):
+                    raise
+                message = await self.api.bot.send_document(
+                    actor.tg_id, BufferedInputFile(raw, filename=f'photo-boss.{ext}'),
+                    caption='Photo Boss · чек на проверку (файл)', protect_content=True,
+                )
+                attachment = message.document
         else:
             message = await self.api.bot.send_document(actor.tg_id, upload, caption='Photo Boss · сохранённый кадр', protect_content=True)
             attachment = message.document
