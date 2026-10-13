@@ -51,12 +51,16 @@ export async function flushOutbox(){
     row.status='synced';row.error='';row.errorStatus=0;row.blob=null;
     summary.completed++;
    }catch(e){
-    row.status=(!e.status||e.status>=500)?'local':'error';
+    // Missing dependencies and receipt failures must not strand independent shoot photos.
+    // Keep their blobs on this device and retry without marking a dependent sale as failed.
+    const temporary=!e.status||e.status>=500||e.status===424;
+    row.status=temporary?'local':'error';
     row.error=e.message;row.errorStatus=e.status||0;
     await update(row);changed();
-    if(!e.status||e.status>=500){
+    if(temporary){
      summary.temporary++;
      clearTimeout(timer);timer=setTimeout(()=>flushOutbox(),30000);
+     if(e.status===424||(e.status>=500&&['booking_receipt','sale_receipt'].includes(row.kind)))continue;
      break;
     }
     summary.failed++;
