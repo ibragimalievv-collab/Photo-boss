@@ -16,7 +16,7 @@ import {startBrowserLogin,checkBrowserLogin,stopBrowserLogin} from './browser-lo
 import {loginView,passwordForm,accountCall,accountChanged} from './account.js';
 import {scheduleEditor,scheduleEditorAction,schedulePayload} from './schedule-editor.js';
 const tg=initTelegram(),$=s=>document.querySelector(s);
-const state={me:null,dashboard:null,finance:null,schedule:null,academy:null,audit:null,bookings:[],route:'home',period:'today',day:todayKey(),week:todayKey(),academyTab:'home',search:'',requestId:0};
+const state={me:null,dashboard:null,finance:null,schedule:null,academy:null,audit:null,bookings:[],route:'home',period:'today',day:todayKey(),week:todayKey(),academyTab:'home',search:'',requestId:0,hotels:[],expandedHotels:new Set()};
 let toastTimer,focusBeforeDialog=null;
 let bootGeneration=0;
 const initWorkChat=me=>document.dispatchEvent(new CustomEvent('pb-chat-account-ready',{detail:me}));
@@ -63,7 +63,44 @@ function homeView(){
  <section class="section"><div class="section-head"><h2>Очередь съёмок</h2><button class="text-button" data-go="shootings">Все ${icon('arrow')}</button></div><div class="stack">${upcoming.length?upcoming.slice(0,3).map(bookingCard).join(''):empty('Очередь пуста','Новые записи появятся здесь.','camera')}</div></section>
  <section class="section"><button class="academy-link" data-go="academy"><span class="academy-logo">${icon('cap')}</span><div><div class="eyebrow accent">PHOTO BOSS ACADEMY</div><h3>Академия Photo Boss</h3><p>Ваш отдельный мир роста и практики.</p></div>${icon('arrow')}</button></section></div></div>`;
 }
-function shootingsView(){const rows=state.bookings.filter(x=>(!state.onlyReady||x.status==='READY_FOR_SALE')&&(!state.search||`${x.client} ${x.room} ${x.photographer} ${x.id}`.toLowerCase().includes(state.search.toLowerCase()))).sort((a,b)=>a.date.localeCompare(b.date)||a.time.localeCompare(b.time));return `${heading('Съёмки и записи','Весь путь гостя — в одной карточке.',state.me.permissions.manageBookings?`<button class="icon-button accent-button" data-action="new-booking" aria-label="Новая запись">${icon('plus')}</button>`:'')}<div class="filter-row"><label class="field"><span>Дата съёмки</span><input id="bookingDay" type="date" class="input" value="${state.day}"></label><button class="btn small ghost" data-action="today-bookings">Сегодня</button>${state.onlyReady?`<button class="btn small" data-action="clear-ready">К продаже ×</button>`:''}</div><label class="searchbox">${icon('search')}<input id="bookingSearch" aria-label="Поиск съёмки" placeholder="Гость, номер комнаты, фотограф" value="${esc(state.search)}"></label><div id="bookingList" class="booking-list stack two-col">${rows.length?rows.map(bookingCard).join(''):empty('Съёмки не найдены','Измените дату или поисковый запрос.','camera')}</div>`;}
+function shootingsView(){
+ const all=state.bookings.filter(x=>!state.onlyReady||x.status==='READY_FOR_SALE');
+ const search=state.search.toLocaleLowerCase('ru-RU');
+ const rows=all.filter(x=>!search||`${x.client} ${x.room} ${x.photographer} ${x.hotel} ${x.id}`.toLocaleLowerCase('ru-RU').includes(search))
+   .sort((a,b)=>a.date.localeCompare(b.date)||a.time.localeCompare(b.time));
+ const supervisor=state.me.user.roles.some(role=>role==='OWNER'||role==='ADMIN');
+ const hotelSections=()=>{
+  const groups=new Map(state.hotels.map(h=>[String(h.id),{id:String(h.id),name:h.name,rows:[]}]));
+  // Keep older or inactive hotels visible if they still have bookings.
+  for(const b of rows){
+   const id=String(b.hotelId??b.hotel??'unknown');
+   if(!groups.has(id))groups.set(id,{id,name:b.hotel||'Без отеля',rows:[]});
+   groups.get(id).rows.push(b);
+  }
+  const sections=[...groups.values()].sort((a,b)=>a.name.localeCompare(b.name,'ru'));
+  return sections.map(h=>{
+   const count=h.rows.length;
+   const isOpen=state.expandedHotels.has(h.id);
+   return `<details class="hotel-shootings" data-hotel-section="${esc(h.id)}" ${isOpen?'open':''}>
+     <summary class="hotel-shootings-heading">
+       <span class="hotel-shootings-name">${esc(h.name)}</span>
+       <span class="hotel-shootings-right">
+         <span class="hotel-shootings-count ${count?'has-shoots':''}" aria-label="Съёмок: ${count}">${count}</span>
+         <span class="hotel-shootings-chevron" aria-hidden="true">⌄</span>
+       </span>
+     </summary>
+     <div class="hotel-shootings-rows booking-list stack two-col">
+       ${count?h.rows.map(bookingCard).join(''):empty('Нет съёмок на выбранную дату','','camera')}
+     </div>
+    </details>`;
+  }).join('');
+ };
+ return `${heading('Съёмки и записи','Весь путь гостя — в одной карточке.',state.me.permissions.manageBookings?`<button class="icon-button accent-button" data-action="new-booking" aria-label="Новая запись">${icon('plus')}</button>`:'')}
+ <div class="filter-row"><label class="field"><span>Дата съёмки</span><input id="bookingDay" type="date" class="input" value="${state.day}"></label><button class="btn small ghost" data-action="today-bookings">Сегодня</button>${state.onlyReady?`<button class="btn small" data-action="clear-ready">К продаже ×</button>`:''}</div>
+ <label class="searchbox">${icon('search')}<input id="bookingSearch" aria-label="Поиск съёмки" placeholder="Гость, номер комнаты, фотограф или отель" value="${esc(state.search)}"></label>
+ ${supervisor?`<section id="bookingList" class="hotel-shootings-list stack">${hotelSections()||empty('Отелей пока нет','Добавьте отель в разделе команды.','camera')}</section>`:`<div id="bookingList" class="booking-list stack two-col">${rows.length?rows.map(bookingCard).join(''):empty('Съёмки не найдены','Измените дату или поисковый запрос.','camera')}</div>`}
+ `;
+}
 function scheduleView(){
  const data=state.schedule,days=Array.from({length:7},(_,i)=>addDays(state.week,i));const rows=data.items.filter(x=>x.date===state.day&&x.status!=='CANCELLED');
  return `${heading(state.me.permissions.manageSchedule?'График команды':'Мой график','Фотографы и менеджеры записи.',state.me.permissions.manageSchedule?`<button class="btn small ghost" data-action="new-team-shift">Общий график</button><button class="icon-button accent-button" data-action="new-shift" aria-label="Добавить смену">${icon('plus')}</button>`:'')}<div class="calendar-week-head"><button class="icon-button" data-week="-7" aria-label="Предыдущая неделя">‹</button><strong>${esc(dateLabel(days[0],{day:'numeric',month:'short'}))} — ${esc(dateLabel(days[6],{day:'numeric',month:'short'}))}</strong><button class="icon-button" data-week="7" aria-label="Следующая неделя">›</button></div><div class="calendar-strip">${days.map(d=>`<button class="day-button ${state.day===d?'selected':''}" data-day="${d}" aria-pressed="${state.day===d}"><small>${esc(dateLabel(d,{weekday:'short'}))}</small>${Number(d.slice(-2))}<span class="dot"></span></button>`).join('')}</div><div class="section-head"><h2>${esc(dateLabel(state.day))}</h2><button class="text-button" data-action="today-schedule">Сегодня</button></div><div class="panel">${rows.length?rows.map(s=>`<div class="schedule-person"><span class="avatar">${esc(initials(s.name))}</span><div><h3>${esc(s.name)}</h3><p class="small">${esc(ROLE_NAMES[s.role]||s.role)} · ${esc(s.hotel)}</p>${mark(s.attendance||s.status)}</div><div class="schedule-hours">${esc(s.start)}–${esc(s.end)}<small>${state.me.permissions.manageSchedule&&s.status==='PLANNED'&&s.attendance==='PLANNED'&&s.date>=state.me.today?`<button class="text-button negative" data-cancel-shift="${s.id}">Отменить</button>`:''}</small></div></div>`).join(''):empty('Выходной или смены не назначены','План и фактический выход на смену учитываются отдельно.','calendar')}</div><p class="compact-note">«По графику» — запланировано. «На смене» — подтверждён выход. План сам по себе не подтверждает присутствие.</p>`;
@@ -82,7 +119,7 @@ async function loadRoute(route=state.route){
  try{
   if(route==='home'){const d=await request('/dashboard');if(ticket!==state.requestId)return;state.dashboard=d;state.me.today=d.today;}
   if(route==='finance'){const q=new URLSearchParams({period:state.period});if(state.period==='custom'){q.set('from',state.customFrom);q.set('to',state.customTo);}const d=await request(`/finance?${q}`);if(ticket!==state.requestId)return;state.finance=d;}
-  if(route==='shootings'){const d=await request(`/bookings?day=${state.day}`);if(ticket!==state.requestId)return;state.bookings=d.items;}
+  if(route==='shootings'){const d=await request(`/bookings?day=${state.day}`);if(ticket!==state.requestId)return;state.bookings=d.items;state.hotels=d.hotels||[];}
   if(route==='schedule'){const d=await request(`/schedule?from=${state.week}&to=${addDays(state.week,6)}`);if(ticket!==state.requestId)return;state.schedule=d;}
   if(route==='academy'){const d=await request('/academy');if(ticket!==state.requestId)return;state.academy=d;await loadAcademyCoach();}
   if(route==='control')await loadShootControl();
@@ -180,6 +217,12 @@ document.addEventListener('click',async event=>{
   if(b.dataset.confirmCancel){b.disabled=true;await request(`/schedule/${Number(b.dataset.confirmCancel)}`,{method:'DELETE'});closeSheet();await loadRoute('schedule');toast('Смена отменена.');}
  }catch(e){b.disabled=false;if(e.status===401)showError(e);else toast(e.message);}
 });
+document.addEventListener('toggle',event=>{
+ const section=event.target.closest?.('[data-hotel-section]');
+ if(!section||!section.matches('details'))return;
+ const id=section.dataset.hotelSection;
+ if(section.open)state.expandedHotels.add(id);else state.expandedHotels.delete(id);
+},true);
 document.addEventListener('change',async e=>{if(e.target.id==='workflowSalePick'){workflowSelect(e.target.value);return;}if(e.target.id==='bookingDay'){if(!e.target.value)return;state.day=e.target.value;await loadRoute('shootings');}});
 document.addEventListener('input',e=>{if(e.target.id==='bookingSearch'){state.search=e.target.value;const pos=e.target.selectionStart;$('#app').innerHTML=shootingsView();const input=$('#bookingSearch');input.focus();input.setSelectionRange(pos,pos);}});
 document.addEventListener('submit',async e=>{
@@ -200,7 +243,7 @@ for(const event of ['copy','cut','contextmenu','dragstart'])document.addEventLis
 function privacy(active){$('#privacyScreen').hidden=state.me?.screenCaptureAllowed?true:active;}
 document.addEventListener('visibilitychange',()=>privacy(!document.hidden));try{tg?.onEvent('deactivated',()=>privacy(false));tg?.onEvent('activated',()=>privacy(true));tg?.BackButton?.onClick(()=>go('home'));}catch{}
 window.addEventListener('hashchange',()=>{if(state.me)loadRoute(location.hash.slice(1)||'home');});
-async function boot(){const ticket=++bootGeneration;stopBrowserLogin();try{const nextMe=await request('/me');if(ticket!==bootGeneration)return;state.me=nextMe;initWorkChat(state.me);setOutboxUser(state.me.user.id);resetAcademyCoach(state.me.user.id,state.me.user.roles);if(!state.me._offline){await request('/session',{method:'POST',body:{}});if(ticket!==bootGeneration)return;for(const path of ['/workflow','/workday','/dashboard','/shoot-control',`/bookings?day=${state.me.today}`,`/schedule?from=${state.me.today}&to=${addDays(state.me.today,6)}`])request(path).catch(()=>{});}state.period='today';state.day=state.me.today;state.week=state.me.today;state.dashboard=null;state.schedule=null;state.finance=null;state.academy=null;state.audit=null;state.bookings=[];state.onlyReady=false;state.search='';state.academyTab='home';setTheme(state.me.user.theme||defaultTheme(state.me.user.roles));await loadRoute(location.hash.slice(1)||'home');}catch(e){if(ticket===bootGeneration)showError(e);}}
+async function boot(){const ticket=++bootGeneration;stopBrowserLogin();try{const nextMe=await request('/me');if(ticket!==bootGeneration)return;state.me=nextMe;initWorkChat(state.me);setOutboxUser(state.me.user.id);resetAcademyCoach(state.me.user.id,state.me.user.roles);if(!state.me._offline){await request('/session',{method:'POST',body:{}});if(ticket!==bootGeneration)return;for(const path of ['/workflow','/workday','/dashboard','/shoot-control',`/bookings?day=${state.me.today}`,`/schedule?from=${state.me.today}&to=${addDays(state.me.today,6)}`])request(path).catch(()=>{});}state.period='today';state.day=state.me.today;state.week=state.me.today;state.dashboard=null;state.schedule=null;state.finance=null;state.academy=null;state.audit=null;state.bookings=[];state.hotels=[];state.expandedHotels.clear();state.onlyReady=false;state.search='';state.academyTab='home';setTheme(state.me.user.theme||defaultTheme(state.me.user.roles));await loadRoute(location.hash.slice(1)||'home');}catch(e){if(ticket===bootGeneration)showError(e);}}
 window.addEventListener('storage',event=>{if(event.key==='pb-account-changed'){bootGeneration++;state.requestId++;resetWorkChat();}});
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/app/sw.js',{scope:'/app/'}).catch(()=>{});
 boot();
