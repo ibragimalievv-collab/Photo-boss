@@ -416,16 +416,15 @@ class MiniApp:
             await self.audit_write(conn, actor, f"shooting_{action}", "shooting",
                                    shoot["id"], f"Mini App: {expected} → {target}")
         if action == "ready":
-            # Reuse the bot's manager notification. Delivery failure must not roll back
-            # an already committed shooting or mislead the photographer.
+            # Notify using the same template as the Telegram bot, after commit.
             try:
-                from .db import Session
-                from .models import Booking
-                from .services.bookings import notify_manager_ready_for_sale
-                async with Session() as session:
-                    booking = await session.get(Booking, bid)
-                    if booking:
-                        await notify_manager_ready_for_sale(self.bot, session, booking)
+                from .services.bookings import send_manager_ready_message
+                async with self.engine.connect() as conn:
+                    managers = await self.rows(conn, """SELECT u.tg_id FROM bookings b
+                        JOIN users u ON u.id=b.manager_id
+                        WHERE b.id=:bid AND u.active=TRUE""", bid=bid)
+                if managers:
+                    await send_manager_ready_message(self.bot, managers[0]["tg_id"], bid)
             except Exception:
                 logger.warning("Could not notify manager for booking %s", bid, exc_info=True)
         return web.json_response({"ok": True, "bookingId": bid,
