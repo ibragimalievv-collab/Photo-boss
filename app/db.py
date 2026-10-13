@@ -46,13 +46,17 @@ async def init_db():
         # Reuse an existing spelling/case variant rather than creating duplicates.
         if connection.dialect.name == "postgresql":
             await connection.execute(text("LOCK TABLE hotels IN SHARE ROW EXCLUSIVE MODE"))
+        await connection.execute(
+            text("UPDATE hotels SET active=TRUE WHERE lower(trim(name))=lower(:lookup)"),
+            {"lookup": "Город мира"},
+        )
         await connection.execute(text("""
             INSERT INTO hotels(name,active)
-            SELECT :name, TRUE
+            SELECT :hotel_name, TRUE
             WHERE NOT EXISTS (
-                SELECT 1 FROM hotels WHERE lower(trim(name))=lower(:name)
+                SELECT 1 FROM hotels WHERE lower(trim(name))=lower(:lookup)
             )
-        """), {"name": "Город мира"})
+        """), {"hotel_name": "Город мира", "lookup": "Город мира"})
         if connection.dialect.name == "postgresql":
             await connection.execute(
                 text(
