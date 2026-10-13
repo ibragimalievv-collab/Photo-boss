@@ -179,7 +179,7 @@ class CoachingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_shoot_queue_is_private_and_duplicate_requests_reuse_review(self):
         with self.engine.inner.begin() as conn:
-            conn.execute(text('INSERT INTO shootings(id,booking_id) VALUES(1,1)'))
+            # A shooting is already present in the shared Mini App fixture.
             conn.execute(text('INSERT INTO photos(id,shooting_id) VALUES(1,1),(2,1)'))
         with pytest.raises(AccessError) as error:
             await self.coach.request_shoot(Request(uid=5, body={'bookingId': 1}))
