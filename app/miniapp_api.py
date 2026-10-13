@@ -319,9 +319,16 @@ class MiniApp:
 
     async def bookings(self, request):
         day = self.day(request.query.get("day", str(self.today())))
+        actor = request["miniapp_actor"]
         async with self.engine.connect() as conn:
-            items = await self.bookings_data(conn, request["miniapp_actor"], day)
-        return web.json_response({"items": items})
+            items = await self.bookings_data(conn, actor, day)
+            # Only supervisors receive the complete hotel list, including hotels
+            # with no bookings on the selected date. Staff still see only their
+            # assigned bookings through bookings_data.
+            hotels = ([dict(row) for row in await self.rows(conn,
+                "SELECT id,name FROM hotels WHERE active=TRUE ORDER BY name,id")]
+                if {"OWNER", "ADMIN"} & set(actor["roles"]) else [])
+        return web.json_response({"items": items, "hotels": hotels})
 
     async def booking_photographers(self, request):
         actor = request["miniapp_actor"]
