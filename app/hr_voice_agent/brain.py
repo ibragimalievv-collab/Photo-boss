@@ -129,6 +129,9 @@ class HRVoiceAgent:
 
         if DECLINE.search(text):
             state.ended = True
+            state.consent_for_answers = False
+            state.history.clear()
+            state.user_turns = 0
             return AgentTurn(OPT_OUT, "ended")
 
         if not state.consent_for_answers:
@@ -159,13 +162,17 @@ class HRVoiceAgent:
             answer = (await self.model.answer(messages)).strip()
         except Exception:
             # Secrets, stack traces and candidate details must not go to a caller.
+            state.ended = True
+            state.transferred_to_human = True
             return AgentTurn(
                 "Извините, связь с ИИ временно недоступна. "
                 "Я передам запрос сотруднику, чтобы с вами связались.",
                 "handed_off",
             )
         if not answer:
-            return AgentTurn("Расскажите, пожалуйста, немного подробнее.", "talking")
+            state.ended = True
+            state.transferred_to_human = True
+            return AgentTurn(HANDOFF, "handed_off")
         answer = answer[:650]
         state.history.extend((
             {"role": "user", "content": text},
