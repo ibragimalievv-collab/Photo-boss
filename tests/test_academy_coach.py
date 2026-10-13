@@ -187,9 +187,12 @@ class CoachingTests(unittest.IsolatedAsyncioTestCase):
         first = json.loads((await self.coach.request_shoot(Request(body={'bookingId': 1}))).text)
         second = json.loads((await self.coach.request_shoot(Request(body={'bookingId': 1}))).text)
         assert first['id'] == second['id']
-        assert len(json.loads((await self.coach.shoots(Request(uid=5))).text)['shoots']) == 0
+        # The fixture now includes a second shoot assigned to the other photographer.
+        # Staff may see their own booking, never the first photographer's booking.
+        assert [r['bookingId'] for r in json.loads(
+            (await self.coach.shoots(Request(uid=5))).text)['shoots']] == [2]
         admin = json.loads((await self.coach.shoots(Request(uid=2, roles=['ADMIN']))).text)
-        assert len(admin['shoots']) == 1
+        assert {r['bookingId'] for r in admin['shoots']} == {1, 2}
 
 
 def test_booking_ai_validates_six_skills_and_does_not_fabricate_provider_errors():
