@@ -23,8 +23,8 @@ from .handlers import (
     receipts,
     sales,
     training,
-    salary_manual,
 )
+from . import salary_manual
 from .services.photo_storage import storage_loop
 from .ui import CompactUiMiddleware, enable_compact_ui
 from .yandex_disk import YandexDisk, configured_from_env
