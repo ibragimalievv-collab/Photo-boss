@@ -204,7 +204,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                 "CREATE TABLE clients(id INTEGER PRIMARY KEY,name TEXT)",
                 "CREATE TABLE packages(id INTEGER PRIMARY KEY,name TEXT)",
                 "CREATE TABLE bookings(id INTEGER PRIMARY KEY,room TEXT,shoot_date DATE,shoot_time TEXT,status TEXT,photographer_id INTEGER,manager_id INTEGER,hotel_id INTEGER,client_id INTEGER,package_id INTEGER)",
-                "CREATE TABLE shootings(id INTEGER PRIMARY KEY,booking_id INTEGER)",
+                "CREATE TABLE shootings(id INTEGER PRIMARY KEY,booking_id INTEGER,status TEXT,accepted_at DATETIME,started_at DATETIME,completed_at DATETIME,ready_for_sale_at DATETIME)",
                 "CREATE TABLE photos(id INTEGER PRIMARY KEY,shooting_id INTEGER)",
                 "CREATE TABLE sales(id INTEGER PRIMARY KEY,booking_id INTEGER,credited_user_id INTEGER,commission_role TEXT,amount NUMERIC,commission NUMERIC,payment_status TEXT,created_at DATETIME)",
                 "CREATE TABLE payroll_entries(id INTEGER PRIMARY KEY,user_id INTEGER,kind TEXT,amount NUMERIC,created_at DATETIME)",
@@ -235,6 +235,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
             connection.execute(text("INSERT INTO clients VALUES (1,'Own guest'),(2,'Other guest')"))
             connection.execute(text("INSERT INTO packages VALUES (1,'Family')"))
             connection.execute(text("INSERT INTO bookings VALUES (1,'101',:day,'10:00','ASSIGNED',3,4,1,1,1),(2,'201',:day,'11:00','ASSIGNED',5,4,2,2,1)"), {"day": self.service.today()})
+            connection.execute(text("INSERT INTO shootings(id,booking_id,status) VALUES (1,1,'ASSIGNED'),(2,2,'ASSIGNED')"))
             connection.execute(text("INSERT INTO sales VALUES (1,1,3,'PHOTOGRAPHER',21000,3150,'PAID',:now),(2,2,5,'PHOTOGRAPHER',26000,3900,'UNPAID',:now)"), {"now": now})
             connection.execute(text("INSERT INTO payroll_entries VALUES (1,3,'Премия',1000,:now),(2,5,'Премия',1500,:now)"), {"now": now})
             connection.execute(text("INSERT INTO receipts VALUES (1,'APPROVED',21000,:now),(2,'PENDING',26000,:now)"), {"now": now})
@@ -258,6 +259,10 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         if route.startswith("/academy/lessons/"):
             request.match_info = {"slug": route.rsplit("/", 1)[1]}
             handler = service.complete_lesson
+        if route.startswith("/bookings/") and "/shooting/" in route and method == "POST":
+            parts = route.split("/")
+            request.match_info = {"id": parts[2], "action": parts[-1]}
+            handler = service.shooting_action
         if route.startswith("/schedule/") and method == "DELETE":
             request.match_info = {"id": route.rsplit("/", 1)[1]}
             handler = service.cancel_shift
@@ -305,6 +310,42 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         assert status == 403
         status, data, _ = await self.call("/me", token=signed(1003, issued=int(time.time()) - 86401))
         assert status == 401 and "telegramId" not in data
+
+    async def test_shooting_actions_match_bot_statuses_and_are_idempotent(self):
+        _, data, _ = await self.call("/bookings", uid=1003)
+        assert data["items"][0]["shootingId"] == 1
+        assert data["items"][0]["shootingStatus"] == "ASSIGNED"
+        for action, expected in (("pickup", "PICKED_UP"), ("start", "SHOOTING"),
+                                 ("finish", "SHOT"), ("ready", "READY_FOR_SALE")):
+            status, body, _ = await self.call(f"/bookings/1/shooting/{action}",
+                                              uid=1003, method="POST", body={})
+            assert status == 200 and body["status"] == expected
+            with self.engine.inner.connect() as conn:
+                assert conn.execute(text("SELECT status FROM bookings WHERE id=1")).scalar() == expected
+                assert conn.execute(text("SELECT status FROM shootings WHERE id=1")).scalar() == expected
+            assert (await self.call(f"/bookings/1/shooting/{action}",
+                                    uid=1003, method="POST", body={}))[0] == 409
+        with self.engine.inner.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT action FROM audit_logs WHERE entity='shooting' ORDER BY id")).scalars().all()
+        assert rows == ["shooting_pickup", "shooting_start", "shooting_finish", "shooting_ready"]
+
+    async def test_shooting_actions_block_other_users_and_wrong_order(self):
+        assert (await self.call("/bookings/1/shooting/start", uid=1003, method="POST"))[0] == 409
+        for uid in (1001, 1002, 1004, 1005):
+            assert (await self.call("/bookings/1/shooting/pickup",
+                                    uid=uid, method="POST"))[0] == 403
+        assert (await self.call("/bookings/1/shooting/pickup",
+                                uid=1003, method="POST", body={"photographerId": 5}))[0] == 400
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("UPDATE bookings SET status='PENDING_CONFIRMATION' WHERE id=1"))
+        assert (await self.call("/bookings/1/shooting/pickup",
+                                uid=1003, method="POST"))[0] == 409
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("UPDATE bookings SET status='ASSIGNED' WHERE id=1"))
+            conn.execute(text("DELETE FROM user_roles WHERE user_id=3 AND role='PHOTOGRAPHER'"))
+        assert (await self.call("/bookings/1/shooting/pickup",
+                                uid=1003, method="POST"))[0] == 403
 
     async def test_booking_access_tracks_current_roles_on_reopen(self):
         with self.engine.inner.begin() as conn:
