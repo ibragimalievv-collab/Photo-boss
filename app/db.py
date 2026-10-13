@@ -42,6 +42,17 @@ async def init_db():
         await connection.run_sync(Base.metadata.create_all)
         from .schema_updates import upgrade
         await upgrade(connection)
+        # Hotel requested by the owner. Idempotent across restarts and deployments.
+        # Reuse an existing spelling/case variant rather than creating duplicates.
+        if connection.dialect.name == "postgresql":
+            await connection.execute(text("LOCK TABLE hotels IN SHARE ROW EXCLUSIVE MODE"))
+        await connection.execute(text("""
+            INSERT INTO hotels(name,active)
+            SELECT :name, TRUE
+            WHERE NOT EXISTS (
+                SELECT 1 FROM hotels WHERE lower(trim(name))=lower(:name)
+            )
+        """), {"name": "Город мира"})
         if connection.dialect.name == "postgresql":
             await connection.execute(
                 text(
