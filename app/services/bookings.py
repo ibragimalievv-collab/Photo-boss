@@ -165,24 +165,29 @@ async def notify_photographer_assignment(bot, session, booking: Booking):
         return False
 
 
-async def notify_manager_ready_for_sale(bot, session, booking: Booking):
-    manager = await session.get(User, booking.manager_id)
-    if manager is None or not manager.active:
-        return False
+async def send_manager_ready_message(bot, manager_tg_id, booking_id):
+    """Shared notification for the Telegram bot and the Mini App."""
     try:
         await bot.send_message(
-            manager.tg_id,
-            f"💰 Съёмка #{booking.id} готова к продаже.\n"
+            manager_tg_id,
+            f"💰 Съёмка #{booking_id} готова к продаже.\n"
             "Сначала загрузите чек продажи, затем укажите количество кадров "
             "и количество проданных кадров, после чего загрузите выбранные фотографии.",
             reply_markup=inline(
-                [[("💰 Оформить продажу", f"sale:start:{booking.id}", "success")]]
+                [[("💰 Оформить продажу", f"sale:start:{booking_id}", "success")]]
             ),
             disable_notification=False,
         )
         return True
     except TelegramAPIError:
         return False
+
+
+async def notify_manager_ready_for_sale(bot, session, booking: Booking):
+    manager = await session.get(User, booking.manager_id)
+    if manager is None or not manager.active:
+        return False
+    return await send_manager_ready_message(bot, manager.tg_id, booking.id)
 
 
 async def notify_photographer_rescheduled(bot, session, booking: Booking):
