@@ -301,24 +301,34 @@ class MiniApp:
             clause = f"AND ({condition})"
         rows = await self.rows(conn, f"""SELECT b.id,b.room,b.shoot_date,b.shoot_time,b.status,
             b.photographer_id,b.manager_id,b.hotel_id,c.name AS client,h.name AS hotel,
+            sh.id AS shooting_id,sh.status AS shooting_status,
             p.name AS photographer,pk.name AS package,
             (SELECT COUNT(*) FROM photos ph JOIN shootings sh ON sh.id=ph.shooting_id
              WHERE sh.booking_id=b.id) AS frames
-            FROM bookings b JOIN clients c ON c.id=b.client_id
+            FROM bookings b LEFT JOIN shootings sh ON sh.booking_id=b.id
+            JOIN clients c ON c.id=b.client_id
             JOIN hotels h ON h.id=b.hotel_id LEFT JOIN users p ON p.id=b.photographer_id
             LEFT JOIN packages pk ON pk.id=b.package_id
             WHERE b.shoot_date=:day {clause} ORDER BY b.shoot_time,b.id""", uid=actor["id"], day=day)
         return [{"id": r["id"], "client": r["client"], "date": str(r["shoot_date"]),
                  "time": str(r["shoot_time"])[:5], "room": r["room"], "status": r["status"],
                  "photographerId": r["photographer_id"], "photographer": r["photographer"],
+                 "shootingId": r["shooting_id"], "shootingStatus": r["shooting_status"],
                  "managerId": r["manager_id"], "hotelId": r["hotel_id"], "hotel": r["hotel"],
                  "type": r["package"] or "Съёмка", "frames": r["frames"]} for r in rows]
 
     async def bookings(self, request):
         day = self.day(request.query.get("day", str(self.today())))
+        actor = request["miniapp_actor"]
         async with self.engine.connect() as conn:
-            items = await self.bookings_data(conn, request["miniapp_actor"], day)
-        return web.json_response({"items": items})
+            items = await self.bookings_data(conn, actor, day)
+            # Only supervisors receive the complete hotel list, including hotels
+            # with no bookings on the selected date. Staff still see only their
+            # assigned bookings through bookings_data.
+            hotels = ([dict(row) for row in await self.rows(conn,
+                "SELECT id,name FROM hotels WHERE active=TRUE ORDER BY name,id")]
+                if {"OWNER", "ADMIN"} & set(actor["roles"]) else [])
+        return web.json_response({"items": items, "hotels": hotels})
 
     async def booking_photographers(self, request):
         actor = request["miniapp_actor"]
@@ -371,6 +381,61 @@ class MiniApp:
             await self.audit_write(conn, actor, "miniapp_photographer_assigned", "booking", bid,
                                    f"Фотограф: {previous} → {uid}")
         return web.json_response({"ok": True, "photographerId": uid})
+
+    async def shooting_action(self, request):
+        """Run exactly the same state transitions used by the Telegram photographer bot."""
+        actor = request["miniapp_actor"]
+        if "PHOTOGRAPHER" not in actor["roles"]:
+            raise AccessError("Действие доступно только фотографу.", 403)
+        if await self.body(request):
+            raise AccessError("Лишние параметры действия.", 400)
+        action = request.match_info["action"]
+        transitions = {
+            "pickup": ("ASSIGNED", "PICKED_UP", "accepted_at"),
+            "start": ("PICKED_UP", "SHOOTING", "started_at"),
+            "finish": ("SHOOTING", "SHOT", "completed_at"),
+            "ready": ("SHOT", "READY_FOR_SALE", "ready_for_sale_at"),
+        }
+        if action not in transitions:
+            raise AccessError("Неизвестное действие съёмки.", 400)
+        bid = int(request.match_info["id"])
+        expected, target, timestamp = transitions[action]
+        async with self.engine.begin() as conn:
+            shoots = await self.rows(conn,
+                "SELECT id,status FROM shootings WHERE booking_id=:bid FOR UPDATE", bid=bid)
+            if not shoots:
+                raise AccessError("Съёмка не найдена.", 404)
+            shoot = shoots[0]
+            bookings = await self.rows(conn,
+                "SELECT photographer_id,status FROM bookings WHERE id=:bid FOR UPDATE", bid=bid)
+            if not bookings or bookings[0]["photographer_id"] != actor["id"]:
+                raise AccessError("Это не ваша съёмка.", 403)
+            if bookings[0]["status"] in {"PENDING_CONFIRMATION", "REJECTED", "CANCELLED"}:
+                raise AccessError("Съёмка ещё не подтверждена или отменена.", 409)
+            if shoot["status"] != expected:
+                raise AccessError("Этот шаг уже выполнен или предыдущий ещё не завершён. Обновите карточку.", 409)
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            await conn.execute(text(
+                f"UPDATE shootings SET status=:status,{timestamp}=:now WHERE id=:sid"),
+                {"status": target, "now": now, "sid": shoot["id"]})
+            await conn.execute(text("UPDATE bookings SET status=:status WHERE id=:bid"),
+                {"status": target, "bid": bid})
+            await self.audit_write(conn, actor, f"shooting_{action}", "shooting",
+                                   shoot["id"], f"Mini App: {expected} → {target}")
+        if action == "ready":
+            # Notify using the same template as the Telegram bot, after commit.
+            try:
+                from .services.bookings import send_manager_ready_message
+                async with self.engine.connect() as conn:
+                    managers = await self.rows(conn, """SELECT u.tg_id FROM bookings b
+                        JOIN users u ON u.id=b.manager_id
+                        WHERE b.id=:bid AND u.active=TRUE""", bid=bid)
+                if managers:
+                    await send_manager_ready_message(self.bot, managers[0]["tg_id"], bid)
+            except Exception:
+                logger.warning("Could not notify manager for booking %s", bid, exc_info=True)
+        return web.json_response({"ok": True, "bookingId": bid,
+                                  "shootingId": shoot["id"], "status": target})
 
     async def finance_data(self, conn, actor, start, end, period):
         if "ADMIN" in actor["roles"] and "OWNER" not in actor["roles"] and (start != self.today() or end != self.today()):
@@ -786,6 +851,7 @@ class MiniApp:
             ("GET", "/dashboard", self.dashboard), ("GET", "/bookings", self.bookings),
             ("GET", "/booking-photographers", self.booking_photographers),
             ("POST", r"/bookings/{id:\d+}/photographer", self.assign_booking_photographer),
+            ("POST", r"/bookings/{id:\d+}/shooting/{action:pickup|start|finish|ready}", self.shooting_action),
             ("GET", "/finance", self.finance), ("GET", "/schedule", self.schedule),
             ("POST", "/schedule", self.create_shift), ("POST", "/schedule/batch", self.create_shift_batch), ("POST", "/schedule/team", self.create_team_schedule), ("DELETE", "/schedule/{id}", self.cancel_shift),
             ("GET", "/audit", self.audit), ("GET", "/academy", self.academy),

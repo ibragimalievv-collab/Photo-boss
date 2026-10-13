@@ -179,7 +179,7 @@ class CoachingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_shoot_queue_is_private_and_duplicate_requests_reuse_review(self):
         with self.engine.inner.begin() as conn:
-            conn.execute(text('INSERT INTO shootings(id,booking_id) VALUES(1,1)'))
+            # A shooting is already present in the shared Mini App fixture.
             conn.execute(text('INSERT INTO photos(id,shooting_id) VALUES(1,1),(2,1)'))
         with pytest.raises(AccessError) as error:
             await self.coach.request_shoot(Request(uid=5, body={'bookingId': 1}))
@@ -187,9 +187,12 @@ class CoachingTests(unittest.IsolatedAsyncioTestCase):
         first = json.loads((await self.coach.request_shoot(Request(body={'bookingId': 1}))).text)
         second = json.loads((await self.coach.request_shoot(Request(body={'bookingId': 1}))).text)
         assert first['id'] == second['id']
-        assert len(json.loads((await self.coach.shoots(Request(uid=5))).text)['shoots']) == 0
+        # The fixture now includes a second shoot assigned to the other photographer.
+        # Staff may see their own booking, never the first photographer's booking.
+        assert [r['bookingId'] for r in json.loads(
+            (await self.coach.shoots(Request(uid=5))).text)['shoots']] == [2]
         admin = json.loads((await self.coach.shoots(Request(uid=2, roles=['ADMIN']))).text)
-        assert len(admin['shoots']) == 1
+        assert {r['bookingId'] for r in admin['shoots']} == {1, 2}
 
 
 def test_booking_ai_validates_six_skills_and_does_not_fabricate_provider_errors():

@@ -48,3 +48,18 @@
 #academyLessonQuiz label{display:block;margin:12px 0;line-height:1.5}
 #academyLessonQuiz input{margin-right:8px}
 @media(max-width:460px){.coach-skills{grid-template-columns:1fr}.coach-comparison{gap:8px}}
+
+
+/* Hotel-specific supervisor shooting navigation: prominent hotel label + red nonzero count. */
+.hotel-shootings{min-width:0;border:1px solid var(--line);background:var(--panel);border-radius:17px;overflow:hidden}
+.hotel-shootings-heading{display:flex;align-items:center;justify-content:space-between;gap:14px;min-height:72px;padding:17px 20px;cursor:pointer;list-style:none}
+.hotel-shootings-heading::-webkit-details-marker{display:none}
+.hotel-shootings-name{font-size:clamp(19px,2.3vw,26px);font-weight:800;letter-spacing:-.035em;line-height:1.2;overflow-wrap:anywhere}
+.hotel-shootings-right{display:flex;gap:14px;align-items:center;flex-shrink:0}
+.hotel-shootings-count{display:inline-flex;align-items:center;justify-content:center;min-width:35px;height:35px;padding:0 8px;border-radius:10px;background:var(--panel2);color:var(--muted);font-size:16px;font-weight:800;font-variant-numeric:tabular-nums}
+.hotel-shootings-count.has-shoots{background:var(--danger-bg);color:var(--danger)}
+.hotel-shootings-chevron{font-size:24px;line-height:1;color:var(--muted);transition:transform .2s}
+.hotel-shootings[open] .hotel-shootings-chevron{transform:rotate(180deg)}
+.hotel-shootings-heading:focus-visible{outline:3px solid var(--accent);outline-offset:-3px}
+.hotel-shootings-rows{border-top:1px solid var(--line);padding:14px;background:var(--bg)}
+@media(max-width:520px){.hotel-shootings-heading{padding:15px;min-height:65px}.hotel-shootings-name{font-size:19px}.hotel-shootings-rows{padding:10px}}

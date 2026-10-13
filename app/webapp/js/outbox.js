@@ -24,25 +24,49 @@ export async function enqueueBatch(items){
 export async function enqueueOperation(kind,date,data,blob=null){return (await enqueueBatch([{kind,date,data,blob}]))[0];}
 export async function retryOperation(key){const rows=await outboxRows();if(!rows.some(r=>r.key===key))return;const row=await localAction('operations','readonly',s=>s.get(key));if(!row||row.userId!==userId)return;row.status='local';row.error='';await update(row);for(const item of rows){if(item.errorStatus===424){const pending=await localAction('operations','readonly',s=>s.get(item.key));if(!pending||pending.userId!==userId)continue;pending.status='local';pending.error='';await update(pending);}}changed();return flushOutbox();}
 export async function flushOutbox(){
- if(running||!userId||!navigator.onLine)return;running=true;const actor=userId;
- try{for(const item of await outboxRows()){
-  if(actor!==userId)break;if(!['local','syncing'].includes(item.status))continue;
-  const row=await localAction('operations','readonly',s=>s.get(item.key));
-  if(actor!==userId)break;if(!row||!['local','syncing'].includes(row.status))continue;
-  row.status='syncing';await update(row);changed();
-  try{
-   const operation={actorId:row.userId,key:row.key,kind:row.kind,date:row.date,data:row.data};
-   let body=operation,path='/operations/sync';
-   if(row.blob){const bytes=await row.blob.arrayBuffer();if(!bytes.byteLength){const error=new Error('Сохранённое фото пустое. Выберите файл заново.');error.status=400;throw error;}const upload=new Blob([bytes],{type:row.blob.type||'application/octet-stream'});body=new FormData();body.append('operation',JSON.stringify(operation));body.append('file',upload,row.filename||'upload');path='/operations/media';}
-   row.result=await api(path,{method:'POST',body,timeoutMs:180000});row.status='synced';row.error='';row.errorStatus=0;row.blob=null;
-  }catch(e){
-   row.status=(!e.status||e.status>=500)?'local':'error';row.error=e.message;row.errorStatus=e.status||0;
+ if(!userId)return {state:'no-account'};
+ if(!navigator.onLine)return {state:'offline'};
+ if(running)return {state:'running'};
+ running=true;
+ const actor=userId,summary={state:'done',completed:0,failed:0,temporary:0};
+ try{
+  for(const item of await outboxRows()){
+   if(actor!==userId)break;
+   if(!['local','syncing'].includes(item.status))continue;
+   const row=await localAction('operations','readonly',s=>s.get(item.key));
+   if(actor!==userId)break;
+   if(!row||!['local','syncing'].includes(row.status))continue;
+   row.status='syncing';await update(row);changed();
+   try{
+    const operation={actorId:row.userId,key:row.key,kind:row.kind,date:row.date,data:row.data};
+    let body=operation,path='/operations/sync';
+    if(row.blob){
+     const bytes=await row.blob.arrayBuffer();
+     if(!bytes.byteLength){const error=new Error('Сохранённое фото пустое. Выберите файл заново.');error.status=400;throw error;}
+     const upload=new Blob([bytes],{type:row.blob.type||'application/octet-stream'});
+     body=new FormData();body.append('operation',JSON.stringify(operation));body.append('file',upload,row.filename||'upload');
+     path='/operations/media';
+    }
+    row.result=await api(path,{method:'POST',body,timeoutMs:180000});
+    row.status='synced';row.error='';row.errorStatus=0;row.blob=null;
+    summary.completed++;
+   }catch(e){
+    row.status=(!e.status||e.status>=500)?'local':'error';
+    row.error=e.message;row.errorStatus=e.status||0;
+    await update(row);changed();
+    if(!e.status||e.status>=500){
+     summary.temporary++;
+     clearTimeout(timer);timer=setTimeout(()=>flushOutbox(),30000);
+     break;
+    }
+    summary.failed++;
+    if([401,403].includes(e.status))break;
+    continue;
+   }
    await update(row);changed();
-   if(!e.status||e.status>=500){clearTimeout(timer);timer=setTimeout(()=>flushOutbox(),30000);break;}
-   if([401,403].includes(e.status))break;continue;
   }
-  await update(row);changed();
- }}finally{running=false;}
+ }finally{running=false;changed();}
+ return summary;
 }
 window.addEventListener('online',()=>flushOutbox());
 
