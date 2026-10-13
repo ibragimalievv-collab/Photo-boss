@@ -2,7 +2,7 @@ import {api} from './api.js';
 import {esc,todayKey} from './domain.js';
 import {enqueueBatch,outboxRows,retryOperation,flushOutbox,enqueueOperation} from './outbox.js';
 let data=null,queue=[],selected=null;
-const labels={local:'Сохранено локально',syncing:'Синхронизируется',synced:'Синхронизировано',error:'Ошибка'};
+const labels={local:'В очереди на этом устройстве — не отправлено',syncing:'Передаётся на сервер',synced:'Сервер принял',error:'Ошибка отправки'};
 const kinds={booking:'Бронь',booking_receipt:'Чек брони',sale_start:'Черновик продажи',sale_receipt:'Чек продажи',sale_counts:'Количество кадров',sale_selected:'Выбранный кадр',sale_complete:'Оформление продажи',shoot_photo:'Кадр полной съёмки',shoot_complete:'Завершение загрузки',checklist:'Контрольный пункт',shift_report:'Замечание',attendance:'Отметка смены'};
 export async function loadWorkflow(){data=await api('/workflow');queue=await outboxRows();if(selected&&!data.bookings.some(b=>b.id===selected))selected=null;}
 const field=(label,input)=>`<label class="field">${label}${input}</label>`;
@@ -16,8 +16,18 @@ let compareURLs=[];
 function clearComparisons(){for(const url of compareURLs)URL.revokeObjectURL(url);compareURLs=[];}
 window.addEventListener('hashchange',clearComparisons);window.addEventListener('pagehide',clearComparisons);
 
-function queueView(){return queue.slice(-100).map(r=>`<article class="panel"><strong>${r.kind==='shoot_photo'&&r.status==='synced'?'Принято сервером · состояние Диска ниже':labels[r.status]}</strong> · ${esc(kinds[r.kind]||r.kind)}${r.result?.photoId?` · кадр №${r.result.photoId}`:''}${r.filename?` · ${esc(r.filename)}`:''}${r.data?.shooting?.id?` · съёмка №${r.data.shooting.id}`:''}${r.result?.bookingId?` · запись №${r.result.bookingId}`:''}${r.result?.saleId?` · продажа №${r.result.saleId}`:''}<p>${esc(r.error||'')}</p>${r.status==='error'||(r.status==='local'&&r.error)?`<button class="btn ghost" data-workflow="retry" data-key="${r.key}">Повторить</button>`:''}</article>`).join('')||'<p>Операций в очереди нет.</p>';}
-function connectionNote(){return (data?._offline?`${navigator.onLine?'Сеть доступна. Форма использует сохранённые справочники':'Нет сети. Справочники сохранены'} ${new Date(data._cachedAt).toLocaleString('ru-RU')}. `:'')+'Брони, продажи, чеки и фото сохраняются на этом устройстве. Суммы и права проверяются сервером при синхронизации. До статуса «Синхронизировано» операция ещё не учтена.';}
+function queueView(){
+ const inProgress=queue.filter(r=>r.status==='local'||r.status==='syncing').length;
+ const errors=queue.filter(r=>r.status==='error').length;
+ const stored=queue.filter(r=>r.status==='synced').length;
+ const visible=[...queue.filter(r=>r.status!=='synced').slice(0,50),...queue.filter(r=>r.status==='synced').slice(-20)];
+ const summary=`<p class="small">Ожидают отправки или отправляются: ${inProgress} · Ошибки: ${errors} · Принято сервером: ${stored}. Показаны первые 50 незавершённых и последние 20 завершённых операций.</p>`;
+ return summary+(visible.map(r=>`<article class="panel"><strong>${r.kind==='shoot_photo'&&r.status==='synced'?'Сервер принял · проверьте Яндекс.Диск ниже':labels[r.status]}</strong> · ${esc(kinds[r.kind]||r.kind)}${r.result?.photoId?` · кадр №${r.result.photoId}`:''}${r.filename?` · ${esc(r.filename)}`:''}${r.data?.shooting?.id?` · съёмка №${r.data.shooting.id}`:''}${r.result?.bookingId?` · запись №${r.result.bookingId}`:''}${r.result?.saleId?` · продажа №${r.result.saleId}`:''}<p>${esc(r.error||'')}</p>${r.status==='error'||(r.status==='local'&&r.error)?`<button class="btn ghost" data-workflow="retry" data-key="${r.key}">Повторить</button>`:''}</article>`).join('')||'<p>Операций в очереди нет.</p>');
+}
+function connectionNote(){
+ const offline=data?._offline?(`${navigator.onLine?'Сеть доступна, но справочники взяты из локальной копии.':'Нет сети. Справочники сохранены.'} ${new Date(data._cachedAt).toLocaleString('ru-RU')}. `):'';
+ return offline+'Фотографии сначала попадают в очередь именно этого браузера на этом устройстве. Пока сервер не принял их, не очищайте данные браузера. После передачи проверяйте отдельный статус «Сохранено на Яндекс.Диске».';
+}
 export function workflowView(){
  const ready=data.bookings.filter(b=>b.status==='READY_FOR_SALE'),b=data.bookings.find(b=>b.id===selected),d=b?.draft;
  const upload=data.bookings.filter(b=>b.status==='READY_FOR_SALE'&&!b.fullUploaded&&b.canUpload);
@@ -26,7 +36,7 @@ export function workflowView(){
  <section class="panel section"><h2>Продажа</h2><p>Выбранные кадры обязательны; оплата подтверждается владельцем.</p><select class="input" id="workflowSalePick"><option value="">Выберите готовую съёмку</option>${ready.map(x=>`<option value="${x.id}" ${x.id===selected?'selected':''}>№${x.id} · ${esc(x.date)} · комната ${esc(x.room)}</option>`).join('')}</select>${b?(d&&!d.mine?'<p>Продажу оформляет другой сотрудник.</p>':`<form id="workflowSale" class="form-grid section"><p>Цена кадра по текущему пакету: ${esc(b.price)} ₽. Итог рассчитает сервер.</p>${!d||d.status==='AWAITING_RECEIPT'?field('Чек продажи',file('receipt')):''}${field('Всего кадров в съёмке',input('total',`type="number" min="1" max="10000" required value="${d?.total||''}" ${d?.status==='AWAITING_SELECTED'?'readonly':''}`))}${field('Продано кадров',input('sold',`type="number" min="1" max="10000" required value="${d?.sold||''}" ${d?.status==='AWAITING_SELECTED'?'readonly':''}`))}<p>Уже сохранено выбранных кадров: ${d?.selected||0}. Прикрепите оставшиеся.</p>${field('Выбранные фотографии',file('selected',true,false))}<button class="btn primary">Сохранить продажу и фотографии</button></form>`):''}</section>
  <details class="panel section"><summary>Загрузить полную съёмку</summary>${upload.length?`<form id="workflowShoot" class="form-grid">${field('Съёмка',`<select class="input" name="booking">${options(upload)}</select>`)}${field('Фотографии',file('photos',true,false))}<label><input type="checkbox" name="finish"> Все кадры добавлены — завершить загрузку</label><p>Можно добавлять частями. Ставка фотографа фиксируется сервером после завершения полной загрузки.</p><button class="btn primary">Сохранить фотографии</button></form>`:'<p>Нет доступных съёмок для полной загрузки.</p>'}</details>
  <section class="panel section"><h2>Файлы на Яндекс.Диске</h2><button class="btn ghost" data-workflow="refresh">Обновить состояние файлов</button>${data.bookings.filter(b=>b.shootingId).map(b=>`<details><summary>Съёмка №${b.shootingId} · ${esc(b.date)} · комната ${esc(b.room)} · сохранено ${(b.files||[]).filter(f=>f.status==='STORED').length} из ${(b.files||[]).length}</summary>${(b.files||[]).map(f=>`<p>Кадр №${f.id}: ${esc(({STORED:'Сохранено на Диске',PENDING:'Ожидает сохранения',UPLOADING:'Сохраняется',FAILED:'Ошибка сохранения'})[f.status])} ${esc(f.error||'')}</p>`).join('')}${editView(b)}${b.canUpload&&(b.files||[]).some(f=>f.status==='FAILED')?`<button class="btn ghost" data-workflow="retry-storage" data-shooting="${b.shootingId}">Повторить только неудачные загрузки</button>`:''}</details>`).join('')||'<p>Съёмок пока нет.</p>'}</section>
- <section class="section"><h2>Синхронизация</h2><button class="btn ghost" data-workflow="sync">Синхронизировать сейчас</button><div id="workflowQueue">${queueView()}</div></section>`;
+ <section class="section"><h2>Синхронизация</h2><button class="btn ghost" data-workflow="sync">Синхронизировать сейчас</button><div id="workflowSyncNote" class="notice" role="status">Отправка запускается автоматически при наличии сети. Нажмите кнопку для ручной проверки.</div><div id="workflowQueue">${queueView()}</div></section>`;
 }
 function imageFiles(form,name,maximum=20*1024*1024){const list=[...form.elements[name].files];for(const f of list)if(!['image/jpeg','image/png','image/webp'].includes(f.type)||!f.size||f.size>maximum)throw new Error(`Изображения JPEG, PNG или WebP, не больше ${maximum/1024/1024} МБ.`);return list;}
 export async function workflowSubmit(form){
@@ -56,6 +66,16 @@ export async function workflowClick(button){
  const kind=button.dataset.workflow;
  if(kind.startsWith('edit-')){const action=kind.slice(5);await enqueueOperation('photo_edit',todayKey(),{shooting:Number(button.dataset.shooting),photo:Number(button.dataset.photo),action:action==='ai'?'AI':action,edit:button.dataset.edit?Number(button.dataset.edit):null,parameters:null});return;}
  if(kind==='compare'){const pid=Number(button.dataset.photo),eid=Number(button.dataset.edit);const blobs=await Promise.all([api(`/photos/${pid}/image`,{responseType:'blob'}),api(`/photos/${pid}/image?edit=${eid}`,{responseType:'blob'})]);const target=document.querySelector(`[data-compare="${eid}"]`);if(!target)return;clearComparisons();compareURLs=blobs.map(b=>URL.createObjectURL(b));target.innerHTML=compareURLs.map((url,i)=>`<figure><figcaption>${i?'Обработанная копия':'Оригинал'}</figcaption><img src="${url}" alt="${i?'Обработанная копия':'Оригинал'}" style="max-width:100%;height:auto"></figure>`).join('');return;}
+if(kind==='sync'){
+ const note=document.querySelector('#workflowSyncNote');
+ if(note)note.textContent='Проверяем состояние очереди…';
+ const result=await flushOutbox();
+ queue=await outboxRows();
+ const list=document.querySelector('#workflowQueue');if(list)list.innerHTML=queueView();
+ const messages={'no-account':'Нет активного аккаунта. Войдите под тем же пользователем, который загружал файлы.',offline:'Браузер сообщает, что нет интернета. Фотографии остаются на устройстве.',running:'Загрузка уже выполняется. Статусы кадров обновляются в очереди.',done:`Проверка завершена. Принято сервером: ${result?.completed||0}; ошибок: ${result?.failed||0}; временных сбоев: ${result?.temporary||0}. Проверяйте статус файлов на Яндекс.Диске отдельно.`};
+ if(note)note.textContent=messages[result?.state]||'Проверка завершена; обновите состояние файлов.';
+ return;
+}
 if(button.dataset.workflow==='refresh'){await loadWorkflow();document.querySelector('#app').innerHTML=workflowView();return;}if(button.dataset.workflow==='retry-storage'){await enqueueOperation('shoot_retry',todayKey(),{shooting:{id:Number(button.dataset.shooting)}});return;}if(button.dataset.workflow==='retry')await retryOperation(button.dataset.key);else await flushOutbox();}
 export function workflowSelect(id){selected=Number(id)||null;document.querySelector('#app').innerHTML=workflowView();}
 function refreshConnection(){const el=document.querySelector('#workflowNotice');if(el)el.textContent=connectionNote();}
