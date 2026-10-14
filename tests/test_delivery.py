@@ -431,7 +431,7 @@ def test_legacy_unselect_preserves_a_shared_independently_uploaded_file(monkeypa
 
             async def visible_files(expected):
                 page = await (await client.get(base)).text()
-                assert page.count('<figure>') == len(expected)
+                assert page.count('<figure class="photo">') == len(expected)
                 assert page.count('<figcaption>separate.png</figcaption>') == 1
                 assert '<figcaption>legacy.png</figcaption>' not in page
                 archive = await client.get(base + '/album.zip')
