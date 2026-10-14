@@ -161,6 +161,9 @@ class Workday:
         async with self.api.engine.begin() as conn:
             rows=await self.api.rows(conn,'SELECT s.id,s.credited_user_id,b.manager_id FROM sales s LEFT JOIN bookings b ON b.id=s.booking_id WHERE s.id=:id',id=sid)
             if not rows: raise AccessError('Продажа не найдена.',404)
+            if 'ADMIN' in a['roles'] and 'OWNER' not in a['roles']:
+                allowed = await self.api.rows(conn, 'SELECT s.id FROM sales s JOIN bookings b ON b.id=s.booking_id WHERE s.id=:id AND ('+booking_scope_sql(a['id'], a['roles'])+')', id=sid, uid=a['id'])
+                if not allowed: raise AccessError('Нет доступа к съёмке этого отеля.',403)
             if not {'OWNER','ADMIN'} & set(a['roles']) and a['id'] not in (rows[0]['credited_user_id'],rows[0]['manager_id']): raise AccessError('Чужая продажа.',403)
             token=self.token(sid);digest=hashlib.sha256(token.encode()).hexdigest()
             await conn.execute(text("INSERT INTO guest_feedback(sale_id,token_hash,comment,created_at) VALUES (:sid,:hash,'',:now) ON CONFLICT(sale_id) DO NOTHING"),{'sid':sid,'hash':digest,'now':utc_now()})

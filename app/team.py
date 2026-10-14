@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from .miniapp_security import AccessError, utc_bounds
 from .models import utc_now
 from .people import People, check_editor, positive_id
+from .services.booking_access import booking_scope_sql
 from .services.insights import cents, parsed
 from .services.onboarding import guides, quiz_for, quiz_kind
 
@@ -211,9 +212,11 @@ class Team:
             compensation=await self.api.rows(conn,'SELECT role,base_salary,sales_percent FROM compensation WHERE user_id=:uid',uid=uid)
             ratings=await self.api.rows(conn,'SELECT f.rating FROM guest_feedback f JOIN sales s ON s.id=f.sale_id WHERE s.credited_user_id=:uid AND f.submitted_at>=:lo AND f.submitted_at<:hi AND f.rating IS NOT NULL',uid=uid,lo=lo,hi=hi)
             hotels=await self.api.rows(conn,'SELECT h.id,h.name FROM hotels h JOIN hotel_employees he ON he.hotel_id=h.id WHERE he.user_id=:uid',uid=uid)
-            bookings = await self.api.rows(conn,'SELECT id,status,shoot_date,shoot_time,hotel_id,room FROM bookings WHERE (manager_id=:uid OR photographer_id=:uid) AND shoot_date>=:start AND shoot_date<=:end ORDER BY shoot_date DESC,id DESC',uid=uid,start=start,end=end)
+            scope = booking_scope_sql(a['id'], a['roles']).replace(':uid', ':actor_uid')
+            bookings = await self.api.rows(conn,'SELECT b.id,b.status,b.shoot_date,b.shoot_time,b.hotel_id,b.room FROM bookings b WHERE (b.manager_id=:uid OR b.photographer_id=:uid) AND ('+scope+') AND b.shoot_date>=:start AND b.shoot_date<=:end ORDER BY b.shoot_date DESC,b.id DESC',uid=uid,actor_uid=a['id'],start=start,end=end)
             audits = await self.api.rows(conn,'SELECT id,action,entity,entity_id,created_at FROM audit_logs WHERE user_id=:uid AND created_at>=:lo AND created_at<:hi ORDER BY id DESC LIMIT 100',uid=uid,lo=flo,hi=fhi)
-            reviews = await self.api.rows(conn,'SELECT id,shooting_id,status,result,created_at FROM shoot_development_reviews WHERE photographer_id=:uid ORDER BY id DESC LIMIT 30',uid=uid)
+            photo_scope = booking_scope_sql(a['id'], a['roles'], photos=True).replace(':uid', ':actor_uid')
+            reviews = await self.api.rows(conn,'SELECT r.id,r.shooting_id,r.status,r.result,r.created_at FROM shoot_development_reviews r JOIN shootings sh ON sh.id=r.shooting_id JOIN bookings b ON b.id=sh.booking_id WHERE r.photographer_id=:uid AND ('+photo_scope+') ORDER BY r.id DESC LIMIT 30',uid=uid,actor_uid=a['id'])
             training = await self.api.rows(conn,'SELECT id,client_type,status,evaluation,created_at FROM sales_training_sessions WHERE user_id=:uid ORDER BY id DESC LIMIT 30',uid=uid)
         detailed = uid==a['id'] or 'OWNER' in a['roles']
         return web.json_response({'profile':profile,'hotels':[dict(h) for h in hotels],'from':str(start),'to':str(end),

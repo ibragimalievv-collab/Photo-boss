@@ -3,6 +3,7 @@ import asyncio
 from datetime import date, time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import delete, select, text
@@ -51,6 +52,8 @@ async def setup():
         await session.commit()
     api = object.__new__(MiniApp)
     api.engine = engine
+    api.tz = ZoneInfo("Europe/Moscow")
+    api.bot = SimpleNamespace()
     async def rows(conn, sql, **params):
         return list((await conn.execute(text(sql.replace(' FOR UPDATE', '')), params)).mappings())
     api.rows = rows
@@ -132,6 +135,34 @@ def test_assignment_checks_scope_before_idempotent_replay():
             req['miniapp_actor']['roles'] = ['MANAGER']
             with pytest.raises(AccessError):
                 await api.assign_booking_photographer(req)
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_employee_card_cannot_bypass_administrator_hotel_scope():
+    import json
+
+    from app.team import Team
+
+    async def run():
+        engine, api = await setup()
+        class Request(dict):
+            def __init__(self):
+                super().__init__(miniapp_actor={'id': 1, 'roles': ['ADMIN']})
+                self.match_info = {'id': '2'}
+        request = Request()
+        try:
+            team = Team(api)
+            data = json.loads((await team.overview(request)).text)
+            assert [b['id'] for b in data['bookings']] == [1]
+            async with engine.begin() as conn:
+                await conn.execute(text('DELETE FROM hotel_employees WHERE user_id=1'))
+            data = json.loads((await team.overview(request)).text)
+            assert data['bookings'] == []
+            request['miniapp_actor']['roles'] = ['OWNER']
+            data = json.loads((await team.overview(request)).text)
+            assert {b['id'] for b in data['bookings']} == {1, 3}
         finally:
             await engine.dispose()
     asyncio.run(run())
