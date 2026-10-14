@@ -83,8 +83,9 @@ async def complete_full_upload(session, actor, shooting_id, *, allow_management=
     shooting = await session.get(Shooting, shooting_id, with_for_update=True)
     booking = await session.get(Booking, shooting.booking_id) if shooting else None
     roles = await roles_of(session, actor)
-    management = allow_management and roles & {'OWNER', 'ADMIN'}
-    if booking is None or (booking.photographer_id != actor.id and not management):
+    from .booking_access import can_access_booking
+    permitted_roles = roles if allow_management else roles - {'OWNER', 'ADMIN', 'MANAGER'}
+    if not await can_access_booking(session, actor.id, permitted_roles, booking, photos=True):
         raise ValueError('Нет доступа к съёмке.')
     if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at is not None:
         raise ValueError('Загрузка уже закрыта.')
@@ -104,11 +105,14 @@ async def complete_full_upload(session, actor, shooting_id, *, allow_management=
 
 ACTIVE_DRAFT_STATUSES = ("AWAITING_RECEIPT", "AWAITING_COUNTS", "AWAITING_SELECTED")
 
-async def can_sell(actor, roles, booking):
+async def can_sell(actor, roles, booking, *, session=None):
     if booking is None or booking.status != "READY_FOR_SALE":
         return False
-    if roles & {"OWNER", "ADMIN"}:
+    if 'OWNER' in roles:
         return True
+    if 'ADMIN' in roles:
+        from .booking_access import can_access_booking
+        return session is not None and await can_access_booking(session, actor.id, roles, booking)
     if "MANAGER" in roles and booking.manager_id == actor.id:
         return True
     return "PHOTOGRAPHER" in roles and booking.photographer_id == actor.id
@@ -139,7 +143,7 @@ async def selected_count(session, draft_id):
 
 async def start_sale_draft(session, actor, roles, booking_id):
     booking = await session.get(Booking, booking_id, with_for_update=True)
-    if not await can_sell(actor, roles, booking):
+    if not await can_sell(actor, roles, booking, session=session):
         raise ValueError('Эта запись ещё не готова к продаже или недоступна.')
     draft = await active_draft(session, booking.id)
     if draft is not None and draft.created_by_id != actor.id:
@@ -210,7 +214,7 @@ async def complete_sale(session, actor, draft_id):
         raise ValueError("Продажа не найдена.")
     booking = await session.get(Booking, preview.booking_id, with_for_update=True)
     draft = await session.get(SaleDraft, draft_id, with_for_update=True, populate_existing=True)
-    if draft.created_by_id != actor.id or not await can_sell(actor, roles, booking):
+    if draft.created_by_id != actor.id or not await can_sell(actor, roles, booking, session=session):
         raise ValueError("Нет доступа к этой продаже.")
     if draft.status != "AWAITING_SELECTED":
         raise ValueError("Продажа уже завершена или отменена.")

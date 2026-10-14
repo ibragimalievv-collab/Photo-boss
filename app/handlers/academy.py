@@ -31,6 +31,7 @@ from ..services.academy import (
     strongest_and_weakest,
     unlocked_block,
 )
+from ..services.booking_access import booking_scope
 from ..services.core import ROLES, audit, get_user
 from ..services.training import CATEGORY_BY_SLUG, category_rows
 
@@ -554,7 +555,7 @@ def parse_positive_int(value):
 
 
 @r.callback_query(F.data == "academy:review_queue")
-async def academy_review_queue(callback: CallbackQuery, current_roles):
+async def academy_review_queue(callback: CallbackQuery, current_user, current_roles):
     if not {"OWNER", "ADMIN"} & set(current_roles):
         return await callback.answer("Раздел доступен владельцу и администратору.", show_alert=True)
     async with Session() as session:
@@ -564,7 +565,7 @@ async def academy_review_queue(callback: CallbackQuery, current_roles):
                 .join(Shooting, Shooting.id == Photo.shooting_id)
                 .join(Booking, Booking.id == Shooting.booking_id)
                 .join(User, User.id == Booking.photographer_id)
-                .where(User.active.is_(True))
+                .where(User.active.is_(True), booking_scope(current_user.id, current_roles, photos=True))
                 .order_by(Photo.created_at.desc())
                 .limit(10)
             )
@@ -584,7 +585,7 @@ async def academy_review_queue(callback: CallbackQuery, current_roles):
 
 
 @r.callback_query(F.data.startswith("academy:review_photo:"))
-async def academy_review_photo(callback: CallbackQuery, current_roles):
+async def academy_review_photo(callback: CallbackQuery, current_user, current_roles):
     if not {"OWNER", "ADMIN"} & set(current_roles):
         return await callback.answer("Недостаточно прав.", show_alert=True)
     photo_id = parse_positive_int(callback.data.partition("academy:review_photo:")[2])
@@ -597,7 +598,7 @@ async def academy_review_photo(callback: CallbackQuery, current_roles):
                 .join(Shooting, Shooting.id == Photo.shooting_id)
                 .join(Booking, Booking.id == Shooting.booking_id)
                 .join(User, User.id == Booking.photographer_id)
-                .where(Photo.id == photo_id)
+                .where(Photo.id == photo_id, booking_scope(current_user.id, current_roles, photos=True))
             )
         ).one_or_none()
     if row is None:

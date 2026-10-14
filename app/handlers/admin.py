@@ -27,6 +27,7 @@ from ..models import (
     User,
     UserRole,
 )
+from ..services.booking_access import booking_scope, can_access_booking
 from ..services.bookings import (
     STATUS_NAMES,
     booking_card,
@@ -515,11 +516,11 @@ async def packages(m):
 
 
 @r.message(F.text == "📋 Все записи")
-async def allbook(m):
+async def allbook(m, current_user, current_roles):
     async with Session() as s:
         if not (await guard(m, s))[1]:
             return
-        await send_day_picker(m, s, "admin:bookings", 0, "📋 Выберите день записей")
+        await send_day_picker(m, s, "admin:bookings", 0, "📋 Выберите день записей", user=current_user, roles=current_roles)
 
 
 def day_label(value, today):
@@ -542,7 +543,7 @@ def day_label(value, today):
     return f"{prefix} — {value:%d.%m.%Y}"
 
 
-async def send_day_picker(message, session, prefix, offset, title):
+async def send_day_picker(message, session, prefix, offset, title, *, user=None, roles=()):
     offset = max(0, min(offset, 364))
     today = training_day()
     days = [today + timedelta(days=offset + index) for index in range(7)]
@@ -550,7 +551,7 @@ async def send_day_picker(message, session, prefix, offset, title):
         (
             await session.execute(
                 select(Booking.shoot_date, func.count(Booking.id))
-                .where(Booking.shoot_date.in_(days))
+                .where(Booking.shoot_date.in_(days), booking_scope(user.id, roles) if user else False)
                 .group_by(Booking.shoot_date)
             )
         ).all()
@@ -604,7 +605,7 @@ async def start_sales_date_search(c, state):
 
 
 @r.message(DateLookup.value)
-async def finish_date_search(m, state):
+async def finish_date_search(m, state, current_user, current_roles):
     try:
         day, month, year = map(int, m.text.strip().split("."))
         selected = date(year, month, day)
@@ -618,7 +619,7 @@ async def finish_date_search(m, state):
             rows = (
                 await s.scalars(
                     select(Booking)
-                    .where(Booking.shoot_date == selected)
+                    .where(Booking.shoot_date == selected, booking_scope(current_user.id, current_roles))
                     .order_by(Booking.shoot_time, Booking.id)
                 )
             ).all()
@@ -645,7 +646,7 @@ async def finish_date_search(m, state):
                 await s.execute(
                     select(Booking, Client)
                     .join(Client, Client.id == Booking.client_id)
-                    .where(Booking.shoot_date == selected)
+                    .where(Booking.shoot_date == selected, booking_scope(current_user.id, current_roles))
                     .order_by(Booking.shoot_time, Booking.id)
                 )
             ).all()
@@ -690,18 +691,18 @@ def callback_date(data):
 
 
 @r.callback_query(F.data.startswith("admin:bookings:page:"))
-async def allbook_page(c):
+async def allbook_page(c, current_user, current_roles):
     try:
         offset = int(c.data.rsplit(":", 1)[1])
     except (TypeError, ValueError):
         return await c.answer("Некорректная кнопка.", show_alert=True)
     async with Session() as s:
-        await send_day_picker(c.message, s, "admin:bookings", offset, "📋 Выберите день записей")
+        await send_day_picker(c.message, s, "admin:bookings", offset, "📋 Выберите день записей", user=current_user, roles=current_roles)
     await c.answer()
 
 
 @r.callback_query(F.data.startswith("admin:bookings:date:"))
-async def allbook_date(c):
+async def allbook_date(c, current_user, current_roles):
     selected = callback_date(c.data)
     if selected is None or c.message is None:
         return await c.answer("Некорректная дата.", show_alert=True)
@@ -709,7 +710,7 @@ async def allbook_date(c):
         rows = (
             await s.scalars(
                 select(Booking)
-                .where(Booking.shoot_date == selected)
+                .where(Booking.shoot_date == selected, booking_scope(current_user.id, current_roles))
                 .order_by(Booking.shoot_time, Booking.id)
             )
         ).all()
@@ -735,26 +736,26 @@ async def allbook_date(c):
 
 
 @r.message(F.text == "📸 Все съёмки")
-async def allshoot(m):
+async def allshoot(m, current_user, current_roles):
     async with Session() as s:
         if not (await guard(m, s))[1]:
             return
-        await send_day_picker(m, s, "admin:shoots", 0, "📸 Выберите день съёмок")
+        await send_day_picker(m, s, "admin:shoots", 0, "📸 Выберите день съёмок", user=current_user, roles=current_roles)
 
 
 @r.callback_query(F.data.startswith("admin:shoots:page:"))
-async def allshoot_page(c):
+async def allshoot_page(c, current_user, current_roles):
     try:
         offset = int(c.data.rsplit(":", 1)[1])
     except (TypeError, ValueError):
         return await c.answer("Некорректная кнопка.", show_alert=True)
     async with Session() as s:
-        await send_day_picker(c.message, s, "admin:shoots", offset, "📸 Выберите день съёмок")
+        await send_day_picker(c.message, s, "admin:shoots", offset, "📸 Выберите день съёмок", user=current_user, roles=current_roles)
     await c.answer()
 
 
 @r.callback_query(F.data.startswith("admin:shoots:date:"))
-async def allshoot_date(c):
+async def allshoot_date(c, current_user, current_roles):
     selected = callback_date(c.data)
     if selected is None or c.message is None:
         return await c.answer("Некорректная дата.", show_alert=True)
@@ -763,7 +764,7 @@ async def allshoot_date(c):
             await s.execute(
                 select(Booking, Client)
                 .join(Client, Client.id == Booking.client_id)
-                .where(Booking.shoot_date == selected)
+                .where(Booking.shoot_date == selected, booking_scope(current_user.id, current_roles))
                 .order_by(Booking.shoot_time, Booking.id)
             )
         ).all()
@@ -788,13 +789,15 @@ async def allshoot_date(c):
 
 
 @r.callback_query(F.data.startswith("admin:shoot:view:"))
-async def allshoot_view(c):
+async def allshoot_view(c, current_user, current_roles):
     try:
         booking_id = int(c.data.rsplit(":", 1)[1])
     except (TypeError, ValueError):
         return await c.answer("Некорректная кнопка.", show_alert=True)
     async with Session() as s:
         booking = await s.get(Booking, booking_id)
+        if not await can_access_booking(s, current_user.id, current_roles, booking):
+            return await c.answer("Нет доступа к съёмке.", show_alert=True)
         if booking is None:
             return await c.answer("Съёмка не найдена.", show_alert=True)
         card = await booking_card(s, booking)
@@ -812,13 +815,15 @@ async def allshoot_view(c):
 
 
 @r.callback_query(F.data.startswith("admin:shoot:reschedule:"))
-async def admin_start_reschedule(c, state):
+async def admin_start_reschedule(c, state, current_user, current_roles):
     try:
         booking_id = int(c.data.rsplit(":", 1)[1])
     except (TypeError, ValueError):
         return await c.answer("Некорректная кнопка.", show_alert=True)
     async with Session() as s:
         booking = await s.get(Booking, booking_id)
+        if not await can_access_booking(s, current_user.id, current_roles, booking):
+            return await c.answer("Нет доступа к съёмке.", show_alert=True)
     if booking is None:
         return await c.answer("Съёмка не найдена.", show_alert=True)
     if booking.status not in {"NEW", "PENDING_CONFIRMATION", "CONFIRMED", "ASSIGNED", "RESCHEDULED"}:
@@ -842,7 +847,7 @@ async def admin_reschedule_date(m, state):
 
 
 @r.message(AdminShootFlow.reschedule_time, F.text)
-async def admin_finish_reschedule(m, state, current_user):
+async def admin_finish_reschedule(m, state, current_user, current_roles):
     try:
         new_time = time.fromisoformat(m.text.strip())
     except ValueError:
@@ -851,6 +856,9 @@ async def admin_finish_reschedule(m, state, current_user):
     booking_id = data.get("admin_reschedule_booking_id")
     async with Session() as s:
         booking = await s.get(Booking, booking_id, with_for_update=True)
+        if not await can_access_booking(s, current_user.id, current_roles, booking):
+            await state.clear()
+            return await m.answer("Нет доступа к съёмке.")
         if booking is None:
             await state.clear()
             return await m.answer("Съёмка не найдена.")
@@ -883,13 +891,15 @@ async def admin_finish_reschedule(m, state, current_user):
 
 
 @r.callback_query(F.data.startswith("admin:shoot:cancel:"))
-async def admin_start_cancel(c, state):
+async def admin_start_cancel(c, state, current_user, current_roles):
     try:
         booking_id = int(c.data.rsplit(":", 1)[1])
     except (TypeError, ValueError):
         return await c.answer("Некорректная кнопка.", show_alert=True)
     async with Session() as s:
         booking = await s.get(Booking, booking_id)
+        if not await can_access_booking(s, current_user.id, current_roles, booking):
+            return await c.answer("Нет доступа к съёмке.", show_alert=True)
     if booking is None:
         return await c.answer("Съёмка не найдена.", show_alert=True)
     if booking.status in {"REJECTED", "CANCELLED", "READY_FOR_SALE"}:
@@ -929,7 +939,7 @@ async def admin_cancel_abort(c, state):
 
 
 @r.callback_query(F.data.startswith("admin:shoot:cancel_confirm:"))
-async def admin_cancel_confirm(c, state, current_user):
+async def admin_cancel_confirm(c, state, current_user, current_roles):
     try:
         booking_id = int(c.data.rsplit(":", 1)[1])
     except (TypeError, ValueError):
@@ -940,6 +950,9 @@ async def admin_cancel_confirm(c, state, current_user):
         return await c.answer("Начните отмену заново.", show_alert=True)
     async with Session() as s:
         booking = await s.get(Booking, booking_id, with_for_update=True)
+        if not await can_access_booking(s, current_user.id, current_roles, booking):
+            await state.clear()
+            return await c.answer("Нет доступа к съёмке.")
         if booking is None:
             await state.clear()
             return await c.answer("Съёмка не найдена.", show_alert=True)

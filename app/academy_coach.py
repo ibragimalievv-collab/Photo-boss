@@ -246,24 +246,27 @@ class AcademyCoach:
         return web.json_response({'items': items})
 
     async def shoots(self, request):
+        from .services.booking_access import booking_scope_sql
         actor = request['miniapp_actor']
-        staff = bool({'OWNER', 'ADMIN'} & set(actor['roles']))
         async with self.engine.connect() as conn:
             rows = await self.api.rows(conn, '''SELECT sh.id,sh.booking_id,b.photographer_id,b.shoot_date,u.name,
                 (SELECT COUNT(*) FROM photos p WHERE p.shooting_id=sh.id) AS total
                 FROM shootings sh JOIN bookings b ON b.id=sh.booking_id JOIN users u ON u.id=b.photographer_id
-                ''' + ('' if staff else 'WHERE b.photographer_id=:uid ') + 'ORDER BY sh.id DESC LIMIT 50', uid=actor['id'])
+                ''' + ('WHERE (' + booking_scope_sql(actor['id'], actor['roles'], photos=True) + ') ') + 'ORDER BY sh.id DESC LIMIT 50', uid=actor['id'])
         return web.json_response({'shoots': [{'id': r['id'], 'bookingId': r['booking_id'], 'photographer': r['name'],
                                              'date': str(r['shoot_date']), 'total': r['total']} for r in rows]})
 
     async def request_shoot(self, request):
+        from .services.booking_access import booking_scope_sql
         actor, body = request['miniapp_actor'], await self.api.body(request)
         if set(body) != {'bookingId'} or type(body['bookingId']) is not int or body['bookingId'] <= 0:
             raise AccessError('Выберите съёмку.', 400)
         async with self.engine.begin() as conn:
             rows = await self.api.rows(conn, '''SELECT sh.id,b.photographer_id FROM shootings sh
-                JOIN bookings b ON b.id=sh.booking_id WHERE b.id=:id''', id=body['bookingId'])
-            if not rows or (rows[0]['photographer_id'] != actor['id'] and not {'OWNER', 'ADMIN'} & set(actor['roles'])):
+                JOIN bookings b ON b.id=sh.booking_id WHERE b.id=:id AND (''' +
+                booking_scope_sql(actor['id'], actor['roles'], photos=True) + ')',
+                id=body['bookingId'], uid=actor['id'])
+            if not rows:
                 raise AccessError('Съёмка не найдена.', 404)
             photos = await self.api.rows(conn, 'SELECT id FROM photos WHERE shooting_id=:id ORDER BY id', id=rows[0]['id'])
             ids = [p['id'] for p in photos]

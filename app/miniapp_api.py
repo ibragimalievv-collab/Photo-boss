@@ -25,7 +25,6 @@ from .miniapp_security import (
     STAFF_ROLES,
     THEMES,
     AccessError,
-    booking_assignment_columns,
     financial_period,
     parse_shift,
     require_owner,
@@ -36,6 +35,7 @@ from .miniapp_security import (
     validate_owner_launch_token,
 )
 from .services.academy_growth import personal_tip
+from .services.booking_access import booking_scope_sql
 
 logger = logging.getLogger(__name__)
 PREFIX = "/api/miniapp"
@@ -294,11 +294,7 @@ class MiniApp:
         return web.json_response({"theme": body["theme"]})
 
     async def bookings_data(self, conn, actor, day):
-        clause = ""
-        if not {"OWNER", "ADMIN"} & set(actor["roles"]):
-            assignments = booking_assignment_columns(actor["roles"])
-            condition = " OR ".join(f"b.{column}=:uid" for column in assignments) or "1=0"
-            clause = f"AND ({condition})"
+        clause = f"AND ({booking_scope_sql(actor['id'], actor['roles'])})"
         rows = await self.rows(conn, f"""SELECT b.id,b.room,b.shoot_date,b.shoot_time,b.status,
             b.photographer_id,b.manager_id,b.hotel_id,c.name AS client,h.name AS hotel,
             sh.id AS shooting_id,sh.status AS shooting_status,
@@ -326,7 +322,10 @@ class MiniApp:
             # with no bookings on the selected date. Staff still see only their
             # assigned bookings through bookings_data.
             hotels = ([dict(row) for row in await self.rows(conn,
-                "SELECT id,name FROM hotels WHERE active=TRUE ORDER BY name,id")]
+                "SELECT id,name FROM hotels WHERE active=TRUE " +
+                ("" if "OWNER" in actor["roles"] else
+                 "AND id IN (SELECT hotel_id FROM hotel_employees WHERE user_id=:uid) ") +
+                "ORDER BY name,id", uid=actor["id"])]
                 if {"OWNER", "ADMIN"} & set(actor["roles"]) else [])
         return web.json_response({"items": items, "hotels": hotels})
 
@@ -358,6 +357,12 @@ class MiniApp:
             if not rows:
                 raise AccessError("Съёмка не найдена.", 404)
             booking = rows[0]
+            scope = booking_scope_sql(actor['id'], actor['roles'])
+            allowed = await self.rows(conn,
+                f"SELECT b.id FROM bookings b WHERE b.id=:bid AND ({scope})",
+                bid=bid, uid=actor['id'])
+            if not allowed:
+                raise AccessError("Нет доступа к съёмке этого отеля.")
             if booking["photographer_id"] == uid:
                 return web.json_response({"ok": True, "photographerId": uid})
             if booking["photographer_id"] != previous:

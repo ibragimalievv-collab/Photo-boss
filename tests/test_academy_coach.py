@@ -181,6 +181,7 @@ class CoachingTests(unittest.IsolatedAsyncioTestCase):
         with self.engine.inner.begin() as conn:
             # A shooting is already present in the shared Mini App fixture.
             conn.execute(text('INSERT INTO photos(id,shooting_id) VALUES(1,1),(2,1)'))
+            conn.execute(text('INSERT INTO hotel_employees(user_id,hotel_id) VALUES(2,1),(2,2)'))
         with pytest.raises(AccessError) as error:
             await self.coach.request_shoot(Request(uid=5, body={'bookingId': 1}))
         assert error.value.status == 404
