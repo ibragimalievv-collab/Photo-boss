@@ -74,7 +74,7 @@ async def main():
                     data=r.request.post_data_buffer, headers={'X-Telegram-Init-Data': init,
                     'Content-Type': r.request.headers.get('content-type', 'application/json')})
                 await r.fulfill(status=response.status, body=await response.read(),
-                                headers={'Content-Type': response.headers.get('Content-Type', 'text/plain')})
+                                headers={k: v for k, v in response.headers.items() if k.lower() in {'content-type', 'content-security-policy', 'cache-control'}})
             await context.route('**/*', route)
             page = await context.new_page()
             page.on('pageerror', lambda e: errors.append(str(e)))
@@ -133,6 +133,7 @@ async def main():
             assert await page.locator('#app').evaluate('el => el.scrollWidth <= el.clientWidth + 2')
             # Guest uses the identical shared layout and persisted favorites, never the staff shell.
             guest = await context.new_page()
+            await guest.set_viewport_size({'width': 390, 'height': 844})
             guest.on('pageerror', lambda e: errors.append(str(e)))
             await guest.goto(BASE + '/g/' + 'g'*32)
             await expect(guest.locator('.hero h1')).to_have_text('Семья в Анапе')
