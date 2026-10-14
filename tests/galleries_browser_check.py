@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from PIL import Image
+from PIL import Image, ImageChops
 from playwright.async_api import async_playwright, expect
 from test_insights import fixture
 from test_miniapp_release import TOKEN, signed
@@ -21,6 +21,99 @@ from app.services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
 from app.yandex_disk import ROOT, YandexDisk
 
 BASE = 'https://gallery-navigation.invalid'
+
+
+async def wait_images(page, selector):
+    for _ in range(100):
+        if await page.locator(selector).evaluate_all('images => images.every(i=>i.complete&&i.naturalWidth>0)'):
+            return
+        await asyncio.sleep(.05)
+    raise AssertionError(await page.locator(selector).evaluate_all('images => images.map(i=>({src:i.src,complete:i.complete,width:i.naturalWidth}))'))
+
+
+async def compare_disk(context, page, output):
+    reference = await context.new_page()
+    await reference.goto(BASE + '/__approved_disk')
+    data = await page.evaluate("""() => ({name:document.querySelector('.account b').textContent,
+        nav:[...document.querySelectorAll('.side .menu button')].map(b=>b.textContent),
+        row:document.querySelector('.table .row').innerHTML,
+        card:document.querySelector('.cards .card').innerHTML})""")
+    await reference.evaluate("""data => {
+        document.querySelector('.account b').textContent=data.name;
+        [...document.querySelectorAll('.side .menu button')].forEach((b,i)=>b.textContent=data.nav[i]);
+        document.querySelector('#rows').innerHTML='<div class="row">'+data.row+'</div>';
+        document.querySelector('#cards').innerHTML='<div class="card">'+data.card+'</div>';
+        document.querySelectorAll('.project, .card>button:not(.round), .link').forEach(b=>{
+            const div=document.createElement('div');div.className=b.className;div.innerHTML=b.innerHTML;b.replaceWith(div);
+        });
+        document.querySelectorAll('.pname,.project .meta').forEach(el=>el.style.display='block');
+    }""", data)
+    measure = """selectors => Object.fromEntries(selectors.map(selector=>{
+        const el=document.querySelector(selector),s=getComputedStyle(el),r=el.getBoundingClientRect();
+        return [selector,{x:r.x,y:r.y,width:r.width,height:r.height,font:s.fontFamily,fontSize:s.fontSize,
+        fontWeight:s.fontWeight,color:s.color,background:s.backgroundColor}];
+    }))"""
+    differences = []
+    for width,height in [(1440,1000),(390,844)]:
+        await page.set_viewport_size({'width':width,'height':height})
+        await reference.set_viewport_size({'width':width,'height':height})
+        selectors=['.wrap','.title','.title h1','.storage','.tabs','.toolbar','.search']
+        selectors += ['.side','.logo','.account','.menu','.top','.table','.thead','.row','.project','.thumb'] if width>850 else ['.mobile','.cards','.card']
+        actual, expected = await page.evaluate(measure,selectors), await reference.evaluate(measure,selectors)
+        for selector in selectors:
+            for key,value in expected[selector].items():
+                got=actual[selector][key]
+                if not (abs(got-value)<=1 if isinstance(value,(int,float)) else got==value):
+                    differences.append((width,selector,key,got,value))
+        await reference.screenshot(path=str(output / f'prototype-disk-{width}.png'),full_page=True)
+    await reference.close()
+    await page.set_viewport_size({'width':1440,'height':1000})
+    assert not differences,differences
+
+
+async def compare_prototype(context, guest, output):
+    reference = await context.new_page()
+    await reference.goto(BASE + '/__approved_gallery')
+    content = await guest.evaluate("""() => ({title:document.querySelector('.hero h1').textContent,
+        meta:document.querySelector('.herotxt>div').textContent, cover:document.querySelector('.hero img').src,
+        photos:[...document.querySelectorAll('.photo')].map(p=>({url:p.querySelector('img').src,
+        favorite:p.querySelector('.heart').classList.contains('on')}))})""")
+    await reference.evaluate("""data => {
+        document.querySelector('#gtitle').textContent=data.title;
+        document.querySelector('#gmeta').textContent=data.meta;
+        document.querySelector('#cover').src=data.cover;
+        document.querySelector('#favCount').textContent=data.photos.filter(p=>p.favorite).length;
+        document.querySelector('#grid').innerHTML=data.photos.map(p=>`<div class="photo"><img src="${p.url}"><button class="round heart ${p.favorite?'on':''}">${p.favorite?'♥':'♡'}</button></div>`).join('');
+    }""", content)
+    selectors = ['.gallery', '.gbar', '.gbrand', '.gbutton', '.hero', '.hero>img', '.herotxt', '.herotxt h1', '.gallerymain',
+                 '.ghead', '.ghead h2', '.ghead p', '.pills', '.pill', '.pill:last-child', '.grid', '.photo', '.photo img', '.round']
+    measure = """selectors => Object.fromEntries(selectors.map(selector=>{
+        const el=document.querySelector(selector),s=getComputedStyle(el),r=el.getBoundingClientRect();
+        return [selector,{x:r.x,y:r.y,width:r.width,height:r.height,font:s.fontFamily,fontSize:s.fontSize,
+        fontWeight:s.fontWeight,color:s.color,background:s.backgroundColor}];
+    }))"""
+    differences = []
+    for width, height in [(390, 844), (1440, 1000)]:
+        await guest.set_viewport_size({'width': width, 'height': height})
+        await reference.set_viewport_size({'width': width, 'height': height})
+        for page in [guest, reference]:
+            await page.locator('.photo img').scroll_into_view_if_needed()
+            await wait_images(page,'.photo img,.hero img')
+            await page.evaluate('scrollTo(0,0)')
+        actual, expected = await guest.evaluate(measure, selectors), await reference.evaluate(measure, selectors)
+        for selector in selectors:
+            for key, value in expected[selector].items():
+                got = actual[selector][key]
+                if not (abs(got-value) <= 1 if isinstance(value, (int, float)) else got == value):
+                    differences.append((width, selector, key, got, value))
+        await guest.screenshot(path=str(output / f'guest-matched-{width}.png'), full_page=True)
+        await reference.screenshot(path=str(output / f'prototype-{width}.png'), full_page=True)
+        with Image.open(output / f'guest-matched-{width}.png') as actual_image, Image.open(output / f'prototype-{width}.png') as expected_image:
+            assert actual_image.size == expected_image.size
+            assert ImageChops.difference(actual_image.convert('RGB'), expected_image.convert('RGB')).getbbox() is None, width
+    await reference.close()
+    assert not differences, differences
+    await guest.set_viewport_size({'width': 390, 'height': 844})
 
 
 async def main():
@@ -71,6 +164,9 @@ async def main():
                 if r.request.url.startswith('https://telegram.org/'):
                     return await r.fulfill(body='', content_type='text/javascript')
                 assert r.request.url.startswith(BASE), r.request.url
+                if r.request.url in {BASE + '/__approved_gallery', BASE + '/__approved_disk'}:
+                    name='approved_disk' if r.request.url.endswith('_disk') else 'approved_gallery'
+                    return await r.fulfill(body=Path(f'tests/fixtures/{name}.html').read_text(), content_type='text/html')
                 response = await client.request(r.request.method, r.request.url.removeprefix(BASE),
                     data=r.request.post_data_buffer, headers={'X-Telegram-Init-Data': init,
                     'Content-Type': r.request.headers.get('content-type', 'application/json')})
@@ -86,6 +182,8 @@ async def main():
             await expect(page.locator('.table .empty')).to_be_visible()
             await page.locator('[data-project-search]').fill('Movenpick')
             await expect(page.locator('.table [data-gp="open"]')).to_have_count(1)
+            await wait_images(page,'.table .thumb')
+            await compare_disk(context,page,output)
             await page.screenshot(path=str(output / 'disk-desktop.png'), full_page=True)
             await page.locator('.table [data-gp="favorite"]').click()
             await expect(page.locator('.table [data-gp="favorite"]')).to_have_attribute('aria-pressed', 'true')
@@ -118,7 +216,8 @@ async def main():
                 await page.locator('[data-v="download"]').click()
             assert (await download.value).suggested_filename == 'family-2.jpg'
             await page.locator('[data-v="close"]').click()
-            await page.locator('[data-gv="settings"]').click()
+            await page.locator('[data-gv="tools"]').click()
+            await page.locator('[data-gv-menu="settings"]').click()
             await page.locator('.modal [name=title]').fill('Семья в Анапе')
             await page.locator('.modal [name=days]').select_option('30')
             await page.locator('.modal [type=submit]').click()
@@ -147,6 +246,14 @@ async def main():
             await page.locator('[data-gp-mode="all"]').click()
             await page.locator('.cards [data-gp="open"]').click()
             await expect(page.locator('.hero h1')).to_have_text('Семья в Анапе')
+            await page.locator('[data-gv=tools]').click()
+            await expect(page.locator('[data-gv-menu=upload]')).to_be_visible()
+            await page.locator('[data-gv-menu=close]').click()
+            for photo in await page.locator('.grid .photo img').all():
+                await photo.scroll_into_view_if_needed()
+                await expect(photo).to_have_js_property('complete', True)
+            await wait_images(page,'.grid .photo img,.hero img')
+            await page.evaluate('scrollTo(0,0)')
             await page.screenshot(path=str(output / 'gallery-mobile.png'), full_page=True)
             assert await page.locator('#app').evaluate('el => el.scrollWidth <= el.clientWidth + 2')
             # Guest uses the identical shared layout and persisted favorites, never the staff shell.
@@ -157,10 +264,31 @@ async def main():
             await expect(guest.locator('.hero h1')).to_have_text('Семья в Анапе')
             await expect(guest.locator('[data-fav-count]')).to_have_text('1')
             await expect(guest.locator('.grid .photo')).to_have_count(1)
-            assert await guest.locator('[data-gv="settings"], [data-gv="upload"]').count() == 0
+            assert await guest.locator('[data-gv="tools"], .project-actions').count() == 0
             await guest.locator('[data-gv-filter="fav"]').click()
             await expect(guest.locator('.grid .photo')).to_have_count(1)
+            await guest.locator('[data-gv-filter=all]').click()
+            await compare_prototype(context, guest, output)
             await guest.screenshot(path=str(output / 'guest-mobile.png'), full_page=True)
+            await guest.locator('[data-gv=share]').click()
+            await expect(guest.locator('.gallery-actions-menu')).to_be_visible()
+            async with guest.expect_download() as download:
+                await guest.locator('[data-gv-menu=download-all]').click()
+            assert (await download.value).suggested_filename.endswith('.jpg')
+            await guest.locator('[data-gv-menu=close]').click()
+            await guest.locator('[data-gv-photo]').click()
+            await expect(guest.locator('.viewer')).to_be_visible()
+            assert await guest.locator('.viewer button').count() == 4
+            await guest.locator('[data-v=close]').click()
+            await page.locator('[data-gv=back]').click()
+            await page.set_viewport_size({'width': 1440, 'height': 1000})
+            await expect(page.locator('#galleryWorkspace .side')).to_be_visible()
+            await page.locator('#galleryWorkspace [data-go=home]').first.click()
+            await expect(page.locator('#sidebar')).to_be_visible()
+            assert not await page.locator('body').evaluate("el => el.classList.contains('gallery-mode')")
+            await page.goto(BASE + '/app/#galleries')
+            await page.set_viewport_size({'width': 390, 'height': 844})
+            await page.locator('.cards [data-gp=open]').click()
             await page.locator('[data-gv="back"]').click()
             await page.locator('.cards [data-gp="menu"]').click()
             await page.locator('[data-menu="trash"]').click()
