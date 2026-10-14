@@ -1,11 +1,11 @@
 import {api} from './api.js';
 import {esc,todayKey} from './domain.js';
-import {enqueueBatch,enqueueOperation,outboxRows,retryOperation,flushOutbox} from './outbox.js';
-let dialog=null,bookingId=null,album=null,objects=[],version=0,control=null,contacts=null;
+import {enqueueBatch,enqueueOperation,outboxRows,retryOperation,flushOutbox,enqueueFilesOneByOne} from './outbox.js';
+let dialog=null,bookingId=null,album=null,objects=[],version=0,control=null,contacts=null,folderBusy=false;
 const labels={shoot:'Нужно снять',sale:'Нужно продать',payment:'Проверить оплату',delivery:'Выдать фотографии'};
 const date=value=>value?new Date(value+'Z').toLocaleString('ru-RU'):'Нет отметки';
 function revoke(){for(const url of objects)URL.revokeObjectURL(url);objects=[];}
-function shell(){if(dialog)return;dialog=document.createElement('dialog');dialog.className='sheet delivery-sheet';dialog.setAttribute('aria-label','Галерея выдачи');document.body.append(dialog);dialog.addEventListener('close',()=>{version++;revoke();});dialog.addEventListener('click',click);dialog.addEventListener('submit',submit);}
+function shell(){if(dialog)return;dialog=document.createElement('dialog');dialog.className='sheet delivery-sheet';dialog.setAttribute('aria-label','Галерея выдачи');document.body.append(dialog);dialog.addEventListener('close',()=>{version++;revoke();});dialog.addEventListener('click',click);dialog.addEventListener('submit',submit);dialog.addEventListener('change',folderChange);}
 function message(text){const el=dialog?.querySelector('[data-delivery-status]');if(el)el.textContent=text;}
 const queueLabels={local:'Сохранено на устройстве',syncing:'Отправляется',synced:'Сохранено на сервере',error:'Ошибка'};
 function photoSetSection(a,set){
@@ -13,7 +13,7 @@ function photoSetSection(a,set){
  const independent=new Set(a.photos.filter(p=>p.uploadSet==='SELECTED'&&p.digest).map(p=>p.digest));
  const photos=a.photos.filter(p=>set==='ALL'?(p.uploadSet||'ALL')==='ALL':(p.uploadSet==='SELECTED'||(p.selected&&(!p.digest||!independent.has(p.digest)))));
  const formId=set==='ALL'?'deliveryAllUploadForm':'deliverySelectedUploadForm';
- return `<section class="section" data-delivery-set="${set}"><h3>${title} · ${photos.length}</h3><p class="small">${set==='ALL'?'Загрузите полную серию этой съёмки.':'Загрузите отдельные готовые файлы с устройства.'}</p>${a.canEdit?`<form id="${formId}" class="form-grid"><label class="field"><span>${title}: JPEG или PNG до 20 МБ</span><input class="input" name="photos" type="file" accept="image/jpeg,image/png" multiple required></label><button class="btn primary">${set==='ALL'?'Загрузить все фотографии':'Загрузить выбранные фотографии'}</button></form>`:''}<div class="delivery-grid">${photos.map(p=>`<figure><button class="btn ghost" data-delivery="view" data-photo="${p.id}"><img data-server-photo="${p.id}" alt="${esc(p.name)}" loading="lazy"><span>${esc(p.name)}</span></button></figure>`).join('')||'<p>В этой папке ещё нет фотографий.</p>'}</div></section>`;
+ return `<section class="section" data-delivery-set="${set}"><h3>${title} · ${photos.length}</h3><p class="small">${set==='ALL'?'Загрузите полную серию этой съёмки.':'Загрузите отдельные готовые файлы с устройства.'}</p>${a.canEdit?`<form id="${formId}" class="form-grid"><label class="field"><span>${title}: JPEG или PNG до 20 МБ</span><input class="input" name="photos" type="file" accept="image/jpeg,image/png" multiple required></label><button class="btn primary">${set==='ALL'?'Загрузить все фотографии':'Загрузить выбранные фотографии'}</button></form><label class="field section"><span>Выбрать папку — загрузить по одному автоматически</span><input class="input" data-delivery-folder="${set}" type="file" accept="image/jpeg,image/png" webkitdirectory multiple></label>`:''}<div class="delivery-grid">${photos.map(p=>`<figure><button class="btn ghost" data-delivery="view" data-photo="${p.id}"><img data-server-photo="${p.id}" alt="${esc(p.name)}" loading="lazy"><span>${esc(p.name)}</span></button></figure>`).join('')||'<p>В этой папке ещё нет фотографий.</p>'}</div></section>`;
 }
 async function render(){
  const queue=(await outboxRows()).filter(r=>r.kind.startsWith('delivery_')&&r.data.booking===bookingId),a=album;
@@ -32,6 +32,23 @@ async function render(){
  for(let i=0;i<jobs.length&&ticket===version;i+=4)await Promise.allSettled(jobs.slice(i,i+4).map(job=>job()));
 }
 export async function openDelivery(id){shell();const ticket=++version;bookingId=Number(id);revoke();dialog.innerHTML='<p role="status">Загружаем галерею…</p><button class="btn" data-delivery="close">Закрыть</button>';if(!dialog.open)dialog.showModal();try{const a=await api(`/delivery/${bookingId}`);if(ticket!==version)return;album=a;await render();}catch(e){if(ticket===version)dialog.innerHTML=`<p>${esc(e.message)}</p><button class="btn" data-delivery="close">Закрыть</button>`;}}
+async function folderChange(e){
+ const input=e.target;
+ if(!input.matches('[data-delivery-folder]'))return;
+ if(folderBusy){message('Сначала завершите загрузку предыдущей папки.');return;}
+ const bid=bookingId,photoSet=input.dataset.deliveryFolder;
+ const files=[...input.files].filter(f=>(['image/jpeg','image/png'].includes(f.type)||(!f.type&&/\\.(jpe?g|png)$/i.test(f.name)))&&f.size>0&&f.size<=20*1024*1024);
+ if(!files.length){message('В папке нет JPEG или PNG до 20 МБ.');return;}
+ folderBusy=true;input.disabled=true;
+ try{
+  message(`Выбрано ${files.length} фотографий. Начинаем поочерёдную загрузку…`);
+  await enqueueFilesOneByOne(files,file=>({kind:'delivery_photo',date:todayKey(),data:{booking:bid,filename:file.name,photoSet}}),progress=>{
+   message(`Яндекс.Диск подтвердил ${progress.done} из ${progress.total}. ${progress.name}`);
+  });
+  message(`Яндекс.Диск подтвердил все ${files.length} файлов. Обновите галерею.`);
+ }catch(error){message(error.message);}
+ finally{folderBusy=false;input.disabled=false;input.value='';}
+}
 async function submit(e){if(!['deliveryAllUploadForm','deliverySelectedUploadForm','deliverySettingsForm'].includes(e.target.id))return;e.preventDefault();const form=e.target,button=form.querySelector('button');button.disabled=true;try{
  if(form.id!=='deliverySettingsForm'){const files=[...form.elements.photos.files],photoSet=form.id==='deliverySelectedUploadForm'?'SELECTED':'ALL';if(!files.length)throw Error('Выберите фотографии.');for(const f of files)if(!['image/jpeg','image/png'].includes(f.type)||!f.size||f.size>20*1024*1024)throw Error('Нужны JPEG или PNG до 20 МБ.');await enqueueBatch(files.map(f=>({kind:'delivery_photo',date:todayKey(),data:{booking:bookingId,filename:f.name,photoSet},blob:f})));form.reset();message(`${files.length} фото сохранено в очередь папки «${photoSet==='ALL'?'Все фотографии':'Выбранные фотографии'}».`);}
  else{const f=new FormData(form),body={title:f.get('title'),published:!!f.get('published'),deliveryMode:f.get('deliveryMode')};if(f.get('clearPassword'))body.password='';else if(f.get('password'))body.password=f.get('password');if(f.get('days')!=='keep')body.expiresDays=Number(f.get('days'));album=await api(`/delivery/${bookingId}`,{method:'POST',body});revoke();await render();message('Настройки сохранены.');}

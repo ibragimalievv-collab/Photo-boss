@@ -1,6 +1,6 @@
 import {academyCoachScreen,academyTrackSwitch,academyTrack,loadAcademyCoach,resetAcademyCoach,openAcademyLesson} from './academy-coach.js';
 import {loadShootControl,shootControlView,loadDeliveryContacts,deliveryContactsView} from './delivery.js';
-import {loadWorkflow,workflowView,workflowClick,workflowSubmit,workflowSelect} from './workflow.js';
+import {loadWorkflow,workflowView,workflowClick,workflowSubmit,workflowSelect,workflowFolderChange} from './workflow.js';
 import {developmentView,loadDevelopment,developmentClick,developmentSubmit} from './development.js';
 import {setOutboxUser} from './outbox.js';
 import {workdayView,loadWorkday,workdayClick,workdaySubmit} from './workday.js';
@@ -223,7 +223,7 @@ document.addEventListener('toggle',event=>{
  const id=section.dataset.hotelSection;
  if(section.open)state.expandedHotels.add(id);else state.expandedHotels.delete(id);
 },true);
-document.addEventListener('change',async e=>{if(e.target.id==='workflowSalePick'){workflowSelect(e.target.value);return;}if(e.target.id==='bookingDay'){if(!e.target.value)return;state.day=e.target.value;await loadRoute('shootings');}});
+document.addEventListener('change',async e=>{if(e.target.id==='workflowShootFolder'){try{await workflowFolderChange(e.target);}catch(error){const note=document.querySelector('#workflowFolderProgress');if(note)note.textContent=error.message;toast(error.message);}return;}if(e.target.id==='workflowSalePick'){workflowSelect(e.target.value);return;}if(e.target.id==='bookingDay'){if(!e.target.value)return;state.day=e.target.value;await loadRoute('shootings');}});
 document.addEventListener('input',e=>{if(e.target.id==='bookingSearch'){state.search=e.target.value;const pos=e.target.selectionStart;$('#app').innerHTML=shootingsView();const input=$('#bookingSearch');input.focus();input.setSelectionRange(pos,pos);}});
 document.addEventListener('submit',async e=>{
  if(e.target.id==='photographerAssignment'){e.preventDefault();const form=e.target,button=form.querySelector('button');button.disabled=true;try{await request(`/bookings/${form.dataset.booking}/photographer`,{method:'POST',body:{photographerId:Number(form.elements.photographerId.value),previousPhotographerId:form.dataset.previous?Number(form.dataset.previous):null}});closeSheet();await loadRoute();toast('Фотограф назначен.');}catch(error){formError(error);button.disabled=false;}return;}
