@@ -45,6 +45,7 @@ from app.models import (
     Booking,
     Client,
     Hotel,
+    HotelEmployee,
     Package,
     PayrollEntry,
     Photo,
@@ -463,6 +464,8 @@ def isolated_database():
             await session.flush()
             hotel = (await session.execute(select(Hotel))).scalars().first()
             package = (await session.execute(select(Package))).scalars().first()
+            admin = await get_user(session, ADMIN)
+            session.add(HotelEmployee(user_id=admin.id, hotel_id=hotel.id))
             manager = await get_user(session, MANAGER)
             photographer = await get_user(session, PHOTO_B)
             booking = Booking(

@@ -18,6 +18,7 @@ from ..models import (
     Shooting,
     User,
 )
+from ..services.booking_access import booking_scope, can_access_booking
 from ..services.bookings import notify_photographer_assignment
 from ..services.core import audit, roles_of
 from ..services.operations import (
@@ -65,14 +66,15 @@ async def kpi_dashboard(message, current_roles):
 
 
 @r.message(F.text == "🧠 Умное назначение")
-async def smart_assignment(message, current_roles):
+async def smart_assignment(message, current_user, current_roles):
     if not {"OWNER", "ADMIN"} & current_roles:
         return
     async with Session() as session:
         bookings = (
             await session.scalars(
                 select(Booking)
-                .where(Booking.photographer_id.is_(None), Booking.status != "REJECTED")
+                .where(Booking.photographer_id.is_(None), Booking.status != "REJECTED",
+                       booking_scope(current_user.id, current_roles))
                 .order_by(Booking.shoot_date, Booking.shoot_time)
                 .limit(20)
             )
@@ -89,13 +91,15 @@ async def smart_assignment(message, current_roles):
 
 
 @r.callback_query(F.data.startswith("smart:booking:"))
-async def smart_booking(callback, current_roles):
+async def smart_booking(callback, current_user, current_roles):
     if not {"OWNER", "ADMIN"} & current_roles:
         return await callback.answer("Недостаточно прав.", show_alert=True)
     booking_id = positive_id(callback.data.rsplit(":", 1)[1])
     async with Session() as session:
         booking = await session.get(Booking, booking_id) if booking_id else None
-        ranking = await ranked_photographers(session, booking) if booking else []
+        if not await can_access_booking(session, current_user.id, current_roles, booking):
+            return await callback.answer("Нет доступа к съёмке.", show_alert=True)
+        ranking = await ranked_photographers(session, booking)
     if booking is None:
         return await callback.answer("Запись не найдена.", show_alert=True)
     rows = [
@@ -123,6 +127,8 @@ async def smart_assign(callback, current_user, current_roles):
         user = await session.get(User, user_id)
         if booking is None or user is None or "PHOTOGRAPHER" not in await roles_of(session, user):
             return await callback.answer("Запись или фотограф недоступны.", show_alert=True)
+        if not await can_access_booking(session, current_user.id, current_roles, booking):
+            return await callback.answer("Нет доступа к съёмке.", show_alert=True)
         booking.photographer_id = user.id
         if booking.status in {"NEW", "CONFIRMED", "PENDING_CONFIRMATION", "RESCHEDULED"}:
             booking.status = "ASSIGNED"

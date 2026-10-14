@@ -104,9 +104,10 @@ class Development:
     def __init__(self,api): self.api=api
 
     async def listing(self,request):
-        a=request['miniapp_actor'];owner=bool({'OWNER','ADMIN'} & set(a['roles']))
+        from .services.booking_access import booking_scope_sql
+        a=request['miniapp_actor']
         async with self.api.engine.connect() as conn:
-            reviews=await self.api.rows(conn,'SELECT * FROM shoot_development_reviews '+('' if owner else 'WHERE photographer_id=:uid ')+'ORDER BY id DESC LIMIT 50',uid=a['id'])
+            reviews=await self.api.rows(conn,'SELECT r.* FROM shoot_development_reviews r JOIN shootings sh ON sh.id=r.shooting_id JOIN bookings b ON b.id=sh.booking_id WHERE ('+booking_scope_sql(a['id'],a['roles'],photos=True)+') ORDER BY r.id DESC LIMIT 50',uid=a['id'])
             sessions=await self.api.rows(conn,'SELECT * FROM sales_training_sessions WHERE user_id=:uid ORDER BY id DESC LIMIT 30',uid=a['id'])
         return web.json_response({'configured':bool(config.openai_api_key),'rules':ai.SALES_RULES,'scenarios':ai.SALES_SCENARIOS,'bookingScenarios':ai.BOOKING_SCENARIOS,
             'reviews':[{'id':r['id'],'shootingId':r['shooting_id'],'photographerId':r['photographer_id'],'status':r['status'],
@@ -144,11 +145,11 @@ class Development:
         return web.json_response({'ok':True})
 
     async def retry(self,request):
+        from .services.booking_access import booking_scope_sql
         a=request['miniapp_actor'];rid=positive_id(request.match_info['id'])
         async with self.api.engine.begin() as conn:
-            rows=await self.api.rows(conn,'SELECT photographer_id,status FROM shoot_development_reviews WHERE id=:id',id=rid)
+            rows=await self.api.rows(conn,'SELECT r.status FROM shoot_development_reviews r JOIN shootings sh ON sh.id=r.shooting_id JOIN bookings b ON b.id=sh.booking_id WHERE r.id=:id AND ('+booking_scope_sql(a['id'],a['roles'],photos=True)+')',id=rid,uid=a['id'])
             if not rows: raise AccessError('Разбор не найден.',404)
-            if a['id']!=rows[0]['photographer_id'] and not {'OWNER','ADMIN'} & set(a['roles']): raise AccessError('Нет доступа.',403)
             await conn.execute(text("UPDATE shoot_development_reviews SET status='PENDING',attempts=0,claimed_at=NULL WHERE id=:id AND status IN ('FAILED','RETRY')"),{'id':rid})
         return web.json_response({'ok':True})
 

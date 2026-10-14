@@ -16,6 +16,7 @@ from .config import config
 from .db import Session
 from .miniapp_security import AccessError
 from .models import Booking, PhotoEdit, PhotoStorage, Shooting, utc_now
+from .services.booking_access import can_access_booking
 from .services.development_ai import structured
 from .yandex_disk import ROOT, YandexDiskError
 
@@ -54,8 +55,7 @@ async def access(session, actor, sid):
     shooting = await session.get(Shooting, sid)
     booking = await session.get(Booking, shooting.booking_id) if shooting else None
     roles = set(actor['roles'])
-    if booking is None or not (roles & {'OWNER', 'ADMIN'} or
-                              ('PHOTOGRAPHER' in roles and booking.photographer_id == actor['id'])):
+    if not await can_access_booking(session, actor['id'], roles, booking, photos=True):
         raise AccessError('Нет доступа к фотографиям этой съёмки.', 403)
     return shooting
 

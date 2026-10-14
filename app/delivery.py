@@ -32,6 +32,7 @@ from .models import (
     User,
     utc_now,
 )
+from .services.booking_access import booking_scope, can_access_booking
 from .services.core import audit
 from .services.photo_storage import image_format
 from .yandex_disk import ROOT, YandexDisk, YandexDiskError, configured_from_env
@@ -81,7 +82,7 @@ class Delivery:
         b = await session.get(Booking, bid, with_for_update=edit)
         if not b:
             raise AccessError('Съёмка не найдена.', 404)
-        if not (can_edit(actor, b) if edit else can_view(actor, b)):
+        if not await can_access_booking(session, actor['id'], actor['roles'], b, photos=True):
             raise AccessError('Нет доступа к фотографиям этой съёмки.', 403)
         return b
 
@@ -480,8 +481,7 @@ class Delivery:
             raise AccessError('Выберите период до одного года.', 400)
         async with AsyncSession(self.api.engine) as session:
             q = select(Booking).where(Booking.shoot_date.between(start, end))
-            if not {'OWNER','ADMIN'} & set(actor['roles']):
-                q = q.where(Booking.photographer_id == actor['id'] if 'PHOTOGRAPHER' in actor['roles'] else Booking.manager_id == actor['id'])
+            q = q.where(booking_scope(actor['id'], actor['roles']))
             bookings = (await session.scalars(q.order_by(Booking.shoot_date, Booking.shoot_time))).all()
             items, by_hotel, by_person = [], {}, {}
             for b in bookings:

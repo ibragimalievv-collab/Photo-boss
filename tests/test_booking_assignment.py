@@ -15,6 +15,7 @@ from app.models import (
     Booking,
     Client,
     Hotel,
+    HotelEmployee,
     Package,
     Shooting,
     User,
@@ -39,6 +40,7 @@ def test_assignment_checks_roles_conflicts_active_photographer_and_started_shoot
             session.add_all([UserRole(user_id=i, role='PHOTOGRAPHER') for i in [2, 3, 6]])
             session.add_all([Client(id=1, name='Guest'), Hotel(id=1, name='Hotel'), Package(id=1, name='Package', price_per_photo=400)])
             await session.flush()
+            session.add(HotelEmployee(user_id=1, hotel_id=1))
             session.add(Booking(id=1, hotel_id=1, client_id=1, package_id=1, room='200', manager_id=1,
                                 photographer_id=2, shoot_date=utc_now().date(), shoot_time=time(12), status='ASSIGNED'))
             await session.commit()

@@ -25,6 +25,7 @@ from app.models import (
     DeliveryGallery,
     DeliveryPhoto,
     Hotel,
+    HotelEmployee,
     Package,
     User,
     utc_now,
@@ -47,6 +48,7 @@ async def setup(monkeypatch):
         session.add_all([User(id=i,tg_id=i,name=f'User {i}') for i in ACTORS])
         session.add_all([Client(id=1,name='Guest'),Hotel(id=1,name='Hotel'),Package(id=1,name='Package',price_per_photo=400)])
         await session.flush()
+        session.add(HotelEmployee(user_id=4, hotel_id=1))
         session.add(Booking(id=1,hotel_id=1,client_id=1,package_id=1,room='200',manager_id=5,photographer_id=2,shoot_date=utc_now().date(),shoot_time=time(12),status='ASSIGNED'))
         await session.commit()
     bot=SimpleNamespace(token='123456:fake-delivery-test-token',me=AsyncMock(return_value=SimpleNamespace(username='PhotoBossTest')),send_message=AsyncMock())
