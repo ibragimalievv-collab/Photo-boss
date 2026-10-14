@@ -1,6 +1,6 @@
 import {api} from './api.js';
 import {localAction,openLocal} from './localstore.js';
-let userId=null,running=false,timer=null;
+let userId=null,running=false,timer=null,rerun=false;
 const update=row=>localAction('operations','readwrite',s=>s.put(row));
 const changed=()=>window.dispatchEvent(new Event('pb-outbox'));
 export function setOutboxUser(id){userId=id;void flushOutbox();}
@@ -22,11 +22,38 @@ export async function enqueueBatch(items){
  changed();void flushOutbox();return rows;
 }
 export async function enqueueOperation(kind,date,data,blob=null){return (await enqueueBatch([{kind,date,data,blob}]))[0];}
+// Store one original locally, send it, and wait for confirmation before loading
+// the next file into IndexedDB. This bounds browser storage for large folders.
+export async function enqueueFilesOneByOne(files,operationFor,onProgress=()=>{}){
+ const actor=userId,total=files.length;
+ if(!actor)throw new Error('Войдите в свой аккаунт Photo Boss.');
+ if(!total)throw new Error('В выбранной папке нет подходящих фотографий.');
+ for(let i=0;i<total;i++){
+  if(actor!==userId)throw new Error('Аккаунт сменился. Выберите папку снова.');
+  const file=files[i];
+  const [saved]=await enqueueBatch([{...operationFor(file,i),blob:file}]);
+  onProgress({done:i,total,name:file.name,state:'sending'});
+  for(;;){
+   if(actor!==userId)throw new Error('Аккаунт сменился. Сохранённые фото остались в очереди прежнего аккаунта.');
+   const current=await localAction('operations','readonly',s=>s.get(saved.key));
+   if(!current)throw new Error('Кадр не найден в очереди.');
+   if(current.status==='synced'){onProgress({done:i+1,total,name:file.name,state:'synced',result:current.result});break;}
+   if(current.status==='error'||(current.status==='local'&&current.error)){
+    onProgress({done:i,total,name:file.name,state:'paused'});
+    throw new Error(`Остановка на «${file.name}»: ${current.error||'не удалось передать файл'}. Кадр остаётся в очереди, нажмите «Повторить».`);
+   }
+   if(!navigator.onLine)throw new Error('Нет сети. Текущий кадр сохранён на устройстве. Не очищайте браузер.');
+   await new Promise(done=>setTimeout(done,350));
+  }
+ }
+ return {done:total,total};
+}
+
 export async function retryOperation(key){const rows=await outboxRows();if(!rows.some(r=>r.key===key))return;const row=await localAction('operations','readonly',s=>s.get(key));if(!row||row.userId!==userId)return;row.status='local';row.error='';await update(row);for(const item of rows){if(item.errorStatus===424){const pending=await localAction('operations','readonly',s=>s.get(item.key));if(!pending||pending.userId!==userId)continue;pending.status='local';pending.error='';await update(pending);}}changed();return flushOutbox();}
 export async function flushOutbox(){
  if(!userId)return {state:'no-account'};
  if(!navigator.onLine)return {state:'offline'};
- if(running)return {state:'running'};
+ if(running){rerun=true;return {state:'running'};}
  running=true;
  const actor=userId,summary={state:'done',completed:0,failed:0,temporary:0};
  try{
@@ -69,7 +96,7 @@ export async function flushOutbox(){
    }
    await update(row);changed();
   }
- }finally{running=false;changed();}
+ }finally{running=false;changed();if(rerun){rerun=false;queueMicrotask(()=>void flushOutbox());}}
  return summary;
 }
 window.addEventListener('online',()=>flushOutbox());
