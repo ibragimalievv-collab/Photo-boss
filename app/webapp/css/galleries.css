@@ -12,3 +12,38 @@ body.gallery-open .workspace{margin-left:0!important}body.gallery-mode .workspac
 .pb-gallery-ui .pills{flex-wrap:wrap;max-width:100%}.pb-gallery-ui .ghead{min-width:0}.pb-gallery-ui .pills .pill{white-space:normal}
 
 .pb-gallery-ui .vselect{left:20px;top:106px}
+
+/* The gallery owns its shell: application navigation and typography cannot shift it. */
+body.gallery-mode #sidebar,body.gallery-mode #topbar,body.gallery-mode #bottomNav{display:none!important}
+body.gallery-mode .workspace{margin-left:0!important;padding:0}
+.pb-gallery-ui .logo{border:0;background:none;text-align:left;display:block;font-family:inherit}
+.pb-gallery-ui .side .menu button{line-height:normal}
+.pb-gallery-ui .top{line-height:normal}
+.pb-gallery-ui .top .avatar{border:0;color:#202a35;font-weight:400;font-size:14px;margin-left:15px}
+.pb-gallery-ui .gallery-status,.pb-gallery-ui .projects-status{position:fixed;z-index:20;bottom:25px;left:50%;transform:translateX(-50%);max-width:calc(100vw - 26px);margin:0;border-radius:99px;background:#17202a;color:#fff;padding:12px 18px;min-height:0}
+.pb-gallery-ui .gallerymain .grid{margin-top:25px}
+.pb-gallery-ui .ghead p{font-weight:400;line-height:normal}
+.pb-gallery-ui .gallery-actions-menu .mbody{display:grid;gap:4px}
+.pb-gallery-ui .gallery-actions-menu .mbody button{color:#202a35}
+.pb-gallery-ui .pills{display:flex;gap:0;align-items:center}
+.pb-gallery-ui .photo img{min-height:0}
+.pb-gallery-ui .herotxt h1{max-width:none}
+
+.pb-gallery-ui .photo>button:first-child{color:inherit}
+.pb-gallery-ui .title h1{font-weight:700;line-height:normal}
+.pb-gallery-ui .top .avatar{background:#e5ecf4}
+.pb-gallery-ui .photo img{background:transparent}
+.pb-gallery-ui .logo{width:100%;box-sizing:border-box}
+
+.pb-gallery-ui .gbrand{white-space:nowrap}
+@media(max-width:850px){
+ .pb-gallery-ui .gbar{padding:0 25px}
+ .pb-gallery-ui .gbrand{font-size:14px}
+ .pb-gallery-ui .gbutton{padding:10px 15px;font-size:14px}
+ .pb-gallery-ui .vclose{right:20px}
+ .pb-gallery-ui .staff-gallery .gbar{padding:0 12px}
+ .pb-gallery-ui .staff-gallery .gbrand{font-size:12px}
+ .pb-gallery-ui .staff-gallery .gbar .gbutton{padding:10px;font-size:12px}
+ .pb-gallery-ui .gallery-back-label{display:none}
+}
+.pb-gallery-ui .pill:not(.active),.pb-gallery-ui .round:not(.on){color:#000}
