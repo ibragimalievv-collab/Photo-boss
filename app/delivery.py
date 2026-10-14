@@ -132,7 +132,8 @@ class Delivery:
             result['clientUrl'] = self.origin() + '/g/' + g.access_token
             bot = await self.api.bot.me()
             result['botUrl'] = 'https://t.me/' + bot.username + '?start=' + ('gallery_' if g.published else 'booking_') + g.access_token
-        return result
+        from .gallery_workspace import GalleryWorkspace
+        return await GalleryWorkspace(self).enrich(session, result, g)
 
     async def listing(self, request):
         a = request['miniapp_actor']
@@ -172,6 +173,10 @@ class Delivery:
                 if type(body['published']) is not bool:
                     raise AccessError('Неверный статус галереи.', 400)
                 g.published = body['published']
+            from .gallery_workspace import read_setting
+            meta = await read_setting(session, f'gallery:meta:{b.id}', {})
+            if g.published and meta.get('trashed'):
+                raise AccessError('Сначала восстановите проект из корзины.', 409)
             if g.published and {'published', 'deliveryMode'} & set(body):
                 q = self.client_photos_query(g).with_only_columns(DeliveryPhoto.id)
                 if not await session.scalar(q.limit(1)):
@@ -368,13 +373,13 @@ class Delivery:
                 return web.Response(text=self.document(g.title, body), content_type='text/html')
             q = self.client_photos_query(g)
             files = (await session.scalars(q.order_by(DeliveryPhoto.id))).all()
+            from .gallery_workspace import GalleryWorkspace, bump_counter, read_setting
             if not g.opened_at:
                 g.opened_at = utc_now()
-                await session.commit()
-            base = '/g/' + g.access_token
-            cards = ''.join('<figure><a href="' + base + '/photos/' + str(p.id) + '"><img loading="lazy" src="' + base + '/photos/' + str(p.id) + '?preview=1" alt="' + html.escape(p.filename, quote=True) + '"></a><figcaption>' + html.escape(p.filename) + '</figcaption><a class="button" href="' + base + '/photos/' + str(p.id) + '?download=1">Скачать оригинал</a></figure>' for p in files)
-            body = '<p>Ваши готовые фотографии. Нажмите на снимок для просмотра.</p><a class="button" href="' + base + '/album.zip">Скачать весь альбом ZIP</a><div class="gallery">' + cards + '</div>'
-            return web.Response(text=self.document(g.title, body), content_type='text/html')
+            await bump_counter(session, g.id, 'views')
+            await session.commit()
+            meta = await read_setting(session, f'gallery:meta:{g.booking_id}', {})
+            return web.Response(text=GalleryWorkspace(self).document(g, files, meta), content_type='text/html')
 
     @staticmethod
     def preview(raw):
@@ -394,8 +399,11 @@ class Delivery:
                 raise web.HTTPNotFound()
             raw = await self.bytes(p)
             download = request.query.get('download') == '1'
-            if download and not g.downloaded_at:
-                g.downloaded_at = utc_now()
+            if download:
+                from .gallery_workspace import bump_counter
+                if not g.downloaded_at:
+                    g.downloaded_at = utc_now()
+                await bump_counter(session, g.id, 'downloads')
                 await session.commit()
             if request.query.get('preview') == '1':
                 raw = await asyncio.to_thread(self.preview, raw)
@@ -409,25 +417,34 @@ class Delivery:
             files = (await session.scalars(q.order_by(DeliveryPhoto.id))).all()
             if not files:
                 raise web.HTTPBadRequest(text='Альбом недоступен для скачивания целиком.')
-            async with request.app['delivery_archive_slot']:
-                with tempfile.TemporaryFile() as output:
-                    with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED) as archive:
-                        for p in files:
-                            raw = await self.bytes(p)
-                            await asyncio.to_thread(archive.writestr, f'{p.id}-{p.filename}', raw)
-                    output.seek(0)
-                    response = web.StreamResponse(headers={'Content-Type':'application/zip','Content-Disposition':'attachment; filename="Photo-Boss-Album.zip"','Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
-                    await response.prepare(request)
-                    while True:
-                        chunk = await asyncio.to_thread(output.read, 65536)
-                        if not chunk:
-                            break
-                        await response.write(chunk)
-                    await response.write_eof()
+            from .gallery_workspace import archive_selection, bump_counter
+            files = archive_selection(request, files)
+            response = await self.stream_archive(request, files)
             if not g.downloaded_at:
                 g.downloaded_at = utc_now()
-                await session.commit()
+            await bump_counter(session, g.id, 'downloads')
+            await session.commit()
             return response
+
+    async def stream_archive(self, request, files):
+        async with request.app['delivery_archive_slot']:
+            with tempfile.TemporaryFile() as output:
+                with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED) as archive:
+                    for p in files:
+                        raw = await self.bytes(p)
+                        await asyncio.to_thread(archive.writestr, f'{p.id}-{p.filename}', raw)
+                output.seek(0)
+                response = web.StreamResponse(headers={'Content-Type':'application/zip',
+                    'Content-Disposition':'attachment; filename="Photo-Boss-Album.zip"',
+                    'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
+                await response.prepare(request)
+                while True:
+                    chunk = await asyncio.to_thread(output.read, 65536)
+                    if not chunk:
+                        break
+                    await response.write(chunk)
+                await response.write_eof()
+        return response
 
     async def qr(self, request):
         actor = request['miniapp_actor']
@@ -531,7 +548,7 @@ def install_delivery(app, api):
         except web.HTTPException as exc:
             response = exc
         response.headers.update({'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff',
-            'Content-Security-Policy':"default-src 'none'; img-src 'self'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"})
+            'Content-Security-Policy':"default-src 'none'; img-src 'self' blob:; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"})
         return response
     app.middlewares.append(public_headers)
     app.router.add_get('/api/miniapp/shoot-control', service.control)
@@ -546,4 +563,6 @@ def install_delivery(app, api):
     app.router.add_post('/g/{token}/unlock', service.unlock)
     app.router.add_get(r'/g/{token}/photos/{photo:\d+}', service.client_photo)
     app.router.add_get('/g/{token}/album.zip', service.archive)
+    from .gallery_workspace import install_gallery_workspace
+    install_gallery_workspace(app, service)
     return service

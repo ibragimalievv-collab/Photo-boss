@@ -292,7 +292,7 @@ async function openThread(kind,peer=null,title='Общий чат'){
  heading.insertAdjacentHTML('beforeend',kind==='peer'?presenceMarkup(peer):'<span class="pb-chat-subtitle">Вся команда · звонки до 6 участников</span>');
  heading.querySelector('.pb-chat-presence')?.setAttribute('aria-live','polite');
  dialog.querySelector('textarea').value=readDraft(draftKey());const savedFile=attachmentDrafts.get(draftKey());if(savedFile){const transfer=new DataTransfer();transfer.items.add(savedFile);dialog.querySelector('input[name=file]').files=transfer.files;renderSelectedFile(savedFile);}updateComposer();renderOutbox();
- dialog.querySelector('#pbChatMessages').addEventListener('scroll',()=>{const box=dialog.querySelector('#pbChatMessages');if(box.scrollHeight-box.scrollTop-box.clientHeight<100)dialog.querySelector('[data-jump-bottom]').hidden=true;},{passive:true});
+ dialog.querySelector('#pbChatMessages').addEventListener('scroll',event=>{const box=event.currentTarget;if(!box.isConnected||dialog.querySelector('#pbChatMessages')!==box)return;const jump=dialog.querySelector('[data-jump-bottom]');if(jump&&box.scrollHeight-box.scrollTop-box.clientHeight<100)jump.hidden=true;},{passive:true});
  renderPresence();refreshPresence();
  const thread=current;await poll();if(current===thread&&dialog.open)timer=setInterval(poll,4000);
 }
