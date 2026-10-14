@@ -166,3 +166,39 @@ def test_employee_card_cannot_bypass_administrator_hotel_scope():
         finally:
             await engine.dispose()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('uid,roles,expected', [
+    (1, ['OWNER'], [1, 2, 3]), (1, ['ADMIN'], [1]),
+    (1, ['ADMIN', 'MANAGER'], [1]), (3, ['MANAGER'], [1]),
+    (2, ['PHOTOGRAPHER'], [1, 3]), (4, ['PHOTOGRAPHER'], [2]),
+    (4, ['MANAGER'], [2, 3]), (3, [], []),
+])
+def test_gallery_listing_uses_current_booking_scope(uid, roles, expected):
+    import json
+
+    async def run():
+        engine, api = await setup()
+        api.day = date.fromisoformat
+        api.today = lambda: date(2026, 10, 14)
+        class Request(dict):
+            def __init__(self):
+                super().__init__(miniapp_actor={'id': uid, 'roles': roles})
+                self.query = {'from': '2026-10-14', 'to': '2026-10-14'}
+        request = Request()
+        try:
+            data = json.loads((await Delivery(api).control(request)).text)
+            assert [b['id'] for b in data['items']] == expected
+            assert sum(h['booked'] for h in data['hotels']) == len(expected)
+            if roles == ['MANAGER']:
+                assert all(not b['canGallery'] for b in data['items'])
+            if roles == ['ADMIN']:
+                async with engine.begin() as conn:
+                    await conn.execute(text('DELETE FROM hotel_employees WHERE user_id=:uid'), {'uid': uid})
+                data = json.loads((await Delivery(api).control(request)).text)
+                assert data['items'] == []
+                assert data['hotels'] == []
+                assert not any(data['counts'].values())
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
