@@ -1,16 +1,18 @@
 """Prototype gallery UI backed exclusively by existing bookings and delivery originals."""
 import html
 import json
+import secrets
 import time
 
-from aiohttp import web
-from sqlalchemy import func, select, text
+from aiohttp import ClientError, web
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .miniapp_security import AccessError, require_owner
 from .models import (
     Booking,
     Client,
+    DeliveryClaim,
     DeliveryGallery,
     DeliveryPhoto,
     Hotel,
@@ -85,6 +87,8 @@ class GalleryWorkspace:
             items = []
             for b, client_name, hotel_name, g, count, size, first in records:
                 meta = values.get(f'gallery:meta:{b.id}', {})
+                if meta.get('purged'):
+                    continue
                 cover = meta.get('coverId')
                 if (cover, b.id) not in valid_covers:
                     cover = first
@@ -100,7 +104,50 @@ class GalleryWorkspace:
                     'views': values.get(f'gallery:views:{g.id}', 0) if g else 0,
                     'downloads': values.get(f'gallery:downloads:{g.id}', 0) if g else 0})
             return web.json_response({'items': items, 'storage': {'bytes': sum(x['bytes'] for x in items)},
-                'owner': 'OWNER' in actor['roles'], 'defaults': values.get('gallery:defaults', {'days': 180})})
+                'owner': 'OWNER' in actor['roles'], 'canPurge': bool({'OWNER', 'ADMIN'} & set(actor['roles'])),
+                'defaults': values.get('gallery:defaults', {'days': 180})})
+
+    async def purge(self, request):
+        actor = request['miniapp_actor']
+        if not {'OWNER', 'ADMIN'} & set(actor['roles']):
+            raise AccessError('Очистка корзины доступна владельцу и администратору.', 403)
+        body = await self.api.body(request)
+        if body != {'confirm': True} or type(body.get('confirm')) is not bool:
+            raise AccessError('Подтвердите безвозвратное удаление фотографий.', 400)
+        from .yandex_disk import ROOT, YandexDisk, YandexDiskError, configured_from_env
+        async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
+            b = await self.delivery.booking(session, actor, request.match_info['booking'], edit=True)
+            meta = await read_setting(session, f'gallery:meta:{b.id}', {})
+            if meta.get('purged'):
+                return web.json_response({'ok': True, 'bookingId': b.id})
+            if not meta.get('trashed'):
+                raise AccessError('Сначала переместите проект в корзину.', 409)
+            g = await session.scalar(select(DeliveryGallery).where(DeliveryGallery.booking_id == b.id))
+            if g:
+                files = (await session.scalars(select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id))).all()
+                # Only this booking's delivery folder; no other originals, bookings or sales.
+                if files:
+                    folder = ROOT + f'/delivery/booking-{b.id}'
+                    if any(not p.disk_path.startswith(folder + '/') for p in files):
+                        raise AccessError('Есть фотографии в старом хранилище. Автоматическая очистка недоступна.', 409)
+                    token, client_id = configured_from_env()
+                    if not token:
+                        raise AccessError('Яндекс.Диск недоступен. Проект остаётся в корзине.', 503)
+                    disk = YandexDisk(token, client_id)
+                    try:
+                        await disk.delete_confirmed(folder)
+                    except (YandexDiskError, ClientError, TimeoutError) as exc:
+                        raise AccessError('Удаление на Яндекс.Диске ещё не подтверждено. Повторите очистку.', 503) from exc
+                await session.execute(delete(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id))
+                await session.execute(delete(DeliveryClaim).where(DeliveryClaim.gallery_id == g.id))
+                g.published = False
+                g.access_token = secrets.token_urlsafe(24)
+                await session.execute(delete(Setting).where(Setting.key.startswith(f'gallery:photo-fav:{g.id}:')))
+            await write_setting(session, f'gallery:meta:{b.id}', {'purged': True})
+            await audit(session, await session.get(User, actor['id']), 'gallery_project_purged', 'booking', b.id)
+            await session.commit()
+            self.storage_cache = None
+            return web.json_response({'ok': True, 'bookingId': b.id})
 
     async def storage(self, request):
         require_owner(request['miniapp_actor']['roles'])
@@ -248,6 +295,7 @@ def install_gallery_workspace(app, delivery):
     app.router.add_get('/api/miniapp/galleries/defaults', service.defaults)
     app.router.add_post('/api/miniapp/galleries/defaults', service.defaults)
     app.router.add_post(r'/api/miniapp/galleries/{booking:\d+}/preferences', service.preferences)
+    app.router.add_post(r'/api/miniapp/galleries/{booking:\d+}/purge', service.purge)
     app.router.add_get(r'/api/miniapp/galleries/{booking:\d+}/archive', service.staff_archive)
     app.router.add_post(r'/api/miniapp/galleries/{booking:\d+}/photos/{photo:\d+}/favorite', service.favorite)
     app.router.add_get('/g/{token}/data', service.public_data)

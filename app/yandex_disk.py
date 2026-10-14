@@ -156,6 +156,17 @@ class YandexDisk:
     def public_status(self):
         return dict(self.state)
 
+    async def delete_confirmed(self, path: str):
+        await self.delete(path)
+        # DELETE may return 202; never remove local references until storage confirms absence.
+        try:
+            await self.metadata(path)
+        except YandexDiskError as exc:
+            if 'HTTP 404' in str(exc):
+                return
+            raise
+        raise YandexDiskError('Deletion is still pending')
+
     async def verify(self, *, write_test=True):
         now = datetime.now(timezone.utc).isoformat()
         self.state.update(checkedAt=now, connected=False, writeVerified=False, error=None)

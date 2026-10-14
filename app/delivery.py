@@ -201,6 +201,10 @@ class Delivery:
             raise AccessError('Выберите папку: все фотографии или выбранные фотографии.', 400)
         b = await self.booking(session, actor, data['booking'], edit=True)
         g = await self.ensure(session, actor, b)
+        from .gallery_workspace import read_setting
+        meta = await read_setting(session, f'gallery:meta:{b.id}', {})
+        if meta.get('purged') or meta.get('trashed'):
+            raise AccessError('Проект удалён или находится в корзине. Загрузка недоступна.', 409)
         if kind == 'delivery_handoff':
             if type(data['delivered']) is not bool:
                 raise AccessError('Некорректная отметка выдачи.', 400)
@@ -453,6 +457,8 @@ class Delivery:
             data = await self.describe(session, actor, b)
             if not data.get('published') or not data.get('clientUrl'):
                 raise AccessError('Сначала опубликуйте фотографии для гостя.', 409)
+            if data['deliveryMode'] != 'SELECTED':
+                raise AccessError('Для QR-доступа выберите выдачу только выбранных фотографий.', 409)
         import qrcode
         output = io.BytesIO()
         qrcode.make(data['clientUrl']).save(output, format='PNG')
