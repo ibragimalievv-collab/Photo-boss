@@ -1,6 +1,6 @@
 import {api} from './api.js';
 import {localAction,openLocal} from './localstore.js';
-let userId=null,running=false,timer=null,rerun=false;
+let userId=null,running=false,timer=null;
 const update=row=>localAction('operations','readwrite',s=>s.put(row));
 const changed=()=>window.dispatchEvent(new Event('pb-outbox'));
 export function setOutboxUser(id){userId=id;void flushOutbox();}
@@ -31,6 +31,9 @@ export async function enqueueFilesOneByOne(files,operationFor,onProgress=()=>{})
  for(let i=0;i<total;i++){
   if(actor!==userId)throw new Error('Аккаунт сменился. Выберите папку снова.');
   const file=files[i];
+  // Wait for any previous upload to leave the shared worker before scheduling the next.
+  while(running&&actor===userId)await new Promise(done=>setTimeout(done,100));
+  if(actor!==userId)throw new Error('Аккаунт сменился. Выберите папку снова.');
   const [saved]=await enqueueBatch([{...operationFor(file,i),blob:file}]);
   onProgress({done:i,total,name:file.name,state:'sending'});
   for(;;){
@@ -53,7 +56,7 @@ export async function retryOperation(key){const rows=await outboxRows();if(!rows
 export async function flushOutbox(){
  if(!userId)return {state:'no-account'};
  if(!navigator.onLine)return {state:'offline'};
- if(running){rerun=true;return {state:'running'};}
+ if(running)return {state:'running'};
  running=true;
  const actor=userId,summary={state:'done',completed:0,failed:0,temporary:0};
  try{
@@ -96,7 +99,7 @@ export async function flushOutbox(){
    }
    await update(row);changed();
   }
- }finally{running=false;changed();if(rerun){rerun=false;queueMicrotask(()=>void flushOutbox());}}
+ }finally{running=false;changed();}
  return summary;
 }
 window.addEventListener('online',()=>flushOutbox());
