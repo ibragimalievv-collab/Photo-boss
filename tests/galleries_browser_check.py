@@ -6,7 +6,7 @@ import os
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -18,6 +18,7 @@ from test_miniapp_release import TOKEN, signed
 from app.miniapp_api import install_miniapp
 from app.models import DeliveryGallery, DeliveryPhoto
 from app.services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
+from app.yandex_disk import ROOT, YandexDisk
 
 BASE = 'https://gallery-navigation.invalid'
 
@@ -47,9 +48,9 @@ async def main():
                 stream = io.BytesIO()
                 Image.new('RGB', (500, 700) if i % 2 else (700, 500), ['#617460', '#8c8674', '#c5b7a2'][i % 3]).save(stream, 'JPEG')
                 raw = stream.getvalue()
-            storage[str(i)] = raw
+            storage[ROOT + f'/delivery/booking-1/test/{i}.jpg'] = raw
             session.add(DeliveryPhoto(id=i, gallery_id=g.id, uploaded_by_id=1, filename=f'family-{i}.jpg',
-                disk_path=str(i), sha256=str(i)*64, byte_size=len(raw), selected=False, upload_set='ALL'))
+                disk_path=ROOT + f'/delivery/booking-1/test/{i}.jpg', sha256=str(i)*64, byte_size=len(raw), selected=i == 2, upload_set='ALL'))
         await session.commit()
     delivery = app['delivery']
     async def photo_bytes(photo):
@@ -93,6 +94,11 @@ async def main():
             await page.locator('.table [data-gp="open"]').click()
             await expect(page.locator('.hero h1')).to_have_text('Movenpick 16:00')
             await expect(page.locator('.grid .photo')).to_have_count(6)
+            await page.locator('[data-gv-filter=selected]').click()
+            await expect(page.locator('.grid .photo')).to_have_count(1)
+            await expect(page.locator('[data-gv-photo="2"]')).to_be_visible()
+            await page.locator('[data-gv-filter=all]').click()
+            await expect(page.locator('.grid .photo')).to_have_count(6)
             await expect(page.locator('.hero img')).to_have_attribute('src', __import__('re').compile(r'^blob:'))
             await page.screenshot(path=str(output / 'gallery-desktop.png'), full_page=True)
             await page.locator('[data-gv-favorite="2"]').click()
@@ -101,6 +107,11 @@ async def main():
             await expect(page.locator('.grid .photo')).to_have_count(1)
             await page.locator('[data-gv-photo="2"]').click()
             await expect(page.locator('dialog.viewer')).to_be_visible()
+            with patch('app.delivery.configured_from_env', return_value=('fake', 'fake')), patch.object(YandexDisk, 'ensure_dir', new=AsyncMock()), patch.object(YandexDisk, 'upload_bytes', new=AsyncMock()), patch.object(YandexDisk, 'delete', new=AsyncMock()):
+                await page.locator('[data-v=selected]').click()
+                await expect(page.locator('[data-v=selected]')).to_have_text('Выбрать для клиента')
+                await page.locator('[data-v=selected]').click()
+                await expect(page.locator('[data-v=selected]')).to_have_text('Убрать из выбранных')
             await page.locator('[data-v="cover"]').click()
             await expect(page.locator('.hero img')).to_have_attribute('data-gallery-image', '2')
             async with page.expect_download() as download:
@@ -112,6 +123,13 @@ async def main():
             await page.locator('.modal [name=days]').select_option('30')
             await page.locator('.modal [type=submit]').click()
             await expect(page.locator('.hero h1')).to_have_text('Семья в Анапе')
+            await page.locator('[data-gv=share]').click()
+            await expect(page.locator('.gallery-qr')).to_have_attribute('src', __import__('re').compile(r'^blob:'))
+            await page.screenshot(path=str(output / 'share-qr.png'), full_page=True)
+            async with page.expect_download() as download:
+                await page.locator('[data-share=qr]').click()
+            assert (await download.value).suggested_filename == 'Photo-Boss-1-QR.png'
+            await page.locator('.modal [data-modal-close]').click()
             await page.locator('[data-gv="back"]').click()
             await expect(page.locator('#app h1')).to_have_text('Диск и клиентские галереи')
             await page.set_viewport_size({'width': 390, 'height': 844})
@@ -138,14 +156,27 @@ async def main():
             await guest.goto(BASE + '/g/' + 'g'*32)
             await expect(guest.locator('.hero h1')).to_have_text('Семья в Анапе')
             await expect(guest.locator('[data-fav-count]')).to_have_text('1')
+            await expect(guest.locator('.grid .photo')).to_have_count(1)
             assert await guest.locator('[data-gv="settings"], [data-gv="upload"]').count() == 0
             await guest.locator('[data-gv-filter="fav"]').click()
             await expect(guest.locator('.grid .photo')).to_have_count(1)
             await guest.screenshot(path=str(output / 'guest-mobile.png'), full_page=True)
+            await page.locator('[data-gv="back"]').click()
+            await page.locator('.cards [data-gp="menu"]').click()
+            await page.locator('[data-menu="trash"]').click()
+            await page.locator('[data-gp-mode="trash"]').click()
+            await page.locator('[data-gp="purge"]').click()
+            await expect(page.locator('.modal')).to_contain_text('Восстановить их будет невозможно')
+            await page.locator('.modal [name="confirm"]').check()
+            with patch('app.yandex_disk.configured_from_env', return_value=('fake', 'fake')), patch.object(YandexDisk, 'delete_confirmed', new=AsyncMock()) as removed, patch.object(YandexDisk, '_json', new=AsyncMock(return_value={'total_space': 1000, 'used_space': 0})):
+                await page.locator('.modal [type=submit]').click()
+                await expect(page.locator('.cards .card')).to_have_count(0)
+                removed.assert_awaited_with(ROOT + '/delivery/booking-1')
+            assert (await client.get('/g/' + 'g'*32)).status == 404
             assert not errors, errors
             assert not bot.send_message.called
             await browser.close()
-            print('PASS: prototype disk/gallery, desktop/mobile, search, saved favorites, original download, cover, settings, trash/restore and shared guest layout')
+            print('PASS: prototype disk/gallery, desktop/mobile, search, saved favorites, original download, cover, settings, trash/restore, confirmed purge, selected-only QR downloads and shared guest layout')
     finally:
         await client.close()
         await engine.dispose()
