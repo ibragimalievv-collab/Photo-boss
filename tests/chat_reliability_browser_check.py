@@ -124,7 +124,10 @@ async def main():
 
             # Hold one request while opening a different conversation: it must not
             # contaminate its history, cursor or read acknowledgement.
+            stale_message_box = await page.locator('#pbChatMessages').element_handle()
             await page.locator('[data-chat="home"]').click()
+            # Native scroll events can arrive after the old thread DOM is removed.
+            await stale_message_box.evaluate("el => el.dispatchEvent(new Event('scroll'))")
             state["hold"] = asyncio.Event()
             state["hold_started"].clear()
             reads_before = len(state["reads"])
