@@ -27,7 +27,8 @@ from .config import config
 from .db import Session, engine
 from .miniapp_api import ACTIONS, MiniApp, as_utc
 from .miniapp_security import owner_launch_token, role_permissions
-from .models import AuditLog, Booking, User
+from .models import AuditLog, Booking, SaleDraft, User
+from .services.booking_access import booking_scope, can_access_booking
 from .services.core import get_user, roles_of
 
 logger = logging.getLogger(__name__)
@@ -141,14 +142,23 @@ class LaunchPolicy(BaseMiddleware):
                     return await respond(event, "Некорректная дата. Используйте ДД.ММ.ГГГГ.")
                 if state:
                     await state.clear()
-                return await self.bookings(event, selected)
+                return await self.bookings(event, selected, user, roles)
+
+        if module.endswith(".sales") and state_data.get("sale_draft_id"):
+            async with Session() as session:
+                draft = await session.get(SaleDraft, state_data["sale_draft_id"])
+                booking = await session.get(Booking, draft.booking_id) if draft else None
+                allowed = await can_access_booking(session, user.id, roles, booking)
+            if not allowed:
+                await state.clear()
+                return await respond(event, "Нет доступа к этой записи. Откройте список доступных съёмок.")
 
         if module.endswith(".sales") and not roles & {"OWNER", "ADMIN"}:
             from .handlers.sales import S, ask_commission_role
             if name == "begin":
                 async with Session() as session:
                     ids = (await session.scalars(select(Booking.id).where(
-                        (Booking.photographer_id == user.id) | (Booking.manager_id == user.id)
+                        booking_scope(user.id, roles)
                     ).order_by(Booking.id.desc()).limit(20))).all()
                 await state.clear()
                 if not ids:
@@ -166,7 +176,8 @@ class LaunchPolicy(BaseMiddleware):
             if booking_id is not None:
                 async with Session() as session:
                     booking = await session.get(Booking, booking_id)
-                if booking is None or user.id not in {booking.photographer_id, booking.manager_id}:
+                    allowed = await can_access_booking(session, user.id, roles, booking)
+                if not allowed:
                     await state.clear()
                     return await respond(event, "Нет доступа к этой записи. Продажи доступны только по вашим съёмкам и записям.")
             if name == "b":
@@ -205,10 +216,10 @@ class LaunchPolicy(BaseMiddleware):
                        else "Администратору доступна общая касса только за сегодня. История и аудит закрыты.")
         return await respond(event, text_value, "finance")
 
-    async def bookings(self, event, selected):
+    async def bookings(self, event, selected, user, roles):
         from .services.bookings import booking_card
         async with Session() as session:
-            rows = (await session.scalars(select(Booking).where(Booking.shoot_date == selected)
+            rows = (await session.scalars(select(Booking).where(Booking.shoot_date == selected, booking_scope(user.id, roles))
                                           .order_by(Booking.shoot_time, Booking.id).limit(30))).all()
             cards = [await booking_card(session, item) for item in rows]
         await respond(event, f"📋 Записи на {selected:%d.%m.%Y}\nФинансовые отчёты доступны отдельно в приложении.")

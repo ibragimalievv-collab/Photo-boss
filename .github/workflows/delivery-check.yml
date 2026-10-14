@@ -83,7 +83,9 @@ jobs:
           ADMIN_TELEGRAM_IDS: '5000000001'
           DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
           PYTHONPATH: .
-        run: python tests/delivery_sets_browser_check.py
+        run: |
+          python tests/delivery_sets_browser_check.py
+          python tests/galleries_browser_check.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:

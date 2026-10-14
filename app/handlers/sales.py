@@ -4,7 +4,7 @@ import aiohttp
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from ..access import StaffFilter
@@ -69,13 +69,8 @@ def positive_id(value):
 
 async def ready_bookings(session, actor, roles):
     query = select(Booking).where(Booking.status == "READY_FOR_SALE")
-    if not roles & {"OWNER", "ADMIN"}:
-        query = query.where(
-            or_(
-                Booking.manager_id == actor.id,
-                Booking.photographer_id == actor.id,
-            )
-        )
+    from ..services.booking_access import booking_scope
+    query = query.where(booking_scope(actor.id, roles))
     return (
         await session.scalars(
             query.order_by(Booking.shoot_date.desc(), Booking.shoot_time.desc()).limit(30)

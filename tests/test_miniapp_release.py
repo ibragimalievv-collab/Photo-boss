@@ -314,6 +314,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_hotel_sections_list_includes_empty_hotels_for_supervisors_only(self):
         with self.engine.inner.begin() as conn:
             conn.execute(text("INSERT INTO hotels(id,name,active) VALUES(3,'Город мира',TRUE)"))
+            conn.execute(text("INSERT INTO hotel_employees VALUES (2,1),(2,2),(2,3)"))
         for uid in (1001, 1002):
             status, data, _ = await self.call("/bookings", uid=uid)
             assert status == 200
@@ -363,6 +364,8 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                                 uid=1003, method="POST"))[0] == 403
 
     async def test_booking_access_tracks_current_roles_on_reopen(self):
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("INSERT INTO hotel_employees VALUES (2,1),(2,2)"))
         with self.engine.inner.begin() as conn:
             conn.execute(text("UPDATE bookings SET manager_id=3 WHERE id=2"))
         for _ in range(2):

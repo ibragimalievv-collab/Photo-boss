@@ -5,5 +5,5 @@ import {loadShootControl,shootControlView} from './delivery.js';
 
 export async function loadGalleries(){return loadShootControl();}
 export function galleriesView(){
-  return '<section class="page-heading"><h1>Клиентские галереи</h1><p>Галереи связаны с записями и съёмками Photo Boss. Управляйте передачей фотографий клиентам через существующий защищённый модуль.</p></section>'+shootControlView();
+  return shootControlView({title:'Клиентские галереи',description:'Откройте съёмку, загрузите фотографии и настройте доступ гостя.'});
 }

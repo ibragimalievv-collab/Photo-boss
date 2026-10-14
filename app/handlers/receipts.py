@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from ..access import StaffFilter
 from ..db import Session
 from ..keyboards import inline
-from ..models import Booking, Receipt, Sale, utc_now
+from ..models import Booking, Receipt, utc_now
 from ..services.core import audit
 from ..services.receipts import (
     MAX_IMAGE_BYTES,
@@ -52,15 +52,8 @@ def positive_id(value):
 
 
 async def can_access(session, booking, user, roles):
-    if booking is None:
-        return False
-    if roles & {"OWNER", "ADMIN"} or user.id in {
-        booking.manager_id, booking.photographer_id
-    }:
-        return True
-    return bool(await session.scalar(select(Sale.id).where(
-        Sale.booking_id == booking.id, Sale.created_by_id == user.id
-    ).limit(1)))
+    from ..services.booking_access import can_access_booking
+    return await can_access_booking(session, user.id, roles, booking)
 
 
 async def request_photo(message, state, booking_id, purpose):

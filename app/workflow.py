@@ -7,10 +7,10 @@ import hashlib
 import json
 
 from aiohttp import web
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .miniapp_security import AccessError, booking_assignment_columns
+from .miniapp_security import AccessError
 from .models import (
     Booking,
     Hotel,
@@ -25,6 +25,7 @@ from .models import (
     Shooting,
     User,
 )
+from .services.booking_access import booking_scope, can_access_booking
 from .services.bookings import create_booking_record
 from .services.core import audit
 from .services.photo_storage import ensure_photo_storage, image_format
@@ -74,9 +75,7 @@ class Workflow:
         a = request['miniapp_actor']
         async with AsyncSession(self.api.engine) as session:
             query = select(Booking).where(Booking.status.notin_(['CANCELLED', 'REJECTED']))
-            if not {'OWNER', 'ADMIN'} & set(a['roles']):
-                assignments = booking_assignment_columns(a['roles'])
-                query = query.where(or_(False, *(getattr(Booking, column) == a['id'] for column in assignments)))
+            query = query.where(booking_scope(a['id'], a['roles']))
             bookings = (await session.scalars(query.order_by(Booking.shoot_date.desc()).limit(200))).all()
             packages = (await session.scalars(select(Package))).all()
             prices = {p.id: str(money(p.price_per_photo)) for p in packages}
@@ -94,7 +93,12 @@ class Workflow:
                     'draft': ({'id': draft.id, 'mine': draft.created_by_id == a['id'], 'status': draft.status,
                         'total': draft.declared_photo_count, 'sold': draft.sold_photos,
                         'selected': await selected_count(session, draft.id)} if draft else None)})
-            hotels = (await session.scalars(select(Hotel).where(Hotel.active.is_(True)))).all()
+            hotel_query = select(Hotel).where(Hotel.active.is_(True))
+            if 'ADMIN' in a['roles'] and 'OWNER' not in a['roles']:
+                from .models import HotelEmployee
+                hotel_query = hotel_query.where(Hotel.id.in_(select(HotelEmployee.hotel_id).where(
+                    HotelEmployee.user_id == a['id'])))
+            hotels = (await session.scalars(hotel_query)).all()
         return web.json_response({'bookings': rows, 'hotels': [{'id': h.id, 'name': h.name} for h in hotels],
             'packages': [{'id': p.id, 'name': p.name, 'price': prices[p.id]} for p in packages if p.active],
             'canBook': bool({'OWNER', 'ADMIN', 'MANAGER'} & set(a['roles'])),
@@ -199,7 +203,7 @@ class Workflow:
             await session.get(Booking, preview.booking_id, with_for_update=True)
             draft = await session.get(SaleDraft, did, with_for_update=True, populate_existing=True)
         booking = await session.get(Booking, draft.booking_id)
-        if draft.created_by_id != actor.id or not await can_sell(actor, roles, booking):
+        if draft.created_by_id != actor.id or not await can_sell(actor, roles, booking, session=session):
             raise AccessError('Нет доступа к этой продаже.', 403)
         if 'price' in data:
             package = await session.get(Package, booking.package_id)
@@ -239,9 +243,7 @@ class Workflow:
         fields(data, 'booking purpose')
         bid = await target(session, actor, data['booking'], 'bookingId')
         booking = await session.get(Booking, bid, with_for_update=True)
-        if booking is None or (not roles & {'OWNER', 'ADMIN'} and not any(
-            getattr(booking, column) == actor.id for column in booking_assignment_columns(roles)
-        )):
+        if not await can_access_booking(session, actor.id, roles, booking):
             raise AccessError('Нет доступа к записи.', 403)
         if data['purpose'] not in ('DEPOSIT', 'PAYMENT'):
             raise AccessError('Неизвестный вид чека.', 400)
@@ -268,9 +270,7 @@ class Workflow:
         sid = await target(session, actor, data['shooting'], 'shootingId')
         shooting = await session.get(Shooting, sid, with_for_update=True)
         booking = await session.get(Booking, shooting.booking_id) if shooting else None
-        if booking is None or (not roles & {'OWNER', 'ADMIN'} and (
-            'PHOTOGRAPHER' not in roles or booking.photographer_id != actor.id
-        )):
+        if not await can_access_booking(session, actor.id, roles, booking, photos=True):
             raise AccessError('Нет доступа к съёмке.', 403)
         if kind == 'shoot_retry':
             rows = (await session.scalars(select(PhotoStorage).where(

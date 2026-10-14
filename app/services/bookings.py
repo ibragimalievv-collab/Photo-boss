@@ -68,6 +68,11 @@ async def create_booking_record(session, actor, data, photographer_id=None):
     package = await session.get(Package, data['package_id'])
     if hotel is None or not hotel.active or package is None or not package.active:
         raise ValueError('Отель или пакет больше не доступны. Обновите данные.')
+    if 'ADMIN' in roles and 'OWNER' not in roles:
+        from ..models import HotelEmployee
+        if not await session.scalar(select(HotelEmployee.id).where(
+                HotelEmployee.user_id == actor.id, HotelEmployee.hotel_id == hotel.id)):
+            raise ValueError('Нет доступа к записи в этом отеле.')
     client = Client(name=name, phone=phone)
     session.add(client)
     await session.flush()

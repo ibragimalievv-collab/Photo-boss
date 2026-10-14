@@ -144,7 +144,7 @@ def test_missing_dependency_and_revoked_role_never_create_sale():
 @pytest.mark.parametrize('roles,visible,upload', [
     (['MANAGER'], True, False), (['PHOTOGRAPHER'], False, False),
     (['MANAGER', 'PHOTOGRAPHER'], True, False),
-    (['OWNER'], True, True), (['ADMIN'], True, True), ([], False, False),
+    (['OWNER'], True, True), (['ADMIN'], False, False), ([], False, False),
 ])
 def test_workflow_list_respects_current_assignment_roles(roles, visible, upload):
     async def run():
