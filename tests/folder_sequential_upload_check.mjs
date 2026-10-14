@@ -21,7 +21,7 @@ const api=async(_path,{body})=>{
  return {ok:true,photoId:calls.length};
 };
 const context=vm.createContext({
- api,localAction,Blob,FormData,Promise,Date,Error,Event,
+ rows,api,localAction,Blob,FormData,Promise,Date,Error,Event,
  crypto:{randomUUID:()=>String(++seed)},navigator:{onLine:true},
  window:{dispatchEvent(){},addEventListener(){}},
  setTimeout,clearTimeout,queueMicrotask,
