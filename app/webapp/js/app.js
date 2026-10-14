@@ -23,7 +23,7 @@ let bootGeneration=0;
 const initWorkChat=me=>document.dispatchEvent(new CustomEvent('pb-chat-account-ready',{detail:me}));
 const resetWorkChat=()=>document.dispatchEvent(new Event('pb-chat-account-reset'));
 const request=api;
-const NAV=[['home','home','Сегодня'],['shootings','camera','Съёмки'],['schedule','calendar','График'],['academy','cap','Академия'],['galleries','camera','Галереи'],['more','more','Ещё']];
+const NAV=[['home','home','Сегодня'],['shootings','camera','Съёмки'],['schedule','calendar','График'],['academy','cap','Академия'],['more','more','Ещё']];
 const names={control:'Контроль съёмок',contacts:'Контакты клиентов',workflow:'Рабочие операции',home:'Рабочий день',shootings:'Съёмки и записи',schedule:'График команды',academy:'Академия Photo Boss',galleries:'Клиентские галереи',more:'Ваше пространство',profile:'Мой профиль',finance:'Касса и начисления',audit:'Аудит действий',insights:'Контроль бизнеса',team:'Команда и HR',onboarding:'Начало работы',workday:'Итоги смены',development:'AI-развитие и продажи'};
 const roleNames=u=>(u.roles||[]).map(r=>ROLE_NAMES[r]||r).join(' · ');
 const btn=(label,action,cls='primary',ic='')=>`<button class="btn ${cls}" data-action="${action}">${ic?icon(ic):''}${label}</button>`;
