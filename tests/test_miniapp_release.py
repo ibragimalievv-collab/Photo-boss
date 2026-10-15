@@ -232,7 +232,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                                    {"id": uid, "tg": uid + 1000, "name": f"User {uid}"})
                 connection.execute(text("INSERT INTO user_roles VALUES (:id,:role)"), {"id": uid, "role": role})
             connection.execute(text("INSERT INTO users VALUES (6,1006,'Inactive',FALSE),(7,1007,'No role',TRUE)"))
-            connection.execute(text("INSERT INTO hotels VALUES (1,'Test hotel',TRUE),(2,'Other hotel',TRUE)"))
+            connection.execute(text("INSERT INTO hotels(id,name,active) VALUES (1,'Test hotel',TRUE),(2,'Other hotel',TRUE)"))
             connection.execute(text("INSERT INTO clients(id,name,phone) VALUES (1,'Own guest','+79991234567'),(2,'Other guest','+79997654321')"))
             connection.execute(text("INSERT INTO packages VALUES (1,'Family')"))
             connection.execute(text("INSERT INTO bookings VALUES (1,'101',:day,'10:00','ASSIGNED',3,4,1,1,1),(2,'201',:day,'11:00','ASSIGNED',5,4,2,2,1)"), {"day": self.service.today()})
