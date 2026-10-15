@@ -10,14 +10,14 @@ TABLES = ('users', 'user_roles', 'hotel_employees', 'bookings', 'shootings', 'sa
           'sale_drafts', 'receipts', 'payroll_entries', 'compensation', 'shifts',
           'shift_check_ins', 'shift_check_outs', 'packages', 'bank_reconciliations', 'cash_movements', 'settings')
 # Opaque media identifiers are not needed to inspect changes to financial records.
-OMIT = {'file_id', 'full_body_file_id', 'workplace_file_id', 'receipt_file_id'}
+OMIT = {'file_id', 'full_body_file_id', 'workplace_file_id', 'receipt_file_id', 'photo_data'}
 
 POSTGRES_FUNCTION = '''CREATE OR REPLACE FUNCTION pb_capture_change() RETURNS trigger AS $$
 DECLARE before_row jsonb; after_row jsonb; actor integer; row_id integer;
 BEGIN
     actor := NULLIF(current_setting('photo_boss.actor', true), '')::integer;
-    IF TG_OP <> 'INSERT' THEN before_row := to_jsonb(OLD) - ARRAY['file_id','full_body_file_id','workplace_file_id','receipt_file_id']; END IF;
-    IF TG_OP <> 'DELETE' THEN after_row := to_jsonb(NEW) - ARRAY['file_id','full_body_file_id','workplace_file_id','receipt_file_id']; END IF;
+    IF TG_OP <> 'INSERT' THEN before_row := to_jsonb(OLD) - ARRAY['file_id','full_body_file_id','workplace_file_id','receipt_file_id','photo_data']; END IF;
+    IF TG_OP <> 'DELETE' THEN after_row := to_jsonb(NEW) - ARRAY['file_id','full_body_file_id','workplace_file_id','receipt_file_id','photo_data']; END IF;
     IF TG_TABLE_NAME = 'settings' THEN
         IF COALESCE(before_row->>'key','') NOT IN ('PHOTO_PRICE','MANAGER_PERCENT','PHOTOGRAPHER_PERCENT') THEN before_row := NULL; END IF;
         IF COALESCE(after_row->>'key','') NOT IN ('PHOTO_PRICE','MANAGER_PERCENT','PHOTOGRAPHER_PERCENT') THEN after_row := NULL; END IF;

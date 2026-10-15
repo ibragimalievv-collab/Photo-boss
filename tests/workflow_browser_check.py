@@ -80,9 +80,13 @@ async def main():
     url = str(server.make_url('/app/#workflow'))
     errors = []
     try:
-        with patch.object(Workflow, 'save_selected', save_selected):
+        with patch.object(Workflow, 'save_selected', save_selected), patch(
+            'app.attendance.analyze_checkin',
+            AsyncMock(return_value={'status': 'ACCEPTED', 'note': 'Fixture: один человек в полный рост.'}),
+        ):
             async with async_playwright() as p:
-                browser = await p.chromium.launch(args=['--ignore-certificate-errors', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'])
+                browser = await p.chromium.launch(executable_path=os.getenv('CALLS_CHROMIUM_PATH') or None,
+                    args=['--ignore-certificate-errors', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'])
                 try:
                     context = await browser.new_context(ignore_https_errors=True, viewport={'width': 390, 'height': 844}, is_mobile=True,
                         geolocation={'latitude': 41.5, 'longitude': 48.1}, permissions=['geolocation', 'camera'])
@@ -117,6 +121,7 @@ async def main():
                     await page.get_by_text('Новая бронь', exact=True).click()
                     form = page.locator('#workflowBooking')
                     await form.locator('[name=client_name]').fill('Offline Guest')
+                    await form.locator('[name=client_phone]').fill('+79991234567')
                     await form.locator('[name=room]').fill('200')
                     await form.locator('[name=shoot_time]').fill('14:00')
                     await form.locator('button').click()

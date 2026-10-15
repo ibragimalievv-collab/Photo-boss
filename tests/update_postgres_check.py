@@ -71,7 +71,18 @@ async def main():
             for column in ('event_key', 'priority', 'kind', 'payload', 'acknowledged_at', 'resolved_at'):
                 await conn.execute(text(f'ALTER TABLE notifications DROP COLUMN {column}'))
             for table in ('shift_check_ins', 'shift_check_outs'):
-                await conn.execute(text(f'ALTER TABLE {table} DROP COLUMN offline_claimed_at'))
+                for name in (f'uq_{table}_user_day_plan', f'uq_{table}_unscheduled'):
+                    await conn.execute(text(f'DROP INDEX {name}'))
+                for column in ('offline_claimed_at', 'scheduled_shift_id', 'photo_data', 'location_accuracy'):
+                    await conn.execute(text(f'ALTER TABLE {table} DROP COLUMN {column}'))
+                await conn.execute(text(f'ALTER TABLE {table} ADD CONSTRAINT legacy_{table}_day UNIQUE(user_id,shift_date)'))
+            for column in ('ai_status', 'ai_note', 'ai_checked_at'):
+                await conn.execute(text(f'ALTER TABLE shift_check_ins DROP COLUMN {column}'))
+            for column in ('processing_started_at', 'viewing_at', 'viewing_comment'):
+                await conn.execute(text(f'ALTER TABLE shootings DROP COLUMN {column}'))
+            for column in ('latitude', 'longitude', 'attendance_radius_m'):
+                await conn.execute(text(f'ALTER TABLE hotels DROP COLUMN {column}'))
+            await conn.execute(text('ALTER TABLE payroll_entries DROP COLUMN source_key'))
             for column in ('report_note', 'report_saved_at'):
                 await conn.execute(text(f'ALTER TABLE shift_check_outs DROP COLUMN {column}'))
             await conn.execute(text("INSERT INTO users(id,tg_id,name,active,created_at) VALUES (1,9876543210,'Before',true,CURRENT_TIMESTAMP)"))
@@ -139,7 +150,7 @@ async def main():
         api = SimpleNamespace(engine=engine, rows=rows, day=date.fromisoformat,
                               today=lambda: date(2026, 9, 22), tz=ZoneInfo('Europe/Moscow'))
         body = {'actorId': 1, 'kind': 'booking', 'key': 'postgres-concurrent-booking', 'date': '2026-09-22',
-                'data': {'client_name': 'Guest', 'client_phone': None, 'hotel_id': 1, 'package_id': 1,
+                'data': {'client_name': 'Guest', 'client_phone': '+79991234567', 'hotel_id': 1, 'package_id': 1,
                          'room': '100', 'guest_count': 1, 'deposit': '0', 'shoot_date': '2026-09-22',
                          'shoot_time': '12:00', 'photographer_id': None}}
         work = Workday(api)

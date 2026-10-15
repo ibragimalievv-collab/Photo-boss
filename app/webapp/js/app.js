@@ -158,20 +158,23 @@ async function photographerForm(id){const booking=[...state.bookings,...(state.d
 function showBooking(id){
  const b=[...state.bookings,...(state.dashboard?.bookings||[])].find(x=>x.id===id);if(!b)return;
  const roles=state.me.user.roles,own=roles.includes('PHOTOGRAPHER')&&b.photographerId===state.me.user.id;
- const steps={ASSIGNED:['pickup','📥 Забрать съёмку'],PICKED_UP:['start','▶️ Начать съёмку'],SHOOTING:['finish','⏹ Завершить съёмку'],SHOT:['ready','✅ Готово к продаже']};
+ const steps={ASSIGNED:['pickup','📥 Забрать съёмку'],PICKED_UP:['start','▶️ Начать съёмку'],SHOOTING:['finish','⏹ Завершить съёмку'],SHOT:['processing','На обработке'],PROCESSING:['ready','Готово к продаже']};
  const step=own&&b.shootingId?steps[b.shootingStatus]:null;
  const canAssign=roles.some(r=>['OWNER','ADMIN'].includes(r))&&['NEW','CONFIRMED','PENDING_CONFIRMATION','RESCHEDULED','ASSIGNED'].includes(b.status)&&(!b.shootingStatus||['NEW','CONFIRMED','PENDING_CONFIRMATION','ASSIGNED'].includes(b.shootingStatus));
- const fields=[['Запись',`№ ${b.id}`],['Когда',`${dateLabel(b.date)} · ${b.time}`],['Отель',b.hotel],['Номер',b.room],['Фотограф',b.photographer||'Не назначен'],['Кадров в съёмке',b.frames??'—']];
+ const fields=[['Запись',`№ ${b.id}`],['Когда',`${dateLabel(b.date)} · ${b.time}`],['Отель',b.hotel],['Номер',b.room],['Фотограф',b.photographer||'Не назначен'],['Записал',b.managerName||'Не указан'],['Телефон гостя',b.clientPhone||'Не указан'],['Просмотр',b.viewingAt?new Date(b.viewingAt).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'}):'Не назначен'],['Кадров в съёмке',b.frames??'—']];
  showSheet(esc(b.client),`${mark(b.shootingStatus||b.status)}<div class="detail-grid">${fields.map(([a,v])=>`<div class="detail"><small>${a}</small><b>${esc(v)}</b></div>`).join('')}</div>
+ ${b.clientPhone?`<a class="btn full-width section" href="tel:${esc(b.clientPhone.replace(/[^+0-9]/g,''))}">Позвонить гостю</a>`:''}
+ ${own&&['SHOT','PROCESSING','READY_FOR_SALE'].includes(b.shootingStatus)?`<form id="viewingAppointment" data-booking="${b.id}" class="form-grid section"><h3>${b.viewingAt?'Изменить время просмотра':'Назначить просмотр с гостем'}</h3>${field('Дата и время просмотра',`<input class="input" type="datetime-local" name="viewingAt" value="${esc(b.viewingAt?new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date(b.viewingAt)).replace(' ','T'):b.date+'T'+b.time)}" required>`)}${field('Комментарий к переносу',`<textarea class="input" name="comment" maxlength="2000">${esc(b.viewingComment||'')}</textarea>`)}<p class="small muted">При переносе просмотра на следующий день или позже укажите причину.</p><p id="formError" class="form-error" hidden></p><button class="btn primary" type="submit">Сохранить время просмотра</button></form>`:''}
  ${roles.some(r=>['OWNER','ADMIN'].includes(r))||own?`<button class="btn full-width" data-gallery-booking="${b.id}">Галерея выдачи</button>`:''}
  ${canAssign?`<button class="btn full-width section" data-assign-photographer="${b.id}">${b.photographerId?'Изменить фотографа':'Назначить фотографа'}</button>`:''}
- ${step?`<button class="btn primary full-width section" data-shoot-booking="${b.id}" data-shoot-action="${step[0]}">${step[1]}</button>`:''}
+ ${step?`<button class="btn primary full-width section" data-shoot-booking="${b.id}" data-shoot-action="${step[0]}" ${step[0]==='ready'&&!b.viewingAt?'disabled':''}>${step[1]}</button>`:''}
+ ${own&&b.shootingStatus==='PROCESSING'&&!b.viewingAt?'<p class="small muted">Перед готовностью к продаже согласуйте с гостем и сохраните время просмотра.</p>':''}
  ${own&&!b.shootingId?`<p class="small muted">Этапы съёмки недоступны: не найдена карточка съёмки. Сообщите администратору.</p>`:''}
  ${!step&&b.shootingStatus==='READY_FOR_SALE'?'<p class="small muted">Съёмка готова к продаже.</p>':''}
  <div class="section">${btn('Перейти к продаже','new-sale','ghost full-width','wallet')}</div>`);
 }
 async function shootingAction(id,step){
- const labels={pickup:'Съёмка принята.',start:'Съёмка начата.',finish:'Съёмка завершена.',ready:'Съёмка готова к продаже.'};
+ const labels={pickup:'Съёмка принята.',start:'Съёмка начата.',finish:'Съёмка завершена.',processing:'Съёмка на обработке.',ready:'Съёмка готова к продаже.'};
  await request(`/bookings/${id}/shooting/${step}`,{method:'POST',body:{}});
  closeSheet();
  await loadRoute();
@@ -230,6 +233,8 @@ document.addEventListener('toggle',event=>{
 document.addEventListener('change',async e=>{if(e.target.id==='workflowShootFolder'){try{await workflowFolderChange(e.target);}catch(error){const note=document.querySelector('#workflowFolderProgress');if(note)note.textContent=error.message;toast(error.message);}return;}if(e.target.id==='workflowSalePick'){workflowSelect(e.target.value);return;}if(e.target.id==='bookingDay'){if(!e.target.value)return;state.day=e.target.value;await loadRoute('shootings');}});
 document.addEventListener('input',e=>{if(e.target.id==='bookingSearch'){state.search=e.target.value;const pos=e.target.selectionStart;$('#app').innerHTML=shootingsView();const input=$('#bookingSearch');input.focus();input.setSelectionRange(pos,pos);}});
 document.addEventListener('submit',async e=>{
+ if(e.target.id==='viewingAppointment'){e.preventDefault();const form=e.target,button=form.querySelector('button');button.disabled=true;try{const viewingAt=form.elements.viewingAt.value,comment=form.elements.comment.value.trim();if(viewingAt.slice(0,10)>state.me.today&&!comment)throw new Error('Укажите причину переноса просмотра на следующий день.');await request(`/bookings/${form.dataset.booking}/shooting/viewing`,{method:'POST',body:{viewingAt,comment}});const id=Number(form.dataset.booking);closeSheet();await loadRoute();showBooking(id);toast('Время просмотра сохранено.');}catch(error){formError(error);button.disabled=false;}return;}
+
  if(e.target.id==='photographerAssignment'){e.preventDefault();const form=e.target,button=form.querySelector('button');button.disabled=true;try{await request(`/bookings/${form.dataset.booking}/photographer`,{method:'POST',body:{photographerId:Number(form.elements.photographerId.value),previousPhotographerId:form.dataset.previous?Number(form.dataset.previous):null}});closeSheet();await loadRoute();toast('Фотограф назначен.');}catch(error){formError(error);button.disabled=false;}return;}
 
  if(['workflowBooking','workflowSale','workflowShoot'].includes(e.target.id)||e.target.classList.contains('photo-edit')){e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{await workflowSubmit(e.target);toast('Данные сохранены на устройстве. Статус — в очереди синхронизации.');}catch(err){toast(err.message);}finally{b.disabled=false;}return;}
@@ -264,3 +269,5 @@ window.addEventListener('online',()=>{offlineState();if(state.me)boot();});windo
 document.addEventListener('pb-academy-coach-updated',()=>{if(state.me&&state.route==='academy')render();});
 document.addEventListener('pb-academy-lesson-completed',()=>{if(state.me&&state.route==='academy')loadRoute('academy');});
 document.addEventListener('pb-open-academy-coach',()=>{state.academyTab='coach';loadRoute('academy');});
+
+window.addEventListener('pb-attendance',()=>{if(state.me&&['home','schedule'].includes(state.route)&&!$('#sheet').open)loadRoute();});

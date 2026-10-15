@@ -7,12 +7,13 @@ import hashlib
 import json
 
 from aiohttp import web
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .miniapp_security import AccessError
 from .models import (
     Booking,
+    Client,
     Hotel,
     OperationRequest,
     Package,
@@ -28,7 +29,7 @@ from .models import (
 from .services.booking_access import booking_scope, can_access_booking
 from .services.bookings import create_booking_record
 from .services.core import audit
-from .services.photo_storage import ensure_photo_storage, image_format
+from .services.photo_storage import ensure_photo_storage, image_format, receive_photo
 from .services.receipts import expected_amount, extract_receipt, money, operation_key
 from .services.sale_workflow import (
     can_sell,
@@ -80,14 +81,32 @@ class Workflow:
             packages = (await session.scalars(select(Package))).all()
             prices = {p.id: str(money(p.price_per_photo)) for p in packages}
             rows = []
+            from .services.shooting_workflow import viewing_iso
             for b in bookings:
+                client = await session.get(Client, b.client_id)
+                manager = await session.get(User, b.manager_id)
                 draft = await session.scalar(select(SaleDraft).where(SaleDraft.booking_id == b.id,
                     SaleDraft.status.in_(['AWAITING_RECEIPT', 'AWAITING_COUNTS', 'AWAITING_SELECTED'])).order_by(SaleDraft.id.desc()).limit(1))
                 shoot = await session.scalar(select(Shooting).where(Shooting.booking_id == b.id))
                 files = (await session.scalars(select(PhotoStorage).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoStorage.id))).all() if shoot else []
+                file_rows = [{'id': f.photo_id,
+                              'status': ('FAILED' if f.status == 'STORED' and not (f.disk_path and f.sha256) else f.status),
+                              'error': ('Нет подтверждения сохранения. Повторите загрузку.'
+                                        if f.status == 'STORED' and not (f.disk_path and f.sha256) else
+                                        ('Хранилище заполнено. Освободите место и повторите.' if f.last_error and 'заполнено' in f.last_error
+                                         else 'Не удалось сохранить. Повторите загрузку.' if f.last_error else None))}
+                             for f in files]
+                if shoot:
+                    tracked = {f.photo_id for f in files}
+                    missing = await session.scalars(select(Photo.id).where(Photo.shooting_id == shoot.id))
+                    file_rows.extend({'id': pid, 'status': 'FAILED', 'error': 'Нет подтверждения сохранения. Повторите загрузку.'}
+                                     for pid in missing if pid not in tracked)
                 edits = (await session.scalars(select(PhotoEdit).join(PhotoStorage, PhotoStorage.photo_id == PhotoEdit.photo_id).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoEdit.id))).all() if shoot else []
-                rows.append({'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
-                    'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': prices.get(b.package_id),
+                rows.append({'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': file_rows, 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
+                    'room': b.room, 'status': b.status, 'hotelId': b.hotel_id,
+                    'clientName': client.name if client else None, 'clientPhone': client.phone if client else None,
+                    'managerName': manager.name if manager else None, 'viewingAt': viewing_iso(shoot.viewing_at) if shoot else None,
+                    'viewingComment': shoot.viewing_comment if shoot else None, 'price': prices.get(b.package_id),
                     'shootingId': shoot.id if shoot else None, 'fullUploaded': bool(shoot and shoot.full_upload_completed_at),
                     'canUpload': ('PHOTOGRAPHER' in a['roles'] and b.photographer_id == a['id']) or bool({'OWNER', 'ADMIN'} & set(a['roles'])),
                     'draft': ({'id': draft.id, 'mine': draft.created_by_id == a['id'], 'status': draft.status,
@@ -105,6 +124,30 @@ class Workflow:
             'date': str(self.api.today()), 'actorId': a['id']})
 
     async def save_telegram(self, actor, raw, *, receipt=False):
+        from aiogram.exceptions import (
+            TelegramBadRequest,
+            TelegramForbiddenError,
+            TelegramNetworkError,
+            TelegramRetryAfter,
+            TelegramServerError,
+        )
+
+        unavailable = ('Откройте основного бота Photo Boss в Telegram, снимите блокировку '
+                       'и нажмите «Старт». Затем повторите загрузку того же файла: '
+                       'оригинал остаётся в очереди на этом устройстве.')
+        try:
+            return await self._archive_telegram(actor, raw, receipt=receipt)
+        except TelegramForbiddenError as exc:
+            raise AccessError(unavailable, 409) from exc
+        except TelegramBadRequest as exc:
+            if 'chat not found' in str(exc).lower():
+                raise AccessError(unavailable, 409) from exc
+            raise
+        except (TelegramNetworkError, TelegramServerError, TelegramRetryAfter, TimeoutError) as exc:
+            raise AccessError('Telegram временно недоступен. Оригинал остаётся в очереди '
+                              'на этом устройстве; отправка повторится после восстановления связи.', 503) from exc
+
+    async def _archive_telegram(self, actor, raw, *, receipt=False):
         from aiogram.exceptions import TelegramBadRequest
         from aiogram.types import BufferedInputFile
         ext, _ = image_format(raw)
@@ -267,19 +310,34 @@ class Workflow:
 
     async def shoot(self, session, actor, roles, kind, data, raw):
         fields(data, 'shooting')
+        await session.get(User, actor.id, with_for_update=True)
         sid = await target(session, actor, data['shooting'], 'shootingId')
         shooting = await session.get(Shooting, sid, with_for_update=True)
         booking = await session.get(Booking, shooting.booking_id) if shooting else None
         if not await can_access_booking(session, actor.id, roles, booking, photos=True):
             raise AccessError('Нет доступа к съёмке.', 403)
+        if not {'OWNER', 'ADMIN'} & roles:
+            from .services.shifts import require_active_shift
+            try:
+                await require_active_shift(session, actor.id, booking.hotel_id)
+            except ValueError as exc:
+                raise AccessError(str(exc), 409) from exc
         if kind == 'shoot_retry':
             rows = (await session.scalars(select(PhotoStorage).where(
-                PhotoStorage.shooting_id == sid, PhotoStorage.status == 'FAILED'
+                PhotoStorage.shooting_id == sid, or_(PhotoStorage.status == 'FAILED',
+                    and_(PhotoStorage.status == 'STORED', or_(PhotoStorage.disk_path.is_(None),
+                        PhotoStorage.sha256.is_(None), PhotoStorage.disk_path == '', PhotoStorage.sha256 == '')))
             ).with_for_update())).all()
             for row in rows:
                 row.status, row.attempts, row.last_error = 'PENDING', 0, None
                 row.started_at = None
-            return {'shootingId': sid, 'retried': len(rows)}
+            missing = (await session.scalars(select(Photo).outerjoin(
+                PhotoStorage, PhotoStorage.photo_id == Photo.id,
+            ).where(Photo.shooting_id == sid, PhotoStorage.id.is_(None)))).all()
+            for photo in missing:
+                await ensure_photo_storage(session, photo_id=photo.id, shooting_id=sid,
+                    file_id=photo.file_id, file_unique_id=f'legacy:photo:{photo.id}', source_kind='DOCUMENT')
+            return {'shootingId': sid, 'retried': len(rows) + len(missing)}
         if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
             raise AccessError('Загрузка съёмки уже закрыта или ещё недоступна.', 409)
         if kind == 'shoot_photo':
@@ -288,14 +346,12 @@ class Workflow:
             if duplicate:
                 return {'shootingId': sid, 'photoId': duplicate, 'duplicate': True}
             file_id, unique_id = await self.save_telegram(actor, raw)
-            photo = Photo(shooting_id=sid, file_id=file_id)
-            session.add(photo)
-            await session.flush()
-            storage, _ = await ensure_photo_storage(session, photo_id=photo.id, shooting_id=sid,
-                file_id=file_id, file_unique_id=unique_id, source_kind='DOCUMENT')
-            storage.sha256 = digest
-            await audit(session, actor, 'shoot_photo_uploaded', 'shooting', sid)
-            return {'shootingId': sid, 'photoId': photo.id, 'storageStatus': 'PENDING'}
+            storage, created = await receive_photo(session, shooting_id=sid,
+                file_id=file_id, file_unique_id=unique_id, source_kind='DOCUMENT', raw=raw)
+            if created:
+                await audit(session, actor, 'shoot_photo_uploaded', 'shooting', sid)
+            return {'shootingId': sid, 'photoId': storage.photo_id,
+                    'storageStatus': storage.status, 'duplicate': not created}
         completed = await complete_full_upload(session, actor, sid, allow_management=True)
         return {'shootingId': sid, 'photos': completed.count, 'percent': str(completed.commissions['percent'])}
 

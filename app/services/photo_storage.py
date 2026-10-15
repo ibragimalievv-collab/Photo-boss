@@ -13,7 +13,7 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from ..db import Session
-from ..models import PhotoStorage
+from ..models import Photo, PhotoStorage
 from ..yandex_disk import ROOT, YandexDisk, YandexDiskError, validate_saved
 
 logger = logging.getLogger(__name__)
@@ -48,12 +48,17 @@ async def ensure_photo_storage(
     file_id: str,
     file_unique_id: str,
     source_kind: str,
+    digest: str | None = None,
+    byte_size: int | None = None,
 ):
+    identities = [PhotoStorage.telegram_unique_id == file_unique_id]
+    if digest:
+        identities.append(PhotoStorage.sha256 == digest)
     existing = await session.scalar(
         select(PhotoStorage).where(
             PhotoStorage.shooting_id == shooting_id,
-            PhotoStorage.telegram_unique_id == file_unique_id,
-        )
+            or_(*identities),
+        ).order_by(PhotoStorage.id).limit(1)
     )
     if existing is not None:
         return existing, False
@@ -65,6 +70,8 @@ async def ensure_photo_storage(
         source_kind=source_kind,
         status="PENDING",
         attempts=0,
+        sha256=digest,
+        byte_size=byte_size,
     )
     try:
         async with session.begin_nested():
@@ -79,6 +86,51 @@ async def ensure_photo_storage(
         )
         return found, False
     return row, True
+
+
+async def receive_photo(session, *, shooting_id, file_id, file_unique_id, source_kind, raw):
+    """Register original bytes identically for Telegram and the Mini App.
+
+    Callers lock the shooting before registering, so uploads through the two
+    channels cannot both create a frame while the other is still uncommitted.
+    Telegram unique IDs alone do not identify a document across both channels.
+    """
+    image_format(raw)
+    if len(raw) > MAX_TELEGRAM_IMAGE_BYTES:
+        raise ValueError("Фото больше 20 МБ; уменьшите файл.")
+    digest = hashlib.sha256(raw).hexdigest()
+    existing = await session.scalar(select(PhotoStorage).where(
+        PhotoStorage.shooting_id == shooting_id,
+        or_(PhotoStorage.telegram_unique_id == file_unique_id, PhotoStorage.sha256 == digest),
+    ).order_by(PhotoStorage.id).limit(1))
+    if existing is not None:
+        return existing, False
+    photo = await session.scalar(select(Photo).where(
+        Photo.shooting_id == shooting_id, Photo.file_id == file_id,
+    ).limit(1))
+    created_photo = photo is None
+    if photo is None:
+        photo = Photo(shooting_id=shooting_id, file_id=file_id)
+        session.add(photo)
+        await session.flush()
+    row, created = await ensure_photo_storage(
+        session, photo_id=photo.id, shooting_id=shooting_id, file_id=file_id,
+        file_unique_id=file_unique_id, source_kind=source_kind,
+        digest=digest, byte_size=len(raw),
+    )
+    if created_photo and not created and row.photo_id != photo.id:
+        await session.delete(photo)
+    return row, created
+
+
+async def unique_photo_count(session, shooting_id: int) -> int:
+    """Count original files, including legacy cross-channel duplicate rows once."""
+    rows = (await session.execute(
+        select(Photo.id, PhotoStorage.sha256).outerjoin(
+            PhotoStorage, PhotoStorage.photo_id == Photo.id,
+        ).where(Photo.shooting_id == shooting_id)
+    )).all()
+    return len({('sha256', digest) if digest else ('photo', photo_id) for photo_id, digest in rows})
 
 
 async def _claim_job():
@@ -250,9 +302,11 @@ async def storage_summary(session, shooting_id: int) -> dict:
             select(PhotoStorage).where(PhotoStorage.shooting_id == shooting_id)
         )
     ).all()
+    def confirmed(row):
+        return row.status == 'STORED' and bool(row.disk_path) and bool(row.sha256)
     return {
         "total": len(rows),
-        "stored": sum(1 for row in rows if row.status == "STORED"),
+        "stored": sum(1 for row in rows if confirmed(row)),
         "pending": sum(1 for row in rows if row.status in {"PENDING", "UPLOADING"}),
-        "failed": sum(1 for row in rows if row.status == "FAILED"),
+        "failed": sum(1 for row in rows if row.status == "FAILED" or (row.status == 'STORED' and not confirmed(row))),
     }

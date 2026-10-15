@@ -26,14 +26,21 @@ class Workday:
     async def state(self,request):
         a=request['miniapp_actor'];day=self.api.today();lo,hi=utc_bounds(day,day,self.api.tz)
         async with self.api.engine.connect() as conn:
+            from .attendance import Attendance
+            requested = getattr(request, 'query', {}).get('shiftId')
+            if requested is not None:
+                requested = positive_id(requested)
+            selected, _ = await Attendance(self.api).scope(conn, a['id'], day, requested)
+            shift_id = selected['id'] if selected else None
+            scope = 'scheduled_shift_id=:sid' if shift_id is not None else 'scheduled_shift_id IS NULL'
             items=await self.checklist(conn,a['roles'])
             done={r['item_key']:bool(r['done']) for r in await self.api.rows(conn,'SELECT item_key,done FROM work_checklist_completions WHERE user_id=:uid AND shift_date=:day',uid=a['id'],day=day)}
             sale_rows=await self.api.rows(conn,'SELECT id,amount,payment_status FROM sales WHERE credited_user_id=:uid AND created_at>=:lo AND created_at<:hi',uid=a['id'],lo=lo,hi=hi)
             condition = booking_scope_sql(a['id'], a['roles'])
             bookings=await self.api.rows(conn,f'SELECT b.id,b.status FROM bookings b WHERE ({condition}) AND b.shoot_date=:day',uid=a['id'],day=day)
-            close=await self.api.rows(conn,'SELECT status,ended_at,report_note,report_saved_at FROM shift_check_outs WHERE user_id=:uid AND shift_date=:day',uid=a['id'],day=day)
+            close=await self.api.rows(conn,f'SELECT status,ended_at,report_note,report_saved_at FROM shift_check_outs WHERE user_id=:uid AND shift_date=:day AND {scope}',uid=a['id'],day=day,sid=shift_id)
             config_items = [parsed(r['value'])|{'key':r['key']} for r in await self.api.rows(conn,"SELECT key,value FROM settings WHERE key LIKE 'checklist:%' ORDER BY key")] if {'OWNER','ADMIN'} & set(a['roles']) else []
-        return web.json_response({'date':str(day),'timezone':str(self.api.tz),'items':[i|{'done':done.get(i['key'],False)} for i in items],
+        return web.json_response({'date':str(day),'timezone':str(self.api.tz),'shiftId':shift_id,'items':[i|{'done':done.get(i['key'],False)} for i in items],
             'summary':{'sales':len(sale_rows),'revenue':sum(cents(r['amount']) for r in sale_rows),'unpaid':sum(r['payment_status']!='PAID' for r in sale_rows),'bookings':len(bookings),'cancelled':sum(b['status'] in ('CANCELLED','REJECTED') for b in bookings)},
             'sales':[{'id':r['id'],'amount':cents(r['amount'])} for r in sale_rows],
             'closed':bool(close and close[0]['status']=='FINISHED'),'note':close[0]['report_note'] or '' if close else '',
@@ -140,8 +147,12 @@ class Workday:
                 await conn.execute(text('''INSERT INTO work_checklist_completions(user_id,shift_date,item_key,done,updated_at) VALUES (:uid,:day,:item,:done,:now)
                     ON CONFLICT(user_id,shift_date,item_key) DO UPDATE SET done=excluded.done,updated_at=excluded.updated_at'''),{'uid':a['id'],'day':day,'item':data['itemKey'],'done':data['done'],'now':utc_now()})
             else:
-                if set(data)!={'note','expectedSavedAt'} or not isinstance(data['note'],str) or len(data['note'])>2000: raise AccessError('Замечание — до 2000 символов.',400)
-                outs=await self.api.rows(conn,"SELECT id,report_note,report_saved_at FROM shift_check_outs WHERE user_id=:uid AND shift_date=:day AND status IN ('FINISHED','PENDING_REVIEW') FOR UPDATE",uid=a['id'],day=day)
+                if set(data)-{'note','expectedSavedAt','shiftId'} or not {'note','expectedSavedAt'} <= set(data) or not isinstance(data['note'],str) or len(data['note'])>2000: raise AccessError('Замечание — до 2000 символов.',400)
+                shift_id = data.get('shiftId')
+                if shift_id is not None and (type(shift_id) is not int or not 0 < shift_id < 2**31):
+                    raise AccessError('Некорректный номер смены.', 400)
+                scope = 'scheduled_shift_id=:sid' if shift_id is not None else 'scheduled_shift_id IS NULL'
+                outs=await self.api.rows(conn,f"SELECT id,report_note,report_saved_at FROM shift_check_outs WHERE user_id=:uid AND shift_date=:day AND {scope} AND status IN ('FINISHED','PENDING_REVIEW') FOR UPDATE",uid=a['id'],day=day,sid=shift_id)
                 if not outs: raise AccessError('Сначала сохраните окончание смены с геолокацией и фото.',409)
                 current=str(outs[0]['report_saved_at']) if outs[0]['report_saved_at'] else None
                 if data['expectedSavedAt']!=current: raise AccessError('Отчёт уже изменён. Обновите его перед сохранением.',409)

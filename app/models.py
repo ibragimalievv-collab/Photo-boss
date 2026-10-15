@@ -9,12 +9,14 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     Time,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -154,6 +156,9 @@ class Hotel(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
     address: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    attendance_radius_m: Mapped[float | None] = mapped_column(Float, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -212,6 +217,9 @@ class Shooting(Base):
     arrived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    viewing_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    viewing_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     ready_for_sale_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     full_upload_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="ASSIGNED")
@@ -378,7 +386,9 @@ class PayrollEntry(Base):
     amount: Mapped[float] = mapped_column(Float)
     period: Mapped[str] = mapped_column(String(30))
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (Index("uq_payroll_entry_source_key", "source_key", unique=True),)
 
 
 class CashMovement(Base):
@@ -422,6 +432,7 @@ class ShiftCheckIn(Base):
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     shift_date: Mapped[date] = mapped_column(Date, index=True)
+    scheduled_shift_id: Mapped[int | None] = mapped_column(ForeignKey("shifts.id"), nullable=True)
     status: Mapped[str] = mapped_column(
         String(30), default="AWAITING_LOCATION", index=True
     )
@@ -431,13 +442,20 @@ class ShiftCheckIn(Base):
     )
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    location_accuracy: Mapped[float | None] = mapped_column(Float, nullable=True)
     full_body_file_id: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    photo_data: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    ai_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     late: Mapped[bool] = mapped_column(Boolean, default=False)
     fine_amount: Mapped[float] = mapped_column(Float, default=0)
     offline_claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     __table_args__ = (
-        UniqueConstraint("user_id", "shift_date", name="uq_shift_check_in_user_day"),
+        Index("uq_shift_check_ins_user_day_plan", "user_id", "shift_date", "scheduled_shift_id", unique=True),
+        Index("uq_shift_check_ins_unscheduled", "user_id", "shift_date", unique=True,
+              postgresql_where=text("scheduled_shift_id IS NULL"), sqlite_where=text("scheduled_shift_id IS NULL")),
     )
 
 
@@ -448,6 +466,7 @@ class ShiftCheckOut(Base):
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     shift_date: Mapped[date] = mapped_column(Date, index=True)
+    scheduled_shift_id: Mapped[int | None] = mapped_column(ForeignKey("shifts.id"), nullable=True)
     status: Mapped[str] = mapped_column(
         String(30), default="AWAITING_LOCATION", index=True
     )
@@ -457,11 +476,15 @@ class ShiftCheckOut(Base):
     )
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    location_accuracy: Mapped[float | None] = mapped_column(Float, nullable=True)
     workplace_file_id: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    photo_data: Mapped[str | None] = mapped_column(Text, nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     offline_claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     __table_args__ = (
-        UniqueConstraint("user_id", "shift_date", name="uq_shift_check_out_user_day"),
+        Index("uq_shift_check_outs_user_day_plan", "user_id", "shift_date", "scheduled_shift_id", unique=True),
+        Index("uq_shift_check_outs_unscheduled", "user_id", "shift_date", unique=True,
+              postgresql_where=text("scheduled_shift_id IS NULL"), sqlite_where=text("scheduled_shift_id IS NULL")),
     )
 
     report_note: Mapped[str | None] = mapped_column(Text, nullable=True)

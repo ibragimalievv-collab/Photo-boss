@@ -1,10 +1,12 @@
 import asyncio
+import io
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from PIL import Image
 from sqlalchemy import func, select
 from test_workflow_replay import ACTOR, packet, setup
 
@@ -13,7 +15,9 @@ from app.miniapp_security import AccessError
 from app.models import PayrollEntry, ShiftCheckIn, ShiftCheckOut, User, UserRole
 
 NOW = datetime(2026, 9, 22, 18, tzinfo=timezone.utc)
-RAW = b'\xff\xd8\xff' + b'camera' * 60 + b'\xff\xd9'
+_image = io.BytesIO()
+Image.new('RGB', (300, 500), 'white').save(_image, format='JPEG')
+RAW = _image.getvalue()
 
 
 async def prepare(monkeypatch):

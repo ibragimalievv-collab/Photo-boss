@@ -12,9 +12,18 @@ from test_workflow_services import booking_data, fixture
 
 from app import photo_edits
 from app.miniapp_security import AccessError
-from app.models import Photo, PhotoEdit, PhotoStorage, Shooting, User, utc_now
+from app.models import (
+    Photo,
+    PhotoEdit,
+    PhotoStorage,
+    ShiftCheckIn,
+    Shooting,
+    User,
+    utc_now,
+)
 from app.services import photo_storage
 from app.services.bookings import create_booking_record
+from app.services.shifts import shift_now
 from app.workflow import Workflow
 from app.yandex_disk import YandexDiskError, validate_saved
 
@@ -42,6 +51,7 @@ async def seeded():
     async with factory() as session:
         booking = await create_booking_record(session, await session.get(User, 1), booking_data())
         booking.photographer_id = 2
+        session.add(ShiftCheckIn(user_id=2, shift_date=shift_now().date(), status='STARTED', ai_status='ACCEPTED'))
         shooting = await session.scalar(select(Shooting))
         shooting.status = 'READY_FOR_SALE'
         photo = Photo(shooting_id=shooting.id, file_id='original')

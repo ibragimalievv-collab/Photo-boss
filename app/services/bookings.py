@@ -2,9 +2,10 @@ from aiogram.exceptions import TelegramAPIError
 from sqlalchemy import func, select
 
 from ..keyboards import inline
-from ..models import Booking, Client, Hotel, Package, Photo, Sale, Shooting, User
+from ..models import Booking, Client, Hotel, Package, Sale, Shooting, User
 from .commissions import photographer_percent
 from .receipts import payment_totals
+from .shifts import shift_now
 
 STATUS_NAMES = {
     "NEW": "Новая",
@@ -16,6 +17,7 @@ STATUS_NAMES = {
     "CANCELLED": "Отменена",
     "PICKED_UP": "Фотограф забрал съёмку",
     "SHOT": "Съёмка отснята",
+    "PROCESSING": "На обработке",
     "UPLOADING": "Загрузка готовых фотографий",
     "READY_FOR_SALE": "Готово к продаже",
     "ACCEPTED": "Съёмка забрана фотографом",
@@ -49,14 +51,14 @@ async def create_booking_record(session, actor, data, photographer_id=None):
             raise ValueError('Фотограф недоступен.')
     try:
         name = data['client_name'].strip()
-        phone = data['client_phone']
+        phone = data['client_phone'].strip()
         room = data['room'].strip()
         count = data['guest_count']
         deposit = Decimal(str(data['deposit']))
         day = date.fromisoformat(data['shoot_date'])
         at = time.fromisoformat(data['shoot_time'])
         if (not 2 <= len(name) <= 200 or not 1 <= len(room) <= 100
-                or (phone is not None and (not isinstance(phone, str) or not 5 <= len(phone) <= 80))
+                or (not 5 <= len(phone) <= 80 or not 5 <= sum(c.isdigit() for c in phone) <= 20)
                 or type(count) is not int or not 1 <= count <= 100
                 or not deposit.is_finite() or not 0 <= deposit <= 10_000_000 or at.tzinfo is not None):
             raise ValueError
@@ -93,6 +95,7 @@ async def booking_card(session, booking: Booking):
     client = await session.get(Client, booking.client_id)
     package = await session.get(Package, booking.package_id)
     manager = await session.get(User, booking.manager_id)
+    shooting = await session.scalar(select(Shooting).where(Shooting.booking_id == booking.id))
     photographer = (
         await session.get(User, booking.photographer_id)
         if booking.photographer_id
@@ -108,11 +111,8 @@ async def booking_card(session, booking: Booking):
             Sale.booking_id == booking.id
         )
     )
-    uploaded_photos = await session.scalar(
-        select(func.count(Photo.id))
-        .join(Shooting, Shooting.id == Photo.shooting_id)
-        .where(Shooting.booking_id == booking.id)
-    )
+    from .photo_storage import unique_photo_count
+    uploaded_photos = await unique_photo_count(session, shooting.id) if shooting else 0
     _, paid, outstanding = await payment_totals(session, booking.id)
     return (
         f"📋 Запись #{booking.id}\n"
@@ -134,6 +134,9 @@ async def booking_card(session, booking: Booking):
         "от продаж этой съёмки\n"
         f"📋 Менеджер: {manager.name if manager else 'не найден'}\n"
         f"📸 Фотограф: {photographer.name if photographer else 'не назначен'}"
+        + (f"\n🕐 Просмотр: {shift_now(shooting.viewing_at):%d.%m.%Y %H:%M}"
+           + (f"\nПричина переноса: {shooting.viewing_comment}" if shooting.viewing_comment else "")
+           if shooting and shooting.viewing_at else "")
         + (
             f"\n❌ Причина отмены: {booking.cancellation_reason}"
             if booking.status == "CANCELLED" and booking.cancellation_reason

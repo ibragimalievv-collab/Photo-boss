@@ -17,7 +17,7 @@ from ..models import (
     Shooting,
     User,
 )
-from .commissions import photographer_percent
+from .commissions import photographer_percent, reconcile_photographer_bonus
 from .core import audit, setting
 from .receipts import money, operation_key, payment_totals, refresh_payment_statuses
 
@@ -28,12 +28,8 @@ async def full_shoot_state(session, booking_id: int):
     )
     count = 0
     if shooting is not None:
-        count = int(
-            await session.scalar(
-                select(func.count(Photo.id)).where(Photo.shooting_id == shooting.id)
-            )
-            or 0
-        )
+        from .photo_storage import unique_photo_count
+        count = await unique_photo_count(session, shooting.id)
     return shooting, count
 
 
@@ -77,9 +73,12 @@ async def finalize_photographer_commissions(session, booking: Booking):
 async def complete_full_upload(session, actor, shooting_id, *, allow_management=False):
     from types import SimpleNamespace
 
+    from ..models import PhotoStorage
     from .core import roles_of
-    from .photo_storage import storage_summary
+    from .photo_storage import storage_summary, unique_photo_count
 
+    # Serialize with shift closure before taking the shooting lock.
+    await session.get(User, actor.id, with_for_update=True)
     shooting = await session.get(Shooting, shooting_id, with_for_update=True)
     booking = await session.get(Booking, shooting.booking_id) if shooting else None
     roles = await roles_of(session, actor)
@@ -89,13 +88,25 @@ async def complete_full_upload(session, actor, shooting_id, *, allow_management=
         raise ValueError('Нет доступа к съёмке.')
     if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at is not None:
         raise ValueError('Загрузка уже закрыта.')
-    count = await session.scalar(select(func.count(Photo.id)).where(Photo.shooting_id == shooting.id))
+    from .shifts import require_active_shift
+    if not (allow_management and {'OWNER', 'ADMIN'} & roles):
+        await require_active_shift(session, actor.id, booking.hotel_id)
+    count = await unique_photo_count(session, shooting.id)
     declared = await session.scalar(select(func.max(Sale.declared_photo_count)).where(Sale.booking_id == booking.id))
     if not count:
         raise ValueError('Сначала загрузите всю съёмку.')
     if declared and count < declared:
         raise ValueError(f'По продаже указано {declared} кадров, а загружено {count}. Загрузите оставшиеся кадры перед завершением.')
     sync = await storage_summary(session, shooting.id)
+    missing = await session.scalar(select(func.count(Photo.id)).outerjoin(
+        PhotoStorage, PhotoStorage.photo_id == Photo.id,
+    ).where(Photo.shooting_id == shooting.id, PhotoStorage.id.is_(None)))
+    if sync['pending'] or sync['failed'] or missing or sync['stored'] != sync['total']:
+        raise ValueError(
+            f"Яндекс.Диск: сохранено {sync['stored']}, в очереди {sync['pending']}, "
+            f"ошибок {sync['failed']}, без подтверждения {missing or 0}. "
+            'Дождитесь сохранения всех кадров и повторите неудачные загрузки.'
+        )
     shooting.full_upload_completed_at = datetime.now(UTC).replace(tzinfo=None)
     commissions = await finalize_photographer_commissions(session, booking)
     await audit(session, actor, 'full_shoot_upload_completed', 'shooting', shooting.id,
@@ -141,10 +152,30 @@ async def selected_count(session, draft_id):
     )
 
 
+async def _locked_sale_actor(session, actor):
+    from .core import roles_of
+    current = await session.scalar(select(User).where(User.id == actor.id).with_for_update().execution_options(populate_existing=True))
+    if current is None or not current.active:
+        raise ValueError('Нет действующего доступа к продаже.')
+    return current, await roles_of(session, current)
+
+
+async def _require_seller_shift(session, actor, roles, booking):
+    # Managers sell their bookings; owners and hotel-scoped administrators retain
+    # their management permissions. Photographer work requires approved attendance.
+    if {'OWNER', 'ADMIN'} & roles or ('MANAGER' in roles and booking.manager_id == actor.id):
+        return
+    if 'PHOTOGRAPHER' in roles:
+        from .shifts import require_active_shift
+        await require_active_shift(session, actor.id, booking.hotel_id)
+
+
 async def start_sale_draft(session, actor, roles, booking_id):
+    actor, roles = await _locked_sale_actor(session, actor)
     booking = await session.get(Booking, booking_id, with_for_update=True)
     if not await can_sell(actor, roles, booking, session=session):
         raise ValueError('Эта запись ещё не готова к продаже или недоступна.')
+    await _require_seller_shift(session, actor, roles, booking)
     draft = await active_draft(session, booking.id)
     if draft is not None and draft.created_by_id != actor.id:
         raise ValueError('Эту продажу уже оформляет другой сотрудник.')
@@ -207,8 +238,7 @@ async def complete_sale(session, actor, draft_id):
     """Commit-free canonical sale operation, shared by bot and offline replay."""
     from types import SimpleNamespace
 
-    from .core import roles_of
-    roles = await roles_of(session, actor)
+    actor, roles = await _locked_sale_actor(session, actor)
     preview = await session.get(SaleDraft, draft_id)
     if preview is None:
         raise ValueError("Продажа не найдена.")
@@ -218,6 +248,7 @@ async def complete_sale(session, actor, draft_id):
         raise ValueError("Нет доступа к этой продаже.")
     if draft.status != "AWAITING_SELECTED":
         raise ValueError("Продажа уже завершена или отменена.")
+    await _require_seller_shift(session, actor, roles, booking)
     count = await selected_count(session, draft.id)
     if not draft.sold_photos or count < draft.sold_photos:
         raise ValueError(f"Сначала загрузите все выбранные фотографии: {count}/{draft.sold_photos or 0}.")
@@ -328,6 +359,7 @@ async def complete_sale(session, actor, draft_id):
         ),
     )
     await refresh_payment_statuses(session, booking.id)
+    await reconcile_photographer_bonus(session, booking)
     await session.flush()
     return SimpleNamespace(sale=sale, draft=draft, booking=booking, photographer=photographer,
                            receipt=receipt, count=count, percent=percent,
