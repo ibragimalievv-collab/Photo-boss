@@ -118,6 +118,14 @@ async def main():
                         old = await page.get_by_role('button',name='Обновить состояние файлов').element_handle()
                         await old.click()
                         await old.wait_for_element_state('hidden')
+                    async def wait_synced(kind, action=None):
+                        # Existing synced rows alone do not prove that a just-clicked
+                        # asynchronous form has finished adding its new operation.
+                        await wait_async(page, """async ({kind,action})=>{
+                            const rows=await (await import('/app/js/outbox.js')).outboxRows();
+                            return rows.some(row=>row.kind===kind&&(!action||row.data.action===action)&&row.status==='synced')
+                                &&rows.every(row=>row.status==='synced');
+                        }""", arg={'kind': kind, 'action': action})
                     url = str(server.make_url('/app/#workflow'))
                     await page.goto(str(server.make_url('/app/#home')))
                     await page.get_by_role('heading', name='Всё под контролем', exact=True).wait_for()
@@ -155,7 +163,10 @@ async def main():
                     await page.locator('#viewingAppointment [name=viewingAt]').fill(tomorrow.strftime('%Y-%m-%dT%H:%M'))
                     await page.locator('#viewingAppointment [name=comment]').fill('Fixture: гость вернётся с экскурсии завтра')
                     await page.locator('#viewingAppointment button').click()
-                    await page.locator('[data-shoot-action=ready]:not([disabled])').click()
+                    async with page.expect_response(lambda response:
+                        response.url.endswith('/bookings/1/shooting/ready') and response.status == 200):
+                        await page.locator('[data-shoot-action=ready]:not([disabled])').click()
+                    await page.locator('#sheetContent').get_by_text('Съёмка готова к продаже.', exact=True).wait_for()
                     async with factory() as session:
                         shooting = await session.scalar(select(Shooting))
                         assert shooting.status == 'READY_FOR_SALE' and shooting.viewing_comment
@@ -187,7 +198,7 @@ async def main():
                     await refresh_files()
                     await page.get_by_text('Съёмка №1',exact=False).filter(has_text='сохранено').click()
                     await page.get_by_role('button',name='Повторить только неудачные загрузки').click()
-                    await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).every(r=>r.status==='synced');}")
+                    await wait_synced('shoot_retry')
                     disk.full = False
                     await photo_storage.sync_one(bot,disk)
                     await photo_storage.sync_one(bot,disk)
@@ -197,7 +208,7 @@ async def main():
                     await page.get_by_text('Обработка · оригиналы сохраняются отдельно',exact=True).click()
                     await page.locator('summary').filter(has_text='Кадр №1').click()
                     await page.locator('.photo-edit[data-photo="1"] button').click()
-                    await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).every(r=>r.status==='synced');}")
+                    await wait_synced('photo_edit', 'MANUAL')
                     await photo_edits.process_one(disk)
                     await refresh_files()
                     await page.get_by_text('Съёмка №1',exact=False).filter(has_text='сохранено').click()
@@ -210,14 +221,14 @@ async def main():
                     response = await context.request.get(str(server.make_url('/api/miniapp/photos/1/image')),headers={'X-Telegram-Init-Data':signed(1)})
                     assert response.status == 403
                     await page.get_by_role('button',name='Отменить результат').click()
-                    await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).every(r=>r.status==='synced');}")
+                    await wait_synced('photo_edit', 'cancel')
                     async with factory() as session:
                         assert (await session.scalar(select(PhotoEdit))).status == 'CANCELLED'
                     await refresh_files()
                     await page.get_by_text('Загрузить полную съёмку', exact=True).click()
                     await page.locator('#workflowShoot [name=finish]').check()
                     await page.locator('#workflowShoot button').click()
-                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).every(r=>r.status==='synced');}")
+                    await wait_synced('shoot_complete')
                     async with factory() as session:
                         assert (await session.scalar(select(Shooting))).full_upload_completed_at is not None
                     await page.goto(str(server.make_url('/app/#home')))
