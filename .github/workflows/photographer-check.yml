@@ -1,0 +1,85 @@
+name: Photographer checks
+
+on:
+  push:
+    paths:
+      - 'app/**'
+      - 'tests/**'
+      - 'requirements*.txt'
+      - '.github/workflows/photographer-check.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'tests/**'
+      - 'requirements*.txt'
+      - '.github/workflows/photographer-check.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: photographer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  photographer-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
+      ADMIN_TELEGRAM_IDS: '5000000001'
+      DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+      PYTHONPATH: .
+      WORKFLOW_TEST_CERT: /tmp/photo-boss-photographer-cert.pem
+      WORKFLOW_TEST_KEY: /tmp/photo-boss-photographer-key.pem
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install test dependencies and Chromium
+        run: |
+          python -m pip install -r requirements-dev.txt playwright==1.51.0
+          python -m playwright install --with-deps chromium
+      - name: Verify camera, network errors and local upload guards
+        run: node tests/photographer_frontend_check.mjs
+      - name: Verify photographer workflow in the HTTPS browser fixture
+        shell: bash
+        run: |
+          umask 077
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout "$WORKFLOW_TEST_KEY" -out "$WORKFLOW_TEST_CERT" \
+            -days 1 -subj '/CN=localhost' \
+            -addext 'subjectAltName=IP:127.0.0.1,DNS:localhost' 2>/dev/null
+          set -o pipefail
+          python tests/photo_storage_browser_check.py 2>&1 | tee photographer-browser-results.txt
+      - name: Verify photographer rules and migration safety
+        run: |
+          python -m pytest -q --junitxml=photographer-rules-results.xml \
+            tests/test_attendance_ai.py \
+            tests/test_attendance_validation.py \
+            tests/test_attendance_scope_migration.py \
+            tests/test_offline_attendance.py \
+            tests/test_geofence.py \
+            tests/test_photographer_workflow.py \
+            tests/test_photographer_integration.py \
+            tests/test_photographer_commissions.py \
+            tests/test_upload_completion_safety.py \
+            tests/test_storage_recovery.py
+      - name: Save photographer verification results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: photographer-check-results
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            photographer-browser-results.txt
+            photographer-rules-results.xml

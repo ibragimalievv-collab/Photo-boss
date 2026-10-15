@@ -131,7 +131,8 @@ async def anomalies(api, conn):
     def add(key, title, entity, eid, evidence, priority='warning'):
         findings.append({'key': key, 'title': title, 'entity': entity, 'entityId': eid, 'evidence': evidence, 'priority': priority})
     sales = await api.rows(conn, '''SELECT s.*,b.hotel_id,b.package_id,b.manager_id,pe.amount AS manager_amount,pe.user_id AS manager_user_id,sh.full_upload_completed_at,
-        (SELECT COUNT(*) FROM photos p WHERE p.shooting_id=sh.id) AS frames
+        (SELECT COUNT(DISTINCT COALESCE(NULLIF(ps.sha256, ''), 'legacy:' || CAST(p.id AS VARCHAR)))
+         FROM photos p LEFT JOIN photo_storage ps ON ps.photo_id=p.id WHERE p.shooting_id=sh.id) AS frames
         FROM sales s LEFT JOIN bookings b ON b.id=s.booking_id LEFT JOIN payroll_entries pe ON pe.id=s.manager_payroll_entry_id LEFT JOIN shootings sh ON sh.booking_id=s.booking_id''')
     for s in sales:
         if s['payment_status'] != 'PAID':
@@ -191,19 +192,21 @@ async def anomalies(api, conn):
         add(f"bank:{r['id']}", 'Сумма банковской сверки не совпадает', 'receipt', r['receipt_id'], {'bankAmount': cents(r['amount'])}, 'critical')
     for r in await api.rows(conn, "SELECT id,shooting_id,attempts FROM photo_storage WHERE status='FAILED'"):
         add(f"upload:{r['id']}", 'Не удалось сохранить фото на Яндекс.Диске', 'shooting', r['shooting_id'], {'attempts': r['attempts']})
-    for row in await api.rows(conn, "SELECT id,user_id,shift_date FROM shift_check_ins WHERE late=TRUE AND status='STARTED' AND shift_date=:today", today=api.today()):
-        add(f"late:{row['id']}", 'Опоздание на смену', 'shift_check_in', row['id'], {'employeeId': row['user_id'], 'date': str(row['shift_date'])})
+    for row in await api.rows(conn, "SELECT id,user_id,shift_date,scheduled_shift_id FROM shift_check_ins WHERE late=TRUE AND status='STARTED' AND shift_date=:today", today=api.today()):
+        add(f"late:{row['id']}", 'Опоздание на смену', 'shift_check_in', row['id'], {'employeeId': row['user_id'], 'date': str(row['shift_date']), 'shiftId': row['scheduled_shift_id']})
     yesterday = api.today()-timedelta(days=1)
-    for r in await api.rows(conn, '''SELECT i.id,i.user_id,i.shift_date FROM shift_check_ins i
+    for r in await api.rows(conn, '''SELECT i.id,i.user_id,i.shift_date,i.scheduled_shift_id FROM shift_check_ins i
         WHERE i.status='STARTED' AND i.shift_date<=:yesterday AND NOT EXISTS
-        (SELECT 1 FROM shift_check_outs o WHERE o.user_id=i.user_id AND o.shift_date=i.shift_date AND o.status IN ('FINISHED','PENDING_REVIEW'))''', yesterday=yesterday):
-        add(f"shift:{r['id']}:open", 'Смена не закрыта', 'shift_check_in', r['id'], {'employeeId': r['user_id'], 'date': str(r['shift_date'])})
+        (SELECT 1 FROM shift_check_outs o WHERE o.user_id=i.user_id AND o.shift_date=i.shift_date
+         AND (o.scheduled_shift_id=i.scheduled_shift_id OR (o.scheduled_shift_id IS NULL AND i.scheduled_shift_id IS NULL))
+         AND o.status IN ('FINISHED','PENDING_REVIEW'))''', yesterday=yesterday):
+        add(f"shift:{r['id']}:open", 'Смена не закрыта', 'shift_check_in', r['id'], {'employeeId': r['user_id'], 'date': str(r['shift_date']), 'shiftId': r['scheduled_shift_id']})
     lower, upper = utc_bounds(api.today()-timedelta(days=7),api.today(),api.tz)
     for r in await api.rows(conn, "SELECT id,cancellation_reason,cancelled_at,shoot_date FROM bookings WHERE status IN ('CANCELLED','REJECTED') AND ((cancelled_at>=:lo AND cancelled_at<:hi) OR (cancelled_at IS NULL AND shoot_date>=:start AND shoot_date<=:end))",lo=lower,hi=upper,start=api.today()-timedelta(days=7),end=api.today()+timedelta(days=7)):
         add(f"booking:{r['id']}:cancelled:{r['cancelled_at']}",'Запись отменена','booking',r['id'],{'shootDate':str(r['shoot_date']),'cancelledAt':str(r['cancelled_at']),'reason':r['cancellation_reason']})
     for table in ('shift_check_ins','shift_check_outs'):
-        for r in await api.rows(conn,f"SELECT id,user_id,shift_date,offline_claimed_at,location_received_at FROM {table} WHERE status='PENDING_REVIEW'"):
-            add(f"attendance:{table}:{r['id']}",'Офлайн-отметка ожидает проверки',table,r['id'],{'employeeId':r['user_id'],'date':str(r['shift_date']),'claimedAt':str(r['offline_claimed_at']),'receivedAt':str(r['location_received_at'])})
+        for r in await api.rows(conn,f"SELECT id,user_id,shift_date,scheduled_shift_id,offline_claimed_at,location_received_at FROM {table} WHERE status='PENDING_REVIEW'"):
+            add(f"attendance:{table}:{r['id']}",'Офлайн-отметка ожидает проверки',table,r['id'],{'employeeId':r['user_id'],'date':str(r['shift_date']),'shiftId':r['scheduled_shift_id'],'claimedAt':str(r['offline_claimed_at']),'receivedAt':str(r['location_received_at'])})
     for r in await api.rows(conn,"SELECT id,shooting_id,last_error FROM shoot_development_reviews WHERE status='FAILED'"):
         add(f"shoot-review:{r['id']}:failed",'AI-разбор не завершён','shooting',r['shooting_id'],{'reviewId':r['id'],'reason':r['last_error']})
     for r in await api.rows(conn,'''SELECT sh.id,b.photographer_id,MIN(s.created_at) AS first_sale FROM shootings sh JOIN bookings b ON b.id=sh.booking_id
@@ -217,9 +220,12 @@ async def anomalies(api, conn):
             roles.setdefault(r['user_id'],set()).add(r['role'])
         closures = await api.rows(conn,"SELECT id,user_id,shift_date FROM shift_check_outs WHERE status IN ('FINISHED','PENDING_REVIEW') AND shift_date>=:start",start=api.today()-timedelta(days=7))
         done = {(r['user_id'],str(r['shift_date']),r['item_key']) for r in await api.rows(conn,'SELECT user_id,shift_date,item_key FROM work_checklist_completions WHERE done=TRUE AND shift_date>=:start',start=api.today()-timedelta(days=7))}
+        missing_checks = set()
         for closure in closures:
             for key,item in checks:
-                if str(closure['shift_date']) >= item.get('effectiveFrom',str(api.today())) and roles.get(closure['user_id'],set()) & set(item.get('roles',[])) and (closure['user_id'],str(closure['shift_date']),key) not in done:
+                identity = (closure['user_id'], str(closure['shift_date']), key)
+                if str(closure['shift_date']) >= item.get('effectiveFrom',str(api.today())) and roles.get(closure['user_id'],set()) & set(item.get('roles',[])) and identity not in done and identity not in missing_checks:
+                    missing_checks.add(identity)
                     add(f"required:{closure['user_id']}:{closure['shift_date']}:{key}",'Не выполнен настроенный обязательный пункт','shift_check_out',closure['id'],{'employeeId':closure['user_id'],'date':str(closure['shift_date']),'itemKey':key,'title':item['title']})
     report = await compare_periods(api,conn,yesterday-timedelta(days=6),yesterday)
     for flag in report['flags']:

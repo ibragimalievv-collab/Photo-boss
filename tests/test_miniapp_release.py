@@ -199,19 +199,20 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                 "CREATE TABLE users(id INTEGER PRIMARY KEY,tg_id BIGINT,name TEXT,active BOOLEAN)",
                 "CREATE TABLE user_roles(user_id INTEGER,role TEXT)",
                 "CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)",
-                "CREATE TABLE hotels(id INTEGER PRIMARY KEY,name TEXT,active BOOLEAN)",
+                "CREATE TABLE hotels(id INTEGER PRIMARY KEY,name TEXT,active BOOLEAN,latitude REAL,longitude REAL,attendance_radius_m REAL)",
                 "CREATE TABLE hotel_employees(user_id INTEGER,hotel_id INTEGER)",
-                "CREATE TABLE clients(id INTEGER PRIMARY KEY,name TEXT)",
+                "CREATE TABLE clients(id INTEGER PRIMARY KEY,name TEXT,phone TEXT)",
                 "CREATE TABLE packages(id INTEGER PRIMARY KEY,name TEXT)",
                 "CREATE TABLE bookings(id INTEGER PRIMARY KEY,room TEXT,shoot_date DATE,shoot_time TEXT,status TEXT,photographer_id INTEGER,manager_id INTEGER,hotel_id INTEGER,client_id INTEGER,package_id INTEGER)",
-                "CREATE TABLE shootings(id INTEGER PRIMARY KEY,booking_id INTEGER,status TEXT,accepted_at DATETIME,started_at DATETIME,completed_at DATETIME,ready_for_sale_at DATETIME)",
+                "CREATE TABLE shootings(id INTEGER PRIMARY KEY,booking_id INTEGER,status TEXT,accepted_at DATETIME,started_at DATETIME,completed_at DATETIME,ready_for_sale_at DATETIME,processing_started_at DATETIME,viewing_at DATETIME,viewing_comment TEXT)",
                 "CREATE TABLE photos(id INTEGER PRIMARY KEY,shooting_id INTEGER)",
+                "CREATE TABLE photo_storage(id INTEGER PRIMARY KEY,photo_id INTEGER,sha256 TEXT)",
                 "CREATE TABLE sales(id INTEGER PRIMARY KEY,booking_id INTEGER,credited_user_id INTEGER,commission_role TEXT,amount NUMERIC,commission NUMERIC,payment_status TEXT,created_at DATETIME)",
                 "CREATE TABLE payroll_entries(id INTEGER PRIMARY KEY,user_id INTEGER,kind TEXT,amount NUMERIC,created_at DATETIME)",
                 "CREATE TABLE receipts(id INTEGER PRIMARY KEY,status TEXT,verified_amount NUMERIC,reviewed_at DATETIME)",
                 "CREATE TABLE shifts(id INTEGER PRIMARY KEY,user_id INTEGER,hotel_id INTEGER,start_at DATETIME,end_at DATETIME,status TEXT)",
-                "CREATE TABLE shift_check_ins(id INTEGER PRIMARY KEY,user_id INTEGER,shift_date DATE,started_at DATETIME)",
-                "CREATE TABLE shift_check_outs(id INTEGER PRIMARY KEY,user_id INTEGER,shift_date DATE,ended_at DATETIME)",
+                "CREATE TABLE shift_check_ins(id INTEGER PRIMARY KEY,user_id INTEGER,shift_date DATE,started_at DATETIME,status TEXT,ai_status TEXT,scheduled_shift_id INTEGER)",
+                "CREATE TABLE shift_check_outs(id INTEGER PRIMARY KEY,user_id INTEGER,shift_date DATE,ended_at DATETIME,status TEXT,scheduled_shift_id INTEGER)",
                 "CREATE TABLE audit_logs(id INTEGER PRIMARY KEY,user_id INTEGER,action TEXT,entity TEXT,entity_id INTEGER,details TEXT,created_at DATETIME)",
                 "CREATE TABLE shoot_development_reviews(id INTEGER PRIMARY KEY,shooting_id INTEGER,photographer_id INTEGER,fingerprint TEXT,photo_ids TEXT,status TEXT,analyzed TEXT,summary_parts TEXT,attempts INTEGER,result TEXT,created_at DATETIME,UNIQUE(shooting_id,fingerprint))",
                 "CREATE TABLE sales_training_sessions(id INTEGER PRIMARY KEY,user_id INTEGER,client_type TEXT,transcript TEXT,status TEXT,revision INTEGER,evaluation TEXT,created_at DATETIME)",
@@ -231,8 +232,8 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                                    {"id": uid, "tg": uid + 1000, "name": f"User {uid}"})
                 connection.execute(text("INSERT INTO user_roles VALUES (:id,:role)"), {"id": uid, "role": role})
             connection.execute(text("INSERT INTO users VALUES (6,1006,'Inactive',FALSE),(7,1007,'No role',TRUE)"))
-            connection.execute(text("INSERT INTO hotels VALUES (1,'Test hotel',TRUE),(2,'Other hotel',TRUE)"))
-            connection.execute(text("INSERT INTO clients VALUES (1,'Own guest'),(2,'Other guest')"))
+            connection.execute(text("INSERT INTO hotels(id,name,active) VALUES (1,'Test hotel',TRUE),(2,'Other hotel',TRUE)"))
+            connection.execute(text("INSERT INTO clients(id,name,phone) VALUES (1,'Own guest','+79991234567'),(2,'Other guest','+79997654321')"))
             connection.execute(text("INSERT INTO packages VALUES (1,'Family')"))
             connection.execute(text("INSERT INTO bookings VALUES (1,'101',:day,'10:00','ASSIGNED',3,4,1,1,1),(2,'201',:day,'11:00','ASSIGNED',5,4,2,2,1)"), {"day": self.service.today()})
             connection.execute(text("INSERT INTO shootings(id,booking_id,status) VALUES (1,1,'ASSIGNED'),(2,2,'ASSIGNED')"))
@@ -331,8 +332,17 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         _, data, _ = await self.call("/bookings", uid=1003)
         assert data["items"][0]["shootingId"] == 1
         assert data["items"][0]["shootingStatus"] == "ASSIGNED"
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("INSERT INTO shift_check_ins(user_id,shift_date,started_at,status,ai_status) VALUES(3,:day,:now,'STARTED','ACCEPTED')"),
+                         {"day": self.service.today(), "now": datetime.now(timezone.utc).replace(tzinfo=None)})
         for action, expected in (("pickup", "PICKED_UP"), ("start", "SHOOTING"),
-                                 ("finish", "SHOT"), ("ready", "READY_FOR_SALE")):
+                                 ("finish", "SHOT"), ("processing", "PROCESSING"),
+                                 ("ready", "READY_FOR_SALE")):
+            if action == 'ready':
+                viewing_at = (datetime.now(self.service.tz) + timedelta(minutes=30)).isoformat(timespec='minutes')
+                status, _, _ = await self.call('/bookings/1/shooting/viewing', uid=1003, method='POST',
+                                              body={'viewingAt': viewing_at, 'comment': 'Согласовано с гостем'})
+                assert status == 200
             status, body, _ = await self.call(f"/bookings/1/shooting/{action}",
                                               uid=1003, method="POST", body={})
             assert status == 200 and body["status"] == expected
@@ -344,7 +354,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         with self.engine.inner.connect() as conn:
             rows = conn.execute(text(
                 "SELECT action FROM audit_logs WHERE entity='shooting' ORDER BY id")).scalars().all()
-        assert rows == ["shooting_pickup", "shooting_start", "shooting_finish", "shooting_ready"]
+        assert rows == ["shooting_pickup", "shooting_start", "shooting_finish", "shooting_processing", "shooting_viewing", "shooting_ready"]
 
     async def test_shooting_actions_block_other_users_and_wrong_order(self):
         assert (await self.call("/bookings/1/shooting/start", uid=1003, method="POST"))[0] == 409

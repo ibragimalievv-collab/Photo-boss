@@ -88,15 +88,15 @@ async def booking_client_name(m, state):
         return await m.answer("Введите имя клиента от 2 до 200 символов.")
     await state.update_data(client_name=name)
     await state.set_state(BookingFlow.client_phone)
-    await m.answer("Введите телефон клиента или отправьте «-», если телефона нет:")
+    await m.answer("Введите обязательный номер телефона клиента:")
 
 
 @r.message(BookingFlow.client_phone)
 async def booking_client_phone(m, state):
-    phone = m.text.strip()
-    if phone != "-" and not 5 <= len(phone) <= 80:
-        return await m.answer("Введите телефон от 5 до 80 символов либо «-».")
-    await state.update_data(client_phone=None if phone == "-" else phone)
+    phone = (m.text or '').strip()
+    if not 5 <= len(phone) <= 80 or not 5 <= sum(c.isdigit() for c in phone) <= 20:
+        return await m.answer("Введите номер телефона: от 5 до 20 цифр.")
+    await state.update_data(client_phone=phone)
     await state.set_state(BookingFlow.guest_count)
     await m.answer("Введите количество гостей на съёмке:")
 

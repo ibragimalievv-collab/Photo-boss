@@ -39,7 +39,7 @@ async def fixture(url='sqlite+aiosqlite:///:memory:'):
 
 
 def booking_data():
-    return {'client_name': 'Guest', 'client_phone': None, 'hotel_id': 1, 'package_id': 1,
+    return {'client_name': 'Guest', 'client_phone': '+79991234567', 'hotel_id': 1, 'package_id': 1,
             'room': '100', 'guest_count': 2, 'deposit': '0', 'shoot_date': '2026-09-22', 'shoot_time': '12:00'}
 
 

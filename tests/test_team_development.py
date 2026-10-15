@@ -22,10 +22,11 @@ def test_discipline_uses_original_shifts_and_suspends_conclusions_for_pending_ev
         try:
             async with factory() as session:
                 for day in (14, 15, 16, 17, 18, 19, 20):
-                    session.add(Shift(user_id=2, hotel_id=1, start_at=when(day, 6), end_at=when(day, 15)))
+                    session.add(Shift(id=day, user_id=2, hotel_id=1, start_at=when(day, 6), end_at=when(day, 15)))
+                await session.flush()
                 for day in (14, 15, 16):
-                    session.add(ShiftCheckIn(user_id=2, shift_date=date(2026,9,day), status='STARTED', late=True, started_at=when(day, 7)))
-                session.add(ShiftCheckIn(user_id=2, shift_date=date(2026,9,17), status='PENDING_REVIEW'))
+                    session.add(ShiftCheckIn(user_id=2, scheduled_shift_id=day, shift_date=date(2026,9,day), status='STARTED', late=True, started_at=when(day, 7)))
+                session.add(ShiftCheckIn(user_id=2, scheduled_shift_id=17, shift_date=date(2026,9,17), status='PENDING_REVIEW'))
                 session.add(ShiftCheckIn(user_id=2, shift_date=date(2026,9,9), status='STARTED', late=True, started_at=when(9, 7)))
                 await session.commit()
             async with engine.connect() as conn:

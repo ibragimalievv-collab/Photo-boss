@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -32,7 +32,6 @@ from app import db as db_module
 from app import main as main_module
 from app.config import Config
 from app.db import Base, Session, engine, init_db
-from app.handlers import photographer as photographer_module
 from app.handlers import receipts as receipts_module
 from app.handlers.admin import DateLookup, E
 from app.handlers.manager import BookingFlow
@@ -49,6 +48,7 @@ from app.models import (
     Package,
     PayrollEntry,
     Photo,
+    PhotoStorage,
     Receipt,
     Sale,
     SaleDraft,
@@ -724,6 +724,11 @@ def test_sale_requires_selected_photos_and_defers_photographer_percent():
 
 def test_shooting_order_ownership_start_finish_ready_and_full_upload():
     async def scenario():
+        from app.services.shifts import shift_now
+        async with Session() as session:
+            photographer = await get_user(session, PHOTO_B)
+            session.add(ShiftCheckIn(user_id=photographer.id, shift_date=shift_now().date(), status='STARTED', ai_status='ACCEPTED'))
+            await session.commit()
         await callback(PHOTO_A, "photo:pickup:1")
         async with Session() as session:
             assert (await session.get(Shooting, 1)).status == "ASSIGNED"
@@ -743,6 +748,10 @@ def test_shooting_order_ownership_start_finish_ready_and_full_upload():
         async with Session() as session:
             assert (await session.get(Shooting, 1)).status == "SHOT"
 
+        await callback(PHOTO_B, "photo:processing:1")
+        await callback(PHOTO_B, "photo:viewing:1")
+        viewing_at = shift_now() + timedelta(minutes=30)
+        await message(PHOTO_B, f"{viewing_at:%d.%m.%Y %H:%M} | По согласованию с гостем")
         await callback(PHOTO_B, "photo:ready:1")
         async with Session() as session:
             shoot = await session.get(Shooting, 1)
@@ -753,7 +762,12 @@ def test_shooting_order_ownership_start_finish_ready_and_full_upload():
         await callback(PHOTO_B, "photo:full_upload:1")
         assert await state_for(PHOTO_B).get_state() == PhotoUploadFlow.uploading.state
         async with Session() as session:
-            session.add(Photo(shooting_id=1, file_id="full-upload-test"))
+            frame = Photo(shooting_id=1, file_id="full-upload-test")
+            session.add(frame)
+            await session.flush()
+            session.add(PhotoStorage(photo_id=frame.id, shooting_id=1, telegram_file_id=frame.file_id,
+                                     telegram_unique_id='full-upload-unique', source_kind='DOCUMENT',
+                                     status='STORED', disk_path='app:/PhotoBoss/test.jpg', sha256='a' * 64))
             await session.commit()
         await callback(PHOTO_B, "photo:upload_done")
         async with Session() as session:
@@ -1002,91 +1016,48 @@ def test_training_category_sends_a_real_reference_photo():
     run(scenario())
 
 
-def test_shift_requires_location_and_photo_and_charges_late_fine(monkeypatch):
-    fixed = datetime(2026, 9, 15, 9, 1, tzinfo=ZoneInfo("Europe/Moscow"))
-
-    def fixed_shift_now(value=None):
-        if value is None:
-            return fixed
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(ZoneInfo("Europe/Moscow"))
-
-    monkeypatch.setattr(photographer_module, "shift_now", fixed_shift_now)
-
+def test_shift_bot_opens_live_camera_instead_of_writing_unverified_checkin():
     async def scenario():
         await message(PHOTO_A, "🔄 Моя смена")
-        assert telegram.calls[-1].text.startswith("🔄 Моя смена")
+        assert 'живой камерой' in telegram.calls[-1].text
+        assert telegram.calls[-1].reply_markup.inline_keyboard[0][0].web_app
         await callback(PHOTO_A, "shift:begin")
-        assert await state_for(PHOTO_A).get_state() == ShiftFlow.location.state
-
-        await location(PHOTO_A)
-        assert await state_for(PHOTO_A).get_state() == ShiftFlow.photo.state
-        assert "полный рост" in telegram.calls[-1].text
-
-        await photo(PHOTO_A, "full-body-check-in")
         assert await state_for(PHOTO_A).get_state() is None
-        assert "штраф 500" in telegram.calls[-1].text
+        assert 'ИИ проверит полный рост' in telegram.calls[-1].text
         async with Session() as session:
-            check_in = (await session.scalars(select(ShiftCheckIn))).one()
-            assert check_in.status == "STARTED"
-            assert check_in.full_body_file_id == "full-body-check-in"
-            assert check_in.latitude == pytest.approx(55.7558)
-            assert check_in.longitude == pytest.approx(37.6173)
-            assert check_in.late is True
-            assert check_in.fine_amount == 500
-            fine = (await session.scalars(select(PayrollEntry))).one()
-            assert fine.kind == "Штраф за опоздание"
-            assert fine.amount == -500
-
-        await message(PHOTO_A, "🔄 Моя смена")
-        assert "Смена начата в 09:01" in telegram.calls[-1].text
-
-    run(scenario())
-
-
-def test_shift_before_nine_has_no_fine(monkeypatch):
-    fixed = datetime(2026, 9, 15, 8, 59, tzinfo=ZoneInfo("Europe/Moscow"))
-    monkeypatch.setattr(photographer_module, "shift_now", lambda value=None: fixed)
-
-    async def scenario():
-        await callback(PHOTO_B, "shift:begin")
-        await location(PHOTO_B)
-        await photo(PHOTO_B, "on-time-full-body")
-        async with Session() as session:
-            check_in = (await session.scalars(select(ShiftCheckIn))).one()
-            assert check_in.late is False
-            assert check_in.fine_amount == 0
+            assert await session.scalar(select(func.count(ShiftCheckIn.id))) == 0
             assert await session.scalar(select(func.count(PayrollEntry.id))) == 0
-        assert "вовремя" in telegram.calls[-1].text
-
     run(scenario())
 
 
-def test_shift_end_requires_location_and_workplace_photo():
+def test_legacy_shift_photo_state_cannot_bypass_live_camera_or_ai():
     async def scenario():
-        await callback(PHOTO_A, "shift:begin")
-        await location(PHOTO_A)
-        await photo(PHOTO_A, "start-full-body")
-
-        await message(PHOTO_A, "🔄 Моя смена")
-        markup = telegram.calls[-1].reply_markup
-        assert markup.inline_keyboard[0][0].callback_data == "shift:end"
-        await callback(PHOTO_A, "shift:end")
-        assert await state_for(PHOTO_A).get_state() == ShiftFlow.end_location.state
-        await location(PHOTO_A, latitude=55.7, longitude=37.5)
-        assert await state_for(PHOTO_A).get_state() == ShiftFlow.workplace_photo.state
-        await photo(PHOTO_A, "workplace-photo")
-        assert await state_for(PHOTO_A).get_state() is None
-
+        await state_for(PHOTO_B).set_state(ShiftFlow.location)
+        await location(PHOTO_B)
+        assert await state_for(PHOTO_B).get_state() is None
+        await state_for(PHOTO_B).set_state(ShiftFlow.photo)
+        await photo(PHOTO_B, "arbitrary-old-full-body")
+        assert await state_for(PHOTO_B).get_state() is None
+        assert telegram.calls[-1].reply_markup.inline_keyboard[0][0].web_app
         async with Session() as session:
-            check_out = (await session.scalars(select(ShiftCheckOut))).one()
-            assert check_out.status == "FINISHED"
-            assert check_out.latitude == pytest.approx(55.7)
-            assert check_out.longitude == pytest.approx(37.5)
-            assert check_out.workplace_file_id == "workplace-photo"
-            assert check_out.ended_at is not None
+            assert await session.scalar(select(func.count(ShiftCheckIn.id))) == 0
+            assert await session.scalar(select(func.count(PayrollEntry.id))) == 0
+    run(scenario())
 
+
+def test_shift_end_bot_and_legacy_state_use_same_browser_camera():
+    async def scenario():
+        await callback(PHOTO_A, "shift:end")
+        assert await state_for(PHOTO_A).get_state() is None
+        assert 'Результат общий для бота и приложения' in telegram.calls[-1].text
+        await state_for(PHOTO_A).set_state(ShiftFlow.end_location)
+        await location(PHOTO_A, latitude=55.7, longitude=37.5)
+        assert await state_for(PHOTO_A).get_state() is None
+        await state_for(PHOTO_A).set_state(ShiftFlow.workplace_photo)
+        await photo(PHOTO_A, "old-workplace-photo")
+        assert await state_for(PHOTO_A).get_state() is None
+        async with Session() as session:
+            assert await session.scalar(select(func.count(ShiftCheckOut.id))) == 0
     run(scenario())
 
 
@@ -1417,7 +1388,7 @@ def test_photographer_assignment_is_owner_or_admin_only():
             photographer = await get_user(session, PHOTO_A)
             before = await session.scalar(select(func.count(Booking.id)))
             data = {"hotel_id": hotel.id, "package_id": package.id, "client_name": "Fixture client",
-                "client_phone": None, "room": "200", "guest_count": 2, "deposit": 0,
+                "client_phone": "+79991234567", "room": "200", "guest_count": 2, "deposit": 0,
                 "shoot_date": "2026-09-22", "shoot_time": "12:00:00"}
         # Even a crafted callback in a stale photographer-selection state is rejected.
         state = state_for(MANAGER)

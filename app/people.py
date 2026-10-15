@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .miniapp_security import AccessError
 from .miniapp_sessions import revoke_sessions
+from .services.geofence import validate_geofence
 from .work_rules import WORK_RULES_TEXT, WORK_RULES_VERSION
 
 ASSIGNABLE = {"ADMIN", "MANAGER", "PHOTOGRAPHER"}
@@ -228,6 +229,58 @@ class People:
                             "after": {"id": hotel["id"], "name": name, "active": True}},
                            ensure_ascii=False))
         return web.json_response({"hotel": dict(hotel)}, status=201)
+
+    async def hotel_points(self, request):
+        actor = request["miniapp_actor"]
+        check_editor(actor["roles"])
+        async with self.engine.begin() as conn:
+            roles = await self.current_editor(conn, actor["id"])
+            scope = "" if "OWNER" in roles else (
+                "AND id IN (SELECT hotel_id FROM hotel_employees WHERE user_id=:uid)")
+            hotels = await self.api.rows(conn,
+                f"SELECT id,name,latitude,longitude,attendance_radius_m FROM hotels "
+                f"WHERE active=TRUE {scope} ORDER BY name,id", uid=actor["id"])
+        return web.json_response({"items": [self.hotel_point(h) for h in hotels]})
+
+    @staticmethod
+    def hotel_point(hotel):
+        return {"id": hotel["id"], "name": hotel["name"],
+                "latitude": hotel["latitude"], "longitude": hotel["longitude"],
+                "radiusM": hotel["attendance_radius_m"],
+                "configured": all(hotel[k] is not None for k in
+                    ("latitude", "longitude", "attendance_radius_m"))}
+
+    async def set_hotel_point(self, request):
+        actor = request["miniapp_actor"]
+        check_editor(actor["roles"])
+        hotel_id = positive_id(request.match_info["id"])
+        body = await self.api.body(request)
+        if set(body) != {"latitude", "longitude", "radiusM"}:
+            raise AccessError("Проверьте координаты и радиус точки.", 400)
+        try:
+            lat, lon, radius = validate_geofence(body["latitude"], body["longitude"], body["radiusM"])
+        except ValueError as exc:
+            raise AccessError(str(exc), 400) from exc
+        async with self.engine.begin() as conn:
+            roles = await self.current_editor(conn, actor["id"])
+            if "OWNER" not in roles and not await self.api.rows(conn,
+                    "SELECT hotel_id FROM hotel_employees WHERE user_id=:uid AND hotel_id=:hid",
+                    uid=actor["id"], hid=hotel_id):
+                raise AccessError("Нет доступа к настройке точки этого отеля.")
+            hotels = await self.api.rows(conn,
+                "SELECT id,name,latitude,longitude,attendance_radius_m FROM hotels "
+                "WHERE id=:id AND active=TRUE FOR UPDATE", id=hotel_id)
+            if not hotels:
+                raise AccessError("Отель не найден или отключён.", 404)
+            before = self.hotel_point(hotels[0])
+            await conn.execute(text("UPDATE hotels SET latitude=:lat,longitude=:lon,"
+                                    "attendance_radius_m=:radius WHERE id=:id"),
+                               {"lat": lat, "lon": lon, "radius": radius, "id": hotel_id})
+            after = before | {"latitude": lat, "longitude": lon, "radiusM": radius,
+                              "configured": lat is not None}
+            await self.api.audit_write(conn, actor, "hotel_point_changed", "hotel", hotel_id,
+                json.dumps({"before": before, "after": after}, ensure_ascii=False))
+        return web.json_response({"hotel": after})
 
     async def assignments(self, conn, uid, payload):
         await conn.execute(text("DELETE FROM user_roles WHERE user_id=:id"), {"id": uid})
@@ -468,6 +521,8 @@ def install_people(app, miniapp):
     app.router.add_get("/api/miniapp/people", service.listing)
     app.router.add_post("/api/miniapp/people", service.create)
     app.router.add_post("/api/miniapp/hotels", service.create_hotel)
+    app.router.add_get("/api/miniapp/hotels/points", service.hotel_points)
+    app.router.add_put("/api/miniapp/hotels/{id}/point", service.set_hotel_point)
     app.router.add_put("/api/miniapp/people/{id}", service.update)
     app.router.add_post("/api/miniapp/people/{id}/fire", service.fire)
     app.router.add_post("/api/miniapp/people/{id}/restore", service.restore)

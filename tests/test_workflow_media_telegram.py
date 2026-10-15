@@ -4,9 +4,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import SendPhoto
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
+from aiogram.methods import SendDocument, SendPhoto
 
+from app.miniapp_security import AccessError
 from app.workflow import Workflow
 
 
@@ -39,7 +46,7 @@ def test_receipt_bad_dimensions_retries_as_document_without_modifying_original()
 def test_unrelated_telegram_errors_are_not_hidden_by_receipt_fallback():
     error = TelegramBadRequest(
         method=SendPhoto(chat_id=42, photo="fixture"),
-        message="Bad Request: chat not found",
+        message="Bad Request: DOCUMENT_INVALID",
     )
     workflow, bot = workflow_with_bot(error)
     with pytest.raises(TelegramBadRequest):
@@ -54,3 +61,45 @@ def test_shooting_photo_does_not_send_or_require_receipt():
     assert result == ("document-id", "document-unique-id")
     bot.send_photo.assert_not_awaited()
     bot.send_document.assert_awaited_once()
+
+
+@pytest.mark.parametrize('error_type,message', [
+    (TelegramForbiddenError, 'Forbidden: bot was blocked by the user'),
+    (TelegramBadRequest, 'Bad Request: chat not found'),
+])
+def test_unavailable_bot_chat_requires_manual_retry_of_same_original(error_type, message):
+    workflow, bot = workflow_with_bot()
+    archived = bot.send_document.return_value
+    bot.send_document.side_effect = [error_type(method=SendDocument(chat_id=42, document='fixture'), message=message), archived]
+    raw = b'\xff\xd8\xff' + b'original-before-chat-error' * 15
+    actor = SimpleNamespace(tg_id=42)
+    with pytest.raises(AccessError) as error:
+        asyncio.run(workflow.save_telegram(actor, raw))
+    assert error.value.status == 409
+    assert 'Старт' in str(error.value) and 'очереди' in str(error.value)
+    assert bot.send_document.await_count == 1
+    assert asyncio.run(workflow.save_telegram(actor, raw)) == ('document-id', 'document-unique-id')
+    assert [call.args[1].data for call in bot.send_document.await_args_list] == [raw, raw]
+
+
+@pytest.mark.parametrize('error_kind', ['network', 'server', 'rate_limit', 'timeout'])
+def test_transient_telegram_failure_can_retry_the_unchanged_original(error_kind):
+    workflow, bot = workflow_with_bot()
+    archived = bot.send_document.return_value
+    method = SendDocument(chat_id=42, document='fixture')
+    failures = {
+        'network': TelegramNetworkError(method=method, message='connection reset'),
+        'server': TelegramServerError(method=method, message='upstream unavailable'),
+        'rate_limit': TelegramRetryAfter(method=method, message='too many requests', retry_after=3),
+        'timeout': TimeoutError(),
+    }
+    bot.send_document.side_effect = [failures[error_kind], archived]
+    raw = b'\xff\xd8\xff' + b'original-before-network-error' * 15
+    actor = SimpleNamespace(tg_id=42)
+    with pytest.raises(AccessError) as error:
+        asyncio.run(workflow.save_telegram(actor, raw))
+    assert error.value.status == 503
+    assert 'очереди' in str(error.value)
+    assert bot.send_document.await_count == 1
+    assert asyncio.run(workflow.save_telegram(actor, raw)) == ('document-id', 'document-unique-id')
+    assert [call.args[1].data for call in bot.send_document.await_args_list] == [raw, raw]

@@ -294,23 +294,28 @@ class MiniApp:
         return web.json_response({"theme": body["theme"]})
 
     async def bookings_data(self, conn, actor, day):
+        from .services.shooting_workflow import viewing_iso
         clause = f"AND ({booking_scope_sql(actor['id'], actor['roles'])})"
         rows = await self.rows(conn, f"""SELECT b.id,b.room,b.shoot_date,b.shoot_time,b.status,
-            b.photographer_id,b.manager_id,b.hotel_id,c.name AS client,h.name AS hotel,
-            sh.id AS shooting_id,sh.status AS shooting_status,
+            b.photographer_id,b.manager_id,b.hotel_id,c.name AS client,c.phone AS client_phone,h.name AS hotel,
+            sh.id AS shooting_id,sh.status AS shooting_status,sh.viewing_at,sh.viewing_comment,m.name AS manager_name,
             p.name AS photographer,pk.name AS package,
-            (SELECT COUNT(*) FROM photos ph JOIN shootings sh ON sh.id=ph.shooting_id
-             WHERE sh.booking_id=b.id) AS frames
+            (SELECT COUNT(DISTINCT COALESCE(ps.sha256,'photo:' || CAST(ph.id AS TEXT)))
+             FROM photos ph JOIN shootings sh ON sh.id=ph.shooting_id
+             LEFT JOIN photo_storage ps ON ps.photo_id=ph.id WHERE sh.booking_id=b.id) AS frames
             FROM bookings b LEFT JOIN shootings sh ON sh.booking_id=b.id
             JOIN clients c ON c.id=b.client_id
             JOIN hotels h ON h.id=b.hotel_id LEFT JOIN users p ON p.id=b.photographer_id
+            LEFT JOIN users m ON m.id=b.manager_id
             LEFT JOIN packages pk ON pk.id=b.package_id
             WHERE b.shoot_date=:day {clause} ORDER BY b.shoot_time,b.id""", uid=actor["id"], day=day)
         return [{"id": r["id"], "client": r["client"], "date": str(r["shoot_date"]),
                  "time": str(r["shoot_time"])[:5], "room": r["room"], "status": r["status"],
                  "photographerId": r["photographer_id"], "photographer": r["photographer"],
                  "shootingId": r["shooting_id"], "shootingStatus": r["shooting_status"],
-                 "managerId": r["manager_id"], "hotelId": r["hotel_id"], "hotel": r["hotel"],
+                 "managerId": r["manager_id"], "managerName": r["manager_name"], "clientPhone": r["client_phone"],
+                 "viewingAt": viewing_iso(r["viewing_at"]), "viewingComment": r["viewing_comment"],
+                 "hotelId": r["hotel_id"], "hotel": r["hotel"],
                  "type": r["package"] or "Съёмка", "frames": r["frames"]} for r in rows]
 
     async def bookings(self, request):
@@ -388,47 +393,64 @@ class MiniApp:
         return web.json_response({"ok": True, "photographerId": uid})
 
     async def shooting_action(self, request):
-        """Run exactly the same state transitions used by the Telegram photographer bot."""
+        """Use the bot's production stages and guard every work action by attendance."""
+        from .services.shifts import require_active_shift_conn
+        from .services.shooting_workflow import (
+            TRANSITIONS,
+            validate_transition,
+            viewing_allowed,
+            viewing_values,
+        )
         actor = request["miniapp_actor"]
         if "PHOTOGRAPHER" not in actor["roles"]:
             raise AccessError("Действие доступно только фотографу.", 403)
-        if await self.body(request):
-            raise AccessError("Лишние параметры действия.", 400)
+        body = await self.body(request)
         action = request.match_info["action"]
-        transitions = {
-            "pickup": ("ASSIGNED", "PICKED_UP", "accepted_at"),
-            "start": ("PICKED_UP", "SHOOTING", "started_at"),
-            "finish": ("SHOOTING", "SHOT", "completed_at"),
-            "ready": ("SHOT", "READY_FOR_SALE", "ready_for_sale_at"),
-        }
-        if action not in transitions:
+        if action not in TRANSITIONS and action != 'viewing':
             raise AccessError("Неизвестное действие съёмки.", 400)
+        if (action == 'viewing' and set(body) != {'viewingAt', 'comment'}) or (action != 'viewing' and body):
+            raise AccessError("Проверьте параметры действия.", 400)
         bid = int(request.match_info["id"])
-        expected, target, timestamp = transitions[action]
         async with self.engine.begin() as conn:
+            # Lock the photographer before the shoot, matching attendance's lock
+            # order: closing a shift and advancing a shoot cannot race.
+            current = await self.rows(conn, "SELECT id FROM users WHERE id=:uid AND active=TRUE AND EXISTS (SELECT 1 FROM user_roles r WHERE r.user_id=users.id AND r.role='PHOTOGRAPHER') FOR UPDATE", uid=actor['id'])
+            if not current:
+                raise AccessError('Нужен действующий доступ фотографа.', 403)
+            bookings = await self.rows(conn,
+                "SELECT photographer_id,status,hotel_id,shoot_date FROM bookings WHERE id=:bid FOR UPDATE", bid=bid)
+            if not bookings or bookings[0]["photographer_id"] != actor["id"]:
+                raise AccessError("Это не ваша съёмка.", 403)
+            booking = bookings[0]
             shoots = await self.rows(conn,
-                "SELECT id,status FROM shootings WHERE booking_id=:bid FOR UPDATE", bid=bid)
+                "SELECT id,status,viewing_at FROM shootings WHERE booking_id=:bid FOR UPDATE", bid=bid)
             if not shoots:
                 raise AccessError("Съёмка не найдена.", 404)
             shoot = shoots[0]
-            bookings = await self.rows(conn,
-                "SELECT photographer_id,status FROM bookings WHERE id=:bid FOR UPDATE", bid=bid)
-            if not bookings or bookings[0]["photographer_id"] != actor["id"]:
-                raise AccessError("Это не ваша съёмка.", 403)
-            if bookings[0]["status"] in {"PENDING_CONFIRMATION", "REJECTED", "CANCELLED"}:
-                raise AccessError("Съёмка ещё не подтверждена или отменена.", 409)
-            if shoot["status"] != expected:
-                raise AccessError("Этот шаг уже выполнен или предыдущий ещё не завершён. Обновите карточку.", 409)
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
-            await conn.execute(text(
-                f"UPDATE shootings SET status=:status,{timestamp}=:now WHERE id=:sid"),
-                {"status": target, "now": now, "sid": shoot["id"]})
-            await conn.execute(text("UPDATE bookings SET status=:status WHERE id=:bid"),
-                {"status": target, "bid": bid})
-            await self.audit_write(conn, actor, f"shooting_{action}", "shooting",
-                                   shoot["id"], f"Mini App: {expected} → {target}")
+            try:
+                if action == 'viewing':
+                    viewing_allowed(shoot['status'], booking['status'])
+                    at, comment = viewing_values(body['viewingAt'], body['comment'], booking['shoot_date'], tz=self.tz)
+                    await require_active_shift_conn(self, conn, actor['id'], booking['hotel_id'])
+                    await conn.execute(text('UPDATE shootings SET viewing_at=:at,viewing_comment=:comment WHERE id=:sid'),
+                                       {'at': at, 'comment': comment, 'sid': shoot['id']})
+                    target = shoot['status']
+                else:
+                    target, timestamp = validate_transition(shoot['status'], booking['status'], action,
+                                                            viewing_at=shoot['viewing_at'])
+                    if action != 'pickup':
+                        await require_active_shift_conn(self, conn, actor['id'], booking['hotel_id'])
+                    now = datetime.now(timezone.utc).replace(tzinfo=None)
+                    await conn.execute(text(f"UPDATE shootings SET status=:status,{timestamp}=:now WHERE id=:sid"),
+                        {"status": target, "now": now, "sid": shoot["id"]})
+                    await conn.execute(text("UPDATE bookings SET status=:status WHERE id=:bid"),
+                        {"status": target, "bid": bid})
+            except ValueError as exc:
+                raise AccessError(str(exc), 409) from exc
+            await self.audit_write(conn, actor, f"shooting_{action}", "shooting", shoot["id"],
+                f"Mini App: {shoot['status']} → {target}" +
+                (f";viewing_at={at.isoformat()};comment={comment or ''}" if action == 'viewing' else ''))
         if action == "ready":
-            # Notify using the same template as the Telegram bot, after commit.
             try:
                 from .services.bookings import send_manager_ready_message
                 async with self.engine.connect() as conn:
@@ -511,11 +533,11 @@ class MiniApp:
             st, en = as_utc(r["start_at"]).astimezone(self.tz), as_utc(r["end_at"]).astimezone(self.tz)
             attendance = "PLANNED"
             checks = await self.rows(conn, """SELECT started_at FROM shift_check_ins
-                WHERE user_id=:uid AND shift_date=:day AND started_at IS NOT NULL""",
-                uid=r["user_id"], day=st.date())
+                WHERE user_id=:uid AND scheduled_shift_id=:sid AND status='STARTED'
+                AND started_at IS NOT NULL""", uid=r["user_id"], sid=r["id"])
             outs = await self.rows(conn, """SELECT ended_at FROM shift_check_outs
-                WHERE user_id=:uid AND shift_date=:day AND ended_at IS NOT NULL""",
-                uid=r["user_id"], day=st.date())
+                WHERE user_id=:uid AND scheduled_shift_id=:sid AND status='FINISHED'
+                AND ended_at IS NOT NULL""", uid=r["user_id"], sid=r["id"])
             if checks:
                 attendance = "ENDED" if outs else ("STARTED" if st.date() == self.today() else "MISSING_CHECKOUT")
             items.append({"id": r["id"], "userId": r["user_id"], "name": r["name"], "role": r["role"],
@@ -630,8 +652,8 @@ class MiniApp:
                 return web.json_response({"ok": True})
             day = as_utc(shift["start_at"]).astimezone(self.tz).date()
             if day < self.today() or shift["status"] != "PLANNED" or await self.rows(conn,
-                "SELECT id FROM shift_check_ins WHERE user_id=:uid AND shift_date=:day AND started_at IS NOT NULL",
-                uid=shift["user_id"], day=day):
+                "SELECT id FROM shift_check_ins WHERE user_id=:uid AND scheduled_shift_id=:sid AND started_at IS NOT NULL",
+                uid=shift["user_id"], sid=sid):
                 raise AccessError("Начавшуюся или прошедшую смену отменять нельзя.", 409)
             await conn.execute(text("UPDATE shifts SET status='CANCELLED' WHERE id=:id"), {"id": sid})
             await self.audit_write(conn, actor, "miniapp_shift_cancelled", "shift", sid,
@@ -856,7 +878,7 @@ class MiniApp:
             ("GET", "/dashboard", self.dashboard), ("GET", "/bookings", self.bookings),
             ("GET", "/booking-photographers", self.booking_photographers),
             ("POST", r"/bookings/{id:\d+}/photographer", self.assign_booking_photographer),
-            ("POST", r"/bookings/{id:\d+}/shooting/{action:pickup|start|finish|ready}", self.shooting_action),
+            ("POST", r"/bookings/{id:\d+}/shooting/{action:pickup|start|finish|processing|viewing|ready}", self.shooting_action),
             ("GET", "/finance", self.finance), ("GET", "/schedule", self.schedule),
             ("POST", "/schedule", self.create_shift), ("POST", "/schedule/batch", self.create_shift_batch), ("POST", "/schedule/team", self.create_team_schedule), ("DELETE", "/schedule/{id}", self.cancel_shift),
             ("GET", "/audit", self.audit), ("GET", "/academy", self.academy),
