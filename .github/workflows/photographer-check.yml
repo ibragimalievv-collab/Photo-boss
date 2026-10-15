@@ -30,8 +30,8 @@ jobs:
       ADMIN_TELEGRAM_IDS: '5000000001'
       DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
       PYTHONPATH: .
-      WORKFLOW_TEST_CERT: ${{ runner.temp }}/photo-boss-photographer-cert.pem
-      WORKFLOW_TEST_KEY: ${{ runner.temp }}/photo-boss-photographer-key.pem
+      WORKFLOW_TEST_CERT: /tmp/photo-boss-photographer-cert.pem
+      WORKFLOW_TEST_KEY: /tmp/photo-boss-photographer-key.pem
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
