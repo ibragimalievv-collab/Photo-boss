@@ -67,9 +67,6 @@ class HotelPointTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         await baseline.MiniAppTests.asyncSetUp(self)
         self.people = People(self.service)
-        with self.engine.inner.begin() as conn:
-            for column in ("latitude", "longitude", "attendance_radius_m"):
-                conn.execute(text(f"ALTER TABLE hotels ADD COLUMN {column} FLOAT"))
 
     async def asyncTearDown(self):
         await baseline.MiniAppTests.asyncTearDown(self)
