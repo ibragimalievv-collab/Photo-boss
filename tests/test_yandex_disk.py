@@ -99,3 +99,48 @@ def test_provider_network_timeouts_have_safe_recoverable_errors(monkeypatch):
     monkeypatch.setattr(disk, "_json", download_url)
     with pytest.raises(module.YandexDiskError, match="прервал скачивание"):
         asyncio.run(disk.download_bytes(ROOT + "/shootings/test.jpg"))
+
+def test_transient_download_500_retries_with_new_link(monkeypatch):
+    """A temporary CDN error should not permanently break Academy photo previews."""
+    from app import yandex_disk as module
+    calls = {"link": 0, "download": 0}
+
+    class Body:
+        async def iter_chunked(self, _size):
+            yield b"original"
+
+    class Response:
+        def __init__(self, status):
+            self.status = status
+            self.headers = {}
+            self.content = Body()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class Session:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def get(self, _href):
+            calls["download"] += 1
+            return Response(500 if calls["download"] == 1 else 200)
+
+    async def link(*args, **kwargs):
+        calls["link"] += 1
+        return {"href": "https://download.example.invalid/image"}
+
+    disk = YandexDisk("token")
+    monkeypatch.setattr(disk, "_json", link)
+    monkeypatch.setattr(module.aiohttp, "ClientSession", Session)
+    assert asyncio.run(disk.download_bytes(ROOT + "/shootings/test.jpg")) == b"original"
+    assert calls == {"link": 2, "download": 2}
