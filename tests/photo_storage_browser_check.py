@@ -90,7 +90,7 @@ async def main():
                             await route.continue_()
                     await context.route('**/api/miniapp/operations/media', lose_upload_response)
                     page = await context.new_page()
-                    page.on('pageerror', lambda e:errors.append(str(e)))
+                    page.on('pageerror', lambda e:errors.append(e.stack or str(e)))
                     async def refresh_files():
                         old = await page.get_by_role('button',name='Обновить состояние файлов').element_handle()
                         await old.click()
@@ -107,7 +107,7 @@ async def main():
                     await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length===3;}")
                     await page.close()
                     page = await context.new_page()
-                    page.on('pageerror',lambda e:errors.append(str(e)))
+                    page.on('pageerror',lambda e:errors.append(e.stack or str(e)))
                     await page.goto(url)
                     await page.get_by_role('heading',name='Рабочие операции',exact=True).wait_for()
                     await context.set_offline(False)
@@ -118,16 +118,36 @@ async def main():
                     async with factory() as session:
                         assert await session.scalar(select(func.count(Photo.id))) == 2
                         assert await session.scalar(select(func.count(PhotoStorage.id))) == 2
+                    # Exercise the same HTTP completion operation before and after
+                    # provider confirmation. A retry must reuse its original key.
+                    completion = {'actorId': 2, 'key': 'storage-closure-browser-v1',
+                                  'kind': 'shoot_complete', 'date': str(api.today()),
+                                  'data': {'shooting': {'id': 1}}}
+                    async def close_upload(expected):
+                        response = await context.request.post(
+                            str(server.make_url('/api/miniapp/operations/sync')),
+                            headers={'X-Telegram-Init-Data': signed(2)}, data=completion)
+                        assert response.status == expected, await response.text()
+                        return await response.json()
+                    await close_upload(424)
+                    async with factory() as session:
+                        assert (await session.get(Shooting, 1)).full_upload_completed_at is None
                     await photo_storage.sync_one(bot,disk)
                     await photo_storage.sync_one(bot,disk)
+                    await close_upload(424)
                     await refresh_files()
                     await page.get_by_text('Съёмка №1',exact=False).filter(has_text='сохранено').click()
-                    await page.get_by_role('button',name='Повторить только неудачные загрузки').click()
+                    await page.get_by_role('button',name='Восстановить сохранение на Диске',exact=True).click()
                     await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).every(r=>r.status==='synced');}")
                     disk.full = False
                     await photo_storage.sync_one(bot,disk)
                     await photo_storage.sync_one(bot,disk)
                     originals = dict(disk.files)
+                    confirmed = await close_upload(200)
+                    assert confirmed['photos'] == 2
+                    assert await close_upload(200) == confirmed
+                    async with factory() as session:
+                        assert (await session.get(Shooting, 1)).full_upload_completed_at is not None
                     await refresh_files()
                     await page.get_by_text('Съёмка №1',exact=False).filter(has_text='сохранено').click()
                     await page.get_by_text('Обработка · оригиналы сохраняются отдельно',exact=True).click()
@@ -184,11 +204,10 @@ async def main():
                     assert len(attempts)==151 and len(set(attempts))==150
                     assert not errors,errors
                     await browser.close()
-                    print('PASS: offline batch/reopen, lost upload response replay, dedupe, quota recovery, original-preserving manual copy, comparison, cancellation, access denial, 360px layout')
+                    print('PASS: offline batch/reopen, lost upload response replay, dedupe, quota recovery, verified closure with idempotent retry, original-preserving manual copy, comparison, cancellation, access denial, 360px layout')
         finally:
             await server.close()
             await engine.dispose()
 
 
 if __name__ == '__main__': asyncio.run(main())
-

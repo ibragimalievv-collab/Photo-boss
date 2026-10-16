@@ -78,10 +78,13 @@ async def complete_full_upload(session, actor, shooting_id, *, allow_management=
     from types import SimpleNamespace
 
     from .core import roles_of
-    from .photo_storage import storage_summary
+    from .photo_storage import require_confirmed_originals, storage_summary
 
-    shooting = await session.get(Shooting, shooting_id, with_for_update=True)
-    booking = await session.get(Booking, shooting.booking_id) if shooting else None
+    # Lock the booking before the shooting, the same order as completing a sale.
+    # Otherwise a concurrent sale can miss the final commission calculation.
+    preview = await session.get(Shooting, shooting_id)
+    booking = await session.get(Booking, preview.booking_id, with_for_update=True) if preview else None
+    shooting = await session.get(Shooting, shooting_id, with_for_update=True, populate_existing=True) if preview else None
     roles = await roles_of(session, actor)
     from .booking_access import can_access_booking
     permitted_roles = roles if allow_management else roles - {'OWNER', 'ADMIN', 'MANAGER'}
@@ -95,6 +98,7 @@ async def complete_full_upload(session, actor, shooting_id, *, allow_management=
         raise ValueError('Сначала загрузите всю съёмку.')
     if declared and count < declared:
         raise ValueError(f'По продаже указано {declared} кадров, а загружено {count}. Загрузите оставшиеся кадры перед завершением.')
+    await require_confirmed_originals(session, shooting.id)
     sync = await storage_summary(session, shooting.id)
     shooting.full_upload_completed_at = datetime.now(UTC).replace(tzinfo=None)
     commissions = await finalize_photographer_commissions(session, booking)
@@ -106,7 +110,10 @@ async def complete_full_upload(session, actor, shooting_id, *, allow_management=
 ACTIVE_DRAFT_STATUSES = ("AWAITING_RECEIPT", "AWAITING_COUNTS", "AWAITING_SELECTED")
 
 async def can_sell(actor, roles, booking, *, session=None):
-    if booking is None or booking.status != "READY_FOR_SALE":
+    if booking is None:
+        return False
+    if booking.status != "READY_FOR_SALE" and (booking.status not in {"SOLD", "COMPLETED"} or session is None
+            or not await session.scalar(select(Sale.id).where(Sale.booking_id == booking.id).limit(1))):
         return False
     if 'OWNER' in roles:
         return True
@@ -178,6 +185,24 @@ async def capture_draft_receipt(session, actor, draft, file_id, unique_id, diges
     await audit(session, actor, 'sale_receipt_captured', 'sale_draft', draft.id)
 
 
+async def already_purchased_photo(session, booking_id, digest):
+    """Exact original already sold in this booking; never compare other guests."""
+    return await session.scalar(select(SaleDraftPhoto.id).where(
+        SaleDraftPhoto.sha256 == digest,
+        SaleDraftPhoto.draft_id.in_(select(Sale.source_draft_id).where(Sale.booking_id == booking_id)),
+    ).limit(1))
+
+
+async def validate_remaining_photos(session, booking, total, sold):
+    previous = int(await session.scalar(select(func.coalesce(func.sum(Sale.sold_photos), 0)).where(
+        Sale.booking_id == booking.id)) or 0)
+    shoot, count = await full_shoot_state(session, booking.id)
+    if shoot is not None and shoot.full_upload_completed_at is not None and total != count:
+        raise ValueError(f'Полная съёмка содержит {count} кадров. Общее количество менять нельзя.')
+    if previous + sold > total:
+        raise ValueError(f'Уже продано: {previous}. Новая покупка превышает оставшееся количество кадров.')
+
+
 async def set_sale_counts(session, actor, draft, total, sold):
     if draft.created_by_id != actor.id or draft.status != 'AWAITING_COUNTS':
         raise ValueError('Черновик продажи уже закрыт.')
@@ -187,9 +212,7 @@ async def set_sale_counts(session, actor, draft, total, sold):
     package = await session.get(Package, booking.package_id)
     if package is None:
         raise ValueError('Пакет недоступен.')
-    already = await session.scalar(select(func.coalesce(func.sum(Sale.sold_photos), 0)).where(Sale.booking_id == booking.id))
-    if already + sold > total:
-        raise ValueError(f'Уже продано: {already}. Итог превышает общее количество кадров.')
+    await validate_remaining_photos(session, booking, total, sold)
     price = Decimal(str(package.price_per_photo))
     if not price.is_finite() or price <= 0:
         raise ValueError('Некорректная цена пакета.')
@@ -219,11 +242,19 @@ async def complete_sale(session, actor, draft_id):
     if draft.status != "AWAITING_SELECTED":
         raise ValueError("Продажа уже завершена или отменена.")
     count = await selected_count(session, draft.id)
-    if not draft.sold_photos or count < draft.sold_photos:
+    if not draft.sold_photos or count != draft.sold_photos:
         raise ValueError(f"Сначала загрузите все выбранные фотографии: {count}/{draft.sold_photos or 0}.")
     already_sold = await session.scalar(select(func.coalesce(func.sum(Sale.sold_photos), 0)).where(Sale.booking_id == booking.id))
     if not draft.declared_photo_count or already_sold + draft.sold_photos > draft.declared_photo_count:
         raise ValueError("Количество проданных кадров изменилось. Проверьте продажу.")
+    await validate_remaining_photos(session, booking, draft.declared_photo_count, draft.sold_photos)
+    current_hashes = select(SaleDraftPhoto.sha256).where(SaleDraftPhoto.draft_id == draft.id)
+    collision = await session.scalar(select(SaleDraftPhoto.id).where(
+        SaleDraftPhoto.sha256.in_(current_hashes),
+        SaleDraftPhoto.draft_id.in_(select(Sale.source_draft_id).where(Sale.booking_id == booking.id)),
+    ).limit(1))
+    if collision:
+        raise ValueError('Среди выбранных есть уже купленный кадр. Уберите его из допродажи.')
     photographer = await session.get(User, booking.photographer_id) if booking.photographer_id else None
     manager = await session.get(User, booking.manager_id)
     package = await session.get(Package, booking.package_id)

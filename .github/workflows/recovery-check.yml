@@ -1,0 +1,64 @@
+name: Media and AI recovery checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
+      ADMIN_TELEGRAM_IDS: '5000000001'
+      DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+      PYTHONPATH: .
+      WORKFLOW_TEST_CERT: /tmp/recovery-cert.pem
+      WORKFLOW_TEST_KEY: /tmp/recovery-key.pem
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: pip install -r requirements-dev.txt playwright==1.51.0
+      - run: python -m playwright install --with-deps chromium
+      - name: Validate upload and draft state without external providers
+        run: |
+          ruff check app tests
+          node tests/form_state_check.mjs
+          node tests/workflow_form_recovery_check.mjs
+          node tests/outbox_recovery_check.mjs
+          node tests/folder_sequential_upload_check.mjs
+          node tests/outbox_receipt_isolation_check.mjs
+          node tests/sales_history_ui_check.mjs
+          python -m pytest -q --junitxml=/tmp/recovery-rules.xml tests/test_media_recovery.py tests/test_ai_diagnostics.py tests/test_academy_practice.py tests/test_development.py tests/test_sales_followups.py
+      - name: Real browser recovery scenarios
+        run: |
+          mkdir -p /tmp/photo-boss-calls-qa
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORKFLOW_TEST_KEY" -out "$WORKFLOW_TEST_CERT" -days 1 -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1' 2>/dev/null
+          failed=0
+          for script in workflow_browser_check academy_coach_browser_check academy_practice_browser_check sales_followup_browser_check; do
+            python "tests/${script}.py" || failed=1
+          done
+          exit "$failed"
+      - name: Archive tracked verification source
+        if: always()
+        run: |
+          git archive --format=zip --output=/tmp/recovery-source.zip HEAD
+          git rev-parse HEAD > /tmp/recovery-source-commit.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recovery-verification
+          path: |
+            /tmp/recovery-source.zip
+            /tmp/recovery-source-commit.txt
+            /tmp/recovery-rules.xml
+            /tmp/photo-boss-calls-qa/
+          retention-days: 7

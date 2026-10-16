@@ -206,9 +206,9 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                 "CREATE TABLE bookings(id INTEGER PRIMARY KEY,room TEXT,shoot_date DATE,shoot_time TEXT,status TEXT,photographer_id INTEGER,manager_id INTEGER,hotel_id INTEGER,client_id INTEGER,package_id INTEGER)",
                 "CREATE TABLE shootings(id INTEGER PRIMARY KEY,booking_id INTEGER,status TEXT,accepted_at DATETIME,started_at DATETIME,completed_at DATETIME,ready_for_sale_at DATETIME)",
                 "CREATE TABLE photos(id INTEGER PRIMARY KEY,shooting_id INTEGER)",
-                "CREATE TABLE sales(id INTEGER PRIMARY KEY,booking_id INTEGER,credited_user_id INTEGER,commission_role TEXT,amount NUMERIC,commission NUMERIC,payment_status TEXT,created_at DATETIME)",
+                "CREATE TABLE sales(id INTEGER PRIMARY KEY,manager_payroll_entry_id INTEGER,booking_id INTEGER,credited_user_id INTEGER,commission_role TEXT,amount NUMERIC,commission NUMERIC,payment_status TEXT,created_at DATETIME)",
                 "CREATE TABLE payroll_entries(id INTEGER PRIMARY KEY,user_id INTEGER,kind TEXT,amount NUMERIC,created_at DATETIME)",
-                "CREATE TABLE receipts(id INTEGER PRIMARY KEY,status TEXT,verified_amount NUMERIC,reviewed_at DATETIME)",
+                "CREATE TABLE receipts(id INTEGER PRIMARY KEY,booking_id INTEGER,status TEXT,verified_amount NUMERIC,reviewed_at DATETIME)",
                 "CREATE TABLE shifts(id INTEGER PRIMARY KEY,user_id INTEGER,hotel_id INTEGER,start_at DATETIME,end_at DATETIME,status TEXT)",
                 "CREATE TABLE shift_check_ins(id INTEGER PRIMARY KEY,user_id INTEGER,shift_date DATE,started_at DATETIME)",
                 "CREATE TABLE shift_check_outs(id INTEGER PRIMARY KEY,user_id INTEGER,shift_date DATE,ended_at DATETIME)",
@@ -236,9 +236,9 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
             connection.execute(text("INSERT INTO packages VALUES (1,'Family')"))
             connection.execute(text("INSERT INTO bookings VALUES (1,'101',:day,'10:00','ASSIGNED',3,4,1,1,1),(2,'201',:day,'11:00','ASSIGNED',5,4,2,2,1)"), {"day": self.service.today()})
             connection.execute(text("INSERT INTO shootings(id,booking_id,status) VALUES (1,1,'ASSIGNED'),(2,2,'ASSIGNED')"))
-            connection.execute(text("INSERT INTO sales VALUES (1,1,3,'PHOTOGRAPHER',21000,3150,'PAID',:now),(2,2,5,'PHOTOGRAPHER',26000,3900,'UNPAID',:now)"), {"now": now})
+            connection.execute(text("INSERT INTO sales VALUES (1,NULL,1,3,'PHOTOGRAPHER',21000,3150,'PAID',:now),(2,NULL,2,5,'PHOTOGRAPHER',26000,3900,'UNPAID',:now)"), {"now": now})
             connection.execute(text("INSERT INTO payroll_entries VALUES (1,3,'Премия',1000,:now),(2,5,'Премия',1500,:now)"), {"now": now})
-            connection.execute(text("INSERT INTO receipts VALUES (1,'APPROVED',21000,:now),(2,'PENDING',26000,:now)"), {"now": now})
+            connection.execute(text("INSERT INTO receipts VALUES (1,1,'APPROVED',21000,:now),(2,2,'PENDING',26000,:now)"), {"now": now})
             connection.execute(text("INSERT INTO audit_logs VALUES (1,1,'unknown_legacy_event','sale',1,'Full retained details',:now)"), {"now": now})
 
     async def asyncTearDown(self):
@@ -570,4 +570,3 @@ def test_runtime_entry_points_install_policy():
     source = (ROOT / "app" / "render_main.py").read_text()
     assert source.count("secret_token=webhook_secret(config.bot_token)") == 2
     assert "drop_pending_updates=False" in source
-

@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.18-chat-reliability"
+RELEASE = "miniapp-3.19-media-recovery"
 
 
 async def health(request):
@@ -48,7 +48,7 @@ async def health(request):
     storage_state = storage.public_status() if storage is not None else {"configured": False, "connected": False, "writeVerified": False}
     calls_state = ice_config(0)
     return web.json_response({"service": "photo-boss", "status": "ok" if ready else "not_ready",
-                              "release": RELEASE, "app": "/app/",
+                              "release": RELEASE, "commit": os.getenv("RENDER_GIT_COMMIT", "")[:12] or None, "app": "/app/",
                               "calls": {"enabled": "work_calls" in request.app,
                                         "maxParticipants": calls_state["maxParticipants"],
                                         "relayConfigured": calls_state["relayConfigured"]},
@@ -85,7 +85,12 @@ async def on_startup(app):
             await reset_chat_menu(bot, tg_id)
         logger.info("Mini App menu configured: %s", app_url())
     logger.info("Telegram bot @%s is authenticated", me.username)
-    logger.info("Academy AI configured=%s; tracks=photographer,booking", bool(config.openai_api_key))
+    logger.info("Academy AI configured=%s; model=%s; tracks=photographer,booking", bool(config.openai_api_key), config.academy_analysis_model)
+    if os.getenv("AI_STARTUP_PROBE", "0") == "1":
+        from .services.development_ai import ROLEPLAY_SCHEMA, structured
+        await structured('Проверка подключения. Верни reply="Готов", score=null, errors=[], recommendations=[].',
+            [{'type': 'input_text', 'text': 'Синтетический тест без личных данных.'}],
+            ROLEPLAY_SCHEMA, 'startup_probe', limit=300)
     logger.info("Authenticated Telegram webhook configured")
     storage_status = await app["yandex_disk"].verify(write_test=True)
     if not storage_status["connected"] or not storage_status["writeVerified"]:
@@ -152,4 +157,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

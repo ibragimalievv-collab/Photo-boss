@@ -36,6 +36,7 @@ from .miniapp_security import (
 )
 from .services.academy_growth import personal_tip
 from .services.booking_access import booking_scope_sql
+from .yandex_disk import YandexDiskError
 
 logger = logging.getLogger(__name__)
 PREFIX = "/api/miniapp"
@@ -60,7 +61,7 @@ ACTIONS = {
     "employee_created": "Добавил сотрудника",
     "employee_fired": "Отключил доступ сотруднику",
     "employee_restored": "Восстановил доступ сотруднику",
-    "employee_role_removed": "Снял роль сотрудника",
+    "employee_role_removed": "Снял роль сотруднику",
     "academy_lesson_completed": "Завершил урок Академии",
     "academy_ai_plan": "AI подготовил персональное учебное задание",
     "academy_location_created": "Добавил учебную локацию",
@@ -184,6 +185,14 @@ class MiniApp:
             response = web.json_response(body, status=exc.status)
         except web.HTTPException as exc:
             response = web.json_response({"error": "Недопустимый запрос."}, status=exc.status)
+        except YandexDiskError:
+            # The provider may be down while the application and database are healthy.
+            # Preserve the original outbox row and do not expose provider URLs or tokens.
+            logger.warning("Mini App storage temporarily unavailable: %s", request.path)
+            response = web.json_response(
+                {"error": "Яндекс.Диск временно недоступен. Повторите действие. Не удаляйте исходные файлы до подтверждения сохранения."},
+                status=503,
+            )
         except Exception:
             logger.exception("Mini App handler failed: %s", request.path)
             response = web.json_response({"error": "Сервис временно недоступен. Повторите попытку."}, status=503)
@@ -224,6 +233,31 @@ class MiniApp:
             return date.fromisoformat(value)
         except (ValueError, TypeError) as exc:
             raise AccessError("Некорректная дата.", 400) from exc
+
+    async def ai_diagnostics(self, request):
+        require_owner(request['miniapp_actor']['roles'])
+        from .config import config
+        from .services.ai_diagnostics import public_diagnostics
+        return web.json_response({'provider': 'openai', 'configured': bool(config.openai_api_key),
+            'models': {'academy': config.academy_analysis_model, 'receipts': config.receipt_analysis_model},
+            'checks': public_diagnostics(), 'scope': 'since_server_start',
+            'note': 'Наличие ключа не доказывает успешный ответ API. Проверка использует только тестовый текст.'})
+
+    async def ai_probe(self, request):
+        require_owner(request['miniapp_actor']['roles'])
+        if await self.body(request) != {}:
+            raise AccessError('Проверка использует только встроенное тестовое задание.', 400)
+        import time
+        now = time.monotonic()
+        if now - getattr(self, '_ai_probe_at', -1000) < 60:
+            raise AccessError('Проверка уже выполнялась. Повтор доступен через минуту.', 429)
+        self._ai_probe_at = now
+        from .services.development_ai import ROLEPLAY_SCHEMA, structured
+        result = await structured('Это проверка доступности учебного ИИ. Ответь reply="Готов", score=null, errors=[], recommendations=[].',
+            [{'type': 'input_text', 'text': 'Проверка соединения, без данных сотрудников и гостей.'}],
+            ROLEPLAY_SCHEMA, 'connection_probe', limit=300)
+        return web.json_response({'ok': result['status'] == 'completed', 'status': result['status'],
+            'errorCode': result.get('errorCode'), 'message': result.get('message', 'OpenAI ответил корректно.')})
 
     async def me(self, request):
         actor = request["miniapp_actor"]
@@ -406,13 +440,13 @@ class MiniApp:
         bid = int(request.match_info["id"])
         expected, target, timestamp = transitions[action]
         async with self.engine.begin() as conn:
+            bookings = await self.rows(conn,
+                "SELECT photographer_id,status FROM bookings WHERE id=:bid FOR UPDATE", bid=bid)
             shoots = await self.rows(conn,
                 "SELECT id,status FROM shootings WHERE booking_id=:bid FOR UPDATE", bid=bid)
             if not shoots:
                 raise AccessError("Съёмка не найдена.", 404)
             shoot = shoots[0]
-            bookings = await self.rows(conn,
-                "SELECT photographer_id,status FROM bookings WHERE id=:bid FOR UPDATE", bid=bid)
             if not bookings or bookings[0]["photographer_id"] != actor["id"]:
                 raise AccessError("Это не ваша съёмка.", 403)
             if bookings[0]["status"] in {"PENDING_CONFIRMATION", "REJECTED", "CANCELLED"}:
@@ -446,14 +480,24 @@ class MiniApp:
         if "ADMIN" in actor["roles"] and "OWNER" not in actor["roles"] and (start != self.today() or end != self.today()):
             raise AccessError("Общая касса за прошлые периоды доступна только владельцу.")
         own = actor["permissions"]["financeScope"] == "self"
+        hotel_only = "ADMIN" in actor["roles"] and "OWNER" not in actor["roles"]
+        hotel_scope = booking_scope_sql(actor["id"], actor["roles"])
         lower, upper = utc_bounds(start, end, self.tz)
         args = {"lo": lower, "hi": upper, "uid": actor["id"]}
         sales = await self.rows(conn, """SELECT s.*, u.name AS employee, c.name AS client
             FROM sales s JOIN users u ON u.id=s.credited_user_id
             LEFT JOIN bookings b ON b.id=s.booking_id LEFT JOIN clients c ON c.id=b.client_id
             WHERE s.created_at>=:lo AND s.created_at<:hi """ +
-            ("AND s.credited_user_id=:uid " if own else "") + "ORDER BY s.created_at DESC", **args)
-        payroll = await self.rows(conn, "SELECT p.*,u.name FROM payroll_entries p JOIN users u ON u.id=p.user_id WHERE p.created_at>=:lo AND p.created_at<:hi " + ("AND p.user_id=:uid" if own else ""), **args)
+            ("AND s.credited_user_id=:uid " if own else f"AND ({hotel_scope}) " if hotel_only else "") + "ORDER BY s.created_at DESC", **args)
+        # Unscoped manual premiums/fines must not expose another hotel's money.
+        # Only an explicit sale -> payroll FK proves an administrator's scope;
+        # do not infer it from employee membership or free-text notes.
+        payroll_scope = "AND p.user_id=:uid" if own else ""
+        if hotel_only:
+            payroll_scope = ("AND EXISTS (SELECT 1 FROM sales ps JOIN bookings b ON b.id=ps.booking_id "
+                             "WHERE ps.manager_payroll_entry_id=p.id AND p.user_id=b.manager_id "
+                             f"AND ({hotel_scope}))")
+        payroll = await self.rows(conn, "SELECT p.*,u.name FROM payroll_entries p JOIN users u ON u.id=p.user_id WHERE p.created_at>=:lo AND p.created_at<:hi " + payroll_scope, **args)
         employees = {}
         for sale in sales:
             uid = sale["credited_user_id"]
@@ -468,10 +512,13 @@ class MiniApp:
             item["earned"] = item["commission"] + item["adjustments"]
         cash = None
         if not own:
-            receipts = await self.rows(conn, """SELECT verified_amount FROM receipts
-                WHERE status='APPROVED' AND reviewed_at>=:lo AND reviewed_at<:hi""", **args)
+            receipts = await self.rows(conn, "SELECT r.verified_amount FROM receipts r " +
+                ("JOIN bookings b ON b.id=r.booking_id " if hotel_only else "") +
+                "WHERE r.status='APPROVED' AND r.reviewed_at>=:lo AND r.reviewed_at<:hi " +
+                (f"AND ({hotel_scope})" if hotel_only else ""), **args)
             cash = sum(cents(r["verified_amount"]) for r in receipts)
-        return {"period": period, "from": str(start), "to": str(end), "scope": "self" if own else "company",
+        return {"period": period, "from": str(start), "to": str(end), "scope": "self" if own else "hotels" if hotel_only else "company",
+                "unscopedAdjustmentsExcluded": hotel_only,
                 "sales": sum(cents(s["amount"]) for s in sales), "cashReceived": cash,
                 "payroll": sum(e["earned"] for e in employees.values()),
                 "employees": sorted(employees.values(), key=lambda x: (-x["sales"], x["name"])),
@@ -479,7 +526,7 @@ class MiniApp:
                     "employee": s["employee"], "date": str(as_utc(s["created_at"]).astimezone(self.tz).date()),
                     "amount": cents(s["amount"]), "status": s["payment_status"]} for s in sales[:100]],
                 "salesCount": len(sales), "salesListLimited": len(sales) > 100,
-                "note": "Касса — подтверждённые чеки по дате подтверждения. Начислено — комиссии и записи премий/удержаний существующего бота. Это не выплаченная зарплата и не чистая прибыль. Продажи показаны до учёта оплаты."}
+                "note": ("Только назначенные вам отели. Ручные премии и удержания без надёжной привязки к отелю здесь не показаны; владелец и сам сотрудник видят их в своих отчётах. " if hotel_only else "") + "Касса — подтверждённые чеки по дате подтверждения. Начислено — комиссии и записи премий/удержаний существующего бота. Это не выплаченная зарплата и не чистая прибыль. Продажи показаны до учёта оплаты."}
 
     async def finance(self, request):
         actor = request["miniapp_actor"]
@@ -836,7 +883,7 @@ class MiniApp:
     async def static_file(self, request):
         name = request.match_info.get("asset", "index.html")
         allowed = {"js/delivery.js", "css/delivery-client.css", "sw.js", "manifest.webmanifest", "js/install.js", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-maskable-512.png", "assets/apple-touch-icon.png", "js/browser-login.js", "js/account.js", "js/schedule-editor.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
-                   "js/galleries.js", "js/gallery-view.js", "js/gallery-client.js", "css/galleries.css", "js/development.js", "js/academy-coach.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
+                   "js/form-state.js", "js/galleries.js", "js/gallery-view.js", "js/gallery-client.js", "css/galleries.css", "js/development.js", "js/academy-coach.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg"}
         if name not in allowed:
@@ -852,7 +899,7 @@ class MiniApp:
         app.router.add_get("/app/", self.static_file)
         app.router.add_get("/app/{asset:.*}", self.static_file)
         app.router.add_get("/certificate/{code}", self.certificate_page)
-        routes = [("GET", "/me", self.me), ("POST", "/session", self.session_open), ("PUT", "/preferences", self.preferences),
+        routes = [("GET", "/diagnostics/ai", self.ai_diagnostics), ("POST", "/diagnostics/ai/probe", self.ai_probe), ("GET", "/me", self.me), ("POST", "/session", self.session_open), ("PUT", "/preferences", self.preferences),
             ("GET", "/dashboard", self.dashboard), ("GET", "/bookings", self.bookings),
             ("GET", "/booking-photographers", self.booking_photographers),
             ("POST", r"/bookings/{id:\d+}/photographer", self.assign_booking_photographer),

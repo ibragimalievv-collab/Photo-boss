@@ -758,6 +758,13 @@ def test_shooting_order_ownership_start_finish_ready_and_full_upload():
         await callback(PHOTO_B, "photo:upload_done")
         async with Session() as session:
             shoot = await session.get(Shooting, 1)
+            assert shoot.full_upload_completed_at is None
+            from test_release_blockers import confirm_photos
+            await confirm_photos(session, shoot)
+            await session.commit()
+        await callback(PHOTO_B, "photo:upload_done")
+        async with Session() as session:
+            shoot = await session.get(Shooting, 1)
             assert shoot.full_upload_completed_at is not None
 
     run(scenario())
@@ -1450,4 +1457,3 @@ def test_photographer_assignment_is_owner_or_admin_only():
             async with Session() as session:
                 assert (await session.get(Booking, 1)).photographer_id == photographer.id
     run(scenario())
-

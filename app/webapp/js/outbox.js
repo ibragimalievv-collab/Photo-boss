@@ -1,8 +1,14 @@
 import {api} from './api.js';
 import {localAction,openLocal} from './localstore.js';
 let userId=null,running=false,timer=null;
+const scheduleRetry=delay=>{clearTimeout(timer);timer=setTimeout(()=>flushOutbox(),Math.min(2147483647,Math.max(1000,delay)));};
 const update=row=>localAction('operations','readwrite',s=>s.put(row));
 const changed=()=>window.dispatchEvent(new Event('pb-outbox'));
+// Older servers converted every domain error to this generic 400. Recheck such
+// media once, with the original key and bytes; never reset arbitrary bad requests.
+const legacyMediaError=row=>row.status==='error'&&row.errorStatus===400&&!row.legacyMediaRecovered&&
+ Boolean(row.hasBlob||row.blob)&&['shoot_photo','delivery_photo','sale_selected','booking_receipt','sale_receipt','attendance'].includes(row.kind)&&
+ typeof row.error==='string'&&row.error.startsWith('Не удалось прочитать вложение.');
 export function setOutboxUser(id){userId=id;void flushOutbox();}
 export async function outboxRows(){
  if(!userId)return [];const actor=userId,db=await openLocal();
@@ -62,10 +68,12 @@ export async function flushOutbox(){
  try{
   for(const item of await outboxRows()){
    if(actor!==userId)break;
-   if(!['local','syncing'].includes(item.status))continue;
+   if(!['local','syncing'].includes(item.status)&&!legacyMediaError(item))continue;
    const row=await localAction('operations','readonly',s=>s.get(item.key));
    if(actor!==userId)break;
-   if(!row||!['local','syncing'].includes(row.status))continue;
+   if(!row||(!['local','syncing'].includes(row.status)&&!legacyMediaError(row)))continue;
+   if(legacyMediaError(row)){row.legacyMediaRecovered=true;row.status='local';row.error='';await update(row);}
+   if(row.retryAt>Date.now()){scheduleRetry(row.retryAt-Date.now());summary.state='backoff';break;}
    row.status='syncing';await update(row);changed();
    try{
     const operation={actorId:row.userId,key:row.key,kind:row.kind,date:row.date,data:row.data};
@@ -78,18 +86,19 @@ export async function flushOutbox(){
      path='/operations/media';
     }
     row.result=await api(path,{method:'POST',body,timeoutMs:180000});
-    row.status='synced';row.error='';row.errorStatus=0;row.blob=null;
+    row.status='synced';row.error='';row.errorStatus=0;row.retryAt=0;row.blob=null;
     summary.completed++;
    }catch(e){
     // Missing dependencies and receipt failures must not strand independent shoot photos.
     // Keep their blobs on this device and retry without marking a dependent sale as failed.
-    const temporary=!e.status||e.status>=500||e.status===424;
+    const temporary=!e.status||e.status>=500||[408,424,429].includes(e.status);
     row.status=temporary?'local':'error';
     row.error=e.message;row.errorStatus=e.status||0;
+     row.retryAt=e.status===429?Date.now()+Math.max(30000,e.retryAfterMs||0):0;
     await update(row);changed();
     if(temporary){
      summary.temporary++;
-     clearTimeout(timer);timer=setTimeout(()=>flushOutbox(),30000);
+     scheduleRetry(Math.max(30000,row.retryAt-Date.now()));
      if(e.status===424||(e.status>=500&&['booking_receipt','sale_receipt'].includes(row.kind)))continue;
      break;
     }
@@ -99,8 +108,7 @@ export async function flushOutbox(){
    }
    await update(row);changed();
   }
- }finally{running=false;changed();}
+ }finally{running=false;changed();if(userId&&userId!==actor)void flushOutbox();}
  return summary;
 }
 window.addEventListener('online',()=>flushOutbox());
-

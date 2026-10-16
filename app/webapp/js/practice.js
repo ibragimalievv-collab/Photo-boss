@@ -32,13 +32,14 @@ function renderAssignment(data){
  const editable=data.own&&data.status==='ACTIVE';
  shell(data.title,`<p>${esc(data.userName)} · <strong data-practice-status>${esc(labels[data.status]||data.status)}</strong></p>
   <p>Загружено ${data.shots.filter(s=>s.uploaded).length}/5. Для каждого кадра показаны референс и задание.</p>
-  ${data.status==='PENDING_REVIEW'?`<p>${data.reviewSource==='AI_PENDING'?'ИИ проверяет фотографии…':'AI-проверку нужно повторить.'} Результат обновится автоматически.</p>`:''}
+  ${data.status==='PENDING_REVIEW'?`<p>${data.reviewSource==='AI_PENDING'?'ИИ проверяет фотографии…':data.analysis?.review?.decision==='MANUAL_REVIEW'?'ИИ не смог уверенно оценить кадры. Можно повторить проверку или переснять спорные кадры.':'AI-проверку нужно повторить.'} Результат обновится автоматически.</p>`:''}
   ${data.personalInstructions?.length?`<section class="practice-feedback"><h3>Ваше AI-задание</h3><ol>${data.personalInstructions.map(x=>`<li>${esc(x)}</li>`).join('')}</ol></section>`:''}${analysisMarkup(data)}<div class="practice-shots">${data.shots.map(s=>`<article class="practice-shot"><h3>Кадр ${s.index}/5</h3><p>${esc(s.instruction)}</p>
   <div class="practice-pair"><figure><img data-practice-photo="${esc(s.reference)}" alt="Учебный референс ${s.index}"><figcaption>Референс</figcaption></figure>
   ${s.photo?`<figure><img data-practice-photo="${esc(s.photo)}" alt="Работа фотографа ${s.index}"><figcaption>Ваш кадр сохранён</figcaption></figure>`:'<p class="practice-missing">Кадр ещё не загружен</p>'}</div>
   ${editable&&!s.uploaded?`<label class="practice-upload">Загрузить кадр ${s.index}<input type="file" accept="image/jpeg,image/png,image/webp" data-practice-upload="${s.index}"></label>`:''}</article>`).join('')}</div>
   ${editable?'<p>Выберите фото из галереи или камеры. Приложение подготовит JPEG до 8 МБ. После пятого кадра набор автоматически отправится на проверку.</p>':''}
   ${data.canRetry?`<button class="btn primary" data-practice-retry>Повторить AI-проверку</button>`:''}
+  ${data.canRetake?'<button class="btn" data-practice-retake>Переснять спорные кадры</button><p>Указанные ИИ кадры откроются для замены. Если номера не указаны — все пять. Прежние работы останутся в истории.</p>':''}
   <button class="practice-refresh" data-practice-refresh>Обновить</button>`);
  loadPhotos();
 }
@@ -84,6 +85,7 @@ panel.addEventListener('click',async e=>{
  if(b.hasAttribute('data-practice-close'))return close();
  if(busy)return;
  try{
+  if(b.hasAttribute('data-practice-retake')){busy=true;b.disabled=true;const indexes=current.analysis?.review?.reshoot_indexes;return renderAssignment(await api(`/academy/practice/${current.id}/retake`,{method:'POST',body:{indexes:indexes?.length?indexes:[1,2,3,4,5]}}));}
   if(b.hasAttribute('data-practice-retry')){await api(`/academy/practice/${current.id}/retry`,{method:'POST',body:{}});return await showAssignment(current.id);}
   if(b.hasAttribute('data-practice-plan')){close();document.dispatchEvent(new CustomEvent('pb-open-academy-coach'));return;}
   if(b.hasAttribute('data-practice-home'))return await home();
@@ -93,4 +95,3 @@ panel.addEventListener('click',async e=>{
  }catch(err){error(err);b.disabled=false;}finally{busy=false;}
 });
 panel.addEventListener('cancel',e=>{e.preventDefault();close();});
-

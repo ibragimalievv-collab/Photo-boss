@@ -65,7 +65,9 @@ def test_sales_training_owner_and_revision_boundaries(monkeypatch):
         body={'revision':1,'text':'Один кадр 400 ₽','finish':True}
         with pytest.raises(AccessError): await svc.turn(Request({'id':2,'roles':['PHOTOGRAPHER']},body,sid))
         await svc.turn(Request(OWNER,body,sid))
-        with pytest.raises(AccessError) as err: await svc.turn(Request(OWNER,body,sid))
+        assert json.loads((await svc.turn(Request(OWNER,body,sid))).text)['replayed'] is True
+        assert ai.roleplay.await_count == 1
+        with pytest.raises(AccessError) as err: await svc.turn(Request(OWNER,body | {'text': 'Другой ответ'},sid))
         assert err.value.status==409
         await engine.dispose()
     asyncio.run(run())

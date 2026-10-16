@@ -66,6 +66,9 @@ class AcademyPractice:
         return {"id": aid, "personalInstructions": plan.get("instructions", []) if plan.get("category") == category.slug else [], "category": category.slug, "title": category.title,
                 "userName": user[0]["name"], "own": row["user_id"] == actor["id"],
                 "canReview": False,
+                "canRetake": bool(row["user_id"] == actor["id"] and row["status"] == "PENDING_REVIEW"
+                                  and row["review_source"] != "AI_PENDING" and isinstance(analysis, dict)
+                                  and analysis.get("review", {}).get("decision") == "MANUAL_REVIEW"),
                 "canRetry": row["status"] == "PENDING_REVIEW" and row["review_source"] != "AI_PENDING",
                 "status": row["status"], "reviewSource": row["review_source"],
                 "score": row["ai_score"], "analysis": analysis,
@@ -235,6 +238,40 @@ class AcademyPractice:
             await conn.execute(text("UPDATE training_assignments SET review_source='AI_PENDING' WHERE id=:id"), {"id": aid})
         return web.json_response({"ok": True})
 
+    async def retake(self, request):
+        """Resolve an uncertain AI review without manual acceptance or lost history."""
+        actor = request["miniapp_actor"]
+        aid = positive_id(request.match_info["id"])
+        body = await self.api.body(request)
+        indexes = body.get("indexes")
+        if (set(body) != {"indexes"} or not isinstance(indexes, list) or not 1 <= len(indexes) <= 5
+                or any(type(i) is not int or not 1 <= i <= 5 for i in indexes)
+                or len(set(indexes)) != len(indexes)):
+            raise AccessError("Укажите разные номера кадров от 1 до 5.", 400)
+        async with self.lock, self.engine.begin() as conn:
+            row = await self.assignment(conn, actor, aid, lock=True)
+            if row["user_id"] != actor["id"]:
+                raise AccessError("Переснять практику может только её автор.", 403)
+            try:
+                analysis = json.loads(row["ai_analysis"] or "null")
+            except ValueError:
+                analysis = None
+            if (row["status"] != "PENDING_REVIEW" or row["review_source"] == "AI_PENDING"
+                    or not isinstance(analysis, dict)
+                    or analysis.get("review", {}).get("decision") != "MANUAL_REVIEW"):
+                raise AccessError("Пересъёмка доступна после неуверенного ответа ИИ. Обновите задание.", 409)
+            # Immutable snapshots in academy_practice_reviews keep every old file.
+            # Only unlink the selected current slots; never delete stored images.
+            for index in indexes:
+                await conn.execute(text("DELETE FROM training_submissions WHERE assignment_id=:id AND pose_index=:pose"),
+                                   {"id": aid, "pose": index})
+            await conn.execute(text("UPDATE training_assignments SET status='ACTIVE',review_source='AI_UNCERTAIN' WHERE id=:id"),
+                               {"id": aid})
+            await self.api.audit_write(conn, actor, "training_uncertain_retake", "training_assignment", aid,
+                                       json.dumps({"indexes": indexes}))
+            result = await self.detail_data(conn, actor, aid)
+        return web.json_response(result)
+
     async def process_pending(self, storage):
         async with self.engine.connect() as conn:
             rows = await self.api.rows(conn, """SELECT * FROM training_assignments
@@ -271,7 +308,7 @@ class AcademyPractice:
                                            {"id": row["id"], "pose": index})
                 await conn.execute(text("""UPDATE training_assignments SET status=:status,review_source=:source,
                     ai_score=:score,ai_analysis=:analysis,completed_at=:completed WHERE id=:id"""),
-                    {"id": row["id"], "status": status, "source": "AI_FAILED" if status == "PENDING_REVIEW" else "AI",
+                    {"id": row["id"], "status": status, "source": ("AI_UNCERTAIN" if decision == "MANUAL_REVIEW" else "AI_FAILED") if status == "PENDING_REVIEW" else "AI",
                      "score": review.get("score"), "analysis": json.dumps(result, ensure_ascii=False),
                      "completed": datetime.now(UTC).replace(tzinfo=None) if status == "COMPLETED" else None})
 
@@ -296,5 +333,6 @@ def install_academy_practice(app, miniapp):
     app.router.add_post(prefix + "/{id}/photos/{pose}", service.upload)
     app.router.add_post(prefix + "/{id}/review", service.review)
     app.router.add_post(prefix + "/{id}/retry", service.retry)
+    app.router.add_post(prefix + "/{id}/retake", service.retake)
     return service
 

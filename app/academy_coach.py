@@ -174,7 +174,7 @@ class AcademyCoach:
             response = await structured(instructions, [{'type': 'input_text', 'text': json.dumps(
                 {'evidence': data['_evidence'], 'lessons': lessons, 'scenarios': data['scenarios']}, ensure_ascii=False)}], schema, 'academy_personal_plan', limit=2400)
             if response['status'] != 'completed' or not valid_value(response.get('data'), schema):
-                raise AccessError('AI временно недоступен. Прошлый план сохранён; повторите позже.', 503)
+                raise AccessError(response.get('message') or 'AI временно недоступен. Прошлый план сохранён; повторите позже.', 503)
             plan = dict(response['data'], diagnostic=data['diagnostic'])
             async with self.engine.begin() as conn:
                 # The unique evidence key also protects against another service instance.
@@ -189,7 +189,7 @@ class AcademyCoach:
         slug = request.match_info['slug']
         questions = public_quiz(slug)
         if not questions:
-            raise AccessError('Тест не найден.', 404)
+            raise AccessError('Тест не найдено.', 404)
         if request.method == 'GET':
             return web.json_response({'questions': questions})
         body = await self.api.body(request)

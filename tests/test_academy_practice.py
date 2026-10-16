@@ -156,3 +156,31 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
         assert data["analysis"] == result
         assert self.bot.send_message.await_count == 0
 
+
+    async def test_uncertain_ai_result_has_retake_path_without_manual_acceptance(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        result = {"status": "completed", "review": {"decision": "MANUAL_REVIEW", "score": 65,
+                  "reshoot_indexes": [2, 4], "issues": ["Недостаточно деталей"], "strengths": [],
+                  "next_action": "Снимите второй и четвёртый кадры при лучшем освещении"}}
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), \
+                patch("app.academy_practice.analyze_training_set", AsyncMock(return_value=result)):
+            await self.practice.process_pending(self.storage)
+        _, data = await self.request(f"/{aid}")
+        assert data["status"] == "PENDING_REVIEW"
+        assert data["reviewSource"] == "AI_UNCERTAIN"
+        assert data["canRetake"] and data["canRetry"]
+        assert (await self.request(f"/{aid}/retake", uid=4, body={"indexes": [2, 4]}))[0] == 404
+        assert (await self.request(f"/{aid}/retake", uid=1, body={"indexes": [2, 4]}))[0] == 403
+        assert (await self.request(f"/{aid}/retake", body={"indexes": [0]}))[0] == 400
+        assert (await self.request(f"/{aid}/retake", body={"indexes": [2, 2]}))[0] == 400
+        status, changed = await self.request(f"/{aid}/retake", body={"indexes": [2, 4]})
+        assert status == 200 and changed["status"] == "ACTIVE"
+        assert [s["index"] for s in changed["shots"] if s["uploaded"]] == [1, 3, 5]
+        assert len(self.files) == 5
+        self.storage.delete.assert_not_awaited()
+        with self.engine.inner.begin() as conn:
+            import json
+            archive = conn.execute(text("SELECT photos FROM academy_practice_reviews WHERE assignment_id=:id"), {"id": aid}).scalar()
+            assert len(json.loads(archive)) == 5
+        assert (await self.request(f"/{aid}/review", body={"decision": "accept"}))[0] == 403

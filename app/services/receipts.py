@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 
 from ..config import config
 from ..models import Receipt, Sale
+from .ai_diagnostics import compatible_schema, http_failure, record
 
 logger = logging.getLogger(__name__)
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -142,7 +143,7 @@ async def extract_receipt(content):
              "data:image/jpeg;base64," + base64.b64encode(content).decode("ascii")},
         ]}],
         "text": {"format": {"type": "json_schema", "name": "receipt",
-                            "strict": True, "schema": SCHEMA}},
+                            "strict": True, "schema": compatible_schema(SCHEMA)}},
     }
     try:
         async with (
@@ -153,10 +154,9 @@ async def extract_receipt(content):
                 json=payload,
             ) as response,
         ):
-            if response.status != 200:
-                logger.warning("Receipt extraction HTTP status %s", response.status)
-                return {"status": "unavailable"}
             result = await response.json()
+            if response.status != 200:
+                return http_failure('receipt', config.receipt_analysis_model, response.status, result)
         if result.get("status") != "completed":
             return {"status": "unavailable"}
         text = "".join(
@@ -164,7 +164,9 @@ async def extract_receipt(content):
             if item.get("type") == "message"
             for part in item.get("content", []) if part.get("type") == "output_text"
         )
-        return {"status": "extracted", "fields": validate_extraction(json.loads(text))}
+        fields = validate_extraction(json.loads(text))
+        record('receipt', config.receipt_analysis_model, 'completed')
+        return {"status": "extracted", "fields": fields}
     except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError):
         # Never log a body, image, token, or Telegram download URL.
         logger.warning("Receipt extraction unavailable; manual review required")
