@@ -17,6 +17,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
       - name: Archive tracked source only
         run: |
           mkdir -p /tmp/photo-boss-audit
@@ -24,8 +27,15 @@ jobs:
           git archive --format=zip --output=/tmp/photo-boss-audit/main-source.zip 59728ad9661fd8f13dfe622cda595fcf21d4823b
           git archive --format=zip --output=/tmp/photo-boss-audit/photographer-source.zip 62a97d6ad6540622a98755cce24c49a76d8d27a4
           git rev-parse HEAD > /tmp/photo-boss-audit/source-commit.txt
+      - name: Download pinned verification dependencies
+        run: python -m pip download --only-binary=:all: -r requirements-dev.txt --dest /tmp/photo-boss-wheels
       - uses: actions/upload-artifact@v4
         with:
           name: audit-source-snapshots
           path: /tmp/photo-boss-audit/
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audit-test-wheels-python313
+          path: /tmp/photo-boss-wheels/
           retention-days: 3
