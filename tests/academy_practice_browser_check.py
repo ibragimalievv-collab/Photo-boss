@@ -79,6 +79,23 @@ async def main():
             assert await owner.locator('#practiceReview').count() == 0
             await owner.locator('[data-practice-retry]').click()
             await expect(owner.locator('.practice-body')).to_contain_text('ИИ проверяет фотографии')
+            uncertain = {'status': 'completed', 'review': {'decision': 'MANUAL_REVIEW', 'score': 65,
+                         'reshoot_indexes': [2, 4], 'issues': ['Недостаточно деталей'], 'strengths': [],
+                         'next_action': 'Переснимите два спорных кадра'}}
+            with patch('app.academy_practice.config', SimpleNamespace(openai_api_key='fixture')), \
+                    patch('app.academy_practice.analyze_training_set', AsyncMock(return_value=uncertain)):
+                await fixture.practice.process_pending(fixture.storage)
+            await trainee.locator('[data-practice-refresh]').click()
+            await expect(trainee.locator('.practice-body')).to_contain_text('ИИ не смог уверенно оценить')
+            await trainee.locator('[data-practice-retake]').click()
+            await trainee.locator('[data-practice-upload="2"]').wait_for()
+            assert await trainee.locator('[data-practice-upload]').count() == 2
+            assert len(fixture.files) == 5
+            for index in (2, 4):
+                await trainee.locator(f'[data-practice-upload="{index}"]').set_input_files(
+                    str(ROOT / f'app/assets/training/woman/{index:02d}.jpg'))
+                await expect(trainee.locator(f'[data-practice-upload="{index}"]')).to_have_count(0)
+            await expect(trainee.locator('[data-practice-status]')).to_have_text('На проверке')
             revision = {'status': 'completed', 'review': {'decision': 'REVISION', 'score': 75,
                         'reshoot_indexes': [2], 'issues': ['Другой ракурс'], 'strengths': [],
                         'next_action': 'Переснимите второй кадр'}}
@@ -94,7 +111,7 @@ async def main():
             await owner.locator('[data-practice-refresh]').click()
             accepted = {'status': 'completed', 'review': {'decision': 'ACCEPT', 'score': 90,
                         'reshoot_indexes': [], 'issues': [], 'strengths': ['Разные планы'],
-                        'next_action': 'Продолжить обучение'}}
+                        'next_action': 'Продолжить обучение'}
             with patch('app.academy_practice.config', SimpleNamespace(openai_api_key='fixture')), \
                     patch('app.academy_practice.analyze_training_set', AsyncMock(return_value=accepted)):
                 await fixture.practice.process_pending(fixture.storage)
@@ -106,7 +123,7 @@ async def main():
             assert trainee.url == BASE + '/app/#academy' and owner.url == BASE + '/app/#academy'
             await trainee.screenshot(path='/tmp/photo-boss-calls-qa/academy-practice.png')
             print(json.dumps({'ok': True, 'fivePhotos': True, 'aiReview': True, 'manualReviewDisabled': True,
-                              'reshoot': True, 'resultInApp': True, 'botHandoffs': 0, 'pageErrors': errors}))
+                              'reshoot': True, 'uncertainRetake': True, 'resultInApp': True, 'botHandoffs': 0, 'pageErrors': errors}))
         finally:
             await browser.close()
             await fixture.asyncTearDown()
@@ -115,4 +132,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-

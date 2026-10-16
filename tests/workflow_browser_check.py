@@ -107,6 +107,19 @@ async def main():
                     await page.evaluate('navigator.serviceWorker.ready')
                     await wait_async(page, '()=>navigator.serviceWorker.controller !== null')
                     assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                    await page.get_by_text('Новая бронь', exact=True).click()
+                    await page.locator('#workflowBooking [name=client_name]').fill('Черновик не терять')
+                    await page.evaluate("window.dispatchEvent(new Event('online'))")
+                    await page.wait_for_timeout(500)
+                    assert await page.locator('#workflowBooking [name=client_name]').input_value() == 'Черновик не терять'
+                    await page.locator('#workflowSalePick').select_option('1')
+                    await page.locator('#workflowSale [name=total]').fill('150')
+                    await page.locator('#workflowSale [name=selected]').set_input_files('app/webapp/assets/academy/family.jpg')
+                    await page.locator('#workflowSalePick').select_option('')
+                    await page.locator('#workflowSalePick').select_option('1')
+                    assert await page.locator('#workflowSale [name=total]').input_value() == '150'
+                    assert await page.locator('#workflowSale [name=selected]').evaluate('(el)=>el.files.length') == 1
+                    assert await page.locator('#workflowBooking [name=client_name]').input_value() == 'Черновик не терять'
                     await context.set_offline(True)
                     assert await page.evaluate("""async()=>{
                         const m=await import('/app/js/outbox.js');
@@ -129,6 +142,10 @@ async def main():
                     await sale.locator('[name=selected]').set_input_files('app/webapp/assets/academy/family.jpg')
                     await sale.locator('button').click()
                     await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length===6;}")
+                    assert await page.locator('#workflowSale [name=total]').input_value() == '150'
+                    await page.evaluate("async()=>{const m=await import('/app/js/workflow.js');await m.workflowSubmit(document.querySelector('#workflowSale'));}")
+                    assert await page.evaluate("async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length;}") == 6
+
                     await page.locator('#attendanceCard button').click()
                     dialog = page.locator('#attendanceDialog')
                     for _ in range(2):

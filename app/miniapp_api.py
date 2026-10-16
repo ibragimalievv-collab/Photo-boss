@@ -61,7 +61,7 @@ ACTIONS = {
     "employee_created": "Добавил сотрудника",
     "employee_fired": "Отключил доступ сотруднику",
     "employee_restored": "Восстановил доступ сотруднику",
-    "employee_role_removed": "Снял роль сотрудника",
+    "employee_role_removed": "Снял роль сотруднику",
     "academy_lesson_completed": "Завершил урок Академии",
     "academy_ai_plan": "AI подготовил персональное учебное задание",
     "academy_location_created": "Добавил учебную локацию",
@@ -233,6 +233,31 @@ class MiniApp:
             return date.fromisoformat(value)
         except (ValueError, TypeError) as exc:
             raise AccessError("Некорректная дата.", 400) from exc
+
+    async def ai_diagnostics(self, request):
+        require_owner(request['miniapp_actor']['roles'])
+        from .config import config
+        from .services.ai_diagnostics import public_diagnostics
+        return web.json_response({'provider': 'openai', 'configured': bool(config.openai_api_key),
+            'models': {'academy': config.academy_analysis_model, 'receipts': config.receipt_analysis_model},
+            'checks': public_diagnostics(), 'scope': 'since_server_start',
+            'note': 'Наличие ключа не доказывает успешный ответ API. Проверка использует только тестовый текст.'})
+
+    async def ai_probe(self, request):
+        require_owner(request['miniapp_actor']['roles'])
+        if await self.body(request) != {}:
+            raise AccessError('Проверка использует только встроенное тестовое задание.', 400)
+        import time
+        now = time.monotonic()
+        if now - getattr(self, '_ai_probe_at', -1000) < 60:
+            raise AccessError('Проверка уже выполнялась. Повтор доступен через минуту.', 429)
+        self._ai_probe_at = now
+        from .services.development_ai import ROLEPLAY_SCHEMA, structured
+        result = await structured('Это проверка доступности учебного ИИ. Ответь reply="Готов", score=null, errors=[], recommendations=[].',
+            [{'type': 'input_text', 'text': 'Проверка соединения, без данных сотрудников и гостей.'}],
+            ROLEPLAY_SCHEMA, 'connection_probe', limit=300)
+        return web.json_response({'ok': result['status'] == 'completed', 'status': result['status'],
+            'errorCode': result.get('errorCode'), 'message': result.get('message', 'OpenAI ответил корректно.')})
 
     async def me(self, request):
         actor = request["miniapp_actor"]
@@ -845,7 +870,7 @@ class MiniApp:
     async def static_file(self, request):
         name = request.match_info.get("asset", "index.html")
         allowed = {"js/delivery.js", "css/delivery-client.css", "sw.js", "manifest.webmanifest", "js/install.js", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-maskable-512.png", "assets/apple-touch-icon.png", "js/browser-login.js", "js/account.js", "js/schedule-editor.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
-                   "js/galleries.js", "js/gallery-view.js", "js/gallery-client.js", "css/galleries.css", "js/development.js", "js/academy-coach.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
+                   "js/form-state.js", "js/galleries.js", "js/gallery-view.js", "js/gallery-client.js", "css/galleries.css", "js/development.js", "js/academy-coach.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg"}
         if name not in allowed:
@@ -861,7 +886,7 @@ class MiniApp:
         app.router.add_get("/app/", self.static_file)
         app.router.add_get("/app/{asset:.*}", self.static_file)
         app.router.add_get("/certificate/{code}", self.certificate_page)
-        routes = [("GET", "/me", self.me), ("POST", "/session", self.session_open), ("PUT", "/preferences", self.preferences),
+        routes = [("GET", "/diagnostics/ai", self.ai_diagnostics), ("POST", "/diagnostics/ai/probe", self.ai_probe), ("GET", "/me", self.me), ("POST", "/session", self.session_open), ("PUT", "/preferences", self.preferences),
             ("GET", "/dashboard", self.dashboard), ("GET", "/bookings", self.bookings),
             ("GET", "/booking-photographers", self.booking_photographers),
             ("POST", r"/bookings/{id:\d+}/photographer", self.assign_booking_photographer),

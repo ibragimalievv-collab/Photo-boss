@@ -207,6 +207,9 @@ def test_booking_ai_validates_six_skills_and_does_not_fabricate_provider_errors(
             assert (await booking_roleplay(BOOKING_SCENARIOS[0]['type'], [{'role': 'employee', 'text': 'Можно рассказать?'}], True))['status'] == 'completed'
             assert 'не продаёт готовые фотографии' in provider.call_args.args[0]
             provider.return_value = {'status': 'completed', 'data': data | {'score': 99}}
+            calculated = await booking_roleplay(BOOKING_SCENARIOS[0]['type'], [], True)
+            assert calculated['status'] == 'completed' and calculated['data']['score'] == 80
+            provider.return_value = {'status': 'completed', 'data': data | {'criteria': {'approach': 999}}}
             assert (await booking_roleplay(BOOKING_SCENARIOS[0]['type'], [], True))['status'] == 'unavailable'
             provider.return_value = {'status': 'unavailable'}
             assert (await booking_roleplay(BOOKING_SCENARIOS[0]['type'], [], True))['status'] == 'unavailable'

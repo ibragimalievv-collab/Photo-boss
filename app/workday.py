@@ -5,7 +5,7 @@ import json
 from datetime import timedelta
 from pathlib import Path
 
-from aiohttp import web
+from aiohttp import ClientPayloadError, web
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
@@ -68,6 +68,12 @@ class Workday:
     async def media(self, request):
         try:
             return await self.read_media(request)
+        except AccessError:
+            # AccessError is a ValueError: do not turn a retryable 503 or access
+            # denial into a permanent 400 in the browser's persistent outbox.
+            raise
+        except (ConnectionError, ClientPayloadError, TimeoutError) as exc:
+            raise AccessError('Передача файла прервалась. Повторите отправку; не удаляйте исходный файл.', 503) from exc
         except (ValueError, AssertionError) as exc:
             raise AccessError('Не удалось прочитать вложение. Повторите отправку; если ошибка повторится, выберите файл заново.', 400) from exc
 
@@ -76,9 +82,14 @@ class Workday:
         meta = await reader.next()
         if meta is None or meta.name != 'operation':
             raise AccessError('Не указана операция вложения.', 400)
-        encoded = await meta.read_chunk(8192)
-        if not meta.at_eof():
-            raise AccessError('Слишком большие метаданные.', 413)
+        encoded = bytearray()
+        while not meta.at_eof():
+            chunk = await meta.read_chunk(8192)
+            if not chunk and not meta.at_eof():
+                raise ConnectionResetError('Incomplete operation metadata')
+            encoded.extend(chunk)
+            if len(encoded) > 8192:
+                raise AccessError('Слишком большие метаданные.', 413)
         try:
             body = json.loads(encoded)
         except (ValueError, UnicodeDecodeError) as exc:
@@ -198,4 +209,3 @@ def install_workday(app,api):
     app.router.add_get('/feedback/{token}',service.feedback_page)
     app.router.add_post('/feedback/{token}',service.feedback_submit)
     return service
-

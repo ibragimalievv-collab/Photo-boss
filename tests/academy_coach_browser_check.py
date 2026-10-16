@@ -24,6 +24,7 @@ async def main():
     errors = []
     completed = set()
     session = None
+    fail_turn = True
     plan_calls = []
     delay_photo = False
     photo_started = asyncio.Event()
@@ -37,7 +38,7 @@ async def main():
         page.on('pageerror', lambda e: errors.append(str(e)))
 
         async def intercept(route):
-            nonlocal session
+            nonlocal session, fail_turn
             url = urlsplit(route.request.url)
             path = url.path
             if url.netloc != 'academy.example' or path.startswith(('/shift/', '/people/', '/work-chat/')):
@@ -89,6 +90,9 @@ async def main():
                            'transcript': [{'role': 'client', 'text': 'У нас нет времени'}], 'evaluation': None}
                 data = {'id': 10}
             elif endpoint == '/academy/sales-training/10/turn':
+                if fail_turn:
+                    fail_turn = False
+                    return await route.fulfill(status=503, body=json.dumps({'error': 'OpenAI: тестовый временный отказ'}), content_type='application/json')
                 session['transcript'].append({'role': 'employee', 'text': body['text']})
                 session['revision'] += 1
                 if body['finish']:
@@ -128,6 +132,10 @@ async def main():
         await page.locator('[data-coach-scenario="booking-time"]').first.click()
         await expect(page.locator('#bookingTrainingForm')).to_be_visible()
         await page.locator('#bookingTrainingForm textarea').fill('Понимаю. Хотите подобрать удобное время?')
+        await page.locator('#bookingTrainingForm button[value="reply"]').click()
+        await expect(page.locator('[data-booking-error]')).to_contain_text('тестовый временный отказ')
+        await page.evaluate("document.dispatchEvent(new CustomEvent('pb-academy-coach-updated'))")
+        await expect(page.locator('#bookingTrainingForm textarea')).to_have_value('Понимаю. Хотите подобрать удобное время?')
         await page.locator('#bookingTrainingForm button[value="reply"]').click()
         await expect(page.locator('#bookingTraining')).to_contain_text('А завтра можно?')
         await page.locator('#bookingTrainingForm button[value="finish"]').click()

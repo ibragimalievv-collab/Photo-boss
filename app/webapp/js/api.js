@@ -1,5 +1,5 @@
 import {readSnapshot,saveSnapshot,setSnapshotUser} from './localstore.js';
-export class ApiError extends Error {constructor(message,status=0,telegramId=null){super(message);this.status=status;this.telegramId=Number.isSafeInteger(telegramId)&&telegramId>0?telegramId:null;}}
+export class ApiError extends Error {constructor(message,status=0,telegramId=null,retryAfterMs=0){super(message);this.status=status;this.retryAfterMs=retryAfterMs;this.telegramId=Number.isSafeInteger(telegramId)&&telegramId>0?telegramId:null;}}
 
 const SECURE_INIT_KEY='photo_boss_init_data_v1';
 const SESSION_INIT_KEY='pb_init_data_v1';
@@ -138,7 +138,12 @@ export async function api(path,{body,method='GET',timeoutMs,responseType,...opti
   if(response.ok&&responseType==='response')return response;
   if(response.ok&&responseType==='blob')return await response.blob();
   const data=await response.json().catch(()=>null);
-  if(!response.ok)throw new ApiError(data?.error||(response.status>=500?'Сервис временно недоступен. Повторите попытку.':`Запрос отклонён (${response.status}).`),response.status,data?.telegramId);
+  if(!response.ok){
+   const header=response.headers?.get?.('Retry-After');
+   const seconds=header&&/^\d+(?:\.\d+)?$/.test(header.trim())?Number(header):null;
+   const retryAfterMs=seconds!==null?seconds*1000:header?Math.max(0,Date.parse(header)-Date.now()):0;
+   throw new ApiError(data?.error||(response.status>=500?'Сервис временно недоступен. Повторите попытку.':`Запрос отклонён (${response.status}).`),response.status,data?.telegramId,Number.isFinite(retryAfterMs)?Math.max(0,retryAfterMs):0);
+  }
   if(!data)throw new ApiError('Сервер вернул некорректный ответ.');
   if(path==='/me')setSnapshotUser(data.user?.telegramId);
   if(method==='GET')try{await saveSnapshot(path,data);}catch{window.dispatchEvent(new Event('pb-local-storage-error'));}

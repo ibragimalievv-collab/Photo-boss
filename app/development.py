@@ -131,17 +131,26 @@ class Development:
             rows=await self.api.rows(conn,'SELECT * FROM sales_training_sessions WHERE id=:id AND user_id=:uid FOR UPDATE',id=sid,uid=a['id'])
             if not rows: raise AccessError('Тренировка не найдена.',404)
             s=rows[0]
+            replay_key = f"ai-training:{sid}:{body['revision']}"
+            digest = hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            old = await self.api.rows(conn, 'SELECT payload_hash,result FROM operation_requests WHERE user_id=:uid AND request_key=:key', uid=a['id'], key=replay_key)
+            if old:
+                if old[0]['payload_hash'] != digest:
+                    raise AccessError('Этот ход уже сохранён с другим текстом. Откройте текущий диалог.', 409)
+                return web.json_response({'ok': True, 'replayed': True})
             if s['revision']!=body['revision'] or s['status']!='ACTIVE': raise AccessError('Диалог обновлён. Откройте текущую версию.',409)
             transcript=json.loads(s['transcript'])
             if len(transcript)>=40 and not body['finish']: raise AccessError('Пора завершить тренировку и получить рекомендации.',409)
             if body['text'].strip(): transcript.append({'role':'employee','text':body['text'].strip()})
             if body['finish'] and not any(t['role']=='employee' for t in transcript): raise AccessError('Сначала ответьте гостю, затем завершите тренировку.',409)
             response=await ai.roleplay(s['client_type'],transcript,body['finish'])
-            if response['status']!='completed': raise AccessError('AI временно недоступен. Ваш ход не потерян в форме; попробуйте снова.',503)
+            if response['status']!='completed': raise AccessError(response.get('message') or 'AI временно недоступен. Ваш ход не потерян в форме; попробуйте снова.',503)
             result=response['data']
             if not (ai.valid_booking_roleplay(result,body['finish']) if s['client_type'].startswith('booking-') else ai.valid_roleplay(result,body['finish'])): raise AccessError('AI вернул некорректную оценку; повторите попытку.',503)
             transcript.append({'role':'coach' if body['finish'] else 'client','text':result['reply']})
             await conn.execute(text('UPDATE sales_training_sessions SET transcript=:transcript,status=:status,revision=revision+1,evaluation=:evaluation WHERE id=:id'),{'transcript':json.dumps(transcript,ensure_ascii=False),'status':'COMPLETED' if body['finish'] else 'ACTIVE','evaluation':json.dumps(result,ensure_ascii=False) if body['finish'] else None,'id':sid})
+            await conn.execute(text('INSERT INTO operation_requests(user_id,request_key,payload_hash,result,created_at) VALUES (:uid,:key,:hash,:result,:now)'),
+                {'uid': a['id'], 'key': replay_key, 'hash': digest, 'result': '{"ok":true}', 'now': utc_now()})
         return web.json_response({'ok':True})
 
     async def retry(self,request):
@@ -172,4 +181,3 @@ def install_development(app,api):
     for method,path,handler in [('GET','/academy/development',service.listing),('POST','/academy/sales-training',service.start),('POST','/academy/sales-training/{id}/turn',service.turn),('POST','/academy/shoot-reviews/{id}/retry',service.retry)]:
         app.router.add_route(method,'/api/miniapp'+path,handler)
     return service
-
