@@ -36,6 +36,7 @@ from .miniapp_security import (
 )
 from .services.academy_growth import personal_tip
 from .services.booking_access import booking_scope_sql
+from .yandex_disk import YandexDiskError
 
 logger = logging.getLogger(__name__)
 PREFIX = "/api/miniapp"
@@ -184,6 +185,14 @@ class MiniApp:
             response = web.json_response(body, status=exc.status)
         except web.HTTPException as exc:
             response = web.json_response({"error": "Недопустимый запрос."}, status=exc.status)
+        except YandexDiskError:
+            # The provider may be down while the application and database are healthy.
+            # Preserve the original outbox row and do not expose provider URLs or tokens.
+            logger.warning("Mini App storage temporarily unavailable: %s", request.path)
+            response = web.json_response(
+                {"error": "Яндекс.Диск временно недоступен. Повторите действие. Не удаляйте исходные файлы до подтверждения сохранения."},
+                status=503,
+            )
         except Exception:
             logger.exception("Mini App handler failed: %s", request.path)
             response = web.json_response({"error": "Сервис временно недоступен. Повторите попытку."}, status=503)
