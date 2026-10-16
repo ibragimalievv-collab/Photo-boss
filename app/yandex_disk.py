@@ -75,20 +75,22 @@ class YandexDisk:
 
     async def _json(self, method: str, endpoint: str, *, params=None, ok=(200,)):
         timeout = aiohttp.ClientTimeout(total=20)
-        async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
-            session.request(method, API + endpoint, headers=self.headers, params=params) as response,
-        ):
-            try:
-                data = await response.json(content_type=None)
-            except (aiohttp.ContentTypeError, json.JSONDecodeError, UnicodeDecodeError):
-                data = {}
-            if response.status not in ok:
-                code = data.get("error") if isinstance(data, dict) else None
-                detail = code if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_]{1,100}", code) else "provider_error"
-                raise YandexDiskError(f"Yandex.Disk HTTP {response.status}" + (f": {detail}" if detail else ""))
-            return data
-
+        try:
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.request(method, API + endpoint, headers=self.headers, params=params) as response,
+            ):
+                try:
+                    data = await response.json(content_type=None)
+                except (aiohttp.ContentTypeError, json.JSONDecodeError, UnicodeDecodeError):
+                    data = {}
+                if response.status not in ok:
+                    code = data.get("error") if isinstance(data, dict) else None
+                    detail = code if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_]{1,100}", code) else "provider_error"
+                    raise YandexDiskError(f"Yandex.Disk HTTP {response.status}" + (f": {detail}" if detail else ""))
+                return data
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            raise YandexDiskError("Яндекс.Диск не ответил на запрос. Повторите попытку.") from exc
     async def metadata(self, path: str):
         return await self._json("GET", "/resources", params={"path": safe_path(path)})
 
@@ -112,16 +114,20 @@ class YandexDisk:
         if not isinstance(href, str) or not href.startswith("https://") or method not in {"PUT", "POST"}:
             raise YandexDiskError("Yandex.Disk did not return a valid upload target")
         timeout = aiohttp.ClientTimeout(total=30)
-        async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
-            session.request(method, href, data=payload, headers={"Content-Type": content_type}) as response,
-        ):
-            if response.status not in (200, 201, 202):
-                raise YandexDiskError(f"Yandex.Disk upload HTTP {response.status}")
+        try:
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.request(method, href, data=payload, headers={"Content-Type": content_type}) as response,
+            ):
+                if response.status not in (200, 201, 202):
+                    raise YandexDiskError(f"Yandex.Disk upload HTTP {response.status}")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            # PUT may have reached the provider before the response was lost.
+            # Never mark success without checking the provider's stored checksum.
+            raise YandexDiskError("Не удалось подтвердить загрузку на Яндекс.Диск. Повторите попытку.") from exc
         metadata = await self.metadata(path)
         validate_saved(metadata, payload)
         return metadata
-
     async def download_bytes(self, path: str, *, max_bytes=20 * 1024 * 1024):
         path = safe_path(path)
         data = await self._json("GET", "/resources/download", params={"path": path})
@@ -130,21 +136,23 @@ class YandexDisk:
             raise YandexDiskError("Yandex.Disk did not return a valid download target")
         timeout = aiohttp.ClientTimeout(total=45)
         payload = bytearray()
-        async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
-            session.get(href) as response,
-        ):
-            if response.status != 200:
-                raise YandexDiskError(f"Yandex.Disk download HTTP {response.status}")
-            length = response.headers.get("Content-Length")
-            if length and length.isdigit() and int(length) > max_bytes:
-                raise YandexDiskError("Yandex.Disk file exceeds download limit")
-            async for chunk in response.content.iter_chunked(64 * 1024):
-                payload.extend(chunk)
-                if len(payload) > max_bytes:
+        try:
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.get(href) as response,
+            ):
+                if response.status != 200:
+                    raise YandexDiskError(f"Yandex.Disk download HTTP {response.status}")
+                length = response.headers.get("Content-Length")
+                if length and length.isdigit() and int(length) > max_bytes:
                     raise YandexDiskError("Yandex.Disk file exceeds download limit")
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    payload.extend(chunk)
+                    if len(payload) > max_bytes:
+                        raise YandexDiskError("Yandex.Disk file exceeds download limit")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            raise YandexDiskError("Яндекс.Диск прервал скачивание файла. Повторите запрос.") from exc
         return bytes(payload)
-
     async def delete(self, path: str):
         path = safe_path(path)
         await self._json(
