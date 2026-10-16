@@ -57,3 +57,45 @@ def test_verify_write_sequence_without_network(monkeypatch):
     assert calls[1][0] == "dir"
     assert calls[2][0] == "upload"
     assert calls[3][0] == "delete"
+
+def test_provider_network_timeouts_have_safe_recoverable_errors(monkeypatch):
+    """Real provider timeouts must not become unhandled application crashes."""
+    from app import yandex_disk as module
+
+    class TimeoutSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def request(self, *args, **kwargs):
+            raise asyncio.TimeoutError("private network detail")
+
+        def get(self, *args, **kwargs):
+            raise asyncio.TimeoutError("private network detail")
+
+    monkeypatch.setattr(module.aiohttp, "ClientSession", TimeoutSession)
+    disk = YandexDisk("secret-token-value")
+
+    with pytest.raises(module.YandexDiskError, match="не ответил") as metadata:
+        asyncio.run(disk._json("GET", "/resources"))
+    assert "private network detail" not in str(metadata.value)
+    assert "secret-token-value" not in str(metadata.value)
+
+    async def upload_url(*args, **kwargs):
+        return {"href": "https://upload.example.invalid/test", "method": "PUT"}
+
+    monkeypatch.setattr(disk, "_json", upload_url)
+    with pytest.raises(module.YandexDiskError, match="подтвердить загрузку"):
+        asyncio.run(disk.upload_bytes(ROOT + "/shootings/test.jpg", b"original JPEG"))
+
+    async def download_url(*args, **kwargs):
+        return {"href": "https://download.example.invalid/test"}
+
+    monkeypatch.setattr(disk, "_json", download_url)
+    with pytest.raises(module.YandexDiskError, match="прервал скачивание"):
+        asyncio.run(disk.download_bytes(ROOT + "/shootings/test.jpg"))
