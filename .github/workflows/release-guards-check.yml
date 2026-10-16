@@ -1,0 +1,65 @@
+name: Storage and hotel finance release guards
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  guards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: photoboss_guards_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-only-disposable-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d photoboss_guards_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
+      ADMIN_TELEGRAM_IDS: '5000000001'
+      DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+      OPENAI_API_KEY: ''
+      PYTHONPATH: '.:tests'
+      BLOCKER_POSTGRES_TEST_URL: postgresql+asyncpg://postgres:ci-only-disposable-password@127.0.0.1:5432/photoboss_guards_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Verify syntax and all backend and client regressions
+        run: |
+          ruff check app tests
+          python -m compileall -q app tests
+          python -m pytest -q --junitxml=/tmp/release-guards-tests.xml
+          for test in tests/*_check.mjs; do node "$test"; done
+      - name: Verify concurrent sale and upload closure on disposable PostgreSQL
+        run: python tests/release_blockers_postgres_check.py
+      - name: Archive exact verified source
+        if: always()
+        run: |
+          git archive --format=zip --output=/tmp/release-guards-source.zip HEAD
+          git rev-parse HEAD > /tmp/release-guards-commit.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-guards-verification
+          path: |
+            /tmp/release-guards-tests.xml
+            /tmp/release-guards-source.zip
+            /tmp/release-guards-commit.txt
+          retention-days: 7
