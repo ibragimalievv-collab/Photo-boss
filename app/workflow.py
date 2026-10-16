@@ -30,7 +30,11 @@ from .models import (
 from .services.booking_access import booking_scope, can_access_booking
 from .services.bookings import create_booking_record
 from .services.core import audit
-from .services.photo_storage import ensure_photo_storage, image_format
+from .services.photo_storage import (
+    StorageConfirmationPending,
+    ensure_photo_storage,
+    image_format,
+)
 from .services.receipts import (
     expected_amount,
     extract_receipt,
@@ -210,6 +214,8 @@ class Workflow:
                 return result
         except AccessError:
             raise
+        except StorageConfirmationPending as exc:
+            raise AccessError(str(exc), 424) from exc
         except ValueError as exc:
             raise AccessError(str(exc), 409) from exc
         except YandexDiskError as exc:
@@ -298,18 +304,17 @@ class Workflow:
     async def shoot(self, session, actor, roles, kind, data, raw):
         fields(data, 'shooting')
         sid = await target(session, actor, data['shooting'], 'shootingId')
-        shooting = await session.get(Shooting, sid, with_for_update=True)
-        booking = await session.get(Booking, shooting.booking_id) if shooting else None
+        preview = await session.get(Shooting, sid)
+        booking = await session.get(Booking, preview.booking_id, with_for_update=True) if preview else None
+        shooting = await session.get(Shooting, sid, with_for_update=True, populate_existing=True) if preview else None
         if not await can_access_booking(session, actor.id, roles, booking, photos=True):
             raise AccessError('Нет доступа к съёмке.', 403)
         if kind == 'shoot_retry':
-            rows = (await session.scalars(select(PhotoStorage).where(
-                PhotoStorage.shooting_id == sid, PhotoStorage.status == 'FAILED'
-            ).with_for_update())).all()
-            for row in rows:
-                row.status, row.attempts, row.last_error = 'PENDING', 0, None
-                row.started_at = None
-            return {'shootingId': sid, 'retried': len(rows)}
+            from .services.photo_storage import repair_storage_queue
+            recovery = await repair_storage_queue(session, sid)
+            await audit(session, actor, 'shoot_storage_recovery', 'shooting', sid,
+                        json.dumps(recovery))
+            return {'shootingId': sid, **recovery}
         if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
             raise AccessError('Загрузка съёмки уже закрыта или ещё недоступна.', 409)
         if kind == 'shoot_photo':
@@ -328,3 +333,4 @@ class Workflow:
             return {'shootingId': sid, 'photoId': photo.id, 'storageStatus': 'PENDING'}
         completed = await complete_full_upload(session, actor, sid, allow_management=True)
         return {'shootingId': sid, 'photos': completed.count, 'percent': str(completed.commissions['percent'])}
+

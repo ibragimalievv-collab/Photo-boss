@@ -78,10 +78,13 @@ async def complete_full_upload(session, actor, shooting_id, *, allow_management=
     from types import SimpleNamespace
 
     from .core import roles_of
-    from .photo_storage import storage_summary
+    from .photo_storage import require_confirmed_originals, storage_summary
 
-    shooting = await session.get(Shooting, shooting_id, with_for_update=True)
-    booking = await session.get(Booking, shooting.booking_id) if shooting else None
+    # Lock the booking before the shooting, the same order as completing a sale.
+    # Otherwise a concurrent sale can miss the final commission calculation.
+    preview = await session.get(Shooting, shooting_id)
+    booking = await session.get(Booking, preview.booking_id, with_for_update=True) if preview else None
+    shooting = await session.get(Shooting, shooting_id, with_for_update=True, populate_existing=True) if preview else None
     roles = await roles_of(session, actor)
     from .booking_access import can_access_booking
     permitted_roles = roles if allow_management else roles - {'OWNER', 'ADMIN', 'MANAGER'}
@@ -95,6 +98,7 @@ async def complete_full_upload(session, actor, shooting_id, *, allow_management=
         raise ValueError('Сначала загрузите всю съёмку.')
     if declared and count < declared:
         raise ValueError(f'По продаже указано {declared} кадров, а загружено {count}. Загрузите оставшиеся кадры перед завершением.')
+    await require_confirmed_originals(session, shooting.id)
     sync = await storage_summary(session, shooting.id)
     shooting.full_upload_completed_at = datetime.now(UTC).replace(tzinfo=None)
     commissions = await finalize_photographer_commissions(session, booking)

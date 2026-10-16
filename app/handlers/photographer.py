@@ -422,14 +422,11 @@ async def action(c: CallbackQuery, state):
     }
     async with Session() as s:
         u = await get_user(s, c.from_user.id)
-        sh = (
-            await s.execute(
-                select(Shooting).where(Shooting.id == sid).with_for_update()
-            )
-        ).scalar_one_or_none()
-        if sh is None:
+        preview = await s.get(Shooting, sid)
+        if preview is None:
             return await c.answer("Съёмка не найдена.")
-        b = await s.get(Booking, sh.booking_id)
+        b = await s.get(Booking, preview.booking_id, with_for_update=True)
+        sh = await s.get(Shooting, sid, with_for_update=True, populate_existing=True)
         if u is None or not u.active or b is None or b.photographer_id != u.id:
             return await c.answer("Это не ваша съёмка.")
         expected, target, timestamp = transitions[act]
@@ -535,7 +532,7 @@ async def upload_sale_photo(m, state):
             return await m.answer("Как файл можно отправлять только JPEG, PNG или WebP.")
     async with Session() as s:
         u = await get_user(s, m.from_user.id)
-        shooting = await s.get(Shooting, shooting_id)
+        shooting = await s.get(Shooting, shooting_id, with_for_update=True, populate_existing=True)
         booking = await s.get(Booking, shooting.booking_id) if shooting else None
         if (
             booking is None
@@ -617,7 +614,10 @@ async def finish_photo_upload(c: CallbackQuery, state):
         try:
             completed = await complete_full_upload(s, u, shooting_id)
         except ValueError as exc:
-            return await c.answer(str(exc), show_alert=True)
+            await c.answer(str(exc)[:190], show_alert=True)
+            if len(str(exc)) > 190:
+                await c.message.answer(str(exc))
+            return
         count, sync, commission_state = completed.count, completed.sync, completed.commissions
         await s.commit()
     await state.clear()

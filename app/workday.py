@@ -99,7 +99,10 @@ class Workday:
             raise AccessError('Не найдено вложение.', 400)
         raw = bytearray()
         while not part.at_eof():
-            raw.extend(await part.read_chunk(65536))
+            chunk = await part.read_chunk(65536)
+            if not chunk and not part.at_eof():
+                raise ConnectionResetError('Incomplete file payload')
+            raw.extend(chunk)
             if len(raw) > 20 * 1024 * 1024:
                 raise AccessError('Фото должно быть не больше 20 МБ.', 413)
         if await reader.next() is not None:

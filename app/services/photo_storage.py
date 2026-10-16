@@ -256,3 +256,84 @@ async def storage_summary(session, shooting_id: int) -> dict:
         "pending": sum(1 for row in rows if row.status in {"PENDING", "UPLOADING"}),
         "failed": sum(1 for row in rows if row.status == "FAILED"),
     }
+
+
+class StorageConfirmationPending(ValueError):
+    """Retry only after storage catches up; never finalize money on this result."""
+
+
+async def require_confirmed_originals(session, shooting_id):
+    """Every original needs its own validated storage receipt, not a zero-error count.
+
+    The caller must hold the Shooting lock while closing an upload. STORED is
+    written by sync_one only after Yandex size/hash verification. Keep this check
+    local to avoid 1000 network requests inside a financial transaction.
+    """
+    import re
+
+    from ..models import Photo
+
+    pairs = (await session.execute(select(Photo.id, PhotoStorage).outerjoin(
+        PhotoStorage, and_(PhotoStorage.photo_id == Photo.id,
+                           PhotoStorage.shooting_id == Photo.shooting_id)
+    ).where(Photo.shooting_id == shooting_id))).all()
+    missing = sum(row is None for _, row in pairs)
+    pending = sum(row is not None and row.status in {'PENDING', 'UPLOADING'} for _, row in pairs)
+    failed = sum(row is not None and row.status == 'FAILED' for _, row in pairs)
+    invalid = 0
+    hashes = []
+    prefix = ROOT + f'/shootings/{shooting_id}/'
+    for _, row in pairs:
+        if row is None or row.status != 'STORED':
+            continue
+        if (not row.disk_path or not row.disk_path.startswith(prefix)
+                or not row.stored_at or not row.byte_size or row.byte_size < 100
+                or not re.fullmatch(r'[0-9a-f]{64}', row.sha256 or '')):
+            invalid += 1
+        else:
+            hashes.append(row.sha256)
+    if not pairs or missing or pending or failed or invalid or len(hashes) != len(pairs):
+        raise StorageConfirmationPending(
+            f'Полная загрузка не завершена: подтверждено {len(hashes)} из {len(pairs)}. '
+            f'Без записи хранения: {missing}; в очереди: {pending}; ошибки: {failed}; '
+            f'без проверки файла: {invalid}. Дождитесь сохранения или повторите восстановление на Диск.'
+        )
+    if len(hashes) != len(set(hashes)):
+        raise ValueError('В архиве есть точные копии одного кадра. Проверьте дубли до завершения загрузки; ставка не изменена.')
+    return len(pairs)
+
+
+async def repair_storage_queue(session, shooting_id):
+    """Rebuild missing jobs from known Photo file references. No originals are deleted.
+
+    Called only after a scoped write authorization and the Shooting row lock.
+    Recovery identifiers are local job markers, not invented Telegram identities.
+    """
+    import re
+
+    from ..models import Photo
+
+    pairs = (await session.execute(select(Photo, PhotoStorage).outerjoin(
+        PhotoStorage, PhotoStorage.photo_id == Photo.id
+    ).where(Photo.shooting_id == shooting_id))).all()
+    enqueued = retried = 0
+    prefix = ROOT + f'/shootings/{shooting_id}/'
+    for photo, row in pairs:
+        if row is None:
+            session.add(PhotoStorage(photo_id=photo.id, shooting_id=shooting_id,
+                telegram_file_id=photo.file_id, telegram_unique_id=f'recovery-photo:{photo.id}',
+                source_kind='DOCUMENT', status='PENDING', attempts=0))
+            enqueued += 1
+            continue
+        valid = (row.status == 'STORED' and row.shooting_id == shooting_id
+                 and row.disk_path and row.disk_path.startswith(prefix)
+                 and row.stored_at and row.byte_size and row.byte_size >= 100
+                 and re.fullmatch(r'[0-9a-f]{64}', row.sha256 or ''))
+        if row.shooting_id != shooting_id or row.status == 'FAILED' or (row.status == 'STORED' and not valid):
+            row.status, row.attempts, row.last_error = 'PENDING', 0, None
+            row.started_at = None
+            row.shooting_id = shooting_id
+            row.telegram_file_id = photo.file_id
+            retried += 1
+    await session.flush()
+    return {'retried': retried, 'enqueued': enqueued}

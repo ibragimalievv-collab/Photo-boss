@@ -440,13 +440,13 @@ class MiniApp:
         bid = int(request.match_info["id"])
         expected, target, timestamp = transitions[action]
         async with self.engine.begin() as conn:
+            bookings = await self.rows(conn,
+                "SELECT photographer_id,status FROM bookings WHERE id=:bid FOR UPDATE", bid=bid)
             shoots = await self.rows(conn,
                 "SELECT id,status FROM shootings WHERE booking_id=:bid FOR UPDATE", bid=bid)
             if not shoots:
                 raise AccessError("Съёмка не найдена.", 404)
             shoot = shoots[0]
-            bookings = await self.rows(conn,
-                "SELECT photographer_id,status FROM bookings WHERE id=:bid FOR UPDATE", bid=bid)
             if not bookings or bookings[0]["photographer_id"] != actor["id"]:
                 raise AccessError("Это не ваша съёмка.", 403)
             if bookings[0]["status"] in {"PENDING_CONFIRMATION", "REJECTED", "CANCELLED"}:
@@ -480,14 +480,24 @@ class MiniApp:
         if "ADMIN" in actor["roles"] and "OWNER" not in actor["roles"] and (start != self.today() or end != self.today()):
             raise AccessError("Общая касса за прошлые периоды доступна только владельцу.")
         own = actor["permissions"]["financeScope"] == "self"
+        hotel_only = "ADMIN" in actor["roles"] and "OWNER" not in actor["roles"]
+        hotel_scope = booking_scope_sql(actor["id"], actor["roles"])
         lower, upper = utc_bounds(start, end, self.tz)
         args = {"lo": lower, "hi": upper, "uid": actor["id"]}
         sales = await self.rows(conn, """SELECT s.*, u.name AS employee, c.name AS client
             FROM sales s JOIN users u ON u.id=s.credited_user_id
             LEFT JOIN bookings b ON b.id=s.booking_id LEFT JOIN clients c ON c.id=b.client_id
             WHERE s.created_at>=:lo AND s.created_at<:hi """ +
-            ("AND s.credited_user_id=:uid " if own else "") + "ORDER BY s.created_at DESC", **args)
-        payroll = await self.rows(conn, "SELECT p.*,u.name FROM payroll_entries p JOIN users u ON u.id=p.user_id WHERE p.created_at>=:lo AND p.created_at<:hi " + ("AND p.user_id=:uid" if own else ""), **args)
+            ("AND s.credited_user_id=:uid " if own else f"AND ({hotel_scope}) " if hotel_only else "") + "ORDER BY s.created_at DESC", **args)
+        # Unscoped manual premiums/fines must not expose another hotel's money.
+        # Only an explicit sale -> payroll FK proves an administrator's scope;
+        # do not infer it from employee membership or free-text notes.
+        payroll_scope = "AND p.user_id=:uid" if own else ""
+        if hotel_only:
+            payroll_scope = ("AND EXISTS (SELECT 1 FROM sales ps JOIN bookings b ON b.id=ps.booking_id "
+                             "WHERE ps.manager_payroll_entry_id=p.id AND p.user_id=b.manager_id "
+                             f"AND ({hotel_scope}))")
+        payroll = await self.rows(conn, "SELECT p.*,u.name FROM payroll_entries p JOIN users u ON u.id=p.user_id WHERE p.created_at>=:lo AND p.created_at<:hi " + payroll_scope, **args)
         employees = {}
         for sale in sales:
             uid = sale["credited_user_id"]
@@ -502,10 +512,13 @@ class MiniApp:
             item["earned"] = item["commission"] + item["adjustments"]
         cash = None
         if not own:
-            receipts = await self.rows(conn, """SELECT verified_amount FROM receipts
-                WHERE status='APPROVED' AND reviewed_at>=:lo AND reviewed_at<:hi""", **args)
+            receipts = await self.rows(conn, "SELECT r.verified_amount FROM receipts r " +
+                ("JOIN bookings b ON b.id=r.booking_id " if hotel_only else "") +
+                "WHERE r.status='APPROVED' AND r.reviewed_at>=:lo AND r.reviewed_at<:hi " +
+                (f"AND ({hotel_scope})" if hotel_only else ""), **args)
             cash = sum(cents(r["verified_amount"]) for r in receipts)
-        return {"period": period, "from": str(start), "to": str(end), "scope": "self" if own else "company",
+        return {"period": period, "from": str(start), "to": str(end), "scope": "self" if own else "hotels" if hotel_only else "company",
+                "unscopedAdjustmentsExcluded": hotel_only,
                 "sales": sum(cents(s["amount"]) for s in sales), "cashReceived": cash,
                 "payroll": sum(e["earned"] for e in employees.values()),
                 "employees": sorted(employees.values(), key=lambda x: (-x["sales"], x["name"])),
@@ -513,7 +526,7 @@ class MiniApp:
                     "employee": s["employee"], "date": str(as_utc(s["created_at"]).astimezone(self.tz).date()),
                     "amount": cents(s["amount"]), "status": s["payment_status"]} for s in sales[:100]],
                 "salesCount": len(sales), "salesListLimited": len(sales) > 100,
-                "note": "Касса — подтверждённые чеки по дате подтверждения. Начислено — комиссии и записи премий/удержаний существующего бота. Это не выплаченная зарплата и не чистая прибыль. Продажи показаны до учёта оплаты."}
+                "note": ("Только назначенные вам отели. Ручные премии и удержания без надёжной привязки к отелю здесь не показаны; владелец и сам сотрудник видят их в своих отчётах. " if hotel_only else "") + "Касса — подтверждённые чеки по дате подтверждения. Начислено — комиссии и записи премий/удержаний существующего бота. Это не выплаченная зарплата и не чистая прибыль. Продажи показаны до учёта оплаты."}
 
     async def finance(self, request):
         actor = request["miniapp_actor"]
