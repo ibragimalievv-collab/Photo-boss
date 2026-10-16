@@ -111,7 +111,7 @@ async def main():
             await owner.locator('[data-practice-refresh]').click()
             accepted = {'status': 'completed', 'review': {'decision': 'ACCEPT', 'score': 90,
                         'reshoot_indexes': [], 'issues': [], 'strengths': ['Разные планы'],
-                        'next_action': 'Продолжить обучение'}
+                        'next_action': 'Продолжить обучение'}}
             with patch('app.academy_practice.config', SimpleNamespace(openai_api_key='fixture')), \
                     patch('app.academy_practice.analyze_training_set', AsyncMock(return_value=accepted)):
                 await fixture.practice.process_pending(fixture.storage)
@@ -132,3 +132,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+

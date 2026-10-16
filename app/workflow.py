@@ -7,12 +7,13 @@ import hashlib
 import json
 
 from aiohttp import web
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .miniapp_security import AccessError
 from .models import (
     Booking,
+    Client,
     Hotel,
     OperationRequest,
     Package,
@@ -20,6 +21,7 @@ from .models import (
     PhotoEdit,
     PhotoStorage,
     Receipt,
+    Sale,
     SaleDraft,
     SaleDraftPhoto,
     Shooting,
@@ -29,8 +31,15 @@ from .services.booking_access import booking_scope, can_access_booking
 from .services.bookings import create_booking_record
 from .services.core import audit
 from .services.photo_storage import ensure_photo_storage, image_format
-from .services.receipts import expected_amount, extract_receipt, money, operation_key
+from .services.receipts import (
+    expected_amount,
+    extract_receipt,
+    money,
+    operation_key,
+    payment_totals,
+)
 from .services.sale_workflow import (
+    already_purchased_photo,
     can_sell,
     capture_draft_receipt,
     complete_full_upload,
@@ -73,10 +82,19 @@ class Workflow:
 
     async def listing(self, request):
         a = request['miniapp_actor']
+        requested = getattr(request, 'query', {}).get('booking')
+        if requested is not None and (not requested.isascii() or not requested.isdigit() or not 0 < int(requested) < 2**31):
+            raise AccessError('Укажите номер съёмки.', 400)
         async with AsyncSession(self.api.engine) as session:
             query = select(Booking).where(Booking.status.notin_(['CANCELLED', 'REJECTED']))
             query = query.where(booking_scope(a['id'], a['roles']))
             bookings = (await session.scalars(query.order_by(Booking.shoot_date.desc()).limit(200))).all()
+            if requested is not None:
+                chosen = await session.scalar(query.where(Booking.id == int(requested)))
+                if chosen is None:
+                    raise AccessError('Съёмка не найдена или недоступна.', 404)
+                if not any(b.id == chosen.id for b in bookings):
+                    bookings.insert(0, chosen)
             packages = (await session.scalars(select(Package))).all()
             prices = {p.id: str(money(p.price_per_photo)) for p in packages}
             rows = []
@@ -86,7 +104,17 @@ class Workflow:
                 shoot = await session.scalar(select(Shooting).where(Shooting.booking_id == b.id))
                 files = (await session.scalars(select(PhotoStorage).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoStorage.id))).all() if shoot else []
                 edits = (await session.scalars(select(PhotoEdit).join(PhotoStorage, PhotoStorage.photo_id == PhotoEdit.photo_id).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoEdit.id))).all() if shoot else []
-                rows.append({'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
+                purchases = (await session.scalars(select(Sale).where(Sale.booking_id == b.id).order_by(Sale.id))).all()
+                customer = await session.get(Client, b.client_id)
+                total, paid, due = await payment_totals(session, b.id)
+                original_count = await session.scalar(select(func.count(Photo.id)).where(Photo.shooting_id == shoot.id)) if shoot else 0
+                history = {'client': customer.name if customer else '', 'sales': [
+                    {'id': sale.id, 'at': sale.created_at.isoformat() + 'Z', 'photos': sale.sold_photos,
+                     'amount': str(money(sale.amount)), 'paymentStatus': sale.payment_status}
+                    for sale in purchases], 'soldTotal': sum(sale.sold_photos for sale in purchases),
+                    'salesAmount': str(total), 'paidAmount': str(paid), 'dueAmount': str(due),
+                    'totalFrames': max([original_count or 0] + [sale.declared_photo_count or 0 for sale in purchases])}
+                rows.append({**history, 'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
                     'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': prices.get(b.package_id),
                     'shootingId': shoot.id if shoot else None, 'fullUploaded': bool(shoot and shoot.full_upload_completed_at),
                     'canUpload': ('PHOTOGRAPHER' in a['roles'] and b.photographer_id == a['id']) or bool({'OWNER', 'ADMIN'} & set(a['roles'])),
@@ -226,6 +254,8 @@ class Workflow:
                 return result | {'photoId': duplicate, 'duplicate': True}
             if await selected_count(session, draft.id) >= draft.sold_photos:
                 raise AccessError('Все выбранные кадры уже сохранены.', 409)
+            if await already_purchased_photo(session, booking.id, digest):
+                raise AccessError('Этот кадр уже куплен в предыдущей продаже. Выберите новый кадр для допродажи.', 409)
             path = await self.save_selected(draft, raw)
             file_id, unique_id = await self.save_telegram(actor, raw)
             photo = SaleDraftPhoto(draft_id=draft.id, telegram_file_id=file_id, telegram_unique_id=unique_id,
@@ -298,4 +328,3 @@ class Workflow:
             return {'shootingId': sid, 'photoId': photo.id, 'storageStatus': 'PENDING'}
         completed = await complete_full_upload(session, actor, sid, allow_management=True)
         return {'shootingId': sid, 'photos': completed.count, 'percent': str(completed.commissions['percent'])}
-

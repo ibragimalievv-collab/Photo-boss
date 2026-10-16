@@ -36,14 +36,17 @@ jobs:
           node tests/outbox_recovery_check.mjs
           node tests/folder_sequential_upload_check.mjs
           node tests/outbox_receipt_isolation_check.mjs
-          python -m pytest -q --junitxml=/tmp/recovery-rules.xml tests/test_media_recovery.py tests/test_ai_diagnostics.py tests/test_academy_practice.py tests/test_development.py
+          node tests/sales_history_ui_check.mjs
+          python -m pytest -q --junitxml=/tmp/recovery-rules.xml tests/test_media_recovery.py tests/test_ai_diagnostics.py tests/test_academy_practice.py tests/test_development.py tests/test_sales_followups.py
       - name: Real browser recovery scenarios
         run: |
           mkdir -p /tmp/photo-boss-calls-qa
           openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORKFLOW_TEST_KEY" -out "$WORKFLOW_TEST_CERT" -days 1 -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1' 2>/dev/null
-          python tests/workflow_browser_check.py
-          python tests/academy_coach_browser_check.py
-          python tests/academy_practice_browser_check.py
+          failed=0
+          for script in workflow_browser_check academy_coach_browser_check academy_practice_browser_check sales_followup_browser_check; do
+            python "tests/${script}.py" || failed=1
+          done
+          exit "$failed"
       - name: Archive tracked verification source
         if: always()
         run: |
