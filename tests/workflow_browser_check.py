@@ -100,6 +100,16 @@ async def main():
                         else:
                             await route.continue_()
                     await context.route('**/api/miniapp/operations/sync', drop_once)
+                    receipt_failed = False
+                    async def fail_receipt_once(route):
+                        nonlocal receipt_failed
+                        if not receipt_failed and b'"kind":"sale_receipt"' in (route.request.post_data_buffer or b''):
+                            receipt_failed = True
+                            await route.fulfill(status=503, content_type='application/json',
+                                body=json.dumps({'error': 'Receipt storage temporarily unavailable'}))
+                        else:
+                            await route.continue_()
+                    await context.route('**/api/miniapp/operations/media', fail_receipt_once)
                     page = await context.new_page()
                     page.on('pageerror', lambda e: errors.append(str(e)))
                     await page.goto(url)
@@ -166,9 +176,35 @@ async def main():
                     await page.get_by_role('heading', name='Рабочие операции', exact=True).wait_for()
                     await page.get_by_text('В очереди на этом устройстве — не отправлено', exact=True).first.wait_for()
                     await context.set_offline(False)
+                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.kind==='sale_receipt'&&r.status==='local'&&r.errorStatus===503);}")
+                    assert await page.evaluate("""async()=>{
+                        const m=await import('/app/js/outbox.js'),rows=await m.outboxRows();
+                        return rows.filter(r=>['sale_counts','sale_selected','sale_complete'].includes(r.kind))
+                            .every(r=>r.status==='local'&&!r.error);
+                    }"""), 'Receipt failure must wait without permanently rejecting the dependent sale stages'
+                    # Reproduce a previously saved 3.20 queue: the old client
+                    # already received wrong-stage 409s after its receipt failed.
+                    await page.evaluate("""async()=>{
+                        const {outboxRows}=await import('/app/js/outbox.js');
+                        const {localAction}=await import('/app/js/localstore.js');
+                        const errors={sale_counts:'Черновик продажи уже закрыт.',
+                            sale_selected:'Сначала сохраните чек и количество кадров.',
+                            sale_complete:'Продажа уже завершена или отменена.'};
+                        for(const item of await outboxRows())if(errors[item.kind]){
+                            const row=await localAction('operations','readonly',s=>s.get(item.key));
+                            row.status='error';row.errorStatus=409;row.error=errors[row.kind];
+                            await localAction('operations','readwrite',s=>s.put(row));
+                        }
+                    }""")
+                    await page.get_by_role('button', name='Синхронизировать сейчас').click()
                     await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.kind==='sale_complete'&&r.status==='local'&&r.error);}")
                     await page.get_by_role('button', name='Синхронизировать сейчас').click()
                     await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');const rows=await m.outboxRows();return rows.length===9&&rows.every(r=>r.status==='synced'&&!r.blob);}")
+                    assert await page.evaluate("""async()=>{
+                        const {outboxRows}=await import('/app/js/outbox.js');
+                        return (await outboxRows()).filter(r=>['sale_counts','sale_selected','sale_complete'].includes(r.kind))
+                            .every(r=>r.saleDependencyRecovery==='sale-dependency-recovery-v1-20261017');
+                    }"""), 'Previously saved wrong-stage failures must recover with the same operations'
                     async with factory() as session:
                         assert await session.scalar(select(func.count(Booking.id))) == 2
                         assert await session.scalar(select(func.count(Sale.id))) == 1
@@ -179,7 +215,7 @@ async def main():
                         assert (await session.scalar(select(ShiftCheckIn))).status == 'PENDING_REVIEW'
                         end = await session.scalar(select(ShiftCheckOut))
                         assert end.status == 'PENDING_REVIEW' and end.report_note == 'Connection was unavailable at shift close'
-                    assert lost and not errors, errors
+                    assert lost and receipt_failed and not errors, errors
                     await page.evaluate("""async()=>{
                         const m=await import('/app/js/workflow.js');await m.loadWorkflow(1);
                         document.querySelector('#app').innerHTML=m.workflowView();
@@ -214,7 +250,7 @@ async def main():
                         assert (await session.scalar(select(ShiftCheckOut))).status == 'FINISHED'
                     assert not errors, errors
                     await panel.screenshot(path=str(output/'offline-attendance-review-mobile.png'), full_page=True)
-                    print('PASS: cold offline start, booking + sale blobs, lost response replay, single sale/commission, offline camera shifts and owner review, no API cache')
+                    print('PASS: cold offline start, receipt503 isolation and legacy409 recovery, lost response replay, single sale/commission, offline camera shifts and owner review, no API cache')
                 finally:
                     await browser.close()
     finally:

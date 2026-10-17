@@ -19,6 +19,18 @@ const legacyMediaError=row=>row.status==='error'&&row.errorStatus===400&&row.leg
 // Called only after /me has confirmed the active account. A previous 401 is not
 // a permanent rejection of the saved file; retry it after this new login only.
 const renewedAuth=row=>row.status==='error'&&row.errorStatus===401&&(row.authEpoch||0)<authEpoch;
+// A sale's receipt, counts, selected photos and completion share one draft key.
+// Their server-side stages must stay ordered while unrelated files keep moving.
+const saleChain=row=>row.kind==='sale_start'?row.key:row.kind?.startsWith('sale_')?row.data?.draft?.key:null;
+const SALE_DEPENDENCY_RECOVERY='sale-dependency-recovery-v1-20261017';
+function legacySaleDependency(row,previous){
+ if(row.status!=='error'||row.errorStatus!==409||row.saleDependencyRecovery===SALE_DEPENDENCY_RECOVERY)return false;
+ const required={sale_counts:'sale_receipt',sale_selected:'sale_counts',sale_complete:'sale_selected'}[row.kind];
+ const stageError=row.kind==='sale_counts'?row.error==='Черновик продажи уже закрыт.':row.kind==='sale_selected'?row.error==='Сначала сохраните чек и количество кадров.':row.kind==='sale_complete'&&(row.error==='Продажа уже завершена или отменена.'||/^Сначала загрузите все выбранные фотографии: \d+\/\d+\.$/.test(row.error||''));
+ // Old clients sent later sale stages after a receipt/photo failed. Recheck
+ // only those exact failures once their original local predecessors succeeded.
+ return Boolean(required&&stageError&&previous.some(step=>step.kind==='sale_start')&&previous.some(step=>step.kind===required)&&previous.every(step=>step.status==='synced'));
+}
 export function setOutboxUser(id){userId=id;if(id)authEpoch=Math.max(Date.now(),authEpoch+1);return flushOutbox();}
 export async function outboxRows(){
  if(!userId)return [];const actor=userId,db=await openLocal();
@@ -40,9 +52,10 @@ export async function enqueueBatch(items){
 export async function enqueueOperation(kind,date,data,blob=null){return (await enqueueBatch([{kind,date,data,blob}]))[0];}
 // A definitive validation/size rejection is safe to correct. Never replace bytes
 // after an uncertain timeout: that operation may already be committed server-side.
+const duplicateSelectedRejection=row=>row.kind==='sale_selected'&&row.errorStatus===409&&row.error==='Этот кадр уже куплен в предыдущей продаже. Выберите новый кадр для допродажи.';
 export async function replaceOperationFile(key,file){
  const row=await localAction('operations','readonly',s=>s.get(key));
- if(!row||row.userId!==userId||row.status!=='error'||![400,413].includes(row.errorStatus)||
+ if(!row||row.userId!==userId||row.status!=='error'||(![400,413].includes(row.errorStatus)&&!duplicateSelectedRejection(row))||
     !['shoot_photo','delivery_photo','sale_selected','booking_receipt','sale_receipt'].includes(row.kind))throw new Error('Этот файл нельзя заменять: дождитесь результата отправки или повторите исходный файл.');
  const maximum=['booking_receipt','sale_receipt'].includes(row.kind)?8*1024*1024:20*1024*1024;
  if(!file||!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>maximum)throw new Error(`Нужен JPEG, PNG или WebP до ${maximum/1024/1024} МБ.`);
@@ -101,17 +114,24 @@ export async function flushOutbox(){
  if(running){rerunRequested=true;return {state:'running'};}
  rerunRequested=false;
  running=true;
- const actor=userId,summary={state:'done',completed:0,failed:0,temporary:0};
+ const actor=userId,summary={state:'done',completed:0,failed:0,temporary:0},blockedSales=new Set(),saleSteps=new Map();
  try{
   for(const item of await outboxRows()){
    if(actor!==userId)break;
-   if(!['local','syncing'].includes(item.status)&&!legacyMediaError(item)&&!renewedAuth(item))continue;
+   const sale=saleChain(item);
+   if(sale&&blockedSales.has(sale))continue;
+   const previous=sale?saleSteps.get(sale)||[]:[];
+   if(sale&&!saleSteps.has(sale))saleSteps.set(sale,previous);
+   if(!['local','syncing'].includes(item.status)&&!legacyMediaError(item)&&!renewedAuth(item)&&!legacySaleDependency(item,previous)){if(sale){previous.push(item);if(item.status!=='synced')blockedSales.add(sale);}continue;}
    const row=await localAction('operations','readonly',s=>s.get(item.key));
    if(actor!==userId)break;
-   if(!row||(!['local','syncing'].includes(row.status)&&!legacyMediaError(row)&&!renewedAuth(row)))continue;
+   if(!row)continue;
+   if(!['local','syncing'].includes(row.status)&&!legacyMediaError(row)&&!renewedAuth(row)&&!legacySaleDependency(row,previous)){if(sale){previous.push(row);if(row.status!=='synced')blockedSales.add(sale);}continue;}
+   if(legacySaleDependency(row,previous)){row.saleDependencyRecovery=SALE_DEPENDENCY_RECOVERY;row.status='local';row.error='';row.retryAt=0;await update(row);}
+   if(sale)previous.push(row);
    if(legacyMediaError(row)){row.legacyMediaRecovered=true;row.legacyMediaRecovery=LEGACY_MEDIA_RECOVERY;row.status='local';row.error='';await update(row);}
    if(renewedAuth(row)){row.status='local';row.error='';row.retryAt=0;}
-   if(row.retryAt>Date.now()){scheduleRetry(row.retryAt-Date.now());summary.state='backoff';continue;}
+   if(row.retryAt>Date.now()){if(sale)blockedSales.add(sale);scheduleRetry(row.retryAt-Date.now());summary.state='backoff';continue;}
    row.authEpoch=authEpoch;
    row.status='syncing';await update(row);changed();
    try{
@@ -128,6 +148,7 @@ export async function flushOutbox(){
     row.status='synced';row.error='';row.errorStatus=0;row.retryAt=0;row.blob=null;
     summary.completed++;
    }catch(e){
+    if(sale)blockedSales.add(sale);
     // Missing dependencies and receipt failures must not strand independent shoot photos.
     // Keep their blobs on this device and retry without marking a dependent sale as failed.
     const temporary=!e.status||e.status>=500||[408,424,429].includes(e.status);

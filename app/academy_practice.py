@@ -287,18 +287,26 @@ class AcademyPractice:
             result = await self.detail_data(conn, actor, aid)
         return web.json_response(result)
 
-    async def _reopen_unavailable_photos(self, row, shots, indexes, *, expected_sources):
+    async def _reopen_unavailable_photos(self, row, shots, indexes, *, expected_sources,
+                                       processing_lease=None):
         """Reopen only unreadable slots while retaining an immutable failure snapshot."""
         indexes = sorted(set(indexes))
         result = {"status": "storage_unavailable", "unavailable_indexes": indexes}
         async with self.lock, self.engine.begin() as conn:
             current = await self.api.rows(
                 conn,
-                "SELECT status,review_source FROM training_assignments WHERE id=:id FOR UPDATE",
+                "SELECT status,review_source,ai_analysis FROM training_assignments WHERE id=:id FOR UPDATE",
                 id=row["id"],
             )
             if (not current or current[0]["status"] != "PENDING_REVIEW"
                     or current[0]["review_source"] not in expected_sources):
+                return False
+            if processing_lease is not None:
+                if analysis_data(current[0]["ai_analysis"]).get("processingLease") != processing_lease:
+                    return False
+            elif current[0]["ai_analysis"] != row["ai_analysis"]:
+                # Startup recovery may overlap a deliberate retry/new failure.
+                # Its old storage result must not replace the newer review.
                 return False
             await conn.execute(text("""INSERT INTO academy_practice_reviews
                 (assignment_id,result,photos,created_at) VALUES (:id,:result,:photos,:now)"""),
@@ -354,10 +362,11 @@ class AcademyPractice:
                 )
                 continue
             async with self.lock, self.engine.begin() as conn:
-                current = await self.api.rows(conn, """SELECT status,review_source
+                current = await self.api.rows(conn, """SELECT status,review_source,ai_analysis
                     FROM training_assignments WHERE id=:id FOR UPDATE""", id=row["id"])
                 if (not current or current[0]["status"] != "PENDING_REVIEW"
-                        or current[0]["review_source"] != "AI_FAILED"):
+                        or current[0]["review_source"] != "AI_FAILED"
+                        or current[0]["ai_analysis"] != row["ai_analysis"]):
                     continue
                 await conn.execute(text("""UPDATE training_assignments
                     SET review_source='AI_PENDING' WHERE id=:id"""), {"id": row["id"]})
@@ -440,10 +449,12 @@ class AcademyPractice:
             if config.openai_api_key:
                 uploaded, unavailable = await self._load_submissions(row, shots, storage)
                 if unavailable:
-                    await self._reopen_unavailable_photos(
-                        row, shots, unavailable, expected_sources={"AI_PROCESSING"}
+                    reopened = await self._reopen_unavailable_photos(
+                        row, shots, unavailable, expected_sources={"AI_PROCESSING"},
+                        processing_lease=lease,
                     )
-                    outcomes[row["id"]] = {"status": "storage_unavailable", "unavailable_indexes": unavailable}
+                    if reopened:
+                        outcomes[row["id"]] = {"status": "storage_unavailable", "unavailable_indexes": unavailable}
                     continue
                 try:
                     references = [p.read_bytes() for p in category.image_paths]

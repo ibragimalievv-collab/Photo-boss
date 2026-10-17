@@ -56,7 +56,7 @@ async function viewReceipt(path){
  receiptViewer=viewer;document.body.append(viewer);viewer.showModal();
 }
 
-function replacementControl(r){return r.status==='error'&&[400,413].includes(r.errorStatus)&&r.hasBlob&&['shoot_photo','delivery_photo','sale_selected','booking_receipt','sale_receipt'].includes(r.kind)?`<label class="field">Исправить отклонённый файл без новой продажи<input class="input" type="file" accept="image/jpeg,image/png,image/webp" data-workflow-replace="${r.key}"></label>`:'';}
+function replacementControl(r){const rejected=[400,413].includes(r.errorStatus)||(r.kind==='sale_selected'&&r.errorStatus===409&&r.error==='Этот кадр уже куплен в предыдущей продаже. Выберите новый кадр для допродажи.');return r.status==='error'&&rejected&&r.hasBlob&&['shoot_photo','delivery_photo','sale_selected','booking_receipt','sale_receipt'].includes(r.kind)?`<label class="field">Исправить отклонённый файл без новой продажи<input class="input" type="file" accept="image/jpeg,image/png,image/webp" data-workflow-replace="${r.key}"></label>`:'';}
 function queueView(){
  const inProgress=queue.filter(r=>r.status==='local'||r.status==='syncing').length;
  const errors=queue.filter(r=>r.status==='error').length;
