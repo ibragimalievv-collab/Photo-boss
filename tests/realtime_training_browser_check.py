@@ -19,7 +19,7 @@ FIXTURE = """<!doctype html><html lang="ru"><body><main id="fixture"></main>
 <script type="module">
 import {realtimeControls} from '/app/js/realtime-training.js';
 window.streams=[];window.peers=[];window.sent=[];window.requests=[];
-window.savedEvents=[];window.stopped=[];window.savedNotifications=[];
+window.savedEvents=[];window.stopped=[];window.savedNotifications=[];window.eventAttempts=[];
 window.flags={denyMicrophone:false,failEvents:0,conflictEvents:0,loseStart:false,holdStart:false};
 window.revision=1;window.sessionStatus='ACTIVE';window.currentLease=null;
 window.startCount=0;window.statusChecks=0;window.finishCount=0;
@@ -38,7 +38,7 @@ class FixturePeer{
  constructor(){this.connectionState='new';this.tracks=[];peers.push(this);}
  addTrack(track,stream){this.tracks.push({track,stream});}
  createDataChannel(label){this.channel=new FixtureChannel();this.label=label;return this.channel;}
- async createOffer(){return {type:'offer',sdp:'v=0\\r\\nfixture-offer'};}
+ async createOffer(){return {type:'offer',sdp:'v=0\\r\\nfixture-offer-with-audio'};}
  async setLocalDescription(offer){this.localDescription=offer;}
  async setRemoteDescription(answer){
   this.remoteDescription=answer;this.connectionState='connected';
@@ -55,11 +55,14 @@ window.fixtureApi=async(path,options={})=>{
  requests.push({path,method:options.method||'GET',body:options.body||null});
  if(path==='/academy/development')return {sessions:[{id:1,revision,status:sessionStatus}]};
  if(path.endsWith('/realtime/start')){
+  if(Object.keys(options.body).sort().join(',')!=='mode,revision,sdp'
+   ||!Number.isInteger(options.body.revision)||!['coach','guest'].includes(options.body.mode)
+   ||!options.body.sdp.startsWith('v=0')||options.body.sdp.length<20)throw Error('Fixture invalid start contract');
   if(options.body.revision!==revision)throw Object.assign(Error('Fixture stale revision'),{status:409});
-  startCount++;currentLease={leaseId:'fixture-lease-'+startCount,mode:options.body.mode};
+  startCount++;currentLease={leaseId:startCount.toString(16).padStart(32,'0'),mode:options.body.mode};
   if(flags.holdStart)await new Promise(resolve=>{window.releaseStart=resolve;});
   if(flags.loseStart){flags.loseStart=false;throw Error('Fixture start response lost');}
-  return {...currentLease,revision,sdp:'v=0\\r\\nfixture-answer',model:'fixture-realtime',maxSeconds:600};
+  return {...currentLease,revision,sdp:'v=0\\r\\nfixture-answer-with-audio',model:'fixture-realtime',maxSeconds:600};
  }
  if(path.endsWith('/realtime/status')){statusChecks++;return {active:Boolean(currentLease),revision,...currentLease};}
  if(path.endsWith('/realtime/stop')){
@@ -67,6 +70,8 @@ window.fixtureApi=async(path,options={})=>{
   return {ok:true};
  }
  if(path.endsWith('/realtime/events')){
+  eventAttempts.push(JSON.parse(JSON.stringify(options.body)));
+  if(!/^[a-f0-9]{32}$/.test(options.body.leaseId))throw Error('Fixture invalid lease contract');
   if(flags.failEvents>0){flags.failEvents--;throw Error('Fixture transcript network unavailable');}
   if(flags.conflictEvents>0){flags.conflictEvents--;revision++;throw Object.assign(Error('Fixture stale revision'),{status:409});}
   if(options.body.revision!==revision)throw Object.assign(Error('Fixture stale revision'),{status:409});
@@ -149,7 +154,7 @@ async def check_browser(capture_path):
                 await page.wait_for_function("document.querySelector('[data-realtime-meter]').textContent.includes('слышит ваш голос')")
                 assert await page.evaluate("requests.find(x=>x.path.endsWith('/realtime/start')).body.mode==='coach'")
                 assert "ИИ-наставником Photo Boss" in await page.evaluate("sent[0].response.instructions")
-                await page.evaluate("window.playingAudio=document.querySelector('[data-realtime-player]');renderFixture()")
+                await page.evaluate("window.renderMutations=0;new MutationObserver(()=>renderMutations++).observe(document.body,{childList:true,subtree:true});window.playingAudio=document.querySelector('[data-realtime-player]');renderFixture()")
                 await page.wait_for_function("document.querySelector('[data-realtime-player]')===playingAudio")
                 await page.locator('[data-realtime-action="mute"]').click()
                 assert await page.evaluate("!streams.at(-1).getAudioTracks()[0].enabled")
@@ -159,7 +164,6 @@ async def check_browser(capture_path):
                 await page.evaluate("""() => {
                     flags.failEvents=1;
                     receive({type:'input_audio_buffer.committed',item_id:'user_1'});
-                    receive({type:'conversation.item.input_audio_transcription.completed',item_id:'user_1',transcript:'Как объяснить цену <script>?' });
                     receive({type:'response.created',response:{id:'response_1'}});
                     receive({type:'conversation.item.added',previous_item_id:'user_1',item:{type:'message',id:'ai_1',role:'assistant'}});
                     receive({type:'response.output_audio_transcript.delta',response_id:'response_1',item_id:'ai_1',delta:'Кадр стоит '});
@@ -167,6 +171,8 @@ async def check_browser(capture_path):
                     receive({type:'response.done',response:{id:'response_1',status:'completed',output:[]}});
                     receive({type:'output_audio_buffer.started',response_id:'response_1'});
                     receive({type:'output_audio_buffer.stopped',response_id:'response_1'});
+                    // AI text can finish before STT completes the preceding user turn.
+                    receive({type:'conversation.item.input_audio_transcription.completed',item_id:'user_1',transcript:'Как объяснить цену <script>?' });
                 }""")
                 await page.wait_for_function("JSON.parse(sessionStorage.getItem('pb_live_training_1')).items.length===2")
                 await page.wait_for_timeout(250)
@@ -182,17 +188,27 @@ async def check_browser(capture_path):
                 await page.wait_for_function("savedEvents.length===2&&document.querySelector('[data-realtime-action=retry]').hidden")
                 assert await page.evaluate("savedEvents.map(x=>x.role).join(',')==='employee,coach'")
                 assert await page.evaluate("savedEvents[1].text==='Кадр стоит 400 ₽.'")
+                assert await page.evaluate("eventAttempts.length===3&&eventAttempts.every(x=>JSON.stringify(x.events)===JSON.stringify(eventAttempts[0].events))")
                 assert await page.evaluate("Number(document.querySelector('[data-realtime-session]').dataset.realtimeRevision)===revision")
                 await page.wait_for_function("!document.querySelector('[data-realtime-action=start]').hidden")
                 assert await page.evaluate("peers[0].connectionState==='closed'&&peers[0].channel.readyState==='closed'")
                 assert await page.evaluate("!document.documentElement.dataset.pbLiveVoice")
+                # Another action may advance revision after these controls rendered.
+                await page.evaluate("revision++")
+                await connected(page)
+                assert await page.evaluate("requests.filter(x=>x.path.endsWith('/realtime/start')).at(-1).body.revision===revision")
+                await page.locator('[data-realtime-action="stop"]').click()
+                await page.wait_for_function("currentLease===null&&streams.every(s=>s.getTracks().every(t=>t.readyState==='ended'))")
+                assert await page.evaluate("renderMutations<100")
                 await page.locator('[data-realtime-action="finish"]').click()
                 await page.wait_for_function("finishCount===1&&sessionStorage.getItem('pb_live_training_1')===null")
                 assert not errors, errors
                 results.update({"nativeFakeMicrophone": True, "coachMode": True,
                                 "rerenderKeepsLiveAudio": True, "muteUnmute": True,
                                 "escapedOrderedTranscript": True, "networkAndRevisionRetry": True,
-                                "stopReleasesMicrophone": True, "savedConversationFinish": True})
+                                "stopReleasesMicrophone": True, "savedConversationFinish": True,
+                                "freshRevisionOnReconnect": True, "exactEventIdsOnRetry": True,
+                                "noRerenderObserverLoop": True})
             finally:
                 await page.close()
 
@@ -201,7 +217,7 @@ async def check_browser(capture_path):
                 # A browser reload may occur before pagehide or the final save.
                 await page.evaluate("""() => {
                     sessionStorage.setItem('pb_live_training_1',JSON.stringify({
-                        id:1,revision:1,leaseId:'fixture-recovered',mode:'coach',closed:false,
+                        id:1,revision:1,leaseId:'cccccccccccccccccccccccccccccccc',mode:'coach',closed:false,
                         items:[
                             {id:'user_done',role:'employee',text:'Как объяснить цену?',done:true,saved:false},
                             {id:'user_incomplete',role:'employee',text:'Частичная фраза',done:false,saved:false},
@@ -221,7 +237,13 @@ async def check_browser(capture_path):
                         &&JSON.parse(sessionStorage.getItem('pb_live_training_1')).missing===true;
                 }""")
                 assert not errors, errors
+                # The tab recovered, but its provider lease can still be active.
+                await page.evaluate("currentLease={leaseId:'cccccccccccccccccccccccccccccccc',mode:'coach'}")
+                await page.locator('[data-realtime-action="finish"]').click()
+                await page.wait_for_function("finishCount===1&&currentLease===null")
+                assert await page.evaluate("requests.findIndex(x=>x.path.endsWith('/realtime/stop'))<requests.findIndex(x=>x.path.endsWith('/realtime/finish'))")
                 results["reloadSealsUnheardAndIncompleteTranscript"] = True
+                results["recoveredLeaseClosedBeforeFinish"] = True
             finally:
                 await page.close()
 
