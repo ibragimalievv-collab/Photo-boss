@@ -9,14 +9,22 @@ from sqlalchemy import select
 from test_team import OWNER, Request, setup
 from test_workflow_services import booking_data, fixture
 
-from app import development, voice_training
+from app import booking_control, development, voice_training
 from app.audit_labels import presentation
-from app.booking_control import activity, activity_tick
+from app.booking_control import (
+    BookingControl,
+    activity,
+    activity_tick,
+    advisor,
+    telegram_text,
+)
 from app.booking_management import BookingManagement, snapshot, version
 from app.miniapp_security import AccessError
 from app.models import (
     Booking,
     Client,
+    Hotel,
+    HotelEmployee,
     Notification,
     Setting,
     Shift,
@@ -24,6 +32,7 @@ from app.models import (
     ShiftCheckOut,
     Shooting,
     User,
+    UserRole,
 )
 from app.services.bookings import create_booking_record
 
@@ -97,6 +106,142 @@ def test_idle_reminder_requires_confirmed_shift_is_throttled_and_resolves():
         finally:
             await engine.dispose()
     asyncio.run(run())
+
+
+def test_booking_reminders_show_scoped_hotels_and_confirmed_manager_names(monkeypatch):
+    monkeypatch.setattr(booking_control, 'config', SimpleNamespace(training_timezone='Europe/Moscow', openai_api_key=None))
+    async def run():
+        engine, factory = await fixture()
+        now = datetime(2026, 9, 22, 8, tzinfo=UTC)
+        bot = SimpleNamespace(send_message=AsyncMock())
+        async def current_activity(session, **kwargs):
+            kwargs.setdefault('now', now)
+            return await activity(session, **kwargs)
+        monkeypatch.setattr(booking_control, 'activity', current_activity)
+        try:
+            async with factory() as session:
+                (await session.get(Hotel, 1)).name = 'Бетон'
+                (await session.get(User, 1)).name = 'Алина'
+                session.add_all([
+                    Hotel(id=2, name='Другой отель'), Hotel(id=3, name='Без менеджера'),
+                    User(id=3, tg_id=3, name='Владелец'), UserRole(user_id=3, role='OWNER'),
+                    User(id=4, tg_id=4, name='Администратор'), UserRole(user_id=4, role='ADMIN'),
+                    HotelEmployee(user_id=4, hotel_id=1),
+                    User(id=5, tg_id=5, name='Варвара'), UserRole(user_id=5, role='MANAGER'),
+                    User(id=7, tg_id=7, name='Лиза'), UserRole(user_id=7, role='MANAGER'),
+                    User(id=8, tg_id=8, name='Не вышел'), UserRole(user_id=8, role='MANAGER'),
+                    User(id=9, tg_id=9, name='Закончил'), UserRole(user_id=9, role='MANAGER'),
+                ])
+                for uid, hid in [(1, 1), (2, 1), (5, 2), (7, 1), (8, 1), (9, 1)]:
+                    session.add(Shift(user_id=uid, hotel_id=hid, start_at=now.replace(tzinfo=None)-timedelta(hours=2),
+                                      end_at=now.replace(tzinfo=None)+timedelta(hours=3)))
+                    if uid != 8:
+                        session.add(ShiftCheckIn(user_id=uid, shift_date=now.date(), status='STARTED',
+                                                started_at=now.replace(tzinfo=None)-timedelta(hours=2)))
+                session.add(ShiftCheckOut(user_id=9, shift_date=now.date(), status='FINISHED', ended_at=now.replace(tzinfo=None)))
+                await session.commit()
+                assert await activity_tick(session, bot, now) == 5
+                await session.commit()
+                messages = {call.args[0]: call.args[1] for call in bot.send_message.await_args_list}
+                assert 'Бетон' in messages[1] and 'Алина, Лиза' in messages[1] and 'Пройдите по отелю' in messages[1]
+                assert 'Другой отель' not in messages[1] and 'Варвара' not in messages[1]
+                assert 'Бетон' in messages[4] and 'Алина, Лиза' in messages[4]
+                assert 'Другой отель' not in messages[4] and 'Варвара' not in messages[4] and 'Без менеджера' not in messages[4]
+                assert all(name in messages[3] for name in ['Бетон', 'Другой отель', 'Варвара', 'Без менеджера', 'нет менеджеров'])
+                assert 'Не вышел' not in messages[3] and 'Закончил' not in messages[3]
+                assert all(call.kwargs['parse_mode'] is None for call in bot.send_message.await_args_list)
+
+                service = BookingControl(SimpleNamespace(engine=engine))
+                admin_data = json.loads((await service.listing(Request({'id': 4, 'roles': ['ADMIN']}))).text)
+                assert [h['name'] for h in admin_data['zeroBookingHotels']] == ['Бетон']
+                assert admin_data['hotels'][0]['managerNames'] == ['Алина', 'Лиза']
+                manager_data = json.loads((await service.listing(Request({'id': 1, 'roles': ['MANAGER']}))).text)
+                assert 'hotels' not in manager_data and 'zeroBookingHotels' not in manager_data
+
+                # The live app and hourly advice cache must reflect the booking immediately,
+                # while Telegram remains throttled despite changed statistics.
+                cached = await session.get(Setting, 'booking-control:advice:4')
+                before = json.loads(cached.value)['fingerprint']
+                booking = await create_booking_record(session, await session.get(User, 1), booking_data())
+                booking.created_at = now.replace(tzinfo=None)
+                await session.commit()
+                later = now + timedelta(minutes=1)
+                assert await activity_tick(session, bot, later) == 0
+                await session.commit()
+                cached = await session.get(Setting, 'booking-control:advice:4')
+                assert json.loads(cached.value)['fingerprint'] != before
+                current = await session.scalar(select(Notification).where(Notification.user_id == 4,
+                    Notification.kind == 'manager_advice', Notification.resolved_at.is_(None)))
+                assert 'Во всех доступных отелях сегодня есть новые записи.' in current.text
+                active = list(await session.scalars(select(Notification).where(Notification.user_id == 1,
+                    Notification.kind == 'manager_idle', Notification.resolved_at.is_(None))))
+                assert active == []
+                assert bot.send_message.await_count == 5
+
+                # Ending the remaining managers' shifts clears supervisor alerts too.
+                for uid in (1, 5, 7):
+                    session.add(ShiftCheckOut(user_id=uid, shift_date=now.date(), status='FINISHED', ended_at=later.replace(tzinfo=None)))
+                await session.flush()
+                assert await activity_tick(session, bot, later) == 0
+                await session.commit()
+                assert not list(await session.scalars(select(Notification).where(Notification.kind.in_(['manager_idle', 'manager_advice']),
+                    Notification.resolved_at.is_(None))))
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_reminders_throttle_from_successful_delivery_and_disable_clears_alerts():
+    async def run():
+        engine, factory = await fixture()
+        now = datetime(2026, 9, 22, 8, tzinfo=UTC)
+        bot = SimpleNamespace(send_message=AsyncMock(side_effect=[TimeoutError(), None, None]))
+        try:
+            async with factory() as session:
+                # First tick just before an old slot boundary; retry succeeds much later.
+                session.add(Shift(user_id=1, hotel_id=1, start_at=now.replace(tzinfo=None)-timedelta(minutes=119),
+                                  end_at=now.replace(tzinfo=None)+timedelta(hours=5)))
+                session.add(ShiftCheckIn(user_id=1, shift_date=now.date(), status='STARTED',
+                                         started_at=now.replace(tzinfo=None)-timedelta(minutes=119)))
+                await session.commit()
+                assert await activity_tick(session, bot, now) == 0
+                await session.commit()
+                assert await activity_tick(session, bot, now+timedelta(minutes=55)) == 1
+                await session.commit()
+                assert await activity_tick(session, bot, now+timedelta(minutes=60)) == 0
+                assert await activity_tick(session, bot, now+timedelta(minutes=114)) == 0
+                assert await activity_tick(session, bot, now+timedelta(minutes=115)) == 1
+                await session.commit()
+                assert bot.send_message.await_count == 3
+                session.add(Setting(key='booking-control:settings', value=json.dumps({'enabled': False, 'idleMinutes': 60})))
+                await session.commit()
+                assert await activity_tick(session, bot, now+timedelta(minutes=116)) == 0
+                await session.commit()
+                assert not list(await session.scalars(select(Notification).where(Notification.kind == 'manager_idle', Notification.resolved_at.is_(None))))
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_advisor_refreshes_team_changes_and_telegram_text_is_bounded(monkeypatch):
+    monkeypatch.setattr(booking_control, 'config', SimpleNamespace(openai_api_key=None))
+    async def run():
+        engine, factory = await fixture()
+        try:
+            async with factory() as session:
+                now = datetime(2026, 9, 22, 8, tzinfo=UTC)
+                first = {'date': '2026-09-22', 'hotels': [{'id': 1, 'managerNames': ['Алина']}], 'advice': 'Первый совет', 'choices': []}
+                saved = await advisor(session, 1, first, now)
+                changed = {**first, 'hotels': [{'id': 1, 'managerNames': ['Лиза']}], 'advice': 'Обновлённый состав'}
+                fresh = await advisor(session, 1, changed, now+timedelta(minutes=1))
+                assert fresh['text'] == 'Обновлённый состав' and fresh['fingerprint'] != saved['fingerprint']
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+    message = 'Отель 🌴 и менеджеры\n' * 800
+    limited = telegram_text(message)
+    assert len(limited.encode('utf-16-le')) <= 8192
+    assert limited.endswith('«Записи и помощь менеджерам».')
 
 
 def test_voice_ownership_cache_and_replayed_audio_never_duplicates_a_turn(monkeypatch):
