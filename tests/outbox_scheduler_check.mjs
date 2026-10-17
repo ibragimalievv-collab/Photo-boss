@@ -48,6 +48,20 @@ function fixture(api){
  const f=fixture(async()=>({ok:true}));f.add('earlier',{retryAt:130000});f.add('later',{retryAt:190000});
  await f.run('flushOutbox()');assert.deepEqual(f.timers.map(t=>t.delay),[30000]);
 }
+// The explicit Sync button retries a lost response now, keeping key and bytes,
+// without bypassing server Retry-After or reviving permanently denied actions.
+{
+ let lost=true;const f=fixture(async()=>{if(lost)throw new Error('Response lost');return {ok:true};});
+ f.add('lost-response');f.add('rate-limited',{retryAt:161000,errorStatus:429});
+ f.add('access-denied',{status:'error',errorStatus:403});
+ await f.run('flushOutbox()');assert.equal(f.rows.get('lost-response').retryAt,130000);
+ assert.equal(await f.rows.get('lost-response').blob.text(),'original');
+ lost=false;await f.run('syncOutboxNow()');
+ assert.deepEqual(f.calls,['lost-response','lost-response']);
+ assert.equal(f.rows.get('lost-response').status,'synced');
+ assert.equal(f.rows.get('rate-limited').retryAt,161000);assert.ok(f.rows.get('rate-limited').blob);
+ assert.equal(f.rows.get('access-denied').status,'error');
+}
 // A file added while an earlier request is in flight must get its own pass.
 {
  let finishFirst;const first=new Promise(resolve=>{finishFirst=resolve;});
@@ -89,5 +103,8 @@ function fixture(api){
  f.add('uncertain',{status:'local',errorStatus:503});
  await assert.rejects(f.run('replaceOperationFile("uncertain",replacement)'),/нельзя заменять/);
  assert.equal(await f.rows.get('uncertain').blob.text(),'original');
+ f.add('camera-attendance',{kind:'attendance',status:'error',errorStatus:413});
+ await assert.rejects(f.run('replaceOperationFile("camera-attendance",replacement)'),/нельзя заменять/);
+ assert.equal(await f.rows.get('camera-attendance').blob.text(),'original','attendance must retain the camera-only original');
 }
 console.log('PASS: backoff isolates rows, in-flight additions flush, renewed auth recovers 401, foreground resumes uploads');

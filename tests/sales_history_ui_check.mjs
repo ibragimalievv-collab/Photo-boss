@@ -30,4 +30,6 @@ vm.runInContext(`data.bookings[0].canFullUpload=false;data.bookings[0].draft={re
 const closed=vm.runInContext('workflowView()',ctx);
 assert.ok(!closed.includes('id="workflowShoot"'),'explicit server denial must override old status');
 assert.ok(closed.includes('AI пока не прочитал чек'));
+assert.equal(vm.runInContext(`replacementControl({key:'attendance',kind:'attendance',status:'error',errorStatus:413,hasBlob:true})`,ctx),'','attendance must not expose a gallery file picker');
+assert.ok(vm.runInContext(`replacementControl({key:'receipt',kind:'sale_receipt',status:'error',errorStatus:413,hasBlob:true})`,ctx).includes('data-workflow-replace'));
 console.log('PASS: closed-order repeat purchase, history totals, locked frame count and escaped names');

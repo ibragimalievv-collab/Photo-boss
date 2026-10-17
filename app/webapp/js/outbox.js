@@ -43,7 +43,7 @@ export async function enqueueOperation(kind,date,data,blob=null){return (await e
 export async function replaceOperationFile(key,file){
  const row=await localAction('operations','readonly',s=>s.get(key));
  if(!row||row.userId!==userId||row.status!=='error'||![400,413].includes(row.errorStatus)||
-    !['shoot_photo','delivery_photo','sale_selected','booking_receipt','sale_receipt','attendance'].includes(row.kind))throw new Error('Этот файл нельзя заменять: дождитесь результата отправки или повторите исходный файл.');
+    !['shoot_photo','delivery_photo','sale_selected','booking_receipt','sale_receipt'].includes(row.kind))throw new Error('Этот файл нельзя заменять: дождитесь результата отправки или повторите исходный файл.');
  const maximum=['booking_receipt','sale_receipt'].includes(row.kind)?8*1024*1024:20*1024*1024;
  if(!file||!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>maximum)throw new Error(`Нужен JPEG, PNG или WebP до ${maximum/1024/1024} МБ.`);
  row.blob=file;row.filename=file.name||row.filename;row.status='local';row.error='';row.errorStatus=0;row.retryAt=0;
@@ -80,6 +80,21 @@ export async function enqueueFilesOneByOne(files,operationFor,onProgress=()=>{})
 }
 
 export async function retryOperation(key){const rows=await outboxRows();if(!rows.some(r=>r.key===key))return;const row=await localAction('operations','readonly',s=>s.get(key));if(!row||row.userId!==userId)return;row.status='local';row.error='';if(row.errorStatus!==429)row.retryAt=0;await update(row);for(const item of rows){if(item.errorStatus===424){const pending=await localAction('operations','readonly',s=>s.get(item.key));if(!pending||pending.userId!==userId)continue;pending.status='local';pending.error='';pending.retryAt=0;await update(pending);}}changed();return flushOutbox();}
+// Explicit user retry may bypass our local network-failure cooldown, never a
+// server Retry-After or a permanent access/validation error. Keep original keys
+// and bytes so a lost successful response is recovered idempotently.
+export async function syncOutboxNow(){
+ const actor=userId;
+ for(const item of await outboxRows()){
+  if(actor!==userId)break;
+  if(item.status!=='local'||item.errorStatus===429||!item.retryAt)continue;
+  const row=await localAction('operations','readonly',s=>s.get(item.key));
+  if(actor!==userId)break;
+  if(!row||row.userId!==actor||row.status!=='local'||row.errorStatus===429)continue;
+  row.retryAt=0;await update(row);
+ }
+ changed();return flushOutbox();
+}
 export async function flushOutbox(){
  if(!userId)return {state:'no-account'};
  if(!navigator.onLine)return {state:'offline'};
