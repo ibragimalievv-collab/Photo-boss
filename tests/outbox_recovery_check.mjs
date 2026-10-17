@@ -11,6 +11,7 @@ const row=(key,extra={})=>({key,userId:42,kind:'shoot_photo',date:'2026-10-16',d
 rows.set('original-key',row('original-key'));
 const context=vm.createContext({rows,Blob,FormData,Promise,Event,Error,Date:{now:()=>now},
  navigator:{onLine:true},window:{dispatchEvent(){},addEventListener(){}},
+ document:{hidden:false,addEventListener(){}},
  setTimeout(_fn,delay){timers.push(delay);return timers.length;},clearTimeout(){},
  localAction:async(_store,_mode,fn)=>fn({get:key=>rows.get(key),put:r=>rows.set(r.key,r)}),
  api:async(_path,{body})=>{
@@ -34,10 +35,12 @@ assert.equal(rows.get('original-key').status,'synced');assert.equal(rows.get('or
 assert.deepEqual(calls,['original-key','original-key'],'replay must preserve operation identity');
 rows.clear();calls.length=0;mode='invalid';
 rows.set('legacy',row('legacy',{status:'error',errorStatus:400,error:'Не удалось прочитать вложение. Повторите отправку; если ошибка повторится, выберите файл заново.'}));
+rows.set('previous-release',row('previous-release',{status:'error',errorStatus:400,legacyMediaRecovered:true,error:'Не удалось прочитать вложение. Повторите отправку.'}));
 rows.set('unrelated',row('unrelated',{status:'error',errorStatus:400,error:'Неверное поле'}));
 rows.set('forbidden',row('forbidden',{status:'error',errorStatus:403,error:'Нет доступа'}));
 await vm.runInContext('flushOutbox()',context);
 await vm.runInContext('flushOutbox()',context);
-assert.deepEqual(calls,['legacy'],'only legacy media failure may be rechecked, once');
+assert.deepEqual(calls,['legacy','previous-release'],'legacy media failure including last release recovery may be rechecked, once per fix');
 assert.ok(rows.get('legacy').legacyMediaRecovered);assert.ok(rows.get('legacy').blob);
+assert.equal(rows.get('previous-release').legacyMediaRecovery,'media-recovery-v2-20261017');assert.ok(rows.get('previous-release').blob);
 console.log('PASS: 429 honors Retry-After, preserves original/key, and legacy false-400 errors recover once without retrying access denials');

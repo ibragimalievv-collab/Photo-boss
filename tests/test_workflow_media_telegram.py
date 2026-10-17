@@ -39,7 +39,7 @@ def test_receipt_bad_dimensions_retries_as_document_without_modifying_original()
 def test_unrelated_telegram_errors_are_not_hidden_by_receipt_fallback():
     error = TelegramBadRequest(
         method=SendPhoto(chat_id=42, photo="fixture"),
-        message="Bad Request: chat not found",
+        message="Bad Request: unexpected invalid request",
     )
     workflow, bot = workflow_with_bot(error)
     with pytest.raises(TelegramBadRequest):
@@ -54,3 +54,28 @@ def test_shooting_photo_does_not_send_or_require_receipt():
     assert result == ("document-id", "document-unique-id")
     bot.send_photo.assert_not_awaited()
     bot.send_document.assert_awaited_once()
+
+
+@pytest.mark.parametrize('receipt', [False, True])
+def test_web_upload_can_save_privately_when_bot_is_blocked(monkeypatch, receipt):
+    from aiogram.exceptions import TelegramForbiddenError
+
+    from app.services import media_files
+    error = TelegramForbiddenError(method=SendPhoto(chat_id=42, photo='fixture'), message='Forbidden: bot was blocked by the user')
+    workflow, bot = workflow_with_bot(error)
+    bot.send_document.side_effect = error
+    save = AsyncMock(return_value=('app:/PhotoBoss/web-media/7/hash.jpg', 'web-sha256:hash'))
+    monkeypatch.setattr(media_files, 'save_private_media', save)
+    raw = b'\xff\xd8\xff' + b'original' * 25
+    assert asyncio.run(workflow.save_telegram(SimpleNamespace(id=7, tg_id=42), raw, receipt=receipt)) == save.return_value
+    save.assert_awaited_once_with(7, raw)
+
+
+def test_unknown_telegram_chat_uses_verified_private_storage(monkeypatch):
+    from app.services import media_files
+    error = TelegramBadRequest(method=SendPhoto(chat_id=42, photo='fixture'), message='Bad Request: chat not found')
+    workflow, _ = workflow_with_bot(error)
+    save = AsyncMock(return_value=('app:/PhotoBoss/web-media/7/hash.jpg', 'web-sha256:hash'))
+    monkeypatch.setattr(media_files, 'save_private_media', save)
+    raw = b'\xff\xd8\xff' + b'original' * 25
+    assert asyncio.run(workflow.save_telegram(SimpleNamespace(id=7, tg_id=42), raw, receipt=True)) == save.return_value

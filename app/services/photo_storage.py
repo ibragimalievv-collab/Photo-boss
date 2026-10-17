@@ -128,9 +128,8 @@ async def _claim_job():
 
 
 async def _download(bot, file_id: str) -> bytes:
-    buffer = LimitedBuffer()
-    await bot.download(file_id, destination=buffer, timeout=40)
-    data = buffer.getvalue()
+    from .media_files import load_private_media
+    data = await load_private_media(bot, file_id, max_bytes=MAX_TELEGRAM_IMAGE_BYTES, timeout=40)
     if len(data) < 100:
         raise ValueError("Telegram вернул пустой или повреждённый файл.")
     return data

@@ -29,6 +29,7 @@ from ..services.receipts import (
     payment_totals,
     refresh_payment_statuses,
 )
+from ..yandex_disk import YandexDiskError
 
 logger = logging.getLogger(__name__)
 r = Router()
@@ -179,7 +180,7 @@ async def analyze_saved(bot, receipt_id, photo):
         content = await download_receipt(bot, photo)
         digest = hashlib.sha256(content).hexdigest()
         analysis = await extract_receipt(content)
-    except (TelegramAPIError, aiohttp.ClientError, OSError, TimeoutError, ValueError) as exc:
+    except (TelegramAPIError, YandexDiskError, aiohttp.ClientError, OSError, TimeoutError, ValueError) as exc:
         # Attachment is already durable even if downloading/analysis fails or times out.
         logger.warning("Receipt %s analysis failed (%s)", receipt_id, type(exc).__name__)
         analysis = {"status": "download_failed"}
@@ -249,8 +250,9 @@ async def review(c, state, current_roles):
         duplicate = await duplicate_receipt(session, receipt)
     await state.clear()
     await c.answer()
-    await c.message.answer_photo(
-        receipt.file_id,
+    from ..services.media_files import send_private_image
+    await send_private_image(
+        c.message, receipt.file_id,
         caption=f"Чек #{receipt.id} · запись #{receipt.booking_id}\n"
                 f"Ожидалось: {receipt.expected_amount:.2f} ₽.\n"
                 f"Статус: {STATUS_NAMES[receipt.status]}.",

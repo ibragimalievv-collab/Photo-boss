@@ -6,7 +6,7 @@ import io
 import json
 import logging
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from aiogram.exceptions import TelegramAPIError
 from aiohttp import web
@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 from .config import config
 from .miniapp_security import AccessError
+from .services.ai_diagnostics import unavailable as ai_unavailable
 from .services.training import CATEGORY_BY_SLUG, TRAINING_CATEGORIES, training_day
 from .services.training_ai import MAX_IMAGE_BYTES, analyze_training_set
 from .work_chat import positive_id
@@ -21,6 +22,16 @@ from .yandex_disk import ROOT, YandexDiskError
 
 logger = logging.getLogger(__name__)
 DISK_PREFIX = "academy-disk:"
+CHECKING_SOURCES = {"AI_PENDING", "AI_PROCESSING"}
+REVIEW_LEASE_SECONDS = 15 * 60
+
+
+def analysis_data(value):
+    try:
+        result = json.loads(value or "null")
+    except (ValueError, TypeError):
+        return {}
+    return result if isinstance(result, dict) else {}
 
 
 class BoundedPhoto(io.BytesIO):
@@ -67,9 +78,9 @@ class AcademyPractice:
                 "userName": user[0]["name"], "own": row["user_id"] == actor["id"],
                 "canReview": False,
                 "canRetake": bool(row["user_id"] == actor["id"] and row["status"] == "PENDING_REVIEW"
-                                  and row["review_source"] != "AI_PENDING" and isinstance(analysis, dict)
+                                  and row["review_source"] not in CHECKING_SOURCES and isinstance(analysis, dict)
                                   and analysis.get("review", {}).get("decision") == "MANUAL_REVIEW"),
-                "canRetry": row["status"] == "PENDING_REVIEW" and row["review_source"] != "AI_PENDING",
+                "canRetry": row["status"] == "PENDING_REVIEW" and row["review_source"] not in CHECKING_SOURCES,
                 "status": row["status"], "reviewSource": row["review_source"],
                 "score": row["ai_score"], "analysis": analysis,
                 "shots": [{"index": i, "instruction": instruction, "uploaded": i in uploaded,
@@ -109,7 +120,9 @@ class AcademyPractice:
                 "categories": [{"slug": c.slug, "title": c.title} for c in TRAINING_CATEGORIES
                                if c.slug in allowed],
                 "history": [{"id": r["id"], "title": CATEGORY_BY_SLUG[r["category_slug"]].title,
-                             "status": r["status"]} for r in assignments[:30]],
+                             "status": r["status"], "reviewSource": r["review_source"],
+                             "score": r["ai_score"], "analysis": analysis_data(r["ai_analysis"])}
+                            for r in assignments[:30]],
                 "queue": [{"id": r["id"], "name": r["name"],
                            "title": CATEGORY_BY_SLUG[r["category_slug"]].title} for r in queue]}
         return web.json_response(result)
@@ -235,7 +248,9 @@ class AcademyPractice:
             row = await self.assignment(conn, actor, aid, lock=True)
             if row["status"] != "PENDING_REVIEW":
                 raise AccessError("Это задание не ожидает проверки.", 409)
-            await conn.execute(text("UPDATE training_assignments SET review_source='AI_PENDING' WHERE id=:id"), {"id": aid})
+            if row["review_source"] in CHECKING_SOURCES:
+                return web.json_response({"ok": True})
+            await conn.execute(text("UPDATE training_assignments SET review_source='AI_PENDING',ai_analysis=NULL WHERE id=:id"), {"id": aid})
         return web.json_response({"ok": True})
 
     async def retake(self, request):
@@ -256,7 +271,7 @@ class AcademyPractice:
                 analysis = json.loads(row["ai_analysis"] or "null")
             except ValueError:
                 analysis = None
-            if (row["status"] != "PENDING_REVIEW" or row["review_source"] == "AI_PENDING"
+            if (row["status"] != "PENDING_REVIEW" or row["review_source"] in CHECKING_SOURCES
                     or not isinstance(analysis, dict)
                     or analysis.get("review", {}).get("decision") != "MANUAL_REVIEW"):
                 raise AccessError("Пересъёмка доступна после неуверенного ответа ИИ. Обновите задание.", 409)
@@ -311,17 +326,24 @@ class AcademyPractice:
             if shot is None:
                 continue
             try:
-                uploaded.append(await photo_bytes(self.api.bot, storage, shot["submitted_file_id"]))
+                payload = await photo_bytes(self.api.bot, storage, shot["submitted_file_id"])
+                if (not payload.startswith(b"\xff\xd8\xff") or not payload.endswith(b"\xff\xd9")
+                        or len(payload) > MAX_IMAGE_BYTES):
+                    raise ValueError("Stored practice photo is not a bounded JPEG")
+                uploaded.append(payload)
             except (OSError, ValueError, TelegramAPIError, YandexDiskError):
                 unavailable.append(index)
         return uploaded, unavailable
 
     async def recover_stalled_storage(self, storage):
         """Repair old AI_FAILED reviews after checking every stored practice photo."""
-        async with self.engine.connect() as conn:
-            rows = await self.api.rows(conn, """SELECT * FROM training_assignments
-                WHERE status='PENDING_REVIEW' AND review_source='AI_FAILED' ORDER BY id LIMIT 20""")
-        for row in rows:
+        async for row in self._pending_candidates(sources=("AI_FAILED",)):
+            previous = analysis_data(row["ai_analysis"])
+            # Credentials, quota, permissions and refusals need a deliberate
+            # retry after remediation, not another paid request on every deploy.
+            if (previous.get("retryable") is False
+                    or (type(previous.get("attempts")) is int and previous["attempts"] >= 3)):
+                continue
             async with self.engine.connect() as conn:
                 shots = await self.api.rows(conn, """SELECT pose_index,submitted_file_id
                     FROM training_submissions WHERE assignment_id=:id ORDER BY pose_index""", id=row["id"])
@@ -341,12 +363,76 @@ class AcademyPractice:
                     SET review_source='AI_PENDING' WHERE id=:id"""), {"id": row["id"]})
             logger.info("Academy assignment %s requeued after storage recovery", row["id"])
 
-    async def process_pending(self, storage):
+    async def _pending_candidates(self, assignment_id=None, *, sources=("AI_PENDING", "AI_PROCESSING")):
+        """Keyset-scan bounded pages, so deferred leases cannot hide ready work.
+
+        A snapshot ceiling keeps this pass finite even when new assignments are
+        submitted continuously. Eligibility metadata stays in Python for the
+        same behavior on PostgreSQL and the SQLite contract-test adapter.
+        """
+        source_params = {f"source{i}": source for i, source in enumerate(sources)}
+        source_sql = ",".join(f":{key}" for key in source_params)
         async with self.engine.connect() as conn:
-            rows = await self.api.rows(conn, """SELECT * FROM training_assignments
-                WHERE status='PENDING_REVIEW' AND review_source='AI_PENDING' ORDER BY id LIMIT 2""")
-        for row in rows:
-            result = {"status": "unavailable"}
+            ceiling_rows = await self.api.rows(conn, f"""SELECT MAX(id) AS ceiling
+                FROM training_assignments WHERE status='PENDING_REVIEW'
+                AND review_source IN ({source_sql})""", **source_params)
+        ceiling = ceiling_rows[0]["ceiling"] if ceiling_rows else None
+        if ceiling is None:
+            return
+        after = 0
+        while after < ceiling:
+            query = f"""SELECT * FROM training_assignments
+                WHERE status='PENDING_REVIEW' AND review_source IN ({source_sql})
+                AND id>:after AND id<=:ceiling
+                """ + ("AND id=:id " if assignment_id is not None else "") + "ORDER BY id LIMIT 20"
+            params = source_params | {"after": after, "ceiling": ceiling}
+            if assignment_id is not None:
+                params["id"] = assignment_id
+            async with self.engine.connect() as conn:
+                rows = await self.api.rows(conn, query, **params)
+            if not rows:
+                return
+            for row in rows:
+                yield row
+            after = rows[-1]["id"]
+            if assignment_id is not None or len(rows) < 20:
+                return
+
+    async def process_pending(self, storage, *, assignment_id=None):
+        processed = 0
+        outcomes = {}
+        async for row in self._pending_candidates(assignment_id):
+            if processed >= 2:
+                break
+            previous = analysis_data(row["ai_analysis"])
+            now = datetime.now(UTC)
+            due = previous.get("nextRetryAt")
+            started = previous.get("processingStartedAt")
+            try:
+                if due and datetime.fromisoformat(due) > now:
+                    continue
+                if (row["review_source"] == "AI_PROCESSING" and started
+                        and (now - datetime.fromisoformat(started)).total_seconds() < REVIEW_LEASE_SECONDS):
+                    continue
+            except (TypeError, ValueError):
+                pass  # Legacy metadata must not permanently block a review.
+            lease = secrets.token_hex(12)
+            attempts = previous.get("attempts", 0)
+            attempts = attempts if type(attempts) is int and 0 <= attempts <= 3 else 0
+            queued = {"status": "processing", "attempts": attempts,
+                      "processingStartedAt": now.isoformat(), "processingLease": lease}
+            async with self.lock, self.engine.begin() as conn:
+                current = await self.api.rows(conn, """SELECT status,review_source,ai_analysis
+                    FROM training_assignments WHERE id=:id FOR UPDATE""", id=row["id"])
+                if (not current or current[0]["status"] != "PENDING_REVIEW"
+                        or current[0]["review_source"] != row["review_source"]
+                        or current[0]["ai_analysis"] != row["ai_analysis"]):
+                    continue
+                await conn.execute(text("""UPDATE training_assignments SET review_source='AI_PROCESSING',
+                    ai_analysis=:analysis WHERE id=:id"""),
+                    {"id": row["id"], "analysis": json.dumps(queued)})
+            processed += 1
+            result = ai_unavailable('academy_review', config.academy_analysis_model, 'not_configured') if not config.openai_api_key else {"status": "unavailable"}
             async with self.engine.connect() as conn:
                 shots = await self.api.rows(conn, """SELECT pose_index,submitted_file_id FROM training_submissions
                     WHERE assignment_id=:id ORDER BY pose_index""", id=row["id"])
@@ -355,18 +441,28 @@ class AcademyPractice:
                 uploaded, unavailable = await self._load_submissions(row, shots, storage)
                 if unavailable:
                     await self._reopen_unavailable_photos(
-                        row, shots, unavailable, expected_sources={"AI_PENDING"}
+                        row, shots, unavailable, expected_sources={"AI_PROCESSING"}
                     )
+                    outcomes[row["id"]] = {"status": "storage_unavailable", "unavailable_indexes": unavailable}
                     continue
-                result = await analyze_training_set(
-                    category, [p.read_bytes() for p in category.image_paths], uploaded
-                )
+                try:
+                    references = [p.read_bytes() for p in category.image_paths]
+                except OSError:
+                    result = ai_unavailable('academy_review', config.academy_analysis_model, 'invalid_output')
+                else:
+                    result = await analyze_training_set(category, references, uploaded)
             review = result.get("review", {}) if result.get("status") == "completed" else {}
             decision = review.get("decision")
             reshoot = review.get("reshoot_indexes", [])
+            if result.get("status") != "completed":
+                result = result | {"attempts": attempts + 1}
+                if result.get("retryable") and attempts + 1 < 3:
+                    result["nextRetryAt"] = (datetime.now(UTC) + timedelta(seconds=(30, 90)[attempts])).isoformat()
             async with self.lock, self.engine.begin() as conn:
-                current = await self.api.rows(conn, "SELECT status,review_source FROM training_assignments WHERE id=:id FOR UPDATE", id=row["id"])
-                if not current or current[0]["status"] != "PENDING_REVIEW" or current[0]["review_source"] != "AI_PENDING":
+                current = await self.api.rows(conn, "SELECT status,review_source,ai_analysis FROM training_assignments WHERE id=:id FOR UPDATE", id=row["id"])
+                if (not current or current[0]["status"] != "PENDING_REVIEW"
+                        or current[0]["review_source"] != "AI_PROCESSING"
+                        or analysis_data(current[0]["ai_analysis"]).get("processingLease") != lease):
                     continue
                 status = "COMPLETED" if decision == "ACCEPT" else "ACTIVE" if decision == "REVISION" and reshoot else "PENDING_REVIEW"
                 if review:
@@ -381,9 +477,13 @@ class AcademyPractice:
                                            {"id": row["id"], "pose": index})
                 await conn.execute(text("""UPDATE training_assignments SET status=:status,review_source=:source,
                     ai_score=:score,ai_analysis=:analysis,completed_at=:completed WHERE id=:id"""),
-                    {"id": row["id"], "status": status, "source": ("AI_UNCERTAIN" if decision == "MANUAL_REVIEW" else "AI_FAILED") if status == "PENDING_REVIEW" else "AI",
+                    {"id": row["id"], "status": status, "source": ("AI_PENDING" if result.get("nextRetryAt") else "AI_UNCERTAIN" if decision == "MANUAL_REVIEW" else "AI_FAILED") if status == "PENDING_REVIEW" else "AI",
                      "score": review.get("score"), "analysis": json.dumps(result, ensure_ascii=False),
                      "completed": datetime.now(UTC).replace(tzinfo=None) if status == "COMPLETED" else None})
+            logger.info("Academy assignment %s review finished decision=%s state=%s code=%s attempts=%s",
+                        row["id"], decision or "unavailable", status, result.get("errorCode", "none"), attempts + 1)
+            outcomes[row["id"]] = result
+        return outcomes
 
     async def worker(self, app):
         try:

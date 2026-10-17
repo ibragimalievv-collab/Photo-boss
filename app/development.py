@@ -17,6 +17,7 @@ from .models import Booking, Photo, Sale, ShootDevelopmentReview, Shooting, utc_
 from .people import positive_id
 from .services import development_ai as ai
 from .services.insights import parsed
+from .yandex_disk import YandexDiskError
 
 
 class LimitedImage(io.BytesIO):
@@ -73,14 +74,14 @@ async def review_one(factory,bot):
             if len(photos)!=len(pending): raise ValueError('Часть исходных фотографий недоступна.')
             images=[]
             for photo in photos:
-                data=LimitedImage()
-                await bot.download(photo.file_id,destination=data,timeout=20)
-                images.append((photo.id,data.getvalue()))
+                from .services.media_files import load_private_media
+                data=await load_private_media(bot,photo.file_id,timeout=20)
+                images.append((photo.id,data))
             response=await ai.analyze_batch(images)
         elif summary_chunk: response=await ai.summarize_shoot(summary_chunk)
         else: response=await ai.summarize_shoot({'segments':parts,'totalFrames':len(ids)} if parts else batches)
         if response['status']!='completed': error='AI недоступен или вернул неполные данные. Анализ не завершён.'
-    except (TelegramAPIError, ClientError, TimeoutError, ValueError, OSError, KeyError, TypeError) as exc:
+    except (TelegramAPIError, YandexDiskError, ClientError, TimeoutError, ValueError, OSError, KeyError, TypeError) as exc:
         error=str(exc) if isinstance(exc,ValueError) else 'Не удалось получить фотографии или выполнить анализ. Повторите позднее.'
     async with factory() as session:
         row=await session.get(ShootDevelopmentReview,rid,with_for_update=True)

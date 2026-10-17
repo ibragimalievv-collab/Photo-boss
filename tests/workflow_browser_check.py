@@ -180,6 +180,14 @@ async def main():
                         end = await session.scalar(select(ShiftCheckOut))
                         assert end.status == 'PENDING_REVIEW' and end.report_note == 'Connection was unavailable at shift close'
                     assert lost and not errors, errors
+                    await page.evaluate("""async()=>{
+                        const m=await import('/app/js/workflow.js');await m.loadWorkflow(1);
+                        document.querySelector('#app').innerHTML=m.workflowView();
+                    }""")
+                    await page.locator('[data-receipt-status]').get_by_role('button', name='Посмотреть фото чека').click()
+                    await wait_async(page, "()=>document.querySelector('dialog[aria-label=\"Фото чека\"] img')?.naturalWidth>0")
+                    await page.locator('dialog[aria-label="Фото чека"]').get_by_role('button', name='Закрыть', exact=True).click()
+                    await page.locator('dialog[aria-label="Фото чека"]').wait_for(state='detached')
                     assert await page.evaluate("async()=>{for(const name of await caches.keys()){for(const request of await (await caches.open(name)).keys())if(new URL(request.url).pathname.startsWith('/api/'))return false;}return true;}")
                     output = Path(os.getenv('CALLS_QA_DIR', '/tmp/photo-boss-calls-qa'))
                     output.mkdir(parents=True, exist_ok=True)

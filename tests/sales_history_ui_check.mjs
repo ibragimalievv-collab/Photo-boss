@@ -16,4 +16,18 @@ assert.ok(markup.includes('Предыдущие продажи и чеки не 
 assert.ok(markup.includes('value="10" readonly'));
 assert.ok(markup.includes('Guest &lt;unsafe>'));
 assert.ok(markup.includes('value="7" selected'));
+vm.runInContext(`data.bookings[0].fullUploaded=false;data.bookings[0].canUpload=true;data.bookings[0].canFullUpload=true;data.bookings[0].shootingId=20;
+ data.bookings[0].receipts=[{id:5,stored:true,imagePath:'/receipts/5/image',status:'PENDING',analysisStatus:'extracted',expectedAmount:'800.00',extractedAmount:'400.00',warnings:['Сумма <не совпала>']}];`,ctx);
+const pending=vm.runInContext('workflowView()',ctx);
+assert.ok(pending.includes('id="workflowShoot"'),'a paid SOLD/COMPLETED booking must still allow missing full originals');
+assert.ok(pending.includes('data-receipt-status="5"'));
+assert.ok(pending.includes('файл принят сервером'));
+assert.ok(pending.includes('это не подтверждение поступления денег'));
+assert.ok(pending.includes('Оплата пока не подтверждена'));
+assert.ok(pending.includes('Сумма &lt;не совпала>'));
+assert.ok(pending.includes('data-receipt-path="/receipts/5/image"'));
+vm.runInContext(`data.bookings[0].canFullUpload=false;data.bookings[0].draft={receiptStored:true,receiptAnalysisStatus:'UNAVAILABLE'};`,ctx);
+const closed=vm.runInContext('workflowView()',ctx);
+assert.ok(!closed.includes('id="workflowShoot"'),'explicit server denial must override old status');
+assert.ok(closed.includes('AI пока не прочитал чек'));
 console.log('PASS: closed-order repeat purchase, history totals, locked frame count and escaped names');

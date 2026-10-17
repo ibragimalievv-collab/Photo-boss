@@ -24,6 +24,7 @@ const context=vm.createContext({
  rows,api,localAction,Blob,FormData,Promise,Date,Error,Event,
  crypto:{randomUUID:()=>String(++seed)},navigator:{onLine:true},
  window:{dispatchEvent(){},addEventListener(){}},
+ document:{hidden:false,addEventListener(){}},
  setTimeout,clearTimeout,queueMicrotask,
 });
 vm.runInContext(source,context);

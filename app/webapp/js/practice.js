@@ -1,4 +1,4 @@
-import {api,ApiError} from './api.js';
+import {api} from './api.js';
 import {esc} from './domain.js';
 
 const panel=document.createElement('dialog');panel.className='practice-dialog';
@@ -6,6 +6,20 @@ panel.setAttribute('aria-labelledby','practiceTitle');document.body.append(panel
 let current=null,pollTimer=null,version=0,busy=false,lastFocus=null;
 const urls=new Set();
 const labels={ACTIVE:'В работе',PENDING_REVIEW:'На проверке',COMPLETED:'Практика принята'};
+function statusLabel(data){
+ if(data.status==='ACTIVE'&&data.reviewSource==='STORAGE_RETRY')return 'Нужна повторная загрузка';
+ if(data.status==='ACTIVE'&&data.reviewSource==='AI')return 'Нужна пересъёмка';
+ if(data.status==='PENDING_REVIEW'&&data.reviewSource==='AI_FAILED')return 'Проверка прервалась';
+ if(data.status==='PENDING_REVIEW'&&data.reviewSource==='AI_UNCERTAIN')return 'Нужно уточнить кадры';
+ return labels[data.status]||data.status;
+}
+function reviewSummary(data){
+ const a=data.analysis||{},r=a.review;
+ if(r?.next_action)return r.next_action;
+ if(a.message)return a.message.replaceAll('Ваш текст сохранён','Фотографии сохранены');
+ if(data.reviewSource==='STORAGE_RETRY')return 'Откройте задание и загрузите только отмеченные кадры.';
+ return '';
+}
 function cleanup(){version++;for(const url of urls)URL.revokeObjectURL(url);urls.clear();}
 function close(){cleanup();clearInterval(pollTimer);panel.close();lastFocus?.focus?.();document.dispatchEvent(new CustomEvent('pb-practice-updated'));}
 function shell(title,html){cleanup();panel.innerHTML=`<header class="practice-head"><button data-practice-home aria-label="Назад">‹</button><h2 id="practiceTitle">${esc(title)}</h2><button data-practice-close aria-label="Закрыть">×</button></header><div class="practice-body"><p class="practice-error" role="alert" hidden></p>${html}</div>`;if(!panel.open){lastFocus=document.activeElement;panel.showModal();}}
@@ -24,16 +38,18 @@ function analysisMarkup(data){
  const a=data.analysis;if(!a)return '';
  if(a.status==='owner')return `<div class="practice-feedback"><strong>Решение владельца</strong><p>${esc(a.comment||'Набор принят.')}</p></div>`;
  if(a.status==='storage_unavailable')return `<p class="practice-feedback">Не удалось прочитать ${esc((a.unavailable_indexes||[]).map(i=>`кадр ${i}`).join(', ')||'один из кадров')} из хранилища. Остальные фотографии сохранены; загрузите только отмеченные кадры заново.</p>`;
- if(a.status!=='completed')return '<p class="practice-feedback">AI-проверка временно недоступна. Фотографии сохранены; повторите проверку.</p>';
+ if(a.status==='processing')return `<p class="practice-feedback">ИИ проверяет сохранённые фотографии. Попытка ${(a.attempts||0)+1}/3. Повторно отправлять фото не нужно.</p>`;
+ if(a.status!=='completed')return `<p class="practice-feedback">${esc(reviewSummary(data)||'AI-проверка временно недоступна. Фотографии сохранены; повторите проверку.')}${a.nextRetryAt?' Следующая попытка запланирована автоматически; фотографии повторно загружать не нужно.':''}</p>`;
  const r=a.review;
  return `<div class="practice-feedback"><h3>Разбор: ${esc(r.score)}/100</h3>${r.strengths?.length?`<p>${esc(r.strengths.join(' · '))}</p>`:''}${r.issues?.length?`<ul>${r.issues.map(i=>`<li>${esc(i)}</li>`).join('')}</ul>`:''}<p>${esc(r.next_action)}</p></div>`;
 }
 function renderAssignment(data){
  current=data;
  const editable=data.own&&data.status==='ACTIVE';
- shell(data.title,`<p>${esc(data.userName)} · <strong data-practice-status>${esc(labels[data.status]||data.status)}</strong></p>
+ shell(data.title,`<p>${esc(data.userName)} · <strong data-practice-status>${esc(statusLabel(data))}</strong></p>
   <p>Загружено ${data.shots.filter(s=>s.uploaded).length}/5. Для каждого кадра показаны референс и задание.</p>
-  ${data.status==='PENDING_REVIEW'?`<p>${data.reviewSource==='AI_PENDING'?'ИИ проверяет фотографии…':data.analysis?.review?.decision==='MANUAL_REVIEW'?'ИИ не смог уверенно оценить кадры. Можно повторить проверку или переснять спорные кадры.':'AI-проверку нужно повторить.'} Результат обновится автоматически.</p>`:''}
+  ${data.status==='PENDING_REVIEW'?`<p>${['AI_PENDING','AI_PROCESSING'].includes(data.reviewSource)?'ИИ проверяет фотографии…':data.analysis?.review?.decision==='MANUAL_REVIEW'?'ИИ не смог уверенно оценить кадры. Можно повторить проверку или переснять спорные кадры.':'AI-проверку нужно повторить.'} Результат обновится автоматически.</p>`:''}
+  ${editable&&data.reviewSource==='AI'?`<p class="practice-feedback">Проверка уже завершена: нужно переснять ${esc((data.analysis?.review?.reshoot_indexes||[]).map(i=>`кадр ${i}`).join(', '))}. Остальные кадры сохранены. Подробный разбор — ниже.</p>`:''}
   ${data.personalInstructions?.length?`<section class="practice-feedback"><h3>Ваше AI-задание</h3><ol>${data.personalInstructions.map(x=>`<li>${esc(x)}</li>`).join('')}</ol></section>`:''}${analysisMarkup(data)}<div class="practice-shots">${data.shots.map(s=>`<article class="practice-shot"><h3>Кадр ${s.index}/5</h3><p>${esc(s.instruction)}</p>
   <div class="practice-pair"><figure><img data-practice-photo="${esc(s.reference)}" alt="Учебный референс ${s.index}"><figcaption>Референс</figcaption></figure>
   ${s.photo?`<figure><img data-practice-photo="${esc(s.photo)}" alt="Работа фотографа ${s.index}"><figcaption>Ваш кадр сохранён</figcaption></figure>`:'<p class="practice-missing">Кадр ещё не загружен</p>'}</div>
@@ -48,9 +64,9 @@ async function showAssignment(id){const data=await api(`/academy/practice/${id}`
 async function home(){
  current=null;
  const data=await api('/academy/practice');
- shell('Практика Академии',`${data.assignment?`<button class="practice-refresh" data-practice-open="${data.assignment.id}">Продолжить: ${esc(data.assignment.title)} · ${esc(labels[data.assignment.status])}</button>`:data.todayDone?'<p>Практика принята. Новый набор откроется завтра.</p>':!data.ready?'<p>Завершите четыре урока текущего блока, чтобы открыть практику.</p>':`<p>AI-наставник назначает практику по вашим результатам и текущему блоку.</p><button class="btn primary" data-practice-plan>Открыть персональное AI-задание</button>`}
+ shell('Практика Академии',`${data.assignment?`<button class="practice-refresh" data-practice-open="${data.assignment.id}">Продолжить: ${esc(data.assignment.title)} · ${esc(statusLabel(data.assignment))}</button>${reviewSummary(data.assignment)?`<p class="practice-feedback">${esc(reviewSummary(data.assignment))}</p>`:''}`:data.todayDone?'<p>Практика принята. Новый набор откроется завтра.</p>':!data.ready?'<p>Завершите четыре урока текущего блока, чтобы открыть практику.</p>':`<p>AI-наставник назначает практику по вашим результатам и текущему блоку.</p><button class="btn primary" data-practice-plan>Открыть персональное AI-задание</button>`}
  ${data.queue.length?`<h3>Проверить работы команды</h3><div class="practice-menu">${data.queue.map(a=>`<button data-practice-open="${a.id}">${esc(a.name)} · ${esc(a.title)}</button>`).join('')}</div>`:''}
- ${data.history.length?`<h3>Мои задания</h3><div class="practice-menu">${data.history.map(a=>`<button data-practice-open="${a.id}">${esc(a.title)} · ${esc(labels[a.status]||a.status)}</button>`).join('')}</div>`:''}`);
+ ${data.history.length?`<h3>Мои задания</h3><div class="practice-menu">${data.history.map(a=>`<button data-practice-open="${a.id}">${esc(a.title)} · ${esc(statusLabel(a))}${a.score!==null&&a.score!==undefined?` · ${esc(a.score)}/100`:''}</button>`).join('')}</div>`:''}`);
 }
 export async function openPractice(id=null,category=null){
  shell('Практика Академии','<p>Загружаем задание…</p>');

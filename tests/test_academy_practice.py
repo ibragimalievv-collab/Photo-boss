@@ -208,6 +208,153 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
         assert completed["status"] == "COMPLETED"
         assert completed["score"] == 91
 
+    async def test_transient_review_retries_three_times_then_exposes_failure(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        failure = {"status": "unavailable", "errorCode": "timeout", "retryable": True,
+                   "message": "Провайдер не ответил вовремя."}
+        analyzer = AsyncMock(return_value=failure)
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), \
+                patch("app.academy_practice.analyze_training_set", analyzer):
+            for attempt in range(1, 4):
+                await self.practice.process_pending(self.storage)
+                _, data = await self.request(f"/{aid}")
+                assert data["analysis"]["attempts"] == attempt
+                assert data["reviewSource"] == ("AI_PENDING" if attempt < 3 else "AI_FAILED")
+                assert data["canRetry"] is (attempt == 3)
+                await self.practice.process_pending(self.storage)
+                assert analyzer.await_count == attempt
+                if attempt < 3:
+                    with self.engine.inner.begin() as conn:
+                        changed = data["analysis"] | {"nextRetryAt": "2000-01-01T00:00:00+00:00"}
+                        conn.execute(text("UPDATE training_assignments SET ai_analysis=:data WHERE id=:id"),
+                                     {"id": aid, "data": json.dumps(changed)})
+            await self.practice.recover_stalled_storage(self.storage)
+            await self.practice.process_pending(self.storage)
+            assert analyzer.await_count == 3
+
+    async def test_nonretryable_quota_failure_does_not_repeat_on_worker_or_startup(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        failure = {"status": "unavailable", "errorCode": "insufficient_quota", "retryable": False,
+                   "message": "Лимит API исчерпан."}
+        analyzer = AsyncMock(return_value=failure)
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), \
+                patch("app.academy_practice.analyze_training_set", analyzer):
+            await self.practice.process_pending(self.storage)
+            await self.practice.recover_stalled_storage(self.storage)
+            await self.practice.process_pending(self.storage)
+        assert analyzer.await_count == 1
+        _, data = await self.request(f"/{aid}")
+        assert data["reviewSource"] == "AI_FAILED"
+        assert data["analysis"]["errorCode"] == "insufficient_quota"
+
+    async def test_provider_call_is_claimed_across_worker_instances(self):
+        from app.academy_practice import AcademyPractice
+
+        aid = await self.start()
+        await self.upload_all(aid)
+        second_worker = AcademyPractice(self.service)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def analyze(*args):
+            entered.set()
+            await release.wait()
+            return {"status": "completed", "review": {"decision": "ACCEPT", "score": 90,
+                    "reshoot_indexes": [], "issues": [], "strengths": [], "next_action": "Далее"}}
+
+        analyzer = AsyncMock(side_effect=analyze)
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), \
+                patch("app.academy_practice.analyze_training_set", analyzer):
+            running = asyncio.create_task(self.practice.process_pending(self.storage))
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            _, checking = await self.request(f"/{aid}")
+            assert checking["reviewSource"] == "AI_PROCESSING" and not checking["canRetry"]
+            await second_worker.process_pending(self.storage)
+            assert analyzer.await_count == 1
+            release.set()
+            await running
+        assert (await self.request(f"/{aid}"))[1]["status"] == "COMPLETED"
+
+    async def test_ready_review_is_not_starved_by_first_twenty_deferred_rows(self):
+        from datetime import UTC, datetime
+
+        aid = await self.start()
+        await self.upload_all(aid)
+        ready_id = 25
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("UPDATE training_assignments SET id=:ready WHERE id=:id"),
+                         {"ready": ready_id, "id": aid})
+            conn.execute(text("UPDATE training_submissions SET assignment_id=:ready WHERE assignment_id=:id"),
+                         {"ready": ready_id, "id": aid})
+            for index in range(1, ready_id):
+                source = "AI_PENDING" if index % 2 else "AI_PROCESSING"
+                metadata = ({"nextRetryAt": "2099-01-01T00:00:00+00:00"} if index % 2 else
+                            {"processingStartedAt": datetime.now(UTC).isoformat(), "processingLease": f"held-{index}"})
+                conn.execute(text("""INSERT INTO training_assignments
+                    (id,user_id,category_slug,status,review_source,ai_analysis)
+                    VALUES (:id,3,'woman','PENDING_REVIEW',:source,:data)"""),
+                    {"id": index, "source": source, "data": json.dumps(metadata)})
+        result = {"status": "completed", "review": {"decision": "ACCEPT", "score": 90,
+                  "reshoot_indexes": [], "issues": [], "strengths": [], "next_action": "Далее"}}
+        analyzer = AsyncMock(return_value=result)
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), \
+                patch("app.academy_practice.analyze_training_set", analyzer):
+            outcomes = await self.practice.process_pending(self.storage)
+        assert set(outcomes) == {ready_id}
+        assert analyzer.await_count == 1
+        assert (await self.request(f"/{ready_id}"))[1]["status"] == "COMPLETED"
+        with self.engine.inner.connect() as conn:
+            assert conn.execute(text("""SELECT COUNT(*) FROM training_assignments
+                WHERE id<25 AND status='PENDING_REVIEW'""")).scalar() == 24
+
+    async def test_stale_processing_lease_is_recovered_without_photo_reupload(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("""UPDATE training_assignments SET review_source='AI_PROCESSING',
+                ai_analysis=:data WHERE id=:id"""), {"id": aid, "data": json.dumps({
+                    "status": "processing", "processingStartedAt": "2000-01-01T00:00:00+00:00",
+                    "processingLease": "old", "attempts": 0})})
+        result = {"status": "completed", "review": {"decision": "REVISION", "score": 75,
+                  "reshoot_indexes": [3], "issues": ["Поменяйте ракурс"], "strengths": [],
+                  "next_action": "Переснимите третий кадр"}}
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), \
+                patch("app.academy_practice.analyze_training_set", AsyncMock(return_value=result)):
+            await self.practice.process_pending(self.storage)
+        _, catalog = await self.request()
+        assert catalog["assignment"]["status"] == "ACTIVE"
+        assert catalog["history"][0]["analysis"]["review"]["next_action"] == "Переснимите третий кадр"
+        assert catalog["history"][0]["score"] == 75
+
+    async def test_startup_recovery_scans_past_capped_failed_rows(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("""UPDATE training_assignments SET id=25,review_source='AI_FAILED',
+                ai_analysis='{"status":"unavailable"}' WHERE id=:id"""), {"id": aid})
+            conn.execute(text("UPDATE training_submissions SET assignment_id=25 WHERE assignment_id=:id"), {"id": aid})
+            for index in range(1, 25):
+                conn.execute(text("""INSERT INTO training_assignments
+                    (id,user_id,category_slug,status,review_source,ai_analysis)
+                    VALUES (:id,3,'woman','PENDING_REVIEW','AI_FAILED',:data)"""),
+                    {"id": index, "data": json.dumps({"status": "unavailable", "attempts": 3})})
+        await self.practice.recover_stalled_storage(self.storage)
+        assert (await self.request("/25"))[1]["reviewSource"] == "AI_PENDING"
+        with self.engine.inner.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM training_assignments WHERE review_source='AI_FAILED'")).scalar() == 24
+
+    async def test_corrupt_stored_photo_reopens_only_invalid_slot(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        key = next(path for path in self.files if f"/{aid}-3-" in path)
+        self.files[key] = b"<html>upstream error</html>"
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")):
+            await self.practice.process_pending(self.storage)
+        _, data = await self.request(f"/{aid}")
+        assert data["status"] == "ACTIVE" and data["reviewSource"] == "STORAGE_RETRY"
+        assert [shot["index"] for shot in data["shots"] if not shot["uploaded"]] == [3]
+
 
     async def test_uncertain_ai_result_has_retake_path_without_manual_acceptance(self):
         aid = await self.start()
