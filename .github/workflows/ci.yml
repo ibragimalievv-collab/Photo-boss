@@ -82,6 +82,7 @@ jobs:
           for file in app/webapp/js/*.js; do node --check "$file"; done
           node tests/install_client_check.mjs
           node tests/account_cache_check.mjs
+          node tests/voice_training_client_check.mjs
           node tests/outbox_receipt_isolation_check.mjs
           node tests/folder_sequential_upload_check.mjs
           node tests/miniapp_launch_auth_check.mjs

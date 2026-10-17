@@ -130,6 +130,7 @@ async def main():
         await expect(page.locator('[data-quiz-result]')).to_contain_text('Урок сохранён')
         await page.locator('[data-coach-close]').click()
         await page.locator('[data-coach-scenario="booking-time"]').first.click()
+        await page.locator('#bookingTraining summary').click()
         await expect(page.locator('#bookingTrainingForm')).to_be_visible()
         await page.locator('#bookingTrainingForm textarea').fill('Понимаю. Хотите подобрать удобное время?')
         await page.locator('#bookingTrainingForm button[value="reply"]').click()
@@ -138,6 +139,7 @@ async def main():
         await expect(page.locator('#bookingTrainingForm textarea')).to_have_value('Понимаю. Хотите подобрать удобное время?')
         await page.locator('#bookingTrainingForm button[value="reply"]').click()
         await expect(page.locator('#bookingTraining')).to_contain_text('А завтра можно?')
+        await page.locator('#bookingTraining summary').click()
         await page.locator('#bookingTrainingForm button[value="finish"]').click()
         await expect(page.get_by_role('heading', name='Результат: 80/100')).to_be_visible()
         assert completed == {'booking-approach'}

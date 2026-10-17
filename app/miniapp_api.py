@@ -185,12 +185,15 @@ class MiniApp:
             response = web.json_response(body, status=exc.status)
         except web.HTTPException as exc:
             response = web.json_response({"error": "Недопустимый запрос."}, status=exc.status)
-        except YandexDiskError:
+        except YandexDiskError as exc:
             # The provider may be down while the application and database are healthy.
             # Preserve the original outbox row and do not expose provider URLs or tokens.
             logger.warning("Mini App storage temporarily unavailable: %s", request.path)
-            response = web.json_response(
-                {"error": "Яндекс.Диск временно недоступен. Повторите действие. Не удаляйте исходные файлы до подтверждения сохранения."},
+            if 'HTTP 404' in str(exc):
+                response = web.json_response({'error': 'Файл не найден на подключённом Яндекс.Диске. Он мог остаться на прежнем Диске. Загрузите исходную фотографию повторно в эту же съёмку.'}, status=404)
+            else:
+                response = web.json_response(
+                    {"error": "Яндекс.Диск временно недоступен. Повторите действие. Не удаляйте исходные файлы до подтверждения сохранения."},
                 status=503,
             )
         except Exception:
@@ -327,31 +330,58 @@ class MiniApp:
             await self.audit_write(conn, actor, "miniapp_theme_changed", "user", actor["id"], f"Оформление: {previous} → {body['theme']}")
         return web.json_response({"theme": body["theme"]})
 
-    async def bookings_data(self, conn, actor, day):
+    async def bookings_data(self, conn, actor, day, *, search='', trash=False):
+        import re
+
+        from .booking_management import version
         clause = f"AND ({booking_scope_sql(actor['id'], actor['roles'])})"
-        rows = await self.rows(conn, f"""SELECT b.id,b.room,b.shoot_date,b.shoot_time,b.status,
-            b.photographer_id,b.manager_id,b.hotel_id,c.name AS client,h.name AS hotel,
+        params = {'uid': actor['id'], 'day': day}
+        where = '1=1' if search else 'b.shoot_date=:day'
+        marker = "EXISTS (SELECT 1 FROM settings st WHERE st.key='booking:trash:' || CAST(b.id AS VARCHAR))"
+        where += ' AND ' + (marker if trash else 'NOT ' + marker)
+        if search:
+            search = re.sub(r'\b(\d{2})\.(\d{2})\.(\d{4})\b', r'\3-\2-\1', search)
+            terms = [re.sub(r'\D', '', search)] if re.fullmatch(r'[+\d\s()\-]+', search) else search.casefold().split()
+            fields = ['c.name', 'h.name', 'b.room', 'p.name', 'm.name', 'c.phone',
+                      'CAST(b.id AS VARCHAR)', 'CAST(b.shoot_date AS VARCHAR)', 'CAST(b.shoot_time AS VARCHAR)',
+                      "replace(replace(replace(replace(replace(c.phone,' ',''),'+',''),'-',''),'(',''),')','')"]
+            for i, term in enumerate(terms[:8]):
+                key = f'q{i}'
+                params[key] = '%' + term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+                where += ' AND (' + ' OR '.join(f"LOWER(COALESCE({field},'')) LIKE :{key} ESCAPE '\\'" for field in fields) + ')'
+        rows = await self.rows(conn, f"""SELECT b.id,b.room,b.guest_count,b.shoot_date,b.shoot_time,b.status,
+            b.photographer_id,b.manager_id,b.hotel_id,c.name AS client,c.phone,h.name AS hotel,
             sh.id AS shooting_id,sh.status AS shooting_status,
-            p.name AS photographer,pk.name AS package,
+            p.name AS photographer,m.name AS manager,pk.name AS package,
             (SELECT COUNT(*) FROM photos ph JOIN shootings sh ON sh.id=ph.shooting_id
              WHERE sh.booking_id=b.id) AS frames
             FROM bookings b LEFT JOIN shootings sh ON sh.booking_id=b.id
             JOIN clients c ON c.id=b.client_id
             JOIN hotels h ON h.id=b.hotel_id LEFT JOIN users p ON p.id=b.photographer_id
+            LEFT JOIN users m ON m.id=b.manager_id
             LEFT JOIN packages pk ON pk.id=b.package_id
-            WHERE b.shoot_date=:day {clause} ORDER BY b.shoot_time,b.id""", uid=actor["id"], day=day)
-        return [{"id": r["id"], "client": r["client"], "date": str(r["shoot_date"]),
+            WHERE {where} {clause} ORDER BY b.shoot_date DESC,b.shoot_time,b.id LIMIT 201""", **params)
+        items = [{"id": r["id"], "client": r["client"], "phone": r['phone'], "guestCount": r['guest_count'], "date": str(r["shoot_date"]),
                  "time": str(r["shoot_time"])[:5], "room": r["room"], "status": r["status"],
                  "photographerId": r["photographer_id"], "photographer": r["photographer"],
                  "shootingId": r["shooting_id"], "shootingStatus": r["shooting_status"],
-                 "managerId": r["manager_id"], "hotelId": r["hotel_id"], "hotel": r["hotel"],
+                 "managerId": r["manager_id"], "manager": r['manager'], "hotelId": r["hotel_id"], "hotel": r["hotel"],
+                 "trashed": trash,
+                 "canEdit": bool({'OWNER', 'ADMIN'} & set(actor['roles']) or ('MANAGER' in actor['roles'] and r['manager_id'] == actor['id'])),
                  "type": r["package"] or "Съёмка", "frames": r["frames"]} for r in rows]
+        for item in items:
+            item['revision'] = version(item)
+        return items
 
     async def bookings(self, request):
         day = self.day(request.query.get("day", str(self.today())))
         actor = request["miniapp_actor"]
+        search = request.query.get('q', '').strip()
+        if len(search) > 160 or len(search.split()) > 8:
+            raise AccessError('Поисковый запрос: до 160 символов и 8 слов.', 400)
+        trash = request.query.get('trash') == '1'
         async with self.engine.connect() as conn:
-            items = await self.bookings_data(conn, actor, day)
+            items = await self.bookings_data(conn, actor, day, search=search, trash=trash)
             # Only supervisors receive the complete hotel list, including hotels
             # with no bookings on the selected date. Staff still see only their
             # assigned bookings through bookings_data.
@@ -361,7 +391,7 @@ class MiniApp:
                  "AND id IN (SELECT hotel_id FROM hotel_employees WHERE user_id=:uid) ") +
                 "ORDER BY name,id", uid=actor["id"])]
                 if {"OWNER", "ADMIN"} & set(actor["roles"]) else [])
-        return web.json_response({"items": items, "hotels": hotels})
+        return web.json_response({"items": items[:200], "hotels": hotels, 'truncated': len(items) > 200, 'allDates': bool(search)})
 
     async def booking_photographers(self, request):
         actor = request["miniapp_actor"]
@@ -697,9 +727,10 @@ class MiniApp:
         async with self.engine.connect() as conn:
             rows = await self.rows(conn, """SELECT a.*,u.name AS actor FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id
                 WHERE a.id<:before ORDER BY a.id DESC LIMIT 31""", before=before)
+        from .audit_labels import presentation
         items = [{"id": r["id"], "actor": r["actor"] or (f"Пользователь №{r['user_id']}" if r["user_id"] else "Система"), "at": as_utc(r["created_at"]).isoformat(),
-                  "action": r["action"], "title": ACTIONS.get(r["action"], f"Событие «{r['action']}»"),
-                  "entity": r["entity"], "entityId": r["entity_id"], "details": r["details"] or "Дополнительные сведения не были записаны."} for r in rows[:30]]
+                  "action": r["action"], "entity": r["entity"], "entityId": r["entity_id"],
+                  **presentation(r['action'], r['entity'], r['details'], ACTIONS)} for r in rows[:30]]
         return web.json_response({"items": items, "next": rows[29]["id"] if len(rows)>30 else None})
 
     async def academy(self, request):
@@ -883,7 +914,7 @@ class MiniApp:
     async def static_file(self, request):
         name = request.match_info.get("asset", "index.html")
         allowed = {"js/delivery.js", "css/delivery-client.css", "sw.js", "manifest.webmanifest", "js/install.js", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-maskable-512.png", "assets/apple-touch-icon.png", "js/browser-login.js", "js/account.js", "js/schedule-editor.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
-                   "js/form-state.js", "js/galleries.js", "js/gallery-view.js", "js/gallery-client.js", "css/galleries.css", "js/development.js", "js/academy-coach.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
+                   "js/voice-training.js", "js/booking-control.js", "js/form-state.js", "js/galleries.js", "js/gallery-view.js", "js/gallery-client.js", "css/galleries.css", "js/development.js", "js/academy-coach.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg"}
         if name not in allowed:
@@ -929,5 +960,11 @@ def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/M
     install_workday(app, miniapp)
     from .development import install_development
     install_development(app, miniapp)
+    from .booking_management import install_booking_management
+    install_booking_management(app, miniapp)
+    from .storage_inventory import install_inventory
+    install_inventory(app, miniapp)
+    from .booking_control import install_booking_control
+    install_booking_control(app, miniapp)
     return miniapp
 

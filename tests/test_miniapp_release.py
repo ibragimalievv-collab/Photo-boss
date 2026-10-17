@@ -241,6 +241,10 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
             connection.execute(text("INSERT INTO receipts VALUES (1,1,'APPROVED',21000,:now),(2,2,'PENDING',26000,:now)"), {"now": now})
             connection.execute(text("INSERT INTO audit_logs VALUES (1,1,'unknown_legacy_event','sale',1,'Full retained details',:now)"), {"now": now})
 
+        with self.engine.inner.begin() as connection:
+            connection.execute(text('ALTER TABLE bookings ADD COLUMN guest_count INTEGER DEFAULT 1'))
+            connection.execute(text('ALTER TABLE clients ADD COLUMN phone TEXT'))
+
     async def asyncTearDown(self):
         self.engine.inner.dispose()
 
@@ -474,7 +478,8 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_audit_details_and_pagination_validation(self):
         _, audit, _ = await self.call("/audit")
-        assert "unknown_legacy_event" in audit["items"][0]["title"]
+        assert audit["items"][0]["title"] == "Зарегистрировано служебное событие"
+        assert audit["items"][0]["action"] == "unknown_legacy_event"
         assert audit["items"][0]["details"] == "Full retained details"
         assert (await self.call("/audit?before=" + str(2**80)))[0] == 400
 

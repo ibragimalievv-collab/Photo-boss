@@ -35,7 +35,13 @@ from .models import (
 from .services.booking_access import booking_scope, can_access_booking
 from .services.core import audit
 from .services.photo_storage import image_format
-from .yandex_disk import ROOT, YandexDisk, YandexDiskError, configured_from_env
+from .yandex_disk import (
+    ROOT,
+    YandexDisk,
+    YandexDiskError,
+    configured_from_env,
+    validate_saved,
+)
 
 SERVICES = {}
 
@@ -230,12 +236,17 @@ class Delivery:
             raise AccessError('Не удалось прочитать фотографию. Нужен JPEG или PNG.', 400) from exc
         digest = hashlib.sha256(raw).hexdigest()
         old = await session.scalar(select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id, DeliveryPhoto.sha256 == digest, DeliveryPhoto.upload_set == photo_set))
-        if old:
-            return {'bookingId': b.id, 'photoId': old.id, 'duplicate': True}
         token, client_id = configured_from_env()
         if not token:
             raise AccessError('Яндекс Диск недоступен. Фото остаётся в очереди.', 503)
         storage = YandexDisk(token, client_id)
+        if old:
+            try:
+                validate_saved(await storage.metadata(old.disk_path), raw)
+                return {'bookingId': b.id, 'photoId': old.id, 'duplicate': True, 'storageVerified': True}
+            except YandexDiskError as exc:
+                if 'HTTP 404' not in str(exc) and 'не совпадает' not in str(exc):
+                    raise
         client = await session.get(Client, b.client_id)
         guest = re.sub(r'[^A-Za-zА-Яа-яЁё0-9 ._()#-]', '_', (client.name if client else 'Гость'))[:60].strip(' .') or 'Гость'
         stamp = f"{b.shoot_date.isoformat()}_{str(b.shoot_time)[:5].replace(':','-')}_{guest.replace(' ', '_')}"
@@ -250,6 +261,12 @@ class Delivery:
         selected = photo_set == 'SELECTED' or data.get('selected', False)
         if selected and photo_set == 'ALL':
             await storage.upload_bytes(selected_folder + f'/{digest}.{ext}', raw, content_type=mime)
+        if old:
+            # A DB duplicate can refer to an account that has been disconnected.
+            # Re-upload the provided original to the current Disk before success.
+            old.disk_path, old.byte_size = path, len(raw)
+            await session.flush()
+            return {'bookingId': b.id, 'photoId': old.id, 'duplicate': True, 'storageVerified': True}
         name = re.sub(r'[^\w .()-]', '_', name)[:140] or 'photo.' + ext
         photo = DeliveryPhoto(gallery_id=g.id, uploaded_by_id=actor['id'], filename=name,
                               disk_path=path, sha256=digest, byte_size=len(raw), selected=selected, upload_set=photo_set)
