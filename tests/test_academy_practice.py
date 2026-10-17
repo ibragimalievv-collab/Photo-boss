@@ -185,6 +185,29 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
             ), {"id": aid}).scalar()
             assert len(json.loads(archive)) == 5
 
+    async def test_stalled_review_with_readable_photos_is_requeued(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("""UPDATE training_assignments
+                SET review_source='AI_FAILED',ai_analysis='{"status":"unavailable"}'
+                WHERE id=:id"""), {"id": aid})
+
+        await self.practice.recover_stalled_storage(self.storage)
+        _, queued = await self.request(f"/{aid}")
+        assert queued["status"] == "PENDING_REVIEW"
+        assert queued["reviewSource"] == "AI_PENDING"
+
+        accepted_result = {"status": "completed", "review": {"decision": "ACCEPT", "score": 91,
+                          "reshoot_indexes": [], "issues": [], "strengths": ["Хорошая серия"],
+                          "next_action": "Следующий блок"}}
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), \
+                patch("app.academy_practice.analyze_training_set", AsyncMock(return_value=accepted_result)):
+            await self.practice.process_pending(self.storage)
+        _, completed = await self.request(f"/{aid}")
+        assert completed["status"] == "COMPLETED"
+        assert completed["score"] == 91
+
 
     async def test_uncertain_ai_result_has_retake_path_without_manual_acceptance(self):
         aid = await self.start()
