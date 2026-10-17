@@ -319,7 +319,7 @@ def test_receipt_vision_response_contract_and_failures(monkeypatch, result_kind)
         receipt_analysis_model="gpt-4.1-mini",
     ))
     monkeypatch.setattr(service.aiohttp, "ClientSession", Client)
-    result = run(service.extract_receipt(b"test-image"))
+    result = run(service.extract_receipt(b"\xff\xd8\xfftest-image"))
     if result_kind == "no_key":
         assert result == {"status": "not_configured"}
         assert captured == []

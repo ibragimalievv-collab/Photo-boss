@@ -7,7 +7,7 @@ import logging
 import aiohttp
 
 from ..config import config
-from .ai_diagnostics import compatible_schema, http_failure, record
+from .ai_diagnostics import compatible_schema, http_failure, record, unavailable
 
 logger = logging.getLogger(__name__)
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -70,21 +70,25 @@ def data_url(content):
 
 
 async def analyze_training_set(category, references, submissions):
+    model = config.academy_analysis_model
     if not config.openai_api_key:
-        return {"status": "not_configured"}
+        return unavailable('academy_review', model, 'not_configured')
     if len(references) != 5 or len(submissions) != 5:
-        return {"status": "unavailable"}
+        return unavailable('academy_review', model, 'invalid_output')
     content = [{"type": "input_text", "text": (
         f"Категория: {category.title}. Проверь 5 пар: сначала эталон, затем работа фотографа. "
         "План кадров: " + " | ".join(f"{i+1}: {x}" for i, x in enumerate(category.shot_plan))
     )}]
-    for index, (reference, submission) in enumerate(zip(references, submissions), 1):
-        content.extend([
-            {"type": "input_text", "text": f"Кадр {index}: эталон"},
-            {"type": "input_image", "detail": "high", "image_url": data_url(reference)},
-            {"type": "input_text", "text": f"Кадр {index}: работа фотографа"},
-            {"type": "input_image", "detail": "high", "image_url": data_url(submission)},
-        ])
+    try:
+        for index, (reference, submission) in enumerate(zip(references, submissions), 1):
+            content.extend([
+                {"type": "input_text", "text": f"Кадр {index}: эталон"},
+                {"type": "input_image", "detail": "high", "image_url": data_url(reference)},
+                {"type": "input_text", "text": f"Кадр {index}: работа фотографа"},
+                {"type": "input_image", "detail": "high", "image_url": data_url(submission)},
+            ])
+    except (ValueError, TypeError, AttributeError):
+        return unavailable('academy_review', model, 'invalid_output')
     payload = {
         "model": config.academy_analysis_model, "store": False, "max_output_tokens": 2200,
         "instructions": (
@@ -94,6 +98,7 @@ async def analyze_training_set(category, references, submissions):
             "Оцени наблюдаемые свойства, не личность и не привлекательность человека. "
             "Телосложение учитывай только для безопасного и выигрышного ракурса, без унизительных формулировок. "
             "Критерии: фокус/техника 20, свет 15, композиция 15, поза 20, эмоция 15, разнообразие 15. "
+            "Общий score обязан точно равняться сумме шести criteria. "
             "Два кадра считаются дублями, если люди, поза, план и угол практически одинаковы; небольшая смена мимики или руки не создаёт новый ракурс. "
             "Каждый из пяти кадров обязан иметь отличающийся ракурс, высоту камеры, план, действие или композицию согласно плану. "
             "ACCEPT только при 85+ баллах, без критических ошибок и без пересъёмки. 70–84 или отдельные слабые/дублирующиеся кадры — REVISION. "
@@ -112,18 +117,28 @@ async def analyze_training_set(category, references, submissions):
                 json=payload,
             ) as response,
         ):
-            result = await response.json()
+            try:
+                result = await response.json()
+            except (ValueError, aiohttp.ContentTypeError):
+                result = {}
             if response.status != 200:
                 return http_failure('academy_review', config.academy_analysis_model, response.status, result)
         if not isinstance(result, dict) or result.get("status") not in (None, "completed"):
-            return {"status": "unavailable"}
-        text = "".join(part["text"] for item in result.get("output", []) if item.get("type") == "message" for part in item.get("content", []) if part.get("type") == "output_text")
+            return unavailable('academy_review', model, 'incomplete')
+        parts = [part for item in result.get("output", []) if item.get("type") == "message"
+                 for part in item.get("content", [])]
+        if any(part.get('type') == 'refusal' for part in parts):
+            return unavailable('academy_review', model, 'refusal')
+        text = "".join(part["text"] for part in parts if part.get("type") == "output_text")
         review = validate(json.loads(text))
         record('academy_review', config.academy_analysis_model, 'completed')
         return {"status": "completed", "review": review}
-    except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError):
-        logger.warning("Academy AI analysis unavailable; retry required")
-        return {"status": "unavailable"}
+    except TimeoutError:
+        return unavailable('academy_review', model, 'timeout')
+    except aiohttp.ClientError:
+        return unavailable('academy_review', model, 'network_error')
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return unavailable('academy_review', model, 'invalid_output')
 
 
 def review_text(data):

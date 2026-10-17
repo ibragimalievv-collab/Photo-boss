@@ -33,6 +33,7 @@ const context = vm.createContext({
   rows, api, localAction, Blob, FormData, Promise, Event, Date, Error,
   navigator: {onLine: true},
   window: {dispatchEvent() {}, addEventListener() {}},
+  document: {hidden: false, addEventListener() {}},
   setTimeout() {return 1;}, clearTimeout() {},
 });
 vm.runInContext(code, context);
@@ -51,7 +52,7 @@ assert.equal(rows.get('finish').status, 'synced');
 assert.deepEqual(calls, ['booking_receipt','shoot_photo','shoot_complete']);
 
 receiptFixed = true;
-const second = await vm.runInContext('flushOutbox()', context);
+const second = await vm.runInContext('retryOperation("receipt")', context);
 assert.equal(second.completed, 1);
 assert.equal(rows.get('receipt').status, 'synced');
 assert.equal(rows.get('receipt').blob, null);

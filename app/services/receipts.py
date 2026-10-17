@@ -66,11 +66,10 @@ class LimitedBuffer(io.BytesIO):
 async def download_receipt(bot, photo):
     if photo.file_size and photo.file_size > MAX_IMAGE_BYTES:
         raise ValueError("Слишком большое фото")
-    buffer = LimitedBuffer()
-    await bot.download(photo.file_id, destination=buffer, timeout=20)
-    content = buffer.getvalue()
-    if not content.startswith(b"\xff\xd8\xff"):
-        raise ValueError("Ожидалось фото JPEG из Telegram")
+    from .media_files import load_private_media
+    from .photo_storage import image_format
+    content = await load_private_media(bot, photo.file_id, max_bytes=MAX_IMAGE_BYTES, timeout=20)
+    image_format(content)
     return content
 
 
@@ -121,6 +120,11 @@ def validate_extraction(data):
 async def extract_receipt(content):
     if not config.openai_api_key:
         return {"status": "not_configured"}
+    from .photo_storage import image_format
+    try:
+        _, mime = image_format(content)
+    except ValueError:
+        return {"status": "unavailable"}
     payload = {
         "model": config.receipt_analysis_model,
         "store": False,
@@ -140,7 +144,7 @@ async def extract_receipt(content):
         "input": [{"role": "user", "content": [
             {"type": "input_text", "text": "Извлеки данные чека для проверки владельцем."},
             {"type": "input_image", "detail": "high", "image_url":
-             "data:image/jpeg;base64," + base64.b64encode(content).decode("ascii")},
+             "data:" + mime + ";base64," + base64.b64encode(content).decode("ascii")},
         ]}],
         "text": {"format": {"type": "json_schema", "name": "receipt",
                             "strict": True, "schema": compatible_schema(SCHEMA)}},

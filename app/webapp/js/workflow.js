@@ -1,7 +1,7 @@
 import {captureForm,captureForms,restoreForms,clearForm} from './form-state.js';
 import {api} from './api.js';
 import {esc,todayKey} from './domain.js';
-import {enqueueBatch,outboxRows,retryOperation,flushOutbox,enqueueOperation,enqueueFilesOneByOne} from './outbox.js';
+import {enqueueBatch,outboxRows,retryOperation,flushOutbox,syncOutboxNow,enqueueOperation,enqueueFilesOneByOne,replaceOperationFile} from './outbox.js';
 let data=null,queue=[],selected=null,folderBusy=false;
 const roubles=value=>new Intl.NumberFormat('ru-RU',{style:'currency',currency:'RUB',maximumFractionDigits:2}).format(Number(value||0));
 const saleable=b=>b.status==='READY_FOR_SALE'||(['SOLD','COMPLETED'].includes(b.status)&&b.sales?.length);
@@ -18,12 +18,15 @@ export async function loadWorkflow(bookingId=null){
  if(selected&&!data.bookings.some(b=>b.id===selected))selected=null;
 }
 function salesHistory(b){
- const rows=b.sales||[];if(!rows.length)return '';
+ const rows=b.sales||[],receipts=b.receipts||[],draft=draftReceiptView(b.draft);if(!rows.length&&!receipts.length)return draft;
  return `<section class="notice" data-sales-history><h3>История покупок · ${esc(b.client||'Гость')}</h3>
  ${rows.map((sale,i)=>`<p>№${sale.id} · ${i?'Допродажа':'Первая покупка'} · ${esc(new Date(sale.at).toLocaleString('ru-RU'))} · ${sale.photos} фото · <strong>${esc(roubles(sale.amount))}</strong> · ${esc(({PAID:'Оплачено',PARTIAL:'Частично оплачено',UNPAID:'Ожидает оплаты'})[sale.paymentStatus]||sale.paymentStatus)}</p>`).join('')}
  <p><strong>Всего куплено: ${b.soldTotal} фото на ${esc(roubles(b.salesAmount))}.</strong><br>Подтверждено поступлений: ${esc(roubles(b.paidAmount))}. Остаток к оплате: ${esc(roubles(b.dueAmount))}.</p>
- <p>Предыдущие продажи и чеки не перезаписываются. Ниже укажите только дополнительные фотографии и новый чек.</p></section>`;
+ <p>Предыдущие продажи и чеки не перезаписываются. Ниже укажите только дополнительные фотографии и новый чек.</p>
+ ${receipts.map(receipt=>`<article data-receipt-status="${receipt.id}"><strong>Чек №${receipt.id}: ${receipt.stored?'файл принят сервером':'файл ещё не принят'}</strong>${receipt.imagePath?`<button class="btn ghost" data-workflow="receipt-view" data-receipt-path="${esc(receipt.imagePath)}">Посмотреть фото чека</button>`:''}<p>${esc(receiptAnalysisLabel(receipt.analysisStatus))}${receipt.extractedAmount!=null?` · на чеке: ${esc(roubles(receipt.extractedAmount))}`:''}${receipt.expectedAmount!=null?` · ожидается: ${esc(roubles(receipt.expectedAmount))}`:''}</p>${(receipt.warnings||[]).map(w=>`<p>${esc(w)}</p>`).join('')}<p>${esc(({PENDING:'Оплата пока не подтверждена: владелец должен сверить поступление с банковской выпиской.',APPROVED:'Поступление подтверждено владельцем.',REJECTED:'Чек отклонён владельцем.'})[receipt.status]||'Подтверждение оплаты отсутствует.')}</p></article>`).join('')}${draft}</section>`;
 }
+function receiptAnalysisLabel(status){return ({READY:'Данные чека распознаны AI; это не подтверждение поступления денег.',SUCCESS:'Данные чека распознаны AI; это не подтверждение поступления денег.',EXTRACTED:'Данные чека распознаны AI; это не подтверждение поступления денег.',UNAVAILABLE:'AI пока не прочитал чек; нужна повторная или ручная проверка.',FAILED:'AI пока не прочитал чек; нужна повторная или ручная проверка.',PENDING:'AI-проверка ожидается.'})[String(status||'').toUpperCase()]||'Результат AI-проверки пока отсутствует.';}
+function draftReceiptView(d){if(!d)return '';return `<section data-draft-receipt><p>${d.receiptStored?'Файл чека принят сервером. '+esc(receiptAnalysisLabel(d.receiptAnalysisStatus)):'Файл чека ещё не принят сервером — проверьте очередь отправки ниже.'} Подтвердить оплату может только владелец после сверки поступления.</p>${d.receiptImagePath?`<button class="btn ghost" data-workflow="receipt-view" data-receipt-path="${esc(d.receiptImagePath)}">Посмотреть фото чека</button>`:''}</section>`;}
 const field=(label,input)=>`<label class="field">${label}${input}</label>`;
 const input=(name,attrs='')=>`<input class="input" name="${name}" ${attrs}>`;
 const file=(name,multiple=false,required=true)=>input(name,`type="file" accept="image/jpeg,image/png,image/webp" ${multiple?'multiple':''} ${required?'required':''}`);
@@ -34,14 +37,33 @@ function editView(b){if(!b.canUpload)return '';return `<details><summary>Обр�
 let compareURLs=[];
 function clearComparisons(){for(const url of compareURLs)URL.revokeObjectURL(url);compareURLs=[];}
 window.addEventListener('hashchange',clearComparisons);window.addEventListener('pagehide',clearComparisons);
+let receiptViewer=null,receiptURL=null,receiptVersion=0;
+function clearReceiptViewer(){
+ receiptVersion++;const viewer=receiptViewer;receiptViewer=null;
+ if(receiptURL){URL.revokeObjectURL(receiptURL);receiptURL=null;}
+ if(viewer?.open)viewer.close();viewer?.remove();
+}
+window.addEventListener('hashchange',clearReceiptViewer);window.addEventListener('pagehide',clearReceiptViewer);
+async function viewReceipt(path){
+ if(!/^\/(?:receipts\/\d+\/image|sale-drafts\/\d+\/receipt\/image)$/.test(path||''))throw new Error('Некорректная ссылка на чек.');
+ clearReceiptViewer();const ticket=receiptVersion,blob=await api(path,{responseType:'blob'});
+ if(ticket!==receiptVersion)return;
+ const viewer=document.createElement('dialog'),image=document.createElement('img'),close=document.createElement('button');
+ viewer.className='delivery-viewer';viewer.setAttribute('aria-label','Фото чека');
+ close.type='button';close.className='btn';close.textContent='Закрыть';close.onclick=()=>viewer.close();
+ receiptURL=URL.createObjectURL(blob);image.src=receiptURL;image.alt='Фото загруженного чека';
+ viewer.append(close,image);viewer.addEventListener('close',clearReceiptViewer,{once:true});
+ receiptViewer=viewer;document.body.append(viewer);viewer.showModal();
+}
 
+function replacementControl(r){return r.status==='error'&&[400,413].includes(r.errorStatus)&&r.hasBlob&&['shoot_photo','delivery_photo','sale_selected','booking_receipt','sale_receipt'].includes(r.kind)?`<label class="field">Исправить отклонённый файл без новой продажи<input class="input" type="file" accept="image/jpeg,image/png,image/webp" data-workflow-replace="${r.key}"></label>`:'';}
 function queueView(){
  const inProgress=queue.filter(r=>r.status==='local'||r.status==='syncing').length;
  const errors=queue.filter(r=>r.status==='error').length;
  const stored=queue.filter(r=>r.status==='synced').length;
  const visible=[...queue.filter(r=>r.status!=='synced').slice(0,50),...queue.filter(r=>r.status==='synced').slice(-20)];
  const summary=`<p class="small">Ожидают отправки или отправляются: ${inProgress} · Ошибки: ${errors} · Принято сервером: ${stored}. Показаны первые 50 незавершённых и последние 20 завершённых операций.</p>`;
- return summary+(visible.map(r=>`<article class="panel"><strong>${r.kind==='shoot_photo'&&r.status==='synced'?'Сервер принял · проверьте Яндекс.Диск ниже':labels[r.status]}</strong> · ${esc(kinds[r.kind]||r.kind)}${r.result?.photoId?` · кадр №${r.result.photoId}`:''}${r.filename?` · ${esc(r.filename)}`:''}${r.data?.shooting?.id?` · съёмка №${r.data.shooting.id}`:''}${r.result?.bookingId?` · запись №${r.result.bookingId}`:''}${r.result?.saleId?` · продажа №${r.result.saleId}`:''}<p>${esc(r.error||'')}</p>${r.status==='error'||(r.status==='local'&&r.error)?`<button class="btn ghost" data-workflow="retry" data-key="${r.key}">Повторить</button>`:''}</article>`).join('')||'<p>Операций в очереди нет.</p>');
+ return summary+(visible.map(r=>`<article class="panel"><strong>${r.kind==='shoot_photo'&&r.status==='synced'?'Сервер принял · проверьте Яндекс.Диск ниже':labels[r.status]}</strong> · ${esc(kinds[r.kind]||r.kind)}${r.result?.photoId?` · кадр №${r.result.photoId}`:''}${r.filename?` · ${esc(r.filename)}`:''}${r.data?.shooting?.id?` · съёмка №${r.data.shooting.id}`:''}${r.result?.bookingId?` · запись №${r.result.bookingId}`:''}${r.result?.saleId?` · продажа №${r.result.saleId}`:''}<p>${esc(r.error||'')}</p>${r.retryAt>Date.now()?`<p>Автоматический повтор не раньше ${esc(new Date(r.retryAt).toLocaleTimeString('ru-RU'))}. Остальные файлы отправляются независимо.</p>`:''}${r.status==='error'||(r.status==='local'&&r.error)?`<button class="btn ghost" data-workflow="retry" data-key="${r.key}">Повторить</button>`:''}${replacementControl(r)}</article>`).join('')||'<p>Операций в очереди нет.</p>');
 }
 function connectionNote(){
  const offline=data?._offline?(`${navigator.onLine?'Сеть доступна, но справочники взяты из локальной копии.':'Нет сети. Справочники сохранены.'} ${new Date(data._cachedAt).toLocaleString('ru-RU')}. `):'';
@@ -49,7 +71,7 @@ function connectionNote(){
 }
 export function workflowView(){
  const ready=data.bookings.filter(saleable),b=data.bookings.find(b=>b.id===selected),d=b?.draft;
- const upload=data.bookings.filter(b=>b.status==='READY_FOR_SALE'&&!b.fullUploaded&&b.canUpload);
+ const upload=data.bookings.filter(b=>b.canFullUpload??(b.status==='READY_FOR_SALE'&&!b.fullUploaded&&b.canUpload));
  return `<h1>Рабочие операции</h1><div id="workflowNotice" class="notice">${esc(connectionNote())}</div>
  ${data.canBook?`<details class="panel section"><summary>Новая бронь</summary><form id="workflowBooking" class="form-grid">${field('Имя гостя',input('client_name','required minlength="2" maxlength="200"'))}${field('Телефон (необязательно)',input('client_phone','type="tel" maxlength="80"'))}${field('Отель',`<select class="input" name="hotel_id" required>${options(data.hotels)}</select>`)}${field('Комната',input('room','required maxlength="100"'))}${field('Гостей',input('guest_count','type="number" min="1" max="100" value="1" required'))}${field('Дата',input('shoot_date',`type="date" value="${todayKey()}" required`))}${field('Время',input('shoot_time','type="time" required'))}${field('Пакет',`<select class="input" name="package_id" required>${options(data.packages)}</select>`)}${field('Заявленная предоплата, ₽',input('deposit','type="number" min="0" max="10000000" step="0.01" value="0" required'))}${field('Чек предоплаты (если внесена)',file('receipt',false,false))}<button class="btn primary">Сохранить бронь</button></form></details>`:''}
  <section class="panel section"><h2>Продажа и допродажа</h2><form id="workflowLookup" class="row"><label>Номер записи <input class="input" name="bookingId" type="number" min="1" required></label><button class="btn ghost" type="submit">Найти прежнюю съёмку</button></form><p>Выбранные кадры обязательны; оплата подтверждается владельцем.</p><select class="input" id="workflowSalePick"><option value="">Выберите готовую съёмку</option>${ready.map(x=>`<option value="${x.id}" ${x.id===selected?'selected':''}>№${x.id} · ${esc(x.date)} · комната ${esc(x.room)}</option>`).join('')}</select>${b?salesHistory(b):''}${b?(d&&!d.mine?'<p>Продажу оформляет другой сотрудник.</p>':`<form id="workflowSale" data-draft-scope="${b.id}" class="form-grid section"><p>${b.sales?.length?'Допродажа: укажите только новую покупку. ':''}Цена кадра по текущему пакету: ${esc(b.price)} ₽. Итог рассчитает сервер.</p>${!d||d.status==='AWAITING_RECEIPT'?field(b.sales?.length?'Новый чек доплаты (не прежний чек)':'Чек продажи',file('receipt')):''}${field('Всего кадров в съёмке',input('total',`type="number" min="1" max="10000" required value="${d?.total||b.totalFrames||''}" ${d?.status==='AWAITING_SELECTED'||b.fullUploaded?'readonly':''}`))}${field(b.sales?.length?'Дополнительно продано кадров':'Продано кадров',input('sold',`type="number" min="1" max="10000" required value="${d?.sold||''}" ${d?.status==='AWAITING_SELECTED'?'readonly':''}`))}<p>Уже сохранено выбранных кадров: ${d?.selected||0}. Прикрепите оставшиеся.</p>${field('Выбранные фотографии',file('selected',true,false))}<button class="btn primary">${b.sales?.length?'Добавить допродажу':'Сохранить продажу и фотографии'}</button></form>`):''}</section>
@@ -113,6 +135,7 @@ export async function workflowSubmit(form){
 }
 export async function workflowClick(button){
  const kind=button.dataset.workflow;
+ if(kind==='receipt-view'){await viewReceipt(button.dataset.receiptPath);return;}
  if(kind==='sale-history'){await loadWorkflow(Number(button.dataset.booking));workflowSelect(button.dataset.booking);document.querySelector('#workflowSale')?.scrollIntoView({block:'center'});return;}
  if(kind==='new-operation'){const form=button.closest('form');if(!form)return;const keys=JSON.parse(form.dataset.pendingKeys||'[]');const rows=await outboxRows();if(!keys.length||!keys.every(k=>rows.some(r=>r.key===k&&r.status==='synced')))throw new Error('Сначала завершите текущую отправку.');clearForm(form);form.reset();form.remove();await loadWorkflow();captureForms();document.querySelector('#app').innerHTML=workflowView();restoreForms();updateFormProgress();return;}
 
@@ -121,7 +144,7 @@ export async function workflowClick(button){
 if(kind==='sync'){
  const note=document.querySelector('#workflowSyncNote');
  if(note)note.textContent='Проверяем состояние очереди…';
- const result=await flushOutbox();
+ const result=await syncOutboxNow();
  queue=await outboxRows();
  const list=document.querySelector('#workflowQueue');if(list)list.innerHTML=queueView();
  const messages={'no-account':'Нет активного аккаунта. Войдите под тем же пользователем, который загружал файлы.',offline:'Браузер сообщает, что нет интернета. Фотографии остаются на устройстве.',running:'Загрузка уже выполняется. Статусы кадров обновляются в очереди.',done:`Проверка завершена. Принято сервером: ${result?.completed||0}; ошибок: ${result?.failed||0}; временных сбоев: ${result?.temporary||0}. Проверяйте статус файлов на Яндекс.Диске отдельно.`};
@@ -150,6 +173,13 @@ function updateFormProgress(){
  }
 }
 window.addEventListener('pb-workflow-mounted',updateFormProgress);
+document.addEventListener('change',async event=>{
+ const input=event.target;if(!input?.matches?.('[data-workflow-replace]')||!input.files?.length)return;
+ input.disabled=true;
+ try{await replaceOperationFile(input.dataset.workflowReplace,input.files[0]);}
+ catch(error){const note=document.querySelector('#workflowSyncNote');if(note)note.textContent=error.message;}
+ finally{if(input.isConnected){input.disabled=false;input.value='';}}
+});
 
 document.addEventListener('submit',async event=>{
  if(event.target.id!=='workflowLookup')return;event.preventDefault();const form=event.target,button=form.querySelector('button');button.disabled=true;

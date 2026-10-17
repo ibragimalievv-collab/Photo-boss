@@ -104,6 +104,8 @@ async def main():
                 await fixture.practice.process_pending(fixture.storage)
             await trainee.locator('[data-practice-refresh]').click()
             await trainee.locator('[data-practice-upload="2"]').wait_for()
+            await expect(trainee.locator('[data-practice-status]')).to_have_text('Нужна пересъёмка')
+            await expect(trainee.locator('.practice-body')).to_contain_text('Проверка уже завершена')
             assert await trainee.locator('[data-practice-upload]').count() == 1
             await trainee.locator('[data-practice-upload="2"]').set_input_files(
                 str(ROOT / 'app/assets/training/child/02.jpg'))

@@ -41,6 +41,7 @@ from .services.receipts import (
     money,
     operation_key,
     payment_totals,
+    warnings_for,
 )
 from .services.sale_workflow import (
     already_purchased_photo,
@@ -64,6 +65,30 @@ def fields(data, expected):
         raise AccessError('Некорректные поля рабочей операции.', 400)
 
 
+def receipt_analysis(value):
+    try:
+        analysis = json.loads(value or '{}')
+    except (ValueError, TypeError):
+        analysis = {}
+    if not isinstance(analysis, dict):
+        analysis = {}
+    return analysis
+
+
+def receipt_state(receipt):
+    """Show storage/AI/owner-review separately; never imply a bank confirmation."""
+    analysis = receipt_analysis(receipt.analysis)
+    extracted = analysis.get('status') == 'extracted' and isinstance(analysis.get('fields'), dict)
+    data = analysis['fields'] if extracted else {}
+    return {'id': receipt.id, 'status': receipt.status,
+            'stored': bool(receipt.file_id), 'imageAvailable': bool(receipt.file_id),
+            'imagePath': f'/receipts/{receipt.id}/image' if receipt.file_id else None,
+            'analysisStatus': 'extracted' if extracted else analysis.get('status', 'unavailable'),
+            'expectedAmount': str(money(receipt.expected_amount)),
+            'extractedAmount': data.get('amount'),
+            'warnings': warnings_for(data, receipt.expected_amount, receipt.created_at.date()) if extracted else []}
+
+
 async def target(session, actor, value, field):
     if not isinstance(value, dict):
         raise AccessError('Не указан объект операции.', 400)
@@ -83,6 +108,32 @@ async def target(session, actor, value, field):
 class Workflow:
     def __init__(self, api):
         self.api = api
+
+    async def receipt_image(self, request):
+        return await self._receipt_image(request, draft=False)
+
+    async def draft_receipt_image(self, request):
+        return await self._receipt_image(request, draft=True)
+
+    async def _receipt_image(self, request, *, draft):
+        from .people import positive_id
+        from .services.media_files import load_private_media
+        actor = request['miniapp_actor']
+        rid = positive_id(request.match_info['id'])
+        async with AsyncSession(self.api.engine) as session:
+            row = await session.get(SaleDraft if draft else Receipt, rid) if rid else None
+            booking = await session.get(Booking, row.booking_id) if row else None
+            if not row or not await can_access_booking(session, actor['id'], set(actor['roles']), booking):
+                raise AccessError('Чек не найден или недоступен.', 404)
+            if draft and row.created_by_id != actor['id'] and not {'OWNER', 'ADMIN'} & set(actor['roles']):
+                raise AccessError('Чек не найден или недоступен.', 404)
+            file_id = row.receipt_file_id if draft else row.file_id
+            if not file_id:
+                raise AccessError('Фото чека ещё не загружено.', 404)
+        raw = await load_private_media(self.api.bot, file_id, max_bytes=8 * 1024 * 1024)
+        return web.Response(body=raw, content_type=image_format(raw)[1], headers={
+            'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+        })
 
     async def listing(self, request):
         a = request['miniapp_actor']
@@ -109,6 +160,8 @@ class Workflow:
                 files = (await session.scalars(select(PhotoStorage).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoStorage.id))).all() if shoot else []
                 edits = (await session.scalars(select(PhotoEdit).join(PhotoStorage, PhotoStorage.photo_id == PhotoEdit.photo_id).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoEdit.id))).all() if shoot else []
                 purchases = (await session.scalars(select(Sale).where(Sale.booking_id == b.id).order_by(Sale.id))).all()
+                receipts = (await session.scalars(select(Receipt).where(Receipt.booking_id == b.id).order_by(Receipt.id))).all()
+                can_upload = await can_access_booking(session, a['id'], set(a['roles']), b, photos=True)
                 customer = await session.get(Client, b.client_id)
                 total, paid, due = await payment_totals(session, b.id)
                 original_count = await session.scalar(select(func.count(Photo.id)).where(Photo.shooting_id == shoot.id)) if shoot else 0
@@ -118,11 +171,17 @@ class Workflow:
                     for sale in purchases], 'soldTotal': sum(sale.sold_photos for sale in purchases),
                     'salesAmount': str(total), 'paidAmount': str(paid), 'dueAmount': str(due),
                     'totalFrames': max([original_count or 0] + [sale.declared_photo_count or 0 for sale in purchases])}
-                rows.append({**history, 'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
+                rows.append({**history, 'receipts': [receipt_state(receipt) for receipt in receipts], 'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
                     'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': prices.get(b.package_id),
                     'shootingId': shoot.id if shoot else None, 'fullUploaded': bool(shoot and shoot.full_upload_completed_at),
-                    'canUpload': ('PHOTOGRAPHER' in a['roles'] and b.photographer_id == a['id']) or bool({'OWNER', 'ADMIN'} & set(a['roles'])),
+                    'shootingStatus': shoot.status if shoot else None,
+                    'canUpload': can_upload,
+                    'canFullUpload': bool(can_upload and shoot and shoot.status == 'READY_FOR_SALE' and not shoot.full_upload_completed_at),
                     'draft': ({'id': draft.id, 'mine': draft.created_by_id == a['id'], 'status': draft.status,
+                        'receiptStored': bool(draft.receipt_file_id),
+                        'receiptImagePath': (f'/sale-drafts/{draft.id}/receipt/image'
+                            if draft.receipt_file_id and (draft.created_by_id == a['id'] or {'OWNER', 'ADMIN'} & set(a['roles'])) else None),
+                        'receiptAnalysisStatus': receipt_analysis(draft.receipt_analysis).get('status', 'unavailable'),
                         'total': draft.declared_photo_count, 'sold': draft.sold_photos,
                         'selected': await selected_count(session, draft.id)} if draft else None)})
             hotel_query = select(Hotel).where(Hotel.active.is_(True))
@@ -137,30 +196,41 @@ class Workflow:
             'date': str(self.api.today()), 'actorId': a['id']})
 
     async def save_telegram(self, actor, raw, *, receipt=False):
-        from aiogram.exceptions import TelegramBadRequest
+        from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
         from aiogram.types import BufferedInputFile
         ext, _ = image_format(raw)
         upload = BufferedInputFile(raw, filename=f'photo-boss.{ext}')
-        if receipt:
-            try:
-                message = await self.api.bot.send_photo(
-                    actor.tg_id, upload, caption='Photo Boss · чек на проверку', protect_content=True,
-                )
-                attachment = message.photo[-1]
-            except TelegramBadRequest as exc:
-                # Receipts with unusual dimensions cannot be Telegram photos.
-                # Preserve their original bytes as a document, without blocking queued shoots.
-                if 'PHOTO_INVALID_DIMENSIONS' not in str(exc):
-                    raise
-                message = await self.api.bot.send_document(
-                    actor.tg_id, BufferedInputFile(raw, filename=f'photo-boss.{ext}'),
-                    caption='Photo Boss · чек на проверку (файл)', protect_content=True,
-                )
+        try:
+            if receipt:
+                try:
+                    message = await self.api.bot.send_photo(
+                        actor.tg_id, upload, caption='Photo Boss · чек на проверку', protect_content=True,
+                    )
+                    attachment = message.photo[-1]
+                except TelegramBadRequest as exc:
+                    # Some valid originals cannot be represented as Telegram photos.
+                    if 'PHOTO_INVALID_DIMENSIONS' not in str(exc):
+                        raise
+                    message = await self.api.bot.send_document(
+                        actor.tg_id, BufferedInputFile(raw, filename=f'photo-boss.{ext}'),
+                        caption='Photo Boss · чек на проверку (файл)', protect_content=True,
+                    )
+                    attachment = message.document
+            else:
+                message = await self.api.bot.send_document(actor.tg_id, upload, caption='Photo Boss · сохранённый кадр', protect_content=True)
                 attachment = message.document
-        else:
-            message = await self.api.bot.send_document(actor.tg_id, upload, caption='Photo Boss · сохранённый кадр', protect_content=True)
-            attachment = message.document
-        return attachment.file_id, attachment.file_unique_id
+            return attachment.file_id, attachment.file_unique_id
+        except (TelegramForbiddenError, TelegramBadRequest) as exc:
+            inaccessible = isinstance(exc, TelegramForbiddenError) or any(
+                value in str(exc).casefold() for value in ('chat not found', 'user is deactivated')
+            )
+            if not inaccessible:
+                raise
+            # The web app must work even before a staff member starts/unblocks
+            # the bot. Preserve the original privately, with no Telegram message
+            # or public link required and no success before checksum validation.
+            from .services.media_files import save_private_media
+            return await save_private_media(actor.id, raw)
 
     async def save_selected(self, draft, raw):
         token, client_id = configured_from_env()

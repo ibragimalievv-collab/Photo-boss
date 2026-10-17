@@ -606,7 +606,8 @@ async def academy_review_photo(callback: CallbackQuery, current_user, current_ro
     photo, photographer = row
     await callback.answer()
     if callback.message:
-        await callback.message.answer_photo(photo.file_id, caption=f"Рабочий кадр #{photo.id} · {photographer.name}\nРазбор делает AI-помощник. Запустите разбор съёмки в Академии приложения.")
+        from ..services.media_files import send_private_image
+        await send_private_image(callback.message, photo.file_id, caption=f"Рабочий кадр #{photo.id} · {photographer.name}\nРазбор делает AI-помощник. Запустите разбор съёмки в Академии приложения.")
 
 
 @r.callback_query(F.data.startswith("academy:review_apply:"))

@@ -1,21 +1,17 @@
 import io
 import json
 import logging
-from datetime import UTC, datetime
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile
 from sqlalchemy import select
 
-from ..academy_practice import DISK_PREFIX, photo_bytes
+from ..academy_practice import DISK_PREFIX, AcademyPractice, photo_bytes
 from ..access import StaffFilter
-from ..config import config
-from ..db import Session
+from ..db import Session, engine
 from ..keyboards import inline
 from ..models import (
     AcademyCoachingPlan,
-    AcademyPracticeReview,
     TrainingAssignment,
     TrainingSubmission,
     User,
@@ -27,8 +23,8 @@ from ..services.training import (
     shot_instruction,
     training_day,
 )
-from ..services.training_ai import MAX_IMAGE_BYTES, analyze_training_set, review_text
-from ..yandex_disk import YandexDisk, YandexDiskError, configured_from_env
+from ..services.training_ai import MAX_IMAGE_BYTES, review_text
+from ..yandex_disk import YandexDisk, configured_from_env
 
 r = Router()
 r.message.filter(StaffFilter(*ROLES))
@@ -124,64 +120,43 @@ async def download_training_photo(bot, file_id):
 
 
 async def ai_review_assignment(bot, assignment_id):
-    """Return True when AI produced a final trainee-facing decision."""
-    if not config.openai_api_key:
-        return False
+    """Use the same claimed, retryable queue as the web app, never a second AI path."""
+    from ..miniapp_api import MiniApp
+
+    service = AcademyPractice(MiniApp(engine, bot, []))
+    outcomes = await service.process_pending(YandexDisk(*configured_from_env()), assignment_id=assignment_id)
+    result = outcomes.get(assignment_id)
+    # Another worker already owns the lease; do not overwrite it with AI_FAILED.
+    if result is None:
+        return True
     async with Session() as session:
         assignment = await session.get(TrainingAssignment, assignment_id)
-        submissions = (await session.scalars(
-            select(TrainingSubmission).where(
-                TrainingSubmission.assignment_id == assignment_id
-            ).order_by(TrainingSubmission.pose_index)
-        )).all()
         trainee = await session.get(User, assignment.user_id) if assignment else None
-    if assignment is None or trainee is None or len(submissions) != 5:
-        return False
+    if assignment is None or trainee is None:
+        return True
     category = CATEGORY_BY_SLUG.get(assignment.category_slug)
     if category is None:
-        return False
-    try:
-        uploaded = [await download_training_photo(bot, item.submitted_file_id) for item in submissions]
-        references = [path.read_bytes() for path in category.image_paths]
-        result = await analyze_training_set(category, references, uploaded)
-    except (OSError, TelegramAPIError, ValueError, YandexDiskError):
-        logger.warning("Could not prepare Academy assignment %s for AI", assignment_id)
-        return False
+        return True
+    if result.get("status") == "storage_unavailable":
+        await bot.send_message(trainee.tg_id, "Нужно повторно загрузить кадры: "
+                               + ", ".join(map(str, result["unavailable_indexes"]))
+                               + ". Остальные фотографии сохранены. Откройте практику в приложении.")
+        return True
     if result.get("status") != "completed":
-        return False
+        message = result.get("message") or "AI-проверка временно недоступна. Фото сохранены."
+        message = message.replace("Ваш текст сохранён", "Фотографии сохранены")
+        message += (" Повторная попытка запланирована автоматически." if result.get("nextRetryAt")
+                    else " Подробности и повторная проверка доступны в Академии приложения.")
+        await bot.send_message(trainee.tg_id, message)
+        return True
     review = result["review"]
-    async with Session() as session:
-        locked = await session.get(TrainingAssignment, assignment_id, with_for_update=True)
-        if locked is None or locked.status != "PENDING_REVIEW":
-            return True
-        session.add(AcademyPracticeReview(assignment_id=assignment_id, result=json.dumps(result, ensure_ascii=False),
-            photos=json.dumps([{"index": x.pose_index, "file": x.submitted_file_id} for x in submissions])))
-        locked.ai_score = review["score"]
-        locked.ai_analysis = json.dumps(result, ensure_ascii=False)
-        locked.review_source = "AI"
-        if review["decision"] == "ACCEPT":
-            locked.status = "COMPLETED"
-            locked.completed_at = datetime.now(UTC).replace(tzinfo=None)
-        elif review["decision"] == "REVISION" and review["reshoot_indexes"]:
-            rows = (await session.scalars(select(TrainingSubmission).where(
-                TrainingSubmission.assignment_id == assignment_id,
-                TrainingSubmission.pose_index.in_(set(review["reshoot_indexes"])),
-            ))).all()
-            for row in rows:
-                await session.delete(row)
-            locked.status = "ACTIVE"
-        else:
-            locked.review_source = "AI_FAILED"
-            await session.commit()
-            return False
-        await session.commit()
     await bot.send_message(trainee.tg_id, review_text(result))
     if review["decision"] == "ACCEPT":
         await bot.send_message(
             trainee.tg_id,
             "✅ ИИ принял практику по единому стандарту Photo Boss. Новый набор откроется завтра.",
         )
-    else:
+    elif review["decision"] == "REVISION":
         indexes = sorted(set(review["reshoot_indexes"]))
         await bot.send_message(
             trainee.tg_id,
@@ -194,6 +169,9 @@ async def ai_review_assignment(bot, assignment_id):
                 caption=(f"Кадр {indexes[0]}/5\n"
                          f"{shot_instruction(category, indexes[0])}"),
             )
+    else:
+        await bot.send_message(trainee.tg_id, "ИИ не смог уверенно оценить кадры. "
+                               "Откройте Академию приложения, чтобы повторить проверку или переснять спорные кадры.")
     return True
 
 
@@ -359,17 +337,8 @@ async def training_submission(message):
             "📥 Все 5 повторов загружены. ИИ проверяет технику, свет, позу, "
             "эмоцию, композицию и разные ракурсы."
         )
-        if await ai_review_assignment(message.bot, assignment.id):
-            return
-        async with Session() as session:
-            pending = await session.get(TrainingAssignment, assignment.id, with_for_update=True)
-            if pending and pending.status == "PENDING_REVIEW":
-                pending.review_source = "AI_FAILED"
-                await session.commit()
-        return await message.answer(
-            "⏳ AI-проверка временно недоступна или не уверена в результате. "
-            "Фото сохранены. Повторите AI-проверку в Академии приложения."
-        )
+        await ai_review_assignment(message.bot, assignment.id)
+        return
     indexes.add(pose_index)
     await message.answer(
         f"✅ Повтор принят. Загружено: {len(indexes)}/5. Следующий кадр:"
