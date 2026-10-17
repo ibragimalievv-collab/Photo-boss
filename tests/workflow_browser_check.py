@@ -82,7 +82,7 @@ async def main():
     try:
         with patch.object(Workflow, 'save_selected', save_selected):
             async with async_playwright() as p:
-                browser = await p.chromium.launch(args=['--ignore-certificate-errors', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'])
+                browser = await p.chromium.launch(executable_path=os.getenv('CALLS_CHROMIUM_PATH') or None,args=['--ignore-certificate-errors', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'])
                 try:
                     context = await browser.new_context(ignore_https_errors=True, viewport={'width': 390, 'height': 844}, is_mobile=True,
                         geolocation={'latitude': 41.5, 'longitude': 48.1}, permissions=['geolocation', 'camera'])

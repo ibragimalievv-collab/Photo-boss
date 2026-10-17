@@ -155,13 +155,16 @@ class GalleryWorkspace:
         token, client_id = configured_from_env()
         if not token:
             return web.json_response({'configured': False})
-        if self.storage_cache and time.monotonic() - self.storage_cache[0] < 300:
+        if request.query.get('fresh') != '1' and self.storage_cache and time.monotonic() - self.storage_cache[0] < 60:
             return web.json_response(self.storage_cache[1])
         try:
-            data = await YandexDisk(token, client_id)._json('GET', '', params={'fields':'total_space,used_space'})
+            data = await YandexDisk(token, client_id)._json('GET', '', params={'fields':'total_space,used_space,user'})
         except YandexDiskError:
             return web.json_response({'configured': True, 'available': False})
-        result = {'configured': True, 'used': data.get('used_space'), 'total': data.get('total_space')}
+        user = data.get('user') if isinstance(data.get('user'), dict) else {}
+        result = {'configured': True, 'available': True, 'used': data.get('used_space'), 'total': data.get('total_space'),
+                  'account': {k: user[k] for k in ('login', 'display_name', 'uid') if isinstance(user.get(k), str)},
+                  'root': 'Приложения → папка приложения → PhotoBoss'}
         self.storage_cache = (time.monotonic(), result)
         return web.json_response(result)
 

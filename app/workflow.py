@@ -163,9 +163,11 @@ class Workflow:
                 receipts = (await session.scalars(select(Receipt).where(Receipt.booking_id == b.id).order_by(Receipt.id))).all()
                 can_upload = await can_access_booking(session, a['id'], set(a['roles']), b, photos=True)
                 customer = await session.get(Client, b.client_id)
+                hotel = await session.get(Hotel, b.hotel_id)
                 total, paid, due = await payment_totals(session, b.id)
                 original_count = await session.scalar(select(func.count(Photo.id)).where(Photo.shooting_id == shoot.id)) if shoot else 0
-                history = {'client': customer.name if customer else '', 'sales': [
+                history = {'client': customer.name if customer else '', 'phone': customer.phone if customer else None,
+                           'hotel': hotel.name if hotel else 'Отель не указан', 'sales': [
                     {'id': sale.id, 'at': sale.created_at.isoformat() + 'Z', 'photos': sale.sold_photos,
                      'amount': str(money(sale.amount)), 'paymentStatus': sale.payment_status}
                     for sale in purchases], 'soldTotal': sum(sale.sold_photos for sale in purchases),
@@ -325,9 +327,12 @@ class Workflow:
             if draft.status != 'AWAITING_SELECTED':
                 raise AccessError('Сначала сохраните чек и количество кадров.', 409)
             digest = hashlib.sha256(raw).hexdigest()
-            duplicate = await session.scalar(select(SaleDraftPhoto.id).where(SaleDraftPhoto.draft_id == draft.id, SaleDraftPhoto.sha256 == digest))
+            duplicate = await session.scalar(select(SaleDraftPhoto).where(SaleDraftPhoto.draft_id == draft.id, SaleDraftPhoto.sha256 == digest))
             if duplicate:
-                return result | {'photoId': duplicate, 'duplicate': True}
+                path = await self.save_selected(draft, raw)
+                duplicate.storage_path = path
+                duplicate.telegram_file_id = 'ydisk:' + path
+                return result | {'photoId': duplicate.id, 'duplicate': True, 'storageVerified': True}
             if await selected_count(session, draft.id) >= draft.sold_photos:
                 raise AccessError('Все выбранные кадры уже сохранены.', 409)
             if await already_purchased_photo(session, booking.id, digest):
@@ -385,13 +390,20 @@ class Workflow:
             await audit(session, actor, 'shoot_storage_recovery', 'shooting', sid,
                         json.dumps(recovery))
             return {'shootingId': sid, **recovery}
-        if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
-            raise AccessError('Загрузка съёмки уже закрыта или ещё недоступна.', 409)
         if kind == 'shoot_photo':
             digest = hashlib.sha256(raw).hexdigest()
-            duplicate = await session.scalar(select(PhotoStorage.photo_id).where(PhotoStorage.shooting_id == sid, PhotoStorage.sha256 == digest).limit(1))
+            duplicate = await session.scalar(select(PhotoStorage).where(PhotoStorage.shooting_id == sid, PhotoStorage.sha256 == digest).limit(1))
             if duplicate:
-                return {'shootingId': sid, 'photoId': duplicate, 'duplicate': True}
+                file_id, unique_id = await self.save_telegram(actor, raw)
+                original = await session.get(Photo, duplicate.photo_id)
+                original.file_id = file_id
+                duplicate.telegram_file_id = file_id
+                duplicate.telegram_unique_id = unique_id
+                duplicate.status, duplicate.attempts, duplicate.last_error = 'PENDING', 0, None
+                duplicate.started_at = None
+                return {'shootingId': sid, 'photoId': duplicate.photo_id, 'duplicate': True, 'storageStatus': 'PENDING'}
+            if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
+                raise AccessError('Загрузка новых кадров уже закрыта или ещё недоступна.', 409)
             file_id, unique_id = await self.save_telegram(actor, raw)
             photo = Photo(shooting_id=sid, file_id=file_id)
             session.add(photo)
@@ -401,6 +413,8 @@ class Workflow:
             storage.sha256 = digest
             await audit(session, actor, 'shoot_photo_uploaded', 'shooting', sid)
             return {'shootingId': sid, 'photoId': photo.id, 'storageStatus': 'PENDING'}
+        if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
+            raise AccessError('Загрузка съёмки уже закрыта или ещё недоступна.', 409)
         completed = await complete_full_upload(session, actor, sid, allow_management=True)
         return {'shootingId': sid, 'photos': completed.count, 'percent': str(completed.commissions['percent'])}
 

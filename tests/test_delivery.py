@@ -1,5 +1,6 @@
 """Disposable database and fake storage/bot; no messages or photos leave the test."""
 import asyncio
+import hashlib
 import io
 from datetime import date, time, timedelta
 from types import SimpleNamespace
@@ -146,6 +147,7 @@ def test_upload_is_deduplicated_rechecks_assignment_and_keeps_originals_separate
     async def upload(self,path,raw,**kwargs):uploaded.append(path)
     monkeypatch.setattr(delivery.YandexDisk,'ensure_dir',directory)
     monkeypatch.setattr(delivery.YandexDisk,'upload_bytes',upload)
+    monkeypatch.setattr(delivery.YandexDisk,'metadata',AsyncMock(return_value={'type':'file','size':len(image()),'sha256':hashlib.sha256(image()).hexdigest()}))
     async def run():
         engine,svc,client,_=await setup(monkeypatch)
         try:
@@ -156,6 +158,10 @@ def test_upload_is_deduplicated_rechecks_assignment_and_keeps_originals_separate
                 assert first['photoId']==again['photoId'] and again['duplicate']
                 assert len(uploaded)==1 and '/delivery/booking-1/' in uploaded[0]
                 assert await session.scalar(select(func.count(DeliveryPhoto.id)))==1
+                delivery.YandexDisk.metadata.side_effect = delivery.YandexDiskError('Yandex.Disk HTTP 404')
+                restored=await svc.apply(session,ACTORS[2],'delivery_photo',{'booking':1,'filename':'restore.png'},image())
+                assert restored['photoId']==first['photoId'] and restored['storageVerified']
+                assert len(uploaded)==2 and await session.scalar(select(func.count(DeliveryPhoto.id)))==1
                 with pytest.raises(AccessError):
                     await svc.apply(session,ACTORS[3],'delivery_photo',{'booking':1,'filename':'wrong.png'},image())
                 b=await session.get(Booking,1);b.photographer_id=3;await session.commit()
@@ -174,6 +180,7 @@ def test_large_album_upload_and_archive_above_previous_total_limits(monkeypatch)
     monkeypatch.setattr(delivery.YandexDisk, 'ensure_dir', AsyncMock())
     upload = AsyncMock()
     monkeypatch.setattr(delivery.YandexDisk, 'upload_bytes', upload)
+    monkeypatch.setattr(delivery.YandexDisk, 'metadata', AsyncMock(return_value={'type':'file','size':len(image()),'sha256':hashlib.sha256(image()).hexdigest()}))
     async def run():
         engine, svc, client, _ = await setup(monkeypatch)
         try:
@@ -218,6 +225,8 @@ def test_photo_sets_upload_independently_and_deduplicate_within_their_own_folder
     monkeypatch.setattr(delivery.YandexDisk, 'ensure_dir', AsyncMock())
     upload = AsyncMock()
     monkeypatch.setattr(delivery.YandexDisk, 'upload_bytes', upload)
+
+    monkeypatch.setattr(delivery.YandexDisk, 'metadata', AsyncMock(return_value={'type':'file','size':len(image()),'sha256':hashlib.sha256(image()).hexdigest()}))
 
     async def run():
         engine, svc, client, _ = await setup(monkeypatch)

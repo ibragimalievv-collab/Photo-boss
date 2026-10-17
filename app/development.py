@@ -127,6 +127,9 @@ class Development:
 
     async def turn(self,request):
         a=request['miniapp_actor'];sid=positive_id(request.match_info['id']);body=await self.api.body(request)
+        return await self.save_turn(a, sid, body)
+
+    async def save_turn(self, a, sid, body, *, source='text'):
         if set(body)!={'revision','text','finish'} or type(body['revision']) is not int or type(body['finish']) is not bool or not isinstance(body['text'],str) or len(body['text'])>2000 or (not body['text'].strip() and not body['finish']): raise AccessError('Введите ответ длиной до 2000 символов.',400)
         async with self.api.engine.begin() as conn:
             rows=await self.api.rows(conn,'SELECT * FROM sales_training_sessions WHERE id=:id AND user_id=:uid FOR UPDATE',id=sid,uid=a['id'])
@@ -152,6 +155,8 @@ class Development:
             await conn.execute(text('UPDATE sales_training_sessions SET transcript=:transcript,status=:status,revision=revision+1,evaluation=:evaluation WHERE id=:id'),{'transcript':json.dumps(transcript,ensure_ascii=False),'status':'COMPLETED' if body['finish'] else 'ACTIVE','evaluation':json.dumps(result,ensure_ascii=False) if body['finish'] else None,'id':sid})
             await conn.execute(text('INSERT INTO operation_requests(user_id,request_key,payload_hash,result,created_at) VALUES (:uid,:key,:hash,:result,:now)'),
                 {'uid': a['id'], 'key': replay_key, 'hash': digest, 'result': '{"ok":true}', 'now': utc_now()})
+            await self.api.audit_write(conn, a, 'academy_voice_turn' if source == 'voice' else 'academy_training_turn',
+                                       'training', sid, json.dumps({'revision': body['revision'], 'track': 'booking' if s['client_type'].startswith('booking-') else 'photographer'}))
         return web.json_response({'ok':True})
 
     async def retry(self,request):
@@ -181,4 +186,6 @@ def install_development(app,api):
     service=Development(api)
     for method,path,handler in [('GET','/academy/development',service.listing),('POST','/academy/sales-training',service.start),('POST','/academy/sales-training/{id}/turn',service.turn),('POST','/academy/shoot-reviews/{id}/retry',service.retry)]:
         app.router.add_route(method,'/api/miniapp'+path,handler)
+    from .voice_training import install_voice_training
+    install_voice_training(app, service)
     return service

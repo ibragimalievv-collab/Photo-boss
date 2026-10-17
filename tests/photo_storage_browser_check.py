@@ -136,7 +136,7 @@ async def main():
                     await photo_storage.sync_one(bot,disk)
                     await close_upload(424)
                     await refresh_files()
-                    await page.get_by_text('Съёмка №1',exact=False).filter(has_text='сохранено').click()
+                    await page.locator('[data-storage-shooting="1"] > summary').click()
                     await page.get_by_role('button',name='Восстановить сохранение на Диске',exact=True).click()
                     await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).every(r=>r.status==='synced');}")
                     disk.full = False
@@ -149,14 +149,14 @@ async def main():
                     async with factory() as session:
                         assert (await session.get(Shooting, 1)).full_upload_completed_at is not None
                     await refresh_files()
-                    await page.get_by_text('Съёмка №1',exact=False).filter(has_text='сохранено').click()
+                    await page.locator('[data-storage-shooting="1"] > summary').click()
                     await page.get_by_text('Обработка · оригиналы сохраняются отдельно',exact=True).click()
                     await page.locator('summary').filter(has_text='Кадр №1').click()
                     await page.locator('.photo-edit[data-photo="1"] button').click()
                     await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).every(r=>r.status==='synced');}")
                     await photo_edits.process_one(disk)
                     await refresh_files()
-                    await page.get_by_text('Съёмка №1',exact=False).filter(has_text='сохранено').click()
+                    await page.locator('[data-storage-shooting="1"] > summary').click()
                     await page.get_by_text('Обработка · оригиналы сохраняются отдельно',exact=True).click()
                     await page.locator('summary').filter(has_text='Кадр №1').click()
                     await page.get_by_role('button',name='Сравнить с оригиналом').click()
