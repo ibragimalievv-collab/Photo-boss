@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.23-hotel-manager-reminders"
+RELEASE = "miniapp-3.24-live-voice-training"
 
 
 async def health(request):
@@ -91,6 +91,12 @@ async def on_startup(app):
         await structured('Проверка подключения. Верни reply="Готов", score=null, errors=[], recommendations=[].',
             [{'type': 'input_text', 'text': 'Синтетический тест без личных данных.'}],
             ROLEPLAY_SCHEMA, 'startup_probe', limit=300)
+    if config.openai_api_key:
+        async def verify_live_voice():
+            from .realtime_training import model_name, probe_realtime
+            available = await probe_realtime()
+            logger.info('Realtime API configuration check: model=%s ready=%s', model_name(), available)
+        app['realtime_probe_task'] = asyncio.create_task(verify_live_voice())
     logger.info("Authenticated Telegram webhook configured")
     storage_status = await app["yandex_disk"].verify(write_test=True)
     if not storage_status["connected"] or not storage_status["writeVerified"]:
@@ -114,7 +120,7 @@ async def on_startup(app):
 async def on_cleanup(app):
     clear_ready_file()
     app["ready"] = False
-    for key in ("operations_task", "storage_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task"):
+    for key in ("realtime_probe_task", "operations_task", "storage_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task"):
         task = app.get(key)
         if task:
             task.cancel()

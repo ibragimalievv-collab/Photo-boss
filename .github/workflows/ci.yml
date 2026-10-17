@@ -136,6 +136,10 @@ jobs:
         run: python tests/work_calls_browser_check.py
       - name: Verify Academy uploads, AI review and reshoot inside the app
         run: python tests/academy_practice_browser_check.py
+      - name: Verify microphone recording and live AI conversation lifecycle
+        run: |
+          python tests/voice_training_browser_check.py
+          python tests/realtime_training_browser_check.py
       - name: Verify new mobile screens and offline replay
         run: python tests/update_browser_check.py
       - name: Verify cold offline start and replay of sales with photos

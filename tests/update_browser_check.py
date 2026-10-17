@@ -107,7 +107,7 @@ async def main():
                         await page.get_by_text('История записей и съёмок',exact=True).click()
                     if name == 'development':
                         await page.get_by_role('button',name='Тренироваться голосом с ИИ',exact=True).first.click()
-                        await page.locator('#salesTraining summary').click()
+                        await page.locator('#salesTraining > details > summary').click()
                         await page.locator('#salesTrainingForm textarea').fill('Съёмка бесплатная, выбранный кадр стоит 400 рублей.')
                         async with page.expect_response(lambda r:r.url.endswith('/turn') and r.status==200):
                             await page.get_by_role('button',name='Завершить и получить оценку',exact=True).click()

@@ -42,6 +42,7 @@ FIELDS = {
     'percent': 'Процент', 'value': 'Значение', 'key': 'Настройка',
     'source': 'Источник', 'capture': 'Как записано событие', 'date': 'Дата',
     'revision': 'Версия записи', 'track': 'Направление обучения',
+    'mode': 'Режим разговора', 'maxSeconds': 'Лимит разговора, секунд',
     'idleMinutes': 'Интервал без записей, минут', 'enabled': 'Включено',
     'deleted': 'В корзине', 'daily': 'Ежедневная сводка', 'critical': 'Критические события',
     'lat': 'Широта', 'lon': 'Долгота', 'accuracy': 'Точность геопозиции, м',
@@ -64,6 +65,7 @@ VALUES = {
     'database': 'Автоматическая запись базы данных', 'photographer': 'Обучение фотографа',
     'booking': 'Обучение менеджера записи', 'MANUAL': 'Ручная сверка',
     'MATCHED': 'Совпадает', 'MISMATCH': 'Не совпадает',
+    'coach': 'ИИ-наставник', 'guest': 'Учебный гость',
 }
 ACTIONS = {
     'bank_reconciled': 'Поступление оплаты сверено с банком',
@@ -101,6 +103,8 @@ ACTIONS = {
     'miniapp_photographer_assigned': 'Назначен фотограф', 'shooting_pickup': 'Фотограф принял съёмку',
     'shooting_start': 'Начата съёмка', 'shooting_finish': 'Завершена съёмка',
     'shooting_ready': 'Съёмка подготовлена к продаже', 'academy_voice_turn': 'Сохранён голосовой ответ в тренировке',
+    'academy_realtime_start': 'Начат живой голосовой разговор с ИИ',
+    'academy_realtime_finish': 'Сохранён разбор живого разговора с ИИ',
 }
 SECRET = re.compile(r'password|secret|token|credential|hash|file_id|disk_path|storage_path', re.IGNORECASE)
 
