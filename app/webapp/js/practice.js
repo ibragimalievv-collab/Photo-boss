@@ -23,6 +23,7 @@ async function loadPhotos(){
 function analysisMarkup(data){
  const a=data.analysis;if(!a)return '';
  if(a.status==='owner')return `<div class="practice-feedback"><strong>Решение владельца</strong><p>${esc(a.comment||'Набор принят.')}</p></div>`;
+ if(a.status==='storage_unavailable')return `<p class="practice-feedback">Не удалось прочитать ${esc((a.unavailable_indexes||[]).map(i=>`кадр ${i}`).join(', ')||'один из кадров')} из хранилища. Остальные фотографии сохранены; загрузите только отмеченные кадры заново.</p>`;
  if(a.status!=='completed')return '<p class="practice-feedback">AI-проверка временно недоступна. Фотографии сохранены; повторите проверку.</p>';
  const r=a.review;
  return `<div class="practice-feedback"><h3>Разбор: ${esc(r.score)}/100</h3>${r.strengths?.length?`<p>${esc(r.strengths.join(' · '))}</p>`:''}${r.issues?.length?`<ul>${r.issues.map(i=>`<li>${esc(i)}</li>`).join('')}</ul>`:''}<p>${esc(r.next_action)}</p></div>`;

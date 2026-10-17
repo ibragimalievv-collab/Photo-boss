@@ -272,22 +272,85 @@ class AcademyPractice:
             result = await self.detail_data(conn, actor, aid)
         return web.json_response(result)
 
+    async def _reopen_unavailable_photos(self, row, shots, indexes, *, expected_sources):
+        """Reopen only unreadable slots while retaining an immutable failure snapshot."""
+        indexes = sorted(set(indexes))
+        result = {"status": "storage_unavailable", "unavailable_indexes": indexes}
+        async with self.lock, self.engine.begin() as conn:
+            current = await self.api.rows(
+                conn,
+                "SELECT status,review_source FROM training_assignments WHERE id=:id FOR UPDATE",
+                id=row["id"],
+            )
+            if (not current or current[0]["status"] != "PENDING_REVIEW"
+                    or current[0]["review_source"] not in expected_sources):
+                return False
+            await conn.execute(text("""INSERT INTO academy_practice_reviews
+                (assignment_id,result,photos,created_at) VALUES (:id,:result,:photos,:now)"""),
+                {"id": row["id"], "result": json.dumps(result, ensure_ascii=False),
+                 "photos": json.dumps([{"index": s["pose_index"], "file": s["submitted_file_id"]}
+                                       for s in shots]),
+                 "now": datetime.now(UTC).replace(tzinfo=None)})
+            for index in indexes:
+                await conn.execute(text(
+                    "DELETE FROM training_submissions WHERE assignment_id=:id AND pose_index=:pose"
+                ), {"id": row["id"], "pose": index})
+            await conn.execute(text("""UPDATE training_assignments SET status='ACTIVE',
+                review_source='STORAGE_RETRY',ai_score=NULL,ai_analysis=:analysis,completed_at=NULL
+                WHERE id=:id"""),
+                {"id": row["id"], "analysis": json.dumps(result, ensure_ascii=False)})
+        logger.warning("Academy assignment %s reopened unreadable photos %s", row["id"], indexes)
+        return True
+
+    async def _load_submissions(self, row, shots, storage):
+        by_index = {s["pose_index"]: s for s in shots}
+        unavailable = [index for index in range(1, 6) if index not in by_index]
+        uploaded = []
+        for index in range(1, 6):
+            shot = by_index.get(index)
+            if shot is None:
+                continue
+            try:
+                uploaded.append(await photo_bytes(self.api.bot, storage, shot["submitted_file_id"]))
+            except (OSError, ValueError, TelegramAPIError, YandexDiskError):
+                unavailable.append(index)
+        return uploaded, unavailable
+
+    async def recover_stalled_storage(self, storage):
+        """Repair reviews left as AI_FAILED by older releases when one stored photo is unreadable."""
+        async with self.engine.connect() as conn:
+            rows = await self.api.rows(conn, """SELECT * FROM training_assignments
+                WHERE status='PENDING_REVIEW' AND review_source='AI_FAILED' ORDER BY id LIMIT 20""")
+        for row in rows:
+            async with self.engine.connect() as conn:
+                shots = await self.api.rows(conn, """SELECT pose_index,submitted_file_id
+                    FROM training_submissions WHERE assignment_id=:id ORDER BY pose_index""", id=row["id"])
+            _, unavailable = await self._load_submissions(row, shots, storage)
+            if unavailable:
+                await self._reopen_unavailable_photos(
+                    row, shots, unavailable, expected_sources={"AI_FAILED"}
+                )
+
     async def process_pending(self, storage):
         async with self.engine.connect() as conn:
             rows = await self.api.rows(conn, """SELECT * FROM training_assignments
                 WHERE status='PENDING_REVIEW' AND review_source='AI_PENDING' ORDER BY id LIMIT 2""")
         for row in rows:
             result = {"status": "unavailable"}
-            try:
-                async with self.engine.connect() as conn:
-                    shots = await self.api.rows(conn, """SELECT pose_index,submitted_file_id FROM training_submissions
-                        WHERE assignment_id=:id ORDER BY pose_index""", id=row["id"])
-                category = CATEGORY_BY_SLUG[row["category_slug"]]
-                if config.openai_api_key:
-                    uploaded = [await photo_bytes(self.api.bot, storage, s["submitted_file_id"]) for s in shots]
-                    result = await analyze_training_set(category, [p.read_bytes() for p in category.image_paths], uploaded)
-            except (OSError, ValueError, TelegramAPIError, YandexDiskError):
-                logger.warning("Academy analysis unavailable for assignment %s", row["id"])
+            async with self.engine.connect() as conn:
+                shots = await self.api.rows(conn, """SELECT pose_index,submitted_file_id FROM training_submissions
+                    WHERE assignment_id=:id ORDER BY pose_index""", id=row["id"])
+            category = CATEGORY_BY_SLUG[row["category_slug"]]
+            if config.openai_api_key:
+                uploaded, unavailable = await self._load_submissions(row, shots, storage)
+                if unavailable:
+                    await self._reopen_unavailable_photos(
+                        row, shots, unavailable, expected_sources={"AI_PENDING"}
+                    )
+                    continue
+                result = await analyze_training_set(
+                    category, [p.read_bytes() for p in category.image_paths], uploaded
+                )
             review = result.get("review", {}) if result.get("status") == "completed" else {}
             decision = review.get("decision")
             reshoot = review.get("reshoot_indexes", [])
@@ -313,6 +376,10 @@ class AcademyPractice:
                      "completed": datetime.now(UTC).replace(tzinfo=None) if status == "COMPLETED" else None})
 
     async def worker(self, app):
+        try:
+            await self.recover_stalled_storage(app["yandex_disk"])
+        except Exception:
+            logger.exception("Academy stalled-storage recovery unavailable")
         while True:
             try:
                 await self.process_pending(app["yandex_disk"])
