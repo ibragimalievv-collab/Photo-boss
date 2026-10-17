@@ -341,7 +341,7 @@ class MiniApp:
         where += ' AND ' + (marker if trash else 'NOT ' + marker)
         if search:
             search = re.sub(r'\b(\d{2})\.(\d{2})\.(\d{4})\b', r'\3-\2-\1', search)
-            terms = [re.sub(r'\D', '', search)] if re.fullmatch(r'[+\d\s()\-]+', search) else search.casefold().split()
+            terms = [re.sub(r'\D', '', search)] if re.fullmatch(r'[+\d\s()\-]+', search) and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', search) else search.casefold().split()
             fields = ['c.name', 'h.name', 'b.room', 'p.name', 'm.name', 'c.phone',
                       'CAST(b.id AS VARCHAR)', 'CAST(b.shoot_date AS VARCHAR)', 'CAST(b.shoot_time AS VARCHAR)',
                       "replace(replace(replace(replace(replace(c.phone,' ',''),'+',''),'-',''),'(',''),')','')"]

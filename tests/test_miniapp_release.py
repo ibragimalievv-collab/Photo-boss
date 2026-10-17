@@ -483,6 +483,19 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         assert audit["items"][0]["details"] == "Full retained details"
         assert (await self.call("/audit?before=" + str(2**80)))[0] == 400
 
+    async def test_booking_search_all_dates_phone_and_current_scope(self):
+        older = self.service.today() - timedelta(days=20)
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("UPDATE clients SET phone='+7 (999) 123-45-67' WHERE id=1"))
+            conn.execute(text('UPDATE bookings SET shoot_date=:day WHERE id=1'), {'day': older})
+        for query in ('9991234567', 'Own%20Test%20hotel', older.strftime('%d.%m.%Y'), older.isoformat()):
+            status, data, _ = await self.call('/bookings?q='+query, uid=1003)
+            assert status == 200
+            assert [b['id'] for b in data['items']] == [1], (query, data)
+            assert data['allDates'] and data['items'][0]['phone'] == '+7 (999) 123-45-67'
+        status, data, _ = await self.call('/bookings?q=9991234567', uid=1005)
+        assert status == 200 and data['items'] == []
+
     async def test_session_open_once_no_credential_in_audit(self):
         token = signed(1003)
         for _ in range(2):
