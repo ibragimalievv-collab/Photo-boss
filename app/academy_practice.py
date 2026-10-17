@@ -317,7 +317,7 @@ class AcademyPractice:
         return uploaded, unavailable
 
     async def recover_stalled_storage(self, storage):
-        """Repair reviews left as AI_FAILED by older releases when one stored photo is unreadable."""
+        """Repair old AI_FAILED reviews after checking every stored practice photo."""
         async with self.engine.connect() as conn:
             rows = await self.api.rows(conn, """SELECT * FROM training_assignments
                 WHERE status='PENDING_REVIEW' AND review_source='AI_FAILED' ORDER BY id LIMIT 20""")
@@ -330,6 +330,16 @@ class AcademyPractice:
                 await self._reopen_unavailable_photos(
                     row, shots, unavailable, expected_sources={"AI_FAILED"}
                 )
+                continue
+            async with self.lock, self.engine.begin() as conn:
+                current = await self.api.rows(conn, """SELECT status,review_source
+                    FROM training_assignments WHERE id=:id FOR UPDATE""", id=row["id"])
+                if (not current or current[0]["status"] != "PENDING_REVIEW"
+                        or current[0]["review_source"] != "AI_FAILED"):
+                    continue
+                await conn.execute(text("""UPDATE training_assignments
+                    SET review_source='AI_PENDING' WHERE id=:id"""), {"id": row["id"]})
+            logger.info("Academy assignment %s requeued after storage recovery", row["id"])
 
     async def process_pending(self, storage):
         async with self.engine.connect() as conn:
