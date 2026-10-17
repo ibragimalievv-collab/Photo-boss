@@ -25,7 +25,8 @@ from app.workflow import Workflow
 async def main():
     engine, factory, bid = await prepared()
     async with factory() as session:
-        original = await purchase(session, bid, 1, 2)
+        original = await purchase(session, bid, 1, 2,
+            repeated_hash=hashlib.sha256(Path('app/webapp/assets/academy/child.jpg').read_bytes()).hexdigest())
         original.receipt.status, original.receipt.verified_amount = 'APPROVED', 800
         await refresh_payment_statuses(session, bid)
         (await session.get(Booking, bid)).status = 'COMPLETED'
@@ -76,7 +77,21 @@ async def main():
                         'app/webapp/assets/academy/evening.jpg',
                     ])
                     await form.get_by_role('button', name='Добавить допродажу').click()
+                    replacement = page.locator('#workflowQueue [data-workflow-replace]')
+                    await expect(replacement).to_be_visible()
+                    duplicate_key = await replacement.get_attribute('data-workflow-replace')
+                    queued_keys = await page.evaluate("async()=>{const {outboxRows}=await import('/app/js/outbox.js');return (await outboxRows()).map(r=>r.key);}")
+                    async with factory() as session:
+                        assert await session.scalar(select(func.count(Sale.id))) == 1
+                        assert await session.scalar(select(func.count(Receipt.id))) == 1
+                        assert await session.scalar(select(OperationRequest.id).where(OperationRequest.request_key == duplicate_key)) is None
+                    await replacement.set_input_files('app/webapp/assets/academy/family.jpg')
                     await expect(form.locator('[data-operation-progress]')).to_contain_text('сохранена сервером', timeout=20000)
+                    assert await page.evaluate("""async([key,keys])=>{
+                        const {outboxRows}=await import('/app/js/outbox.js'),rows=await outboxRows();
+                        return JSON.stringify(rows.map(r=>r.key))===JSON.stringify(keys)&&
+                            rows.find(r=>r.key===key)?.status==='synced'&&rows.find(r=>r.key===key)?.filename==='family.jpg';
+                    }""", [duplicate_key, queued_keys]), 'Corrected selection must keep the original sale operations'
                     async with factory() as session:
                         sales = list((await session.scalars(select(Sale).order_by(Sale.id))).all())
                         assert len(sales) == 2
@@ -96,7 +111,7 @@ async def main():
                     assert not errors, errors
                     output = Path('/tmp/photo-boss-calls-qa'); output.mkdir(exist_ok=True, parents=True)
                     await page.screenshot(path=str(output/'sales-followup-mobile.png'), full_page=True)
-                    print('PASS: return purchase on closed booking; 800+1200 as separate sales; first payment intact; duplicate submit rejected; history restored')
+                    print('PASS: return purchase, duplicate-photo409 corrected in-place with same key, single new receipt; 800+1200 as separate sales; first payment intact; duplicate submit rejected; history restored')
                 finally:
                     await browser.close()
     finally:

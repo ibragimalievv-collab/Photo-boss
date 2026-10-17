@@ -327,6 +327,57 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
         assert catalog["history"][0]["analysis"]["review"]["next_action"] == "Переснимите третий кадр"
         assert catalog["history"][0]["score"] == 75
 
+    async def test_expired_storage_worker_cannot_reopen_newer_review_claim(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        original_download = self.storage.download_bytes.side_effect
+        replacement = {"status": "processing", "processingLease": "new-worker",
+                       "processingStartedAt": "2099-01-01T00:00:00+00:00"}
+
+        async def superseded_download(path, **kwargs):
+            if f"/{aid}-2-" in path:
+                # A paused worker's lease expired while reading storage and a
+                # replacement worker has already claimed the same assignment.
+                with self.engine.inner.begin() as conn:
+                    conn.execute(text("UPDATE training_assignments SET ai_analysis=:data WHERE id=:id"),
+                                 {"id": aid, "data": json.dumps(replacement)})
+                raise YandexDiskError("old download failed")
+            return await original_download(path, **kwargs)
+
+        self.storage.download_bytes.side_effect = superseded_download
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")):
+            assert await self.practice.process_pending(self.storage) == {}
+        _, data = await self.request(f"/{aid}")
+        assert data["status"] == "PENDING_REVIEW"
+        assert data["reviewSource"] == "AI_PROCESSING"
+        assert data["analysis"] == replacement
+        assert all(shot["uploaded"] for shot in data["shots"])
+        with self.engine.inner.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM academy_practice_reviews")).scalar() == 0
+
+    async def test_startup_storage_recovery_does_not_replace_newer_failure(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("""UPDATE training_assignments SET review_source='AI_FAILED',
+                ai_analysis='{"status":"unavailable"}' WHERE id=:id"""), {"id": aid})
+        original_download = self.storage.download_bytes.side_effect
+        failure = {"status": "unavailable", "errorCode": "insufficient_quota",
+                   "retryable": False, "attempts": 1}
+
+        async def newer_failure(path, **kwargs):
+            with self.engine.inner.begin() as conn:
+                conn.execute(text("UPDATE training_assignments SET ai_analysis=:data WHERE id=:id"),
+                             {"id": aid, "data": json.dumps(failure)})
+            return await original_download(path, **kwargs)
+
+        self.storage.download_bytes.side_effect = newer_failure
+        await self.practice.recover_stalled_storage(self.storage)
+        _, data = await self.request(f"/{aid}")
+        assert data["reviewSource"] == "AI_FAILED"
+        assert data["analysis"] == failure
+        assert all(shot["uploaded"] for shot in data["shots"])
+
     async def test_startup_recovery_scans_past_capped_failed_rows(self):
         aid = await self.start()
         await self.upload_all(aid)

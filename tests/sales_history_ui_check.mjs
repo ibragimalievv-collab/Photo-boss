@@ -32,4 +32,7 @@ assert.ok(!closed.includes('id="workflowShoot"'),'explicit server denial must ov
 assert.ok(closed.includes('AI пока не прочитал чек'));
 assert.equal(vm.runInContext(`replacementControl({key:'attendance',kind:'attendance',status:'error',errorStatus:413,hasBlob:true})`,ctx),'','attendance must not expose a gallery file picker');
 assert.ok(vm.runInContext(`replacementControl({key:'receipt',kind:'sale_receipt',status:'error',errorStatus:413,hasBlob:true})`,ctx).includes('data-workflow-replace'));
+assert.ok(vm.runInContext(`replacementControl({key:'duplicate',kind:'sale_selected',status:'error',errorStatus:409,error:'Этот кадр уже куплен в предыдущей продаже. Выберите новый кадр для допродажи.',hasBlob:true})`,ctx).includes('data-workflow-replace'));
+assert.equal(vm.runInContext(`replacementControl({key:'denied',kind:'sale_selected',status:'error',errorStatus:403,hasBlob:true})`,ctx),'');
+assert.equal(vm.runInContext(`replacementControl({key:'price',kind:'sale_selected',status:'error',errorStatus:409,error:'Цена пакета изменилась. Обновите данные и проверьте продажу.',hasBlob:true})`,ctx),'');
 console.log('PASS: closed-order repeat purchase, history totals, locked frame count and escaped names');

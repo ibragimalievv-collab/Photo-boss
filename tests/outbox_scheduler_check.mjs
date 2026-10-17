@@ -43,6 +43,82 @@ function fixture(api){
  f.add('receipt',{kind:'sale_receipt'});f.add('independent-photo');await f.run('flushOutbox()');
  assert.equal(f.rows.get('independent-photo').status,'synced');assert.ok(f.rows.get('receipt').blob);
 }
+// Sale steps must wait for the receipt and preceding photos in their own chain.
+// A transient receipt failure used to send counts/photos early, making their
+// wrong-stage 409 errors permanent even after the receipt recovered.
+{
+ let receiptReady=false,countsReady=false,selectedReady=false;
+ const f=fixture(async op=>{
+  if(op.kind==='sale_receipt'&&!receiptReady){const e=new Error('Хранилище занято');e.status=503;throw e;}
+  if(op.kind==='sale_counts'){
+   if(!receiptReady){const e=new Error('Черновик продажи уже закрыт.');e.status=409;throw e;}
+   countsReady=true;
+  }
+  if(op.kind==='sale_selected'){
+   if(!countsReady){const e=new Error('Сначала сохраните чек и количество кадров.');e.status=409;throw e;}
+   selectedReady=true;
+  }
+  if(op.kind==='sale_complete'&&!selectedReady){const e=new Error('Продажа уже завершена или отменена.');e.status=409;throw e;}
+  return {ok:true};
+ });
+ f.add('start',{kind:'sale_start',blob:null,data:{booking:{id:7}},status:'synced'});
+ const draft={key:'start'};
+ f.add('receipt',{kind:'sale_receipt',data:{draft}});
+ f.add('counts',{kind:'sale_counts',blob:null,data:{draft,total:2,sold:1}});
+ f.add('selected',{kind:'sale_selected',data:{draft}});
+ f.add('complete',{kind:'sale_complete',blob:null,data:{draft}});
+ f.add('independent-photo');
+ await f.run('flushOutbox()');
+ assert.deepEqual(f.calls,['receipt','independent-photo']);
+ for(const key of ['counts','selected','complete'])assert.equal(f.rows.get(key).status,'local');
+ assert.ok(f.rows.get('selected').blob,'waiting selected photo must retain its original');
+ await f.run('flushOutbox()');
+ assert.deepEqual(f.calls,['receipt','independent-photo'],'a receipt cooldown must also hold its sale steps');
+ receiptReady=true;f.setNow(130001);await f.run('flushOutbox()');
+ assert.deepEqual(f.calls,['receipt','independent-photo','receipt','counts','selected','complete']);
+ assert.ok([...f.rows.values()].every(row=>row.status==='synced'));
+}
+// A permanent receipt error waits for correction without discarding later photos.
+{
+ const f=fixture(async()=>({ok:true}));
+ f.add('rejected-receipt',{kind:'sale_receipt',status:'error',errorStatus:413,data:{draft:{key:'draft'}}});
+ f.add('waiting-photo',{kind:'sale_selected',data:{draft:{key:'draft'}}});
+ f.add('independent-photo');await f.run('flushOutbox()');
+ assert.deepEqual(f.calls,['independent-photo']);
+ assert.equal(f.rows.get('waiting-photo').status,'local');assert.ok(f.rows.get('waiting-photo').blob);
+}
+// Already saved queues from the previous release recover only their exact
+// wrong-stage errors, after the original predecessor has succeeded.
+{
+ const f=fixture(async()=>({ok:true})),draft={key:'start'};
+ f.add('start',{kind:'sale_start',blob:null,status:'synced'});
+ f.add('receipt',{kind:'sale_receipt',data:{draft},status:'synced'});
+ f.add('counts',{kind:'sale_counts',blob:null,data:{draft,total:2,sold:1},status:'error',errorStatus:409,error:'Черновик продажи уже закрыт.'});
+ f.add('selected',{kind:'sale_selected',data:{draft},status:'error',errorStatus:409,error:'Сначала сохраните чек и количество кадров.'});
+ f.add('complete',{kind:'sale_complete',blob:null,data:{draft},status:'error',errorStatus:409,error:'Продажа уже завершена или отменена.'});
+ f.add('denied',{kind:'sale_counts',blob:null,data:{draft:{key:'other'}},status:'error',errorStatus:403,error:'Нет доступа'});
+ await f.run('flushOutbox()');
+ assert.deepEqual(f.calls,['counts','selected','complete']);
+ for(const key of ['counts','selected','complete']){
+  assert.equal(f.rows.get(key).status,'synced');
+  assert.equal(f.rows.get(key).saleDependencyRecovery,'sale-dependency-recovery-v1-20261017');
+ }
+ assert.equal(f.rows.get('denied').status,'error');
+}
+// A genuine closed sale is rechecked at most once. Financial/duplicate conflicts
+// and an unproven chain never qualify for automatic legacy recovery.
+{
+ const f=fixture(async()=>{const e=new Error('Черновик продажи уже закрыт.');e.status=409;throw e;}),draft={key:'closed'};
+ f.add('closed',{kind:'sale_start',status:'synced',blob:null});
+ f.add('receipt',{kind:'sale_receipt',data:{draft},status:'synced'});
+ f.add('closed-counts',{kind:'sale_counts',blob:null,data:{draft},status:'error',errorStatus:409,error:'Черновик продажи уже закрыт.'});
+ f.add('price-change',{kind:'sale_counts',blob:null,data:{draft:{key:'price'}},status:'error',errorStatus:409,error:'Цена пакета изменилась. Обновите данные и проверьте продажу.'});
+ f.add('duplicate',{kind:'sale_selected',data:{draft:{key:'duplicate'}},status:'error',errorStatus:409,error:'Этот кадр уже куплен в предыдущей продаже. Выберите новый кадр для допродажи.'});
+ f.add('unproven',{kind:'sale_complete',blob:null,data:{draft:{key:'missing-start'}},status:'error',errorStatus:409,error:'Продажа уже завершена или отменена.'});
+ await f.run('flushOutbox()');await f.run('flushOutbox()');
+ assert.deepEqual(f.calls,['closed-counts']);
+ for(const key of ['closed-counts','price-change','duplicate','unproven'])assert.equal(f.rows.get(key).status,'error');
+}
 // Later retry windows must never cancel the earliest pending retry.
 {
  const f=fixture(async()=>({ok:true}));f.add('earlier',{retryAt:130000});f.add('later',{retryAt:190000});
@@ -106,5 +182,14 @@ function fixture(api){
  f.add('camera-attendance',{kind:'attendance',status:'error',errorStatus:413});
  await assert.rejects(f.run('replaceOperationFile("camera-attendance",replacement)'),/нельзя заменять/);
  assert.equal(await f.rows.get('camera-attendance').blob.text(),'original','attendance must retain the camera-only original');
+ f.add('duplicate-photo',{kind:'sale_selected',status:'error',errorStatus:409,error:'Этот кадр уже куплен в предыдущей продаже. Выберите новый кадр для допродажи.'});
+ await f.run('replaceOperationFile("duplicate-photo",replacement)');
+ assert.equal(f.rows.get('duplicate-photo').status,'synced');assert.equal(f.rows.get('duplicate-photo').filename,'fixed.jpg');
+ assert.equal(f.calls.at(-1),'duplicate-photo','corrected photo must keep the rejected operation key');
+ for(const [key,status,message] of [['denied',403,'Нет доступа'],['price',409,'Цена пакета изменилась. Обновите данные и проверьте продажу.']]){
+  f.add(key,{kind:'sale_selected',status:'error',errorStatus:status,error:message});
+  await assert.rejects(f.run(`replaceOperationFile('${key}',replacement)`),/нельзя заменять/);
+  assert.equal(await f.rows.get(key).blob.text(),'original');
+ }
 }
 console.log('PASS: backoff isolates rows, in-flight additions flush, renewed auth recovers 401, foreground resumes uploads');
