@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -155,6 +156,34 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
         assert data["status"] == "COMPLETED" and data["score"] == 90
         assert data["analysis"] == result
         assert self.bot.send_message.await_count == 0
+
+    async def test_stalled_review_reopens_only_unreadable_storage_photo(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("""UPDATE training_assignments
+                SET review_source='AI_FAILED',ai_analysis='{"status":"unavailable"}'
+                WHERE id=:id"""), {"id": aid})
+
+        original_download = self.storage.download_bytes.side_effect
+
+        async def unavailable_second(path, **kwargs):
+            if f"/{aid}-2-" in path:
+                raise YandexDiskError("provider 500")
+            return await original_download(path, **kwargs)
+
+        self.storage.download_bytes.side_effect = unavailable_second
+        await self.practice.recover_stalled_storage(self.storage)
+        _, data = await self.request(f"/{aid}")
+        assert data["status"] == "ACTIVE"
+        assert data["reviewSource"] == "STORAGE_RETRY"
+        assert data["analysis"] == {"status": "storage_unavailable", "unavailable_indexes": [2]}
+        assert [shot["index"] for shot in data["shots"] if not shot["uploaded"]] == [2]
+        with self.engine.inner.begin() as conn:
+            archive = conn.execute(text(
+                "SELECT photos FROM academy_practice_reviews WHERE assignment_id=:id"
+            ), {"id": aid}).scalar()
+            assert len(json.loads(archive)) == 5
 
 
     async def test_uncertain_ai_result_has_retake_path_without_manual_acceptance(self):
