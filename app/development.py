@@ -131,6 +131,9 @@ class Development:
 
     async def save_turn(self, a, sid, body, *, source='text'):
         if set(body)!={'revision','text','finish'} or type(body['revision']) is not int or type(body['finish']) is not bool or not isinstance(body['text'],str) or len(body['text'])>2000 or (not body['text'].strip() and not body['finish']): raise AccessError('Введите ответ длиной до 2000 символов.',400)
+        realtime = getattr(self, 'realtime', None)
+        if realtime:
+            await realtime.assert_idle(a, sid)
         async with self.api.engine.begin() as conn:
             rows=await self.api.rows(conn,'SELECT * FROM sales_training_sessions WHERE id=:id AND user_id=:uid FOR UPDATE',id=sid,uid=a['id'])
             if not rows: raise AccessError('Тренировка не найдена.',404)
@@ -188,4 +191,6 @@ def install_development(app,api):
         app.router.add_route(method,'/api/miniapp'+path,handler)
     from .voice_training import install_voice_training
     install_voice_training(app, service)
+    from .realtime_training import install_realtime_training
+    install_realtime_training(app, service)
     return service

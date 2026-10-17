@@ -10,17 +10,43 @@ from .config import config
 from .miniapp_security import AccessError
 from .models import utc_now
 from .people import positive_id
+from .services.ai_diagnostics import http_failure, record, unavailable
 
 MAX_AUDIO = 10 * 1024 * 1024
+TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe'
+SPEECH_MODEL = 'gpt-4o-mini-tts'
 AUDIO_TYPES = {'audio/webm': 'webm', 'video/webm': 'webm', 'audio/mp4': 'mp4',
                'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/x-wav': 'wav'}
 
 
+def audio_error(result, *, recording=False):
+    """Expose only classified provider errors, never raw responses or secrets."""
+    messages = {
+        'timeout': 'OpenAI не ответил вовремя. Повторите запрос.',
+        'network_error': 'Сервер не смог связаться с OpenAI. Повторите запрос.',
+        'provider_unavailable': 'OpenAI временно недоступен. Повторите позднее.',
+        'invalid_output': 'OpenAI вернул некорректный голосовой ответ. Повторите запрос.',
+    }
+    message = messages.get(result['errorCode'], result['message'])
+    message += (' Запись доступна для повтора, пока открыта эта страница.'
+                if recording else ' Диалог сохранён.')
+    return AccessError(message, 503)
+
+
+async def provider_error(response, purpose, model, *, recording=False):
+    try:
+        body = await response.json()
+    except (ValueError, aiohttp.ContentTypeError):
+        body = {}
+    return audio_error(http_failure(purpose, model, response.status, body), recording=recording)
+
+
 async def transcribe(raw, mime):
+    purpose = 'voice_transcription'
     if not config.openai_api_key:
-        raise AccessError('Голосовой ИИ не подключён. Обратитесь к владельцу.', 503)
+        raise audio_error(unavailable(purpose, TRANSCRIPTION_MODEL, 'not_configured'), recording=True)
     form = aiohttp.FormData()
-    form.add_field('model', 'gpt-4o-mini-transcribe')
+    form.add_field('model', TRANSCRIPTION_MODEL)
     form.add_field('language', 'ru')
     form.add_field('file', raw, filename='voice.'+AUDIO_TYPES[mime], content_type=mime)
     try:
@@ -28,38 +54,57 @@ async def transcribe(raw, mime):
                     client.post('https://api.openai.com/v1/audio/transcriptions',
                     headers={'Authorization': f'Bearer {config.openai_api_key}'}, data=form) as response):
             if response.status != 200:
-                raise AccessError('Не удалось распознать голос. Запись сохранена на устройстве — повторите отправку.', 503)
+                raise await provider_error(response, purpose, TRANSCRIPTION_MODEL, recording=True)
             body = await response.json()
-        value = body.get('text')
+        value = body.get('text') if isinstance(body, dict) else None
         if not isinstance(value, str) or not value.strip():
+            unavailable(purpose, TRANSCRIPTION_MODEL, 'invalid_output')
             raise AccessError('Речь не распознана. Запишите ответ ещё раз.', 422)
         if len(value.strip()) > 2000:
+            unavailable(purpose, TRANSCRIPTION_MODEL, 'invalid_output')
             raise AccessError('Ответ слишком длинный. Запишите короткую реплику до 90 секунд.', 400)
+        record(purpose, TRANSCRIPTION_MODEL, 'completed')
         return value.strip()
-    except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
-        raise AccessError('Сервис распознавания недоступен. Голосовая запись остаётся для повтора.', 503) from exc
+    except AccessError:
+        raise
+    except TimeoutError as exc:
+        raise audio_error(unavailable(purpose, TRANSCRIPTION_MODEL, 'timeout'), recording=True) from exc
+    except aiohttp.ContentTypeError as exc:
+        raise audio_error(unavailable(purpose, TRANSCRIPTION_MODEL, 'invalid_output'), recording=True) from exc
+    except aiohttp.ClientError as exc:
+        raise audio_error(unavailable(purpose, TRANSCRIPTION_MODEL, 'network_error'), recording=True) from exc
+    except ValueError as exc:
+        raise audio_error(unavailable(purpose, TRANSCRIPTION_MODEL, 'invalid_output'), recording=True) from exc
 
 async def synthesize(message):
+    purpose = 'voice_speech'
     if not config.openai_api_key:
-        raise AccessError('Голосовой ИИ не подключён.', 503)
+        raise audio_error(unavailable(purpose, SPEECH_MODEL, 'not_configured'))
     try:
         async with (aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as client,
                     client.post('https://api.openai.com/v1/audio/speech',
                     headers={'Authorization': f'Bearer {config.openai_api_key}'},
-                    json={'model': 'gpt-4o-mini-tts', 'voice': 'coral', 'input': message[:4000],
+                    json={'model': SPEECH_MODEL, 'voice': 'coral', 'input': message[:4000],
                           'response_format': 'mp3', 'instructions': 'Говори естественно по-русски, как собеседник в учебной тренировке.'}) as response):
             if response.status != 200:
-                raise AccessError('Озвучка временно недоступна. Диалог сохранён — повторите прослушивание.', 503)
+                raise await provider_error(response, purpose, SPEECH_MODEL)
             audio = bytearray()
             async for chunk in response.content.iter_chunked(65536):
                 audio.extend(chunk)
                 if len(audio) > 6 * 1024 * 1024:
+                    unavailable(purpose, SPEECH_MODEL, 'invalid_output')
                     raise AccessError('Голосовой ответ слишком большой. Повторите прослушивание.', 503)
             if not audio:
+                unavailable(purpose, SPEECH_MODEL, 'invalid_output')
                 raise AccessError('ИИ вернул пустой голосовой ответ.', 503)
+            record(purpose, SPEECH_MODEL, 'completed')
             return bytes(audio)
-    except (aiohttp.ClientError, TimeoutError) as exc:
-        raise AccessError('Сервис озвучки недоступен. Диалог сохранён.', 503) from exc
+    except AccessError:
+        raise
+    except TimeoutError as exc:
+        raise audio_error(unavailable(purpose, SPEECH_MODEL, 'timeout')) from exc
+    except aiohttp.ClientError as exc:
+        raise audio_error(unavailable(purpose, SPEECH_MODEL, 'network_error')) from exc
 
 class VoiceTraining:
     def __init__(self, development):
@@ -77,6 +122,9 @@ class VoiceTraining:
     async def voice(self, request):
         actor, sid = request['miniapp_actor'], positive_id(request.match_info['id'])
         current = await self.session(actor, sid)
+        realtime = getattr(self.development, 'realtime', None)
+        if realtime:
+            await realtime.assert_idle(actor, sid)
         if actor['id'] in self.pending:
             raise AccessError('Предыдущий голосовой запрос ещё выполняется.', 429)
         self.pending.add(actor['id'])
@@ -130,6 +178,9 @@ class VoiceTraining:
         if await self.api.body(request) != {}:
             raise AccessError('Можно прослушать только сохранённый ответ ИИ.', 400)
         current = await self.session(actor, sid)
+        realtime = getattr(self.development, 'realtime', None)
+        if realtime:
+            await realtime.assert_idle(actor, sid)
         transcript = json.loads(current['transcript'])
         latest = next((t['text'] for t in reversed(transcript) if t.get('role') in ('client', 'coach')), '')
         if current['status'] == 'COMPLETED':
