@@ -137,11 +137,12 @@ async def main():
         await expect(page.locator('[data-booking-error]')).to_contain_text('тестовый временный отказ')
         await page.evaluate("document.dispatchEvent(new CustomEvent('pb-academy-coach-updated'))")
         await expect(page.locator('#bookingTrainingForm textarea')).to_have_value('Понимаю. Хотите подобрать удобное время?')
+        await page.locator('#bookingTraining summary').click()
         await page.locator('#bookingTrainingForm button[value="reply"]').click()
         await expect(page.locator('#bookingTraining')).to_contain_text('А завтра можно?')
         await page.locator('#bookingTraining summary').click()
         await page.locator('#bookingTrainingForm button[value="finish"]').click()
-        await expect(page.get_by_role('heading', name='Результат: 80/100')).to_be_visible()
+        await expect(page.get_by_role('heading', name='Оценка 80/100')).to_be_visible()
         assert completed == {'booking-approach'}
         assert 'booking' in plan_calls and 'photographer' in plan_calls
         assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth+2')
