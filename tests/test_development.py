@@ -10,7 +10,13 @@ from test_team import OWNER, Request, setup
 
 from app import development
 from app.miniapp_security import AccessError
-from app.models import Photo, ShootDevelopmentReview, Shooting
+from app.models import (
+    OperationRequest,
+    Photo,
+    SalesTrainingSession,
+    ShootDevelopmentReview,
+    Shooting,
+)
 from app.services import development_ai as ai
 
 
@@ -156,4 +162,80 @@ def test_malformed_ai_and_provider_failures_never_become_completed_results(monke
             r=await s.get(SalesTrainingSession,sid)
             assert r.revision==1 and len(json.loads(r.transcript))==1
         await engine.dispose()
+    asyncio.run(run())
+
+
+def test_new_booking_learner_requires_diagnostic_before_any_scenario(monkeypatch):
+    async def run():
+        engine, factory, team = await setup()
+        monkeypatch.setattr(development, 'config', SimpleNamespace(openai_api_key='test'))
+        service = development.Development(team.api)
+        try:
+            for scenario in ai.BOOKING_SCENARIOS:
+                with pytest.raises(AccessError) as error:
+                    await service.start(Request(OWNER, {'clientType': scenario['type']}))
+                assert error.value.status == 409 and 'диагностику' in str(error.value)
+            async with factory() as session:
+                assert not (await session.scalars(select(SalesTrainingSession))).all()
+            # The knowledge gate does not affect the separate photography sales track.
+            assert (await service.start(Request(OWNER, {'clientType': 'budget'}))).status == 201
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_diagnostic_baseline_allows_booking_practice_regardless_of_initial_score(monkeypatch):
+    from app.academy_diagnostic import NAMESPACE
+    from app.services.booking_diagnostic import QUESTIONS, assess
+
+    async def run():
+        engine, factory, team = await setup()
+        monkeypatch.setattr(development, 'config', SimpleNamespace(openai_api_key='test'))
+        service = development.Development(team.api)
+        initial = assess([item['scores'].index(0) for item in QUESTIONS])
+        try:
+            async with factory() as session:
+                session.add(OperationRequest(user_id=OWNER['id'], request_key=NAMESPACE + 'initial-baseline',
+                    payload_hash='test', result=json.dumps({'assessment': initial})))
+                await session.commit()
+            for scenario in ai.BOOKING_SCENARIOS:
+                assert (await service.start(Request(OWNER, {'clientType': scenario['type']}))).status == 201
+            # Another person's assessment must never unlock this learner's course.
+            with pytest.raises(AccessError) as error:
+                await service.start(Request({'id': 2, 'roles': ['MANAGER']}, {'clientType': 'booking-time'}))
+            assert error.value.status == 409
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('previous_status,evaluation,expected', [
+    ('COMPLETED', {'reply': 'Разбор', 'score': 20, 'criteria': {key: 20 for key in (
+        'approach', 'contact', 'conditions', 'objections', 'booking', 'respect')},
+        'errors': ['Пока мало уточнений'], 'recommendations': ['Уточните пожелание гостя']}, 201),
+    ('ACTIVE', {'reply': 'Разбор', 'score': 90, 'criteria': {key: 90 for key in (
+        'approach', 'contact', 'conditions', 'objections', 'booking', 'respect')},
+        'errors': [], 'recommendations': ['Продолжайте']}, 409),
+    ('COMPLETED', {'criteria': {}}, 409),
+    ('COMPLETED', {'reply': 'Разбор', 'score': 100, 'criteria': {'respect': 100},
+        'errors': [], 'recommendations': ['Продолжайте']}, 409),
+])
+def test_prior_valid_completed_booking_dialogue_preserves_access(monkeypatch, previous_status, evaluation, expected):
+    async def run():
+        engine, factory, team = await setup()
+        monkeypatch.setattr(development, 'config', SimpleNamespace(openai_api_key='test'))
+        service = development.Development(team.api)
+        try:
+            async with factory() as session:
+                session.add(SalesTrainingSession(user_id=OWNER['id'], client_type='booking-approach',
+                    status=previous_status, evaluation=json.dumps(evaluation)))
+                await session.commit()
+            if expected == 201:
+                assert (await service.start(Request(OWNER, {'clientType': 'booking-time'}))).status == 201
+            else:
+                with pytest.raises(AccessError) as error:
+                    await service.start(Request(OWNER, {'clientType': 'booking-time'}))
+                assert error.value.status == expected
+        finally:
+            await engine.dispose()
     asyncio.run(run())

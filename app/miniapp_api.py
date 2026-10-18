@@ -97,6 +97,12 @@ class MiniApp:
                          "duration": "Короткий урок", "day": getattr(l, "day", index),
                          "block": getattr(l, "block", 1)}
                         for index, l in enumerate(lessons, start=1)]
+        from .services.academy_materials import LESSON_MATERIALS
+        for lesson in self.lessons:
+            material = LESSON_MATERIALS.get(lesson["slug"])
+            if material:
+                lesson["materials"] = material
+                lesson["duration"] = f"{material['estimatedMinutes']} мин + практика"
         self.blocks = [{"number": b.number, "title": b.title,
                         "practiceCategories": list(b.practice_categories),
                         "practiceTitle": b.practice_title} for b in (blocks or [])]
@@ -801,6 +807,10 @@ class MiniApp:
                     "strengths": "; ".join(result.get("strengths", [])), "issues": "; ".join(result.get("issues", [])),
                     "recommendation": result.get("next_action", "")})
         cert = certificate[0] if certificate else None
+        course_done = bool(blocks) and all(
+            b["lessonsDone"] == b["lessonsTotal"] and b["practiceDone"] for b in blocks
+        )
+        final_assignment = next((p for p in practices if p["category_slug"] == "final_exam"), None)
         return web.json_response({"lessons": lessons, "blocks": blocks,
             "currentBlock": current["number"] if current else None,
             "carryOver": True, "completed": done, "points": len(done)*10,
@@ -809,6 +819,9 @@ class MiniApp:
             "practices": [{"id": p["id"], "category": p["category_slug"], "status": p["status"]} for p in practices],
             "reviews": fresh_reviews + [{"id": r["id"], "score": r["quality_score"], "issues": r["issues"], "recommendation": r["recommendation"], "source": "ARCHIVE"} for r in reviews],
             "personalTip": tip,
+            "finalExam": {"eligible": course_done, "category": "final_exam",
+                "status": final_assignment["status"] if final_assignment else None,
+                "assignmentId": final_assignment["id"] if final_assignment else None},
             "certificate": ({"number": cert["certificate_no"], "score": cert["final_score"],
                 "issuedAt": as_utc(cert["issued_at"]).isoformat(),
                 "url": f"{request.scheme}://{request.host}/certificate/{cert['verification_code']}"} if cert else None),
@@ -843,8 +856,8 @@ class MiniApp:
         small{{color:#aaa}}@media print{{body{{background:white;color:black}}main{{background:white}}}}</style>
         <main><small>PHOTO BOSS ACADEMY</small><h1>INTERNATIONAL CERTIFICATE</h1>
         <p>Certificate of completion / Сертификат об окончании</p><h2>{name}</h2>
-        <p>has completed the 28-day Photo Boss Academy program and passed the final practical assessment.<br>
-        завершил(а) 28-дневную программу Photo Boss Academy и прошёл(а) итоговую практическую аттестацию.</p>
+        <p>has completed the Photo Boss Academy program and passed the final practical assessment.<br>
+        завершил(а) программу Photo Boss Academy и прошёл(а) итоговую практическую аттестацию.</p>
         <p>Final score / Итоговая оценка: <b>{row['final_score']}/100</b></p>
         <p>Certificate No: <b>{number}</b><br>Issued / Выдан: {issued}</p>
         <p class='status'>{status}</p><small>Private professional certificate issued by Photo Boss. Not a state-accredited diploma.<br>
@@ -929,9 +942,9 @@ class MiniApp:
     async def static_file(self, request):
         name = request.match_info.get("asset", "index.html")
         allowed = {"js/delivery.js", "css/delivery-client.css", "sw.js", "manifest.webmanifest", "js/install.js", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-maskable-512.png", "assets/apple-touch-icon.png", "js/browser-login.js", "js/account.js", "js/schedule-editor.js", "js/localstore.js", "js/workflow.js", "index.html", "config.js", "css/styles.css", "js/app.js", "js/icons.js", "js/domain.js",
-                   "js/realtime-training.js", "js/voice-training.js", "js/booking-control.js", "js/form-state.js", "js/galleries.js", "js/gallery-view.js", "js/gallery-client.js", "css/galleries.css", "js/development.js", "js/academy-coach.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
+                   "js/realtime-training.js", "js/voice-training.js", "js/booking-control.js", "js/form-state.js", "js/galleries.js", "js/gallery-view.js", "js/gallery-client.js", "css/galleries.css", "js/development.js", "js/academy-coach.js", "js/academy-mentor.js", "js/booking-diagnostic.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
-                   "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg"}
+                   "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg", "assets/academy/exposure.svg", "assets/academy/window-light.svg", "assets/academy/perspective.svg", "assets/academy/group-depth.svg"}
         if name not in allowed:
             raise web.HTTPNotFound()
         path = self.static_dir / name
@@ -960,6 +973,10 @@ class MiniApp:
             app.router.add_route(method, PREFIX + path, handler)
         from .academy_coach import install_academy_coach
         install_academy_coach(app, self)
+        from .academy_mentor import install_academy_mentor
+        install_academy_mentor(app, self, app["academy_coach"])
+        from .academy_diagnostic import install_academy_diagnostic
+        install_academy_diagnostic(app, self)
 
 
 def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/Moscow"):

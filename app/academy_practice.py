@@ -15,7 +15,13 @@ from sqlalchemy import text
 from .config import config
 from .miniapp_security import AccessError
 from .services.ai_diagnostics import unavailable as ai_unavailable
-from .services.training import CATEGORY_BY_SLUG, TRAINING_CATEGORIES, training_day
+from .services.training import (
+    CATEGORY_BY_SLUG,
+    FINAL_EXAM_REQUIREMENTS,
+    FINAL_EXAM_SLUG,
+    TRAINING_CATEGORIES,
+    training_day,
+)
 from .services.training_ai import MAX_IMAGE_BYTES, analyze_training_set
 from .work_chat import positive_id
 from .yandex_disk import ROOT, YandexDiskError
@@ -24,6 +30,7 @@ logger = logging.getLogger(__name__)
 DISK_PREFIX = "academy-disk:"
 CHECKING_SOURCES = {"AI_PENDING", "AI_PROCESSING"}
 REVIEW_LEASE_SECONDS = 15 * 60
+CONTEXT_KEY_PREFIX = "academy-assignment-context:"
 
 
 def analysis_data(value):
@@ -61,6 +68,66 @@ class AcademyPractice:
             raise AccessError("Задание не найдено.", 404)
         return rows[0]
 
+    async def assignment_context(self, conn, row, *, bind=False):
+        """A practice keeps the original personal goal even after plans regenerate.
+
+        Legacy/bot assignments bind at first review. Only a plan that existed when
+        the assignment was created can be used; otherwise there is no personal goal.
+        The existing idempotency table provides a unique, immutable receipt.
+        """
+        key = CONTEXT_KEY_PREFIX + str(row["id"])
+        saved = await self.api.rows(conn, "SELECT result FROM operation_requests WHERE user_id=:uid AND request_key=:key",
+                                    uid=row["user_id"], key=key)
+        if saved:
+            data = analysis_data(saved[0]["result"])
+            if (data.get("kind") != "academy-assignment-context-v1" or data.get("assignmentId") != row["id"]
+                    or data.get("category") != row["category_slug"]):
+                raise AccessError("Сохранённое условие практики повреждено. Обратитесь к администратору.", 409)
+            return data
+        if not bind:
+            return {}
+        plan_rows = []
+        if row.get("assigned_at"):
+            plan_rows = await self.api.rows(conn, """SELECT id,data,fingerprint FROM academy_coaching_plans
+                WHERE user_id=:uid AND track='photographer' AND created_at<=:assigned
+                ORDER BY id DESC LIMIT 100""", uid=row["user_id"], assigned=row["assigned_at"])
+        matching = (None if row["category_slug"] == FINAL_EXAM_SLUG else
+                    next((p for p in plan_rows if analysis_data(p["data"]).get("category") == row["category_slug"]), None))
+        plan = analysis_data(matching["data"]) if matching else {}
+        if row["category_slug"] == FINAL_EXAM_SLUG:
+            plan = {"title": CATEGORY_BY_SLUG[FINAL_EXAM_SLUG].title,
+                    "instructions": list(FINAL_EXAM_REQUIREMENTS),
+                    "successCriteria": ["Пять разных кадров образуют связную серию.",
+                        "Есть общий, средний и крупный планы, взаимодействие и движение.",
+                        "В серии видны как минимум два разных световых условия.",
+                        "Главные объекты резкие; свет, фон, края и цвет кожи контролируются."]}
+        # Store only fields used by a reviewer, never an evolving user profile.
+        data = {"kind": "academy-assignment-context-v1", "assignmentId": row["id"], "category": row["category_slug"],
+                "planId": matching["id"] if matching else None,
+                "planFingerprint": matching["fingerprint"] if matching else None,
+                "focus": plan.get("focus"), "title": plan.get("title", ""),
+                "instructions": plan.get("instructions", []), "successCriteria": plan.get("successCriteria", []),
+                "boundAt": datetime.now(UTC).isoformat()}
+        encoded = json.dumps(data, ensure_ascii=False, sort_keys=True)
+        await conn.execute(text("""INSERT INTO operation_requests(user_id,request_key,payload_hash,result,created_at)
+            VALUES (:uid,:key,:hash,:result,:now) ON CONFLICT(user_id,request_key) DO NOTHING"""),
+            {"uid": row["user_id"], "key": key, "hash": hashlib.sha256(encoded.encode()).hexdigest(),
+             "result": encoded, "now": datetime.now(UTC).replace(tzinfo=None)})
+        # A concurrent worker may already have created the receipt.
+        return await self.assignment_context(conn, row)
+
+    async def previous_review(self, conn, assignment):
+        rows = await self.api.rows(conn, "SELECT result FROM academy_practice_reviews WHERE assignment_id=:id ORDER BY id DESC LIMIT 30", id=assignment["id"])
+        own = next((data for row in rows if (data := analysis_data(row["result"])).get("status") == "completed"), {})
+        if own:
+            return own | {"assignmentId": assignment["id"], "sameAssignment": True}
+        rows = await self.api.rows(conn, """SELECT r.result,r.assignment_id FROM academy_practice_reviews r
+            JOIN training_assignments a ON a.id=r.assignment_id
+            WHERE a.user_id=:uid AND a.category_slug=:category AND a.id<>:id
+            ORDER BY r.id DESC LIMIT 30""", uid=assignment["user_id"], category=assignment["category_slug"], id=assignment["id"])
+        return next((data | {"assignmentId": row["assignment_id"], "sameAssignment": False}
+                     for row in rows if (data := analysis_data(row["result"])).get("status") == "completed"), {})
+
     async def detail_data(self, conn, actor, aid):
         row = await self.assignment(conn, actor, aid)
         category = CATEGORY_BY_SLUG[row["category_slug"]]
@@ -72,9 +139,10 @@ class AcademyPractice:
             analysis = json.loads(row["ai_analysis"] or "null")
         except ValueError:
             analysis = None
-        plans = await self.api.rows(conn, "SELECT data FROM academy_coaching_plans WHERE user_id=:uid AND track='photographer' ORDER BY id DESC LIMIT 1", uid=row["user_id"])
-        plan = json.loads(plans[0]["data"]) if plans else {}
-        return {"id": aid, "personalInstructions": plan.get("instructions", []) if plan.get("category") == category.slug else [], "category": category.slug, "title": category.title,
+        plan = await self.assignment_context(conn, row)
+        return {"id": aid, "personalInstructions": plan.get("instructions", []),
+                "successCriteria": plan.get("successCriteria", []), "personalFocus": plan.get("focus"),
+                "planId": plan.get("planId"), "category": category.slug, "title": category.title,
                 "userName": user[0]["name"], "own": row["user_id"] == actor["id"],
                 "canReview": False,
                 "canRetake": bool(row["user_id"] == actor["id"] and row["status"] == "PENDING_REVIEW"
@@ -105,11 +173,13 @@ class AcademyPractice:
             latest = assignments[0] if assignments else None
             today_done = bool(latest and latest["status"] == "COMPLETED" and latest["completed_at"]
                               and training_day(datetime.fromisoformat(str(latest["completed_at"]))) == training_day())
-            course_done = all(l["slug"] in completed for l in self.api.lessons) and all(
+            course_done = len(self.api.lessons) >= 28 and len(self.api.blocks) >= 7 and all(l["slug"] in completed for l in self.api.lessons) and all(
                 not b["practiceCategories"] or bool(set(b["practiceCategories"]) & accepted) for b in self.api.blocks)
             allowed = set(CATEGORY_BY_SLUG) if course_done else set(block["practiceCategories"]) if block else set(CATEGORY_BY_SLUG)
             if not allowed:
                 allowed = set(CATEGORY_BY_SLUG)
+            if not course_done:
+                allowed.discard(FINAL_EXAM_SLUG)
             queue = []
             if {"OWNER", "ADMIN"} & set(actor["roles"]):
                 queue = await self.api.rows(conn, """SELECT a.id,u.name,a.category_slug
@@ -136,7 +206,7 @@ class AcademyPractice:
         async with self.lock, self.engine.begin() as conn:
             # Serialize with the existing bot workflow as well as other app tabs.
             await self.api.rows(conn, "SELECT id FROM users WHERE id=:id FOR UPDATE", id=actor["id"])
-            if len(self.api.lessons) == 28:
+            if len(self.api.lessons) == 28 and body["category"] != FINAL_EXAM_SLUG:
                 plans = await self.api.rows(conn, "SELECT data FROM academy_coaching_plans WHERE user_id=:uid AND track='photographer' ORDER BY id DESC LIMIT 1", uid=actor["id"])
                 if not plans or json.loads(plans[0]["data"]).get("category") != body["category"]:
                     raise AccessError("Откройте AI-наставника: он назначит практику по вашим результатам.", 409)
@@ -150,6 +220,8 @@ class AcademyPractice:
                 VALUES (:uid,:day,:category,'ACTIVE',:now) RETURNING id""",
                 uid=actor["id"], day=training_day(), category=body["category"], now=datetime.now(UTC).replace(tzinfo=None))
             aid = rows[0]["id"]
+            assignment = await self.assignment(conn, actor, aid)
+            await self.assignment_context(conn, assignment, bind=True)
             await self.api.audit_write(conn, actor, "training_started", "training_assignment", aid, body["category"])
             result = await self.detail_data(conn, actor, aid)
         return web.json_response(result, status=201)
@@ -440,6 +512,8 @@ class AcademyPractice:
                 await conn.execute(text("""UPDATE training_assignments SET review_source='AI_PROCESSING',
                     ai_analysis=:analysis WHERE id=:id"""),
                     {"id": row["id"], "analysis": json.dumps(queued)})
+                context = await self.assignment_context(conn, row, bind=True)
+                previous_review = await self.previous_review(conn, row)
             processed += 1
             result = ai_unavailable('academy_review', config.academy_analysis_model, 'not_configured') if not config.openai_api_key else {"status": "unavailable"}
             async with self.engine.connect() as conn:
@@ -461,7 +535,8 @@ class AcademyPractice:
                 except OSError:
                     result = ai_unavailable('academy_review', config.academy_analysis_model, 'invalid_output')
                 else:
-                    result = await analyze_training_set(category, references, uploaded)
+                    result = await analyze_training_set(category, references, uploaded,
+                                                        assignment_context=context, previous_review=previous_review)
             review = result.get("review", {}) if result.get("status") == "completed" else {}
             decision = review.get("decision")
             reshoot = review.get("reshoot_indexes", [])

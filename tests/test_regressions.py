@@ -1387,7 +1387,7 @@ def test_owner_can_add_named_premium_and_open_employee_profile():
 
 
 def test_each_training_category_has_five_distinct_photos():
-    assert len(TRAINING_CATEGORIES) == 9
+    assert len(TRAINING_CATEGORIES) == 10
     for category in TRAINING_CATEGORIES:
         paths = category.image_paths
         assert len(paths) == 5

@@ -6,6 +6,8 @@ panel.setAttribute('aria-labelledby','practiceTitle');document.body.append(panel
 let current=null,pollTimer=null,version=0,busy=false,lastFocus=null;
 const urls=new Set();
 const labels={ACTIVE:'В работе',PENDING_REVIEW:'На проверке',COMPLETED:'Практика принята'};
+const criterionLabels={focus:['Фокус и техника',20],light:['Свет',15],composition:['Композиция',15],pose:['Позирование',20],emotion:['Выразительность',15],variety:['Разнообразие',15]};
+const evidenceLabels={ACHIEVED:'Выполнено',PARTIAL:'Частично',NOT_ACHIEVED:'Нужно исправить',NOT_ASSESSABLE:'Недостаточно данных',FIXED:'Исправлено',STILL_PRESENT:'Ошибка сохраняется',LOW:'Низкая',MEDIUM:'Средняя',HIGH:'Высокая'};
 function statusLabel(data){
  if(data.status==='ACTIVE'&&data.reviewSource==='STORAGE_RETRY')return 'Нужна повторная загрузка';
  if(data.status==='ACTIVE'&&data.reviewSource==='AI')return 'Нужна пересъёмка';
@@ -41,7 +43,17 @@ function analysisMarkup(data){
  if(a.status==='processing')return `<p class="practice-feedback">ИИ проверяет сохранённые фотографии. Попытка ${(a.attempts||0)+1}/3. Повторно отправлять фото не нужно.</p>`;
  if(a.status!=='completed')return `<p class="practice-feedback">${esc(reviewSummary(data)||'AI-проверка временно недоступна. Фотографии сохранены; повторите проверку.')}${a.nextRetryAt?' Следующая попытка запланирована автоматически; фотографии повторно загружать не нужно.':''}</p>`;
  const r=a.review;
- return `<div class="practice-feedback"><h3>Разбор: ${esc(r.score)}/100</h3>${r.strengths?.length?`<p>${esc(r.strengths.join(' · '))}</p>`:''}${r.issues?.length?`<ul>${r.issues.map(i=>`<li>${esc(i)}</li>`).join('')}</ul>`:''}<p>${esc(r.next_action)}</p></div>`;
+ const evidence=(items,key,title)=>items?.length?`<h4>${title}</h4><ul>${items.map(x=>`<li><strong>${esc(x[key])}: ${esc(evidenceLabels[x.status]||x.status)}</strong>${x.frame_indexes?.length?` · кадры ${esc(x.frame_indexes.join(', '))}`:''}<p>${esc(x.evidence)}</p><p>${esc(x.action)}</p></li>`).join('')}</ul>`:'';
+ return `<div class="practice-feedback"><h3>Разбор: ${esc(r.score)}/100</h3>
+ ${r.criteria?`<dl>${Object.entries(criterionLabels).map(([key,[label,max]])=>`<dt>${label}</dt><dd>${esc(r.criteria[key])}/${max}</dd>`).join('')}</dl>`:''}
+ ${r.strengths?.length?`<h4>Что получилось</h4><p>${esc(r.strengths.join(' · '))}</p>`:''}
+ ${r.issues?.length?`<h4>Что исправить</h4><ul>${r.issues.map(i=>`<li>${esc(i)}</li>`).join('')}</ul>`:''}
+ ${r.duplicate_pairs?.length?`<p><strong>Похожие ракурсы:</strong> ${esc(r.duplicate_pairs.map(pair=>pair.join('–')).join(', '))}</p>`:''}
+ ${evidence(r.goal_results,'criterion','Результат личного задания')}${evidence(r.correction_checks,'previous_issue','Исправление прежних ошибок')}
+ ${r.frames?.length?`<h4>Разбор каждого кадра</h4>${r.frames.map(f=>`<section><h4>Кадр ${esc(f.index)}</h4><p>${esc(f.observation)}</p><p><strong>Следующий шаг:</strong> ${esc(f.action)}</p><p class="small">Уверенность: ${esc(evidenceLabels[f.confidence]||f.confidence)}. ${esc(f.uncertainty)}</p></section>`).join('')}`:''}
+ ${r.limitations?.length?`<h4>Ограничения проверки</h4><ul>${r.limitations.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:''}
+ ${a.imageEvidence?.some(x=>x.reencoded)?`<p class="small">ИИ проверял отдельные JPEG-копии до 2048 пикселей. Оригиналы сохранены; оценка пиксельной резкости исходника 1:1 не выполнялась.</p><ul class="small">${a.imageEvidence.map(x=>`<li>Кадр ${esc(x.index)}: исходник ${esc(x.original.width)}×${esc(x.original.height)} → анализ ${esc(x.analysis.width)}×${esc(x.analysis.height)}</li>`).join('')}</ul>`:''}
+ <p><strong>Следующее действие:</strong> ${esc(r.next_action)}</p></div>`;
 }
 function renderAssignment(data){
  current=data;
@@ -50,11 +62,11 @@ function renderAssignment(data){
   <p>Загружено ${data.shots.filter(s=>s.uploaded).length}/5. Для каждого кадра показаны референс и задание.</p>
   ${data.status==='PENDING_REVIEW'?`<p>${['AI_PENDING','AI_PROCESSING'].includes(data.reviewSource)?'ИИ проверяет фотографии…':data.analysis?.review?.decision==='MANUAL_REVIEW'?'ИИ не смог уверенно оценить кадры. Можно повторить проверку или переснять спорные кадры.':'AI-проверку нужно повторить.'} Результат обновится автоматически.</p>`:''}
   ${editable&&data.reviewSource==='AI'?`<p class="practice-feedback">Проверка уже завершена: нужно переснять ${esc((data.analysis?.review?.reshoot_indexes||[]).map(i=>`кадр ${i}`).join(', '))}. Остальные кадры сохранены. Подробный разбор — ниже.</p>`:''}
-  ${data.personalInstructions?.length?`<section class="practice-feedback"><h3>Ваше AI-задание</h3><ol>${data.personalInstructions.map(x=>`<li>${esc(x)}</li>`).join('')}</ol></section>`:''}${analysisMarkup(data)}<div class="practice-shots">${data.shots.map(s=>`<article class="practice-shot"><h3>Кадр ${s.index}/5</h3><p>${esc(s.instruction)}</p>
+  ${data.personalInstructions?.length?`<section class="practice-feedback"><h3>Ваше AI-задание</h3><ol>${data.personalInstructions.map(x=>`<li>${esc(x)}</li>`).join('')}</ol>${data.successCriteria?.length?`<h4>Критерии успеха</h4><ul>${data.successCriteria.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:''}<p class="small">Условия закреплены за этой практикой и сохраняются при пересъёмке.</p></section>`:''}${analysisMarkup(data)}<div class="practice-shots">${data.shots.map(s=>`<article class="practice-shot"><h3>Кадр ${s.index}/5</h3><p>${esc(s.instruction)}</p>
   <div class="practice-pair"><figure><img data-practice-photo="${esc(s.reference)}" alt="Учебный референс ${s.index}"><figcaption>Референс</figcaption></figure>
   ${s.photo?`<figure><img data-practice-photo="${esc(s.photo)}" alt="Работа фотографа ${s.index}"><figcaption>Ваш кадр сохранён</figcaption></figure>`:'<p class="practice-missing">Кадр ещё не загружен</p>'}</div>
   ${editable&&!s.uploaded?`<label class="practice-upload">Загрузить кадр ${s.index}<input type="file" accept="image/jpeg,image/png,image/webp" data-practice-upload="${s.index}"></label>`:''}</article>`).join('')}</div>
-  ${editable?'<p>Выберите фото из галереи или камеры. Приложение подготовит JPEG до 8 МБ. После пятого кадра набор автоматически отправится на проверку.</p>':''}
+  ${editable?'<p>Загрузите исходный JPEG до 8 МБ: размер и EXIF сохраняются. PNG и WebP преобразуются в JPEG без уменьшения; их EXIF не сохраняется. Фото больше 8 МБ нужно уменьшить самостоятельно. После пятого кадра начнётся проверка.</p>':''}
   ${data.canRetry?`<button class="btn primary" data-practice-retry>Повторить AI-проверку</button>`:''}
   ${data.canRetake?'<button class="btn" data-practice-retake>Переснять спорные кадры</button><p>Указанные ИИ кадры откроются для замены. Если номера не указаны — все пять. Прежние работы останутся в истории.</p>':''}
   <button class="practice-refresh" data-practice-refresh>Обновить</button>`);
@@ -79,13 +91,17 @@ export async function openPractice(id=null,category=null){
 async function preparePhoto(file){
  if(!file||!['image/jpeg','image/png','image/webp'].includes(file.type))throw new Error('Выберите JPEG, PNG или WebP.');
  if(file.size>25*1024*1024)throw new Error('Исходное фото больше 25 МБ. Выберите уменьшенную копию.');
+ if(file.type==='image/jpeg'){
+  if(file.size>8*1024*1024)throw new Error('JPEG больше 8 МБ. Сохраните отдельную копию до 8 МБ; её детализация может быть ниже.');
+  return file;
+ }
  const image=await createImageBitmap(file);
  try{
-  const scale=Math.min(1,2048/Math.max(image.width,image.height));
-  const canvas=document.createElement('canvas');canvas.width=Math.round(image.width*scale);canvas.height=Math.round(image.height*scale);
+  if(image.width*image.height>32*1024*1024)throw new Error('Для PNG/WebP больше 32 Мп сохраните отдельный JPEG до 8 МБ.');
+  const canvas=document.createElement('canvas');canvas.width=image.width;canvas.height=image.height;
   const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(image,0,0,canvas.width,canvas.height);
   const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.9));
-  if(!blob||blob.size>8*1024*1024)throw new Error('Не удалось подготовить фото до 8 МБ.');
+  if(!blob||blob.size>8*1024*1024)throw new Error('После преобразования фото больше 8 МБ. Подготовьте отдельную JPEG-копию до 8 МБ.');
   return blob;
  }finally{image.close();}
 }

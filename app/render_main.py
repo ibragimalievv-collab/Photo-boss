@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.25-sales-schedule-recording"
+RELEASE = "miniapp-3.26-academy-personal-mentor"
 
 
 async def health(request):

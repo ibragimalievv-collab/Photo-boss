@@ -120,6 +120,8 @@ class Workday:
         if not isinstance(body, dict):
             raise AccessError('Некорректная операция.', 400)
         if set(body)!={'key','kind','date','data','actorId'} or not isinstance(body['key'],str) or not 16<=len(body['key'])<=80 or not isinstance(body['data'],dict): raise AccessError('Некорректная операция.',400)
+        if body['key'].startswith(('academy-', 'mentor-', 'realtime-')):
+            raise AccessError('Некорректный идентификатор операции.', 400)
         if not isinstance(body['kind'], str) or body['kind'] not in KINDS | {'checklist','shift_report','attendance','cash_expense'}: raise AccessError('Этот тип операции не поддерживает синхронизацию.',400)
         if type(body['actorId']) is not int or body['actorId'] != a['id']: raise AccessError('Аккаунт изменился. Операция принадлежит другому сотруднику.',403)
         payload = json.dumps(body,sort_keys=True,ensure_ascii=False).encode()

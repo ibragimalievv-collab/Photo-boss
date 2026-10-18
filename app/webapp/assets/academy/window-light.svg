@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="620" viewBox="0 0 900 620" role="img" aria-labelledby="title description">
+  <title id="title">Портрет у окна: вид сверху</title>
+  <desc id="description">Большое окно слева освещает человека в центре. Поворачивая лицо к окну и от окна, сравнивают тени. Камера показана ниже; фон и положение камеры выбирают отдельно. Схема качественная, без масштаба.</desc>
+  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0 L8 3 L0 6" fill="none" stroke="#235f91" stroke-width="1.6"/></marker></defs>
+  <rect width="900" height="620" rx="24" fill="#f5f7fa"/>
+  <g font-family="Arial, sans-serif" fill="#142b43">
+    <text x="40" y="55" font-size="28" font-weight="700">Свет у окна: вид сверху</text>
+    <text x="40" y="89" font-size="18">Схема без масштаба. Направление лица меняет рисунок теней.</text>
+    <rect x="84" y="140" width="30" height="270" rx="5" fill="#8cc9ee"/>
+    <text x="62" y="120" font-size="22">Окно</text>
+    <path d="M140 185 L380 265 M140 270 L380 285 M140 365 L380 305" stroke="#e1ad41" stroke-width="7" fill="none"/>
+    <circle cx="432" cy="285" r="48" fill="#f5d7bd" stroke="#735339" stroke-width="3"/>
+    <path d="M401 279 L384 268 L408 257" stroke="#735339" stroke-width="3" fill="#f5d7bd"/>
+    <path d="M460 220 A78 78 0 0 0 355 235" fill="none" stroke="#235f91" stroke-width="3" marker-end="url(#arrow)"/>
+    <text x="510" y="260" font-size="22" font-weight="700">Человек</text>
+    <text x="510" y="293" font-size="20">Сравните два поворота лица.</text>
+    <text x="510" y="324" font-size="20">Проверьте оба глаза и тень.</text>
+    <rect x="397" y="430" width="70" height="43" rx="8" fill="#294b67"/>
+    <circle cx="432" cy="430" r="16" fill="#8cc9ee" stroke="#294b67" stroke-width="5"/>
+    <path d="M432 406 L432 350" stroke="#235f91" stroke-width="3" stroke-dasharray="8 6" marker-end="url(#arrow)"/>
+    <text x="490" y="445" font-size="21">Камера: возможная точка.</text>
+    <text x="490" y="475" font-size="19">Положение выбирается отдельно.</text>
+    <text x="40" y="535" font-size="21" font-weight="700">Сначала свет на лице, затем фон и точка съёмки.</text>
+    <text x="40" y="573" font-size="18">Расстояние до окна, его размер и отражения тоже меняют свет.</text>
+  </g>
+</svg>

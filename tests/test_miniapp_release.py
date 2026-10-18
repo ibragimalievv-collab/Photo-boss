@@ -196,6 +196,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         with self.engine.inner.begin() as connection:
             ddls = [
+                "CREATE TABLE IF NOT EXISTS operation_requests(id INTEGER PRIMARY KEY,user_id INTEGER,request_key TEXT,payload_hash TEXT,result TEXT,created_at DATETIME,UNIQUE(user_id,request_key))",
                 "CREATE TABLE users(id INTEGER PRIMARY KEY,tg_id BIGINT,name TEXT,active BOOLEAN)",
                 "CREATE TABLE user_roles(user_id INTEGER,role TEXT)",
                 "CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)",

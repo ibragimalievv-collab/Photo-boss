@@ -10,8 +10,7 @@ from ..models import (
     TrainingAssignment,
 )
 from .academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
-
-FINAL_CATEGORIES = set(ACADEMY_BLOCKS[-1].practice_categories)
+from .training import FINAL_EXAM_SLUG
 
 TIP_BY_CRITERION = {
     "focus": "Фокус и техника: проверь выдержку, точку фокуса на глазах и устойчивость камеры.",
@@ -24,9 +23,9 @@ TIP_BY_CRITERION = {
 
 
 async def academy_counts(session, user_id):
-    lessons = int(await session.scalar(select(func.count(
-        AcademyLessonProgress.id
-    )).where(AcademyLessonProgress.user_id == user_id,
+    lessons = int(await session.scalar(select(func.count(func.distinct(
+        AcademyLessonProgress.topic_slug
+    ))).where(AcademyLessonProgress.user_id == user_id,
              AcademyLessonProgress.topic_slug.in_([lesson.slug for lesson in ACADEMY_LESSONS]))) or 0)
     rows = (await session.scalars(select(TrainingAssignment).where(
         TrainingAssignment.user_id == user_id,
@@ -38,9 +37,16 @@ async def academy_counts(session, user_id):
     )
     final_scores = [
         row.ai_score for row in rows
-        if row.category_slug in FINAL_CATEGORIES and row.ai_score is not None
+        if row.category_slug == FINAL_EXAM_SLUG
+        and type(row.ai_score) is int and 0 <= row.ai_score <= 100
     ]
     return lessons, practices, max(final_scores, default=None)
+
+
+async def final_exam_unlocked(session, user_id):
+    """Preserve accepted block work while requiring all core prerequisites."""
+    lessons, practices, _score = await academy_counts(session, user_id)
+    return lessons >= len(ACADEMY_LESSONS) and practices >= len(ACADEMY_BLOCKS)
 
 
 async def ensure_certificate(session, user_id):
