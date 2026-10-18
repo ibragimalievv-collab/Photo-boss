@@ -16,6 +16,38 @@ from app.models import (
     Setting,
     utc_now,
 )
+from app.yandex_disk import YandexDisk, YandexDiskError
+
+
+def test_disk_account_cache_is_invalidated_on_token_change_and_fresh_failure(monkeypatch):
+    async def run():
+        engine, _delivery, client, _ = await setup(monkeypatch)
+        identity = ['first']
+        monkeypatch.setattr('app.yandex_disk.configured_from_env', lambda: (identity[0], 'client'))
+        response = AsyncMock(return_value={'user': {'login': 'first-account'}, 'used_space': 10, 'total_space': 100})
+        monkeypatch.setattr(YandexDisk, '_json', response)
+        headers = {'X-Test-Actor': '1'}
+        url = '/api/miniapp/galleries/storage'
+        try:
+            first = await client.get(url, headers=headers)
+            assert first.headers['Cache-Control'] == 'no-store'
+            assert (await first.json())['account']['login'] == 'first-account'
+            await client.get(url, headers=headers)
+            assert response.await_count == 1
+            identity[0] = 'second'
+            response.return_value = {'user': {'login': 'second-account'}, 'used_space': 0, 'total_space': 100}
+            assert (await (await client.get(url, headers=headers)).json())['account']['login'] == 'second-account'
+            assert response.await_count == 2
+            response.side_effect = YandexDiskError('Yandex.Disk HTTP 401')
+            failed = await (await client.get(url+'?fresh=1', headers=headers)).json()
+            assert failed == {'configured': True, 'available': False}
+            # A subsequent ordinary read must not resurrect the last successful account.
+            assert await (await client.get(url, headers=headers)).json() == failed
+            assert response.await_count == 4
+        finally:
+            await client.close()
+            await engine.dispose()
+    asyncio.run(run())
 
 
 def test_gallery_actions_shared_favorites_trash_and_private_archives(monkeypatch):

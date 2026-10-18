@@ -1,4 +1,5 @@
 """Prototype gallery UI backed exclusively by existing bookings and delivery originals."""
+import hashlib
 import html
 import json
 import secrets
@@ -153,20 +154,25 @@ class GalleryWorkspace:
         require_owner(request['miniapp_actor']['roles'])
         from .yandex_disk import YandexDisk, YandexDiskError, configured_from_env
         token, client_id = configured_from_env()
+        headers = {'Cache-Control': 'no-store'}
         if not token:
-            return web.json_response({'configured': False})
-        if request.query.get('fresh') != '1' and self.storage_cache and time.monotonic() - self.storage_cache[0] < 60:
-            return web.json_response(self.storage_cache[1])
+            self.storage_cache = None
+            return web.json_response({'configured': False, 'available': False}, headers=headers)
+        identity = hashlib.sha256(token.encode()).digest()
+        if (request.query.get('fresh') != '1' and self.storage_cache
+                and self.storage_cache[2] == identity and time.monotonic() - self.storage_cache[0] < 60):
+            return web.json_response(self.storage_cache[1], headers=headers)
+        self.storage_cache = None
         try:
             data = await YandexDisk(token, client_id)._json('GET', '', params={'fields':'total_space,used_space,user'})
         except YandexDiskError:
-            return web.json_response({'configured': True, 'available': False})
+            return web.json_response({'configured': True, 'available': False}, headers=headers)
         user = data.get('user') if isinstance(data.get('user'), dict) else {}
         result = {'configured': True, 'available': True, 'used': data.get('used_space'), 'total': data.get('total_space'),
                   'account': {k: user[k] for k in ('login', 'display_name', 'uid') if isinstance(user.get(k), str)},
                   'root': 'Приложения → папка приложения → PhotoBoss'}
-        self.storage_cache = (time.monotonic(), result)
-        return web.json_response(result)
+        self.storage_cache = (time.monotonic(), result, identity)
+        return web.json_response(result, headers=headers)
 
     async def preferences(self, request):
         actor, body = request['miniapp_actor'], await self.api.body(request)

@@ -23,6 +23,66 @@ from app.yandex_disk import ROOT, YandexDisk
 BASE = 'https://gallery-navigation.invalid'
 
 
+async def check_disk_diagnostics(page):
+    """Fresh probe, corruption labels, stale quota and navigation during a slow reply."""
+    available, read_ok = True, True
+    entered, release = asyncio.Event(), asyncio.Event()
+    hold = False
+    async def account(route):
+        if hold:
+            entered.set()
+            await release.wait()
+        await route.fulfill(json={'configured': True, 'available': available,
+            **({'account': {'login': 'fixture-disk'}, 'used': 50, 'total': 100, 'root': 'PhotoBoss'} if available else {})})
+    async def probe(route):
+        await route.fulfill(json={'connected': True, 'writeVerified': True, 'readVerified': read_ok,
+            'checkedAt': '2026-10-18T13:00:00Z', 'error': None if read_ok else 'Чтение не подтверждено'})
+    async def inventory(route):
+        await route.fulfill(json={'note': 'Проверены последние файлы.', 'items': [
+            {'source': 'original', 'id': 1, 'at': '2026-10-18T13:00:00Z', 'diskStatus': 'mismatch'},
+            {'source': 'gallery', 'id': 2, 'at': '2026-10-18T13:00:00Z', 'diskStatus': 'verified'}]})
+    routes = [('**/api/miniapp/galleries/storage*', account),
+              ('**/api/miniapp/storage/probe', probe), ('**/api/miniapp/storage/inventory', inventory)]
+    for pattern, handler in routes:
+        await page.route(pattern, handler)
+    try:
+        for width in [1440, 390]:
+            await page.set_viewport_size({'width': width, 'height': 1000 if width == 1440 else 844})
+            await page.locator('[data-disk-info]').click()
+            await expect(page.locator('.modal')).to_contain_text('fixture-disk')
+            await page.locator('[data-disk-refresh]').click()
+            await expect(page.locator('[data-disk-inventory]')).to_contain_text('Запись и чтение подтверждены:')
+            await expect(page.locator('[data-disk-inventory]')).to_contain_text('контрольная сумма не совпадает')
+            assert await page.locator('.modal').evaluate('el=>el.scrollWidth<=el.clientWidth+1')
+            await page.locator('[data-modal-close]').click()
+        available = False
+        await page.locator('[data-disk-info]').click()
+        await expect(page.locator('.modal')).to_contain_text('Не удалось получить сведения')
+        await expect(page.locator('.storage small')).not_to_contain_text('50%')
+        read_ok = False
+        await page.locator('[data-disk-refresh]').click()
+        await expect(page.locator('[data-disk-inventory]')).to_have_text('Чтение не подтверждено')
+        await expect(page.locator('[data-disk-inventory]')).not_to_contain_text('№2')
+        await page.locator('[data-modal-close]').click()
+        # A late account response must not reopen a dialog after leaving this view.
+        await page.set_viewport_size({'width': 1440, 'height': 1000})
+        available, hold = True, True
+        await page.locator('[data-disk-info]').click()
+        await asyncio.wait_for(entered.wait(), 5)
+        await page.locator('#galleryWorkspace [data-go=home]').first.click()
+        await expect(page.locator('#sidebar')).to_be_visible()
+        release.set()
+        await page.wait_for_load_state('networkidle')
+        assert await page.locator('dialog.modal:visible').count() == 0
+    finally:
+        release.set()
+        for pattern, handler in routes:
+            await page.unroute(pattern, handler)
+    await page.goto(BASE + '/app/#galleries')
+    await expect(page.locator('#app h1')).to_have_text('Диск и клиентские галереи')
+    await page.set_viewport_size({'width': 1440, 'height': 1000})
+
+
 async def wait_images(page, selector):
     for _ in range(100):
         if await page.locator(selector).evaluate_all('images => images.every(i=>i.complete&&i.naturalWidth>0)'):
@@ -184,6 +244,7 @@ async def main():
             await expect(page.locator('.table [data-gp="open"]')).to_have_count(1)
             await wait_images(page,'.table .thumb')
             await compare_disk(context,page,output)
+            await check_disk_diagnostics(page)
             await page.screenshot(path=str(output / 'disk-desktop.png'), full_page=True)
             await page.locator('.table [data-gp="favorite"]').click()
             await expect(page.locator('.table [data-gp="favorite"]')).to_have_attribute('aria-pressed', 'true')

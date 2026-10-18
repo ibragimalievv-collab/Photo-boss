@@ -15,6 +15,7 @@ from app.miniapp_security import AccessError
 from app.models import Photo, PhotoEdit, PhotoStorage, Shooting, User, utc_now
 from app.services import photo_storage
 from app.services.bookings import create_booking_record
+from app.storage_inventory import recent_inventory
 from app.workflow import Workflow
 from app.yandex_disk import YandexDiskError, validate_saved
 
@@ -52,6 +53,27 @@ async def seeded():
         session.add(row)
         await session.commit()
         return engine, factory, shooting.id, photo.id, row.id, raw
+
+
+@pytest.mark.parametrize('checksum,expected', [('correct', 'verified'), ('wrong', 'mismatch'), (None, 'unverified')])
+def test_inventory_detects_corrupt_file_even_when_size_matches(checksum, expected):
+    async def run():
+        engine, factory, _sid, _pid, rid, raw = await seeded()
+        try:
+            async with factory() as session:
+                row = await session.get(PhotoStorage, rid)
+                row.disk_path, row.byte_size, row.status = 'app:/PhotoBoss/test.jpg', len(raw), 'STORED'
+                await session.commit()
+            async def metadata(path):
+                return {'type': 'file', 'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest() if checksum == 'correct' else checksum}
+            result = await recent_inventory(engine, SimpleNamespace(metadata=metadata))
+            assert len(result['items']) == 1
+            item = result['items'][0]
+            assert item['diskStatus'] == expected
+            assert 'path' not in item and 'sha256' not in item
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
 
 
 def test_quota_failure_retry_and_final_attempt_recovery(monkeypatch):

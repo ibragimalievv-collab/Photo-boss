@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.27-archived-operations-reset"
+RELEASE = "miniapp-3.28-disk-verification-recovery"
 
 
 async def health(request):
@@ -55,7 +55,9 @@ async def health(request):
                               "storage": {"provider": "yandex_disk",
                                           "configured": bool(storage_state.get("configured")),
                                           "connected": bool(storage_state.get("connected")),
-                                          "writeVerified": bool(storage_state.get("writeVerified"))}},
+                                          "writeVerified": bool(storage_state.get("writeVerified")),
+                                          "readVerified": bool(storage_state.get("readVerified")),
+                                          "checkedAt": storage_state.get("checkedAt")}},
                              status=200 if ready else 503, headers={"Cache-Control": "no-store"})
 
 
@@ -101,7 +103,7 @@ async def on_startup(app):
         app['realtime_probe_task'] = asyncio.create_task(verify_live_voice())
     logger.info("Authenticated Telegram webhook configured")
     storage_status = await app["yandex_disk"].verify(write_test=True)
-    if not storage_status["connected"] or not storage_status["writeVerified"]:
+    if not storage_status["connected"] or not storage_status["writeVerified"] or not storage_status["readVerified"]:
         logger.warning("Yandex.Disk storage is degraded; Telegram workflows remain available")
     deleted = await cleanup_expired_chat(engine, app["yandex_disk"])
     if deleted:
