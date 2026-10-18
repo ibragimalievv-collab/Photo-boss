@@ -619,12 +619,27 @@ class MiniApp:
             raise AccessError("Период графика должен быть не длиннее 31 дня.", 400)
         async with self.engine.connect() as conn:
             items = await self.shifts_data(conn, actor, start, end)
-            employees, hotels = [], []
+            employees, hotels, unavailable = [], [], []
             if actor["permissions"]["manageSchedule"]:
-                employees = [dict(r) for r in await self.rows(conn, """SELECT DISTINCT u.id,u.name FROM users u
-                    JOIN user_roles r ON r.user_id=u.id WHERE u.active=TRUE AND r.role IN ('MANAGER','PHOTOGRAPHER') ORDER BY u.name""")]
+                # Keep the complete roster available to the editor. In particular,
+                # hotel assignment and existing shifts must not hide a new employee.
+                roster = {}
+                for row in await self.rows(conn, """SELECT u.id,u.name,u.active,r.role FROM users u
+                    LEFT JOIN user_roles r ON r.user_id=u.id ORDER BY u.name,u.id,r.role"""):
+                    person = roster.setdefault(row['id'], {'id': row['id'], 'name': row['name'],
+                        'active': bool(row['active']), 'roles': []})
+                    if row['role'] and row['role'] not in person['roles']:
+                        person['roles'].append(row['role'])
+                for person in roster.values():
+                    eligible = bool({'MANAGER', 'PHOTOGRAPHER'} & set(person['roles']))
+                    if person['active'] and eligible:
+                        employees.append({k: person[k] for k in ('id', 'name', 'roles')})
+                    else:
+                        unavailable.append({k: person[k] for k in ('id', 'name', 'roles')} |
+                            {'reason': 'inactive' if not person['active'] else 'work_role_required'})
                 hotels = [dict(r) for r in await self.rows(conn, "SELECT id,name FROM hotels WHERE active=TRUE ORDER BY name")]
-        return web.json_response({"items": items, "employees": employees, "hotels": hotels})
+        return web.json_response({"items": items, "employees": employees, "hotels": hotels,
+                                  "unavailableEmployees": unavailable})
 
     async def create_shift(self, request):
         payload = await self.body(request)

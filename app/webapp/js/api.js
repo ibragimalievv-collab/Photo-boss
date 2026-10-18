@@ -109,8 +109,8 @@ function authHeaders(kind,value){
  return {};
 }
 
-export async function api(path,{body,method='GET',timeoutMs,responseType,...options}={}){
- if(method==='GET'&&!responseType&&typeof navigator!=='undefined'&&navigator.onLine===false){const cached=await readSnapshot(path);if(cached)return cached;throw new ApiError('Без сети: откройте этот раздел при подключении, чтобы сохранить данные.');}
+export async function api(path,{body,method='GET',timeoutMs,responseType,allowSnapshot=true,...options}={}){
+ if(method==='GET'&&!responseType&&typeof navigator!=='undefined'&&navigator.onLine===false){if(allowSnapshot){const cached=await readSnapshot(path);if(cached)return cached;}throw new ApiError(allowSnapshot?'Без сети: откройте этот раздел при подключении, чтобы сохранить данные.':'Для актуального списка сотрудников нужно соединение с сервером. Подключитесь к сети и откройте график ещё раз.');}
  const cfg=window.PHOTO_BOSS_CONFIG||{};
  const ownerToken=browserSessionOnly?'':ownerTokenFresh(HASH_OWNER_LAUNCH_TOKEN)?HASH_OWNER_LAUNCH_TOKEN:storedOwnerLaunchToken();
  const telegram=browserSessionOnly?{value:'',source:'none'}:await telegramInitData();
@@ -148,6 +148,6 @@ export async function api(path,{body,method='GET',timeoutMs,responseType,...opti
   if(path==='/me')setSnapshotUser(data.user?.telegramId);
   if(method==='GET')try{await saveSnapshot(path,data);}catch{window.dispatchEvent(new Event('pb-local-storage-error'));}
   return data;
- }catch(e){if(method==='GET'&&!e.status)try{const cached=await readSnapshot(path);if(cached)return cached;}catch{}if(e.name==='AbortError')throw new ApiError('Сервер отвечает дольше обычного. Повторите попытку.');if(e instanceof ApiError)throw e;throw new ApiError('Нет соединения с сервером. Демо-данные не подставляются.');}finally{clearTimeout(timer);}
+ }catch(e){if(method==='GET'&&allowSnapshot&&!e.status)try{const cached=await readSnapshot(path);if(cached)return cached;}catch{}if(e.name==='AbortError')throw new ApiError('Сервер отвечает дольше обычного. Повторите попытку.');if(e instanceof ApiError)throw e;throw new ApiError('Нет соединения с сервером. Демо-данные не подставляются.');}finally{clearTimeout(timer);}
 }
 

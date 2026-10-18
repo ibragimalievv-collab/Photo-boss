@@ -200,6 +200,8 @@ async def main():
                     await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.kind==='sale_complete'&&r.status==='local'&&r.error);}")
                     await page.get_by_role('button', name='Синхронизировать сейчас').click()
                     await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');const rows=await m.outboxRows();return rows.length===9&&rows.every(r=>r.status==='synced'&&!r.blob);}")
+                    await page.locator('[data-sale-booking="1"]').filter(has_text='Завершено: 1 фото').wait_for()
+                    assert 'завершённых продаж — 1, продано кадров — 1' in await page.locator('[data-sales-totals]').inner_text()
                     assert await page.evaluate("""async()=>{
                         const {outboxRows}=await import('/app/js/outbox.js');
                         return (await outboxRows()).filter(r=>['sale_counts','sale_selected','sale_complete'].includes(r.kind))
@@ -216,6 +218,36 @@ async def main():
                         end = await session.scalar(select(ShiftCheckOut))
                         assert end.status == 'PENDING_REVIEW' and end.report_note == 'Connection was unavailable at shift close'
                     assert lost and receipt_failed and not errors, errors
+                    # A completed booking must not trap the next guest behind
+                    # its saved, disabled draft or a newly collapsed section.
+                    await page.get_by_text('Новая бронь', exact=True).click()
+                    await page.locator('#workflowBooking [name=client_name]').fill('First Online Guest')
+                    await page.locator('#workflowBooking [name=room]').fill('201')
+                    await page.locator('#workflowBooking [name=shoot_time]').fill('15:00')
+                    await page.locator('#workflowBooking button').click()
+                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).filter(r=>r.kind==='booking'&&r.status==='synced').length===2;}")
+                    await page.locator('#workflowBooking [data-workflow="new-operation"]').click()
+                    await page.locator('#workflowBooking [name=client_name]').wait_for(state='visible')
+                    assert await page.locator('#workflowBooking [name=client_name]').input_value() == ''
+                    assert await page.locator('#workflowBooking [name=client_name]').is_enabled()
+                    await page.locator('#workflowBooking [name=client_name]').fill('Next Guest')
+                    await page.locator('#workflowBooking [name=room]').fill('201')
+                    await page.locator('#workflowBooking [name=shoot_time]').fill('15:00')
+                    await page.locator('#workflowBooking button').click()
+                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).filter(r=>r.kind==='booking'&&r.status==='synced').length===3;}")
+                    await page.locator('#bottomNav [data-go=home]').click()
+                    await page.locator('[data-action="new-booking"]').click()
+                    field = page.locator('#workflowBooking [name=client_name]')
+                    await field.wait_for(state='visible')
+                    assert await field.is_enabled() and await field.input_value() == ''
+                    assert await field.evaluate('(el)=>el===document.activeElement')
+                    # Opening the shortcut again preserves an unsent next guest.
+                    await field.fill('Unsent Guest')
+                    await page.locator('#bottomNav [data-go=home]').click()
+                    await page.locator('[data-action="new-booking"]').click()
+                    assert await field.input_value() == 'Unsent Guest'
+                    assert await field.is_enabled()
+                    assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                     await page.evaluate("""async()=>{
                         const m=await import('/app/js/workflow.js');await m.loadWorkflow(1);
                         document.querySelector('#app').innerHTML=m.workflowView();
@@ -225,6 +257,57 @@ async def main():
                     await page.locator('dialog[aria-label="Фото чека"]').get_by_role('button', name='Закрыть', exact=True).click()
                     await page.locator('dialog[aria-label="Фото чека"]').wait_for(state='detached')
                     assert await page.evaluate("async()=>{for(const name of await caches.keys()){for(const request of await (await caches.open(name)).keys())if(new URL(request.url).pathname.startsWith('/api/'))return false;}return true;}")
+                    # Duplicate selections can leave all original files accepted
+                    # while the server correctly blocks completion (1 unique / 2).
+                    # Repair in the originating browser, including after reload.
+                    async with factory() as session:
+                        repair_booking = await session.get(Booking, 3)
+                        repair_booking.photographer_id = 2
+                        repair_booking.status = 'READY_FOR_SALE'
+                        repair_shooting = await session.scalar(select(Shooting).where(Shooting.booking_id == 3))
+                        repair_shooting.status = 'READY_FOR_SALE'
+                        await session.commit()
+                    await page.evaluate("""async()=>{
+                        const m=await import('/app/js/workflow.js');await m.loadWorkflow(3);m.workflowSelect(3);
+                    }""")
+                    repair_form = page.locator('#workflowSale')
+                    await repair_form.locator('[name=total]').fill('150')
+                    await repair_form.locator('[name=sold]').fill('2')
+                    await repair_form.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/evening.jpg')
+                    await repair_form.locator('[name=selected]').set_input_files([
+                        'app/webapp/assets/academy/couple.jpg', 'app/webapp/assets/academy/couple.jpg'])
+                    await repair_form.locator('button').first.click()
+                    try:
+                        await repair_form.locator('[data-workflow="repair-sale"]').wait_for(state='visible')
+                    except Exception:
+                        print(await page.evaluate("""async()=>({queue:(await (await import('/app/js/outbox.js')).outboxRows()).map(r=>({kind:r.kind,status:r.status,error:r.error})),errors:document.body.innerText.slice(-1500)})"""))
+                        raise
+                    assert await repair_form.locator('[name=sold]').is_disabled()
+                    original_repair = await page.evaluate("""async()=>{
+                        const {outboxRows}=await import('/app/js/outbox.js'),rows=await outboxRows();
+                        const keys=JSON.parse(document.querySelector('#workflowSale').dataset.pendingKeys);
+                        return rows.filter(r=>keys.includes(r.key)).map(r=>({key:r.key,kind:r.kind,data:r.data}));
+                    }""")
+                    await page.reload()
+                    await page.locator('#workflowSale [data-workflow="repair-sale"]').wait_for(state='visible')
+                    await page.locator('#workflowSale [data-workflow="repair-sale"]').click()
+                    await wait_async(page, "()=>!document.querySelector('#workflowSale [name=sold]').disabled")
+                    assert await page.locator('#workflowSale [name=sold]').is_enabled()
+                    await page.locator('#workflowSale [name=sold]').fill('1')
+                    await page.locator('#workflowSale button').first.click()
+                    await wait_async(page, """async()=>{
+                        const {outboxRows}=await import('/app/js/outbox.js'),rows=await outboxRows();
+                        const keys=JSON.parse(document.querySelector('#workflowSale').dataset.pendingKeys);
+                        return keys.every(key=>rows.some(r=>r.key===key&&r.status==='synced'));
+                    }""")
+                    assert await page.evaluate("""async original=>{
+                        const {outboxRows}=await import('/app/js/outbox.js'),rows=await outboxRows();
+                        return original.every(old=>{const row=rows.find(r=>r.key===old.key);return row&&JSON.stringify(row.data)===JSON.stringify(old.data);});
+                    }""", original_repair)
+                    async with factory() as session:
+                        recovered = (await session.scalars(select(Sale).where(Sale.booking_id == 3))).all()
+                        assert len(recovered) == 1 and recovered[0].sold_photos == 1 and recovered[0].amount == 400
+                        assert await session.scalar(select(func.count(Receipt.id)).where(Receipt.booking_id == 3)) == 1
                     output = Path(os.getenv('CALLS_QA_DIR', '/tmp/photo-boss-calls-qa'))
                     output.mkdir(parents=True, exist_ok=True)
                     await page.screenshot(path=str(output/'offline-replay-mobile.png'), full_page=True)

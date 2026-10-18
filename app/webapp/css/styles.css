@@ -63,3 +63,31 @@
 .hotel-shootings-heading:focus-visible{outline:3px solid var(--accent);outline-offset:-3px}
 .hotel-shootings-rows{border-top:1px solid var(--line);padding:14px;background:var(--bg)}
 @media(max-width:520px){.hotel-shootings-heading{padding:15px;min-height:65px}.hotel-shootings-name{font-size:19px}.hotel-shootings-rows{padding:10px}}
+
+/* Voice practice uses the same responsive controls in browser, Telegram and PWA. */
+#salesTraining,#bookingTraining{min-width:0;padding:clamp(12px,2vw,20px);overflow-wrap:anywhere}
+#salesTraining>h3,#bookingTraining>h3{line-height:1.45;margin-bottom:12px}
+.voice-training,.realtime-training{display:grid;gap:12px;min-width:0;max-width:100%;font-size:14px;line-height:1.6;letter-spacing:normal}
+.voice-training>* , .realtime-training>*{min-width:0;max-width:100%;margin:0}
+.voice-training h3,.realtime-training h3{line-height:1.45}
+.voice-training p,.realtime-training p,.voice-training summary,.realtime-training summary{overflow-wrap:anywhere;word-break:normal;line-height:1.6}
+.voice-training>.row.wrap,.realtime-training>.row.wrap{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));align-items:stretch;gap:10px;margin:0}
+.voice-training .btn,.realtime-training .btn,#salesTraining form .btn,#bookingTraining form .btn{min-width:0;max-width:100%;min-height:48px;height:auto;white-space:normal;overflow-wrap:anywhere;word-break:normal;line-height:1.5;letter-spacing:normal;text-align:center}
+.voice-training audio,.realtime-training audio{display:block;width:100%;min-width:0;max-width:100%;min-height:44px}
+.voice-training meter{display:block;width:100%;height:16px}
+.voice-training .field,.realtime-training .field{display:grid;gap:6px;line-height:1.5}
+.voice-training select,.realtime-training select{max-width:100%;min-width:0;min-height:48px;font-size:16px;line-height:1.5}
+.voice-training details,.realtime-training details{border-top:1px solid var(--line);padding-top:8px}
+.voice-training summary,.realtime-training summary{min-height:44px;padding:10px 0;cursor:pointer}
+[data-realtime-transcript]{display:grid;gap:12px;margin-top:10px;white-space:pre-line;overflow-wrap:anywhere;line-height:1.6}
+.training-state{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 14px;min-height:48px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);color:var(--text);font-weight:650;line-height:1.5}
+.training-state>*{min-width:0;max-width:100%;overflow-wrap:anywhere}
+[data-voice-clock],[data-realtime-clock]{font-variant-numeric:tabular-nums;white-space:nowrap;letter-spacing:normal}
+.voice-training[data-voice-phase="recording"] .training-state{background:var(--danger-bg);border-color:var(--danger);color:var(--danger)}
+.realtime-training[data-realtime-phase="active"] .training-state{background:var(--success-bg);border-color:var(--success);color:var(--success)}
+.voice-training[data-voice-phase="stopping"] .training-state,.voice-training[data-voice-phase="sending"] .training-state,.realtime-training[data-realtime-phase="stopping"] .training-state{background:var(--warning-bg);border-color:var(--warning);color:var(--warning)}
+.voice-training[data-voice-phase="error"] .training-state,.realtime-training[data-realtime-phase="error"] .training-state{background:var(--danger-bg);border-color:var(--danger);color:var(--danger)}
+@media(max-width:520px){.voice-training>.row.wrap,.realtime-training>.row.wrap{grid-template-columns:minmax(0,1fr)}.voice-training .btn,.realtime-training .btn{width:100%}.voice-training,.realtime-training{padding:12px}}
+#shiftForm .form-row{grid-template-columns:repeat(2,minmax(0,1fr))}#shiftForm .field{min-width:0}#shiftForm .btn{white-space:normal;overflow-wrap:anywhere;line-height:1.5;height:auto;min-height:44px}#shiftForm select{max-width:100%}
+#shiftForm .schedule-roster-list{display:block;max-height:260px;overflow-y:auto;border:1px solid var(--line);border-radius:11px;padding:4px 10px;background:var(--panel2)}#shiftForm .schedule-roster-person{display:flex;align-items:center;gap:10px;min-height:48px;padding:8px 0;line-height:1.5;color:var(--text)}#shiftForm .schedule-roster-person[hidden]{display:none}#shiftForm .schedule-roster-person input{flex:0 0 20px;width:20px;height:20px}#shiftForm .schedule-roster-person span{min-width:0;overflow-wrap:anywhere}#scheduleRosterCount{margin:0;line-height:1.5}
+@media(max-width:390px){#shiftForm .form-row{grid-template-columns:minmax(0,1fr)}#shiftForm .schedule-roster>.row.wrap{align-items:stretch}#shiftForm .schedule-roster>.row.wrap>.btn{flex:1 1 100%}}

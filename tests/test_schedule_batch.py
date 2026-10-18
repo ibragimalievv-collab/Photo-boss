@@ -60,6 +60,28 @@ class ScheduleBatchTests(unittest.IsolatedAsyncioTestCase):
         assert self.count() == 0
         assert (await self.call([self.slot(),self.slot(offset=30)],uid=1001)).status == 201
 
+    async def test_complete_roster_without_hotel_or_shift_assignment_and_explicit_exclusions(self):
+        with self.fixture.engine.inner.begin() as conn:
+            # Same names, two roles and more than one ordinary page of staff must
+            # still produce one selectable record per active working employee.
+            for uid in range(8, 113):
+                conn.execute(text('INSERT INTO users VALUES (:id,:tg,:name,TRUE)'),
+                             {'id': uid, 'tg': 1000+uid, 'name': 'Same employee name'})
+                for role in ('MANAGER', 'PHOTOGRAPHER'):
+                    conn.execute(text('INSERT INTO user_roles VALUES (:uid,:role)'), {'uid': uid, 'role': role})
+            conn.execute(text("INSERT INTO user_roles VALUES (6,'PHOTOGRAPHER')"))
+        for editor in (1001, 1002):
+            status, data, _ = await self.fixture.call('/schedule', uid=editor)
+            assert status == 200
+            assert len(data['employees']) == 108
+            assert len({person['id'] for person in data['employees']}) == 108
+            assert next(person for person in data['employees'] if person['id'] == 112)['roles'] == ['MANAGER', 'PHOTOGRAPHER']
+            reasons = {person['id']: person['reason'] for person in data['unavailableEmployees']}
+            assert reasons == {1: 'work_role_required', 2: 'work_role_required', 6: 'inactive', 7: 'work_role_required'}
+        # People outside schedule management cannot retrieve any roster metadata.
+        _, data, _ = await self.fixture.call('/schedule', uid=1003)
+        assert data['employees'] == data['unavailableEmployees'] == []
+
 
 class TeamScheduleTests(ScheduleBatchTests):
     async def team(self, shifts, *, uid=1002):

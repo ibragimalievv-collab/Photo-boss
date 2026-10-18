@@ -5,6 +5,7 @@ module never commits independently of that receipt of the operation.
 """
 import hashlib
 import json
+from decimal import Decimal
 
 from aiohttp import web
 from sqlalchemy import func, select
@@ -144,6 +145,14 @@ class Workflow:
             query = select(Booking).where(Booking.status.notin_(['CANCELLED', 'REJECTED']))
             query = query.where(booking_scope(a['id'], a['roles']))
             bookings = (await session.scalars(query.order_by(Booking.shoot_date.desc()).limit(200))).all()
+            # A large schedule must never hide an unfinished sale from an older
+            # shooting. Keep the same server-side role/hotel scope for extras.
+            open_sales = await session.scalars(query.where(Booking.id.in_(
+                select(SaleDraft.booking_id).where(SaleDraft.status.in_(
+                    ['AWAITING_RECEIPT', 'AWAITING_COUNTS', 'AWAITING_SELECTED']))
+            )).order_by(Booking.shoot_date.desc()))
+            visible_ids = {booking.id for booking in bookings}
+            bookings.extend(booking for booking in open_sales if booking.id not in visible_ids)
             if requested is not None:
                 chosen = await session.scalar(query.where(Booking.id == int(requested)))
                 if chosen is None:
@@ -166,20 +175,26 @@ class Workflow:
                 hotel = await session.get(Hotel, b.hotel_id)
                 total, paid, due = await payment_totals(session, b.id)
                 original_count = await session.scalar(select(func.count(Photo.id)).where(Photo.shooting_id == shoot.id)) if shoot else 0
+                draft_actor = await session.get(User, draft.created_by_id) if draft else None
                 history = {'client': customer.name if customer else '', 'phone': customer.phone if customer else None,
                            'hotel': hotel.name if hotel else 'Отель не указан', 'sales': [
                     {'id': sale.id, 'at': sale.created_at.isoformat() + 'Z', 'photos': sale.sold_photos,
                      'amount': str(money(sale.amount)), 'paymentStatus': sale.payment_status}
                     for sale in purchases], 'soldTotal': sum(sale.sold_photos for sale in purchases),
                     'salesAmount': str(total), 'paidAmount': str(paid), 'dueAmount': str(due),
-                    'totalFrames': max([original_count or 0] + [sale.declared_photo_count or 0 for sale in purchases])}
+                    'totalFrames': max([original_count or 0, draft.declared_photo_count or 0 if draft else 0] + [sale.declared_photo_count or 0 for sale in purchases])}
                 rows.append({**history, 'receipts': [receipt_state(receipt) for receipt in receipts], 'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
                     'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': prices.get(b.package_id),
                     'shootingId': shoot.id if shoot else None, 'fullUploaded': bool(shoot and shoot.full_upload_completed_at),
+                    'uploadedOriginals': int(original_count or 0),
                     'shootingStatus': shoot.status if shoot else None,
                     'canUpload': can_upload,
                     'canFullUpload': bool(can_upload and shoot and shoot.status == 'READY_FOR_SALE' and not shoot.full_upload_completed_at),
                     'draft': ({'id': draft.id, 'mine': draft.created_by_id == a['id'], 'status': draft.status,
+                        'createdByName': draft_actor.name if draft_actor else 'Сотрудник не указан',
+                        'amount': (str(money(Decimal(prices[b.package_id]) * draft.sold_photos))
+                            if draft.sold_photos and b.package_id in prices else None),
+                        'expectedAmount': str(money(draft.expected_amount)) if draft.expected_amount is not None else None,
                         'receiptStored': bool(draft.receipt_file_id),
                         'receiptImagePath': (f'/sale-drafts/{draft.id}/receipt/image'
                             if draft.receipt_file_id and (draft.created_by_id == a['id'] or {'OWNER', 'ADMIN'} & set(a['roles'])) else None),
@@ -346,7 +361,7 @@ class Workflow:
             result['photoId'] = photo.id
         elif kind == 'sale_complete':
             complete = await complete_sale(session, actor, draft.id)
-            result |= {'saleId': complete.sale.id, 'amount': str(complete.sale_amount),
+            result |= {'saleId': complete.sale.id, 'amount': str(complete.sale_amount), 'soldPhotos': complete.sale.sold_photos,
                        'paymentStatus': complete.sale.payment_status}
         return result
 

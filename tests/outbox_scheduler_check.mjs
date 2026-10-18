@@ -121,6 +121,55 @@ function fixture(api){
 }
 // Later retry windows must never cancel the earliest pending retry.
 {
+ const f=fixture(async op=>op.kind==='sale_complete'?{saleId:9,amount:'400.00',soldPhotos:1}:{draftId:3});
+ const draft={key:'start'},keys=['start','receipt','counts','photo','complete'];
+ f.add('start',{kind:'sale_start',status:'synced',blob:null,data:{booking:{id:7}},result:{draftId:3}});
+ f.add('receipt',{kind:'sale_receipt',status:'synced',blob:null,data:{draft}});
+ f.add('counts',{kind:'sale_counts',status:'synced',blob:null,data:{draft,total:150,sold:1,price:'400.00'}});
+ f.add('photo',{kind:'sale_selected',status:'synced',blob:null,data:{draft},result:{photoId:11}});
+ f.add('complete',{kind:'sale_complete',status:'error',blob:null,data:{draft,price:'400.00'},errorStatus:409,error:'Полная съёмка содержит 1 кадров. Общее количество менять нельзя.'});
+ const accepted=keys.slice(0,4).map(key=>JSON.stringify(f.rows.get(key))),payload=JSON.stringify(f.rows.get('complete').data);
+ await f.run('repairSaleQueue(["start","receipt","counts","photo","complete"],{draftId:3,total:1,sold:1,price:"400.00"})');await settle();
+ assert.deepEqual(f.calls,['new-1','complete'],'corrected counts must precede retrying original completion');
+ assert.equal(f.rows.size,6);assert.equal(f.rows.get('complete').status,'synced');
+ assert.equal(JSON.stringify(f.rows.get('complete').data),payload,'original idempotent request payload stays unchanged');
+ for(let i=0;i<4;i++)assert.equal(JSON.stringify(f.rows.get(keys[i])),accepted[i],'accepted receipt/count/photo rows stay unchanged');
+ assert.equal(f.rows.get('new-1').data.total,1);assert.equal(f.rows.get('counts').data.total,150);
+}
+// A reload after accepting a correction still resumes the original operation.
+{
+ const f=fixture(async()=>({saleId:10,amount:'400.00'})),draft={key:'start'};
+ f.add('complete',{kind:'sale_complete',status:'error',blob:null,data:{draft},errorStatus:409,error:'Сначала загрузите все выбранные фотографии: 1/2.',resumeByKey:'repair'});
+ f.add('repair',{kind:'sale_selected',status:'synced',blob:null,data:{draft:{id:3}},resumeCompleteKey:'complete'});
+ await f.run('flushOutbox()');await settle();
+ assert.deepEqual(f.calls,['complete']);assert.equal(f.rows.get('complete').status,'synced');
+}
+// Uncertain completion and files that are still pending cannot be unlocked.
+{
+ const f=fixture(async op=>{if(op.kind==='sale_complete'){const error=new Error('Сначала загрузите все выбранные фотографии: 1/2.');error.status=409;throw error;}return {draftId:3};}),draft={key:'start'};
+ f.add('start',{kind:'sale_start',status:'synced',blob:null,result:{draftId:3}});
+ f.add('counts',{kind:'sale_counts',status:'synced',blob:null,data:{draft,total:2,sold:2}});
+ f.add('photo',{kind:'sale_selected',status:'synced',blob:null,data:{draft}});
+ f.add('complete',{kind:'sale_complete',status:'error',blob:null,data:{draft},errorStatus:409,error:'Сначала загрузите все выбранные фотографии: 1/2.'});
+ await f.run('repairSaleQueue(["start","counts","photo","complete"],{draftId:3,total:2,sold:2,price:"400.00"})');await settle();
+ await f.run('flushOutbox()');await settle();
+ assert.deepEqual(f.calls,['new-1','complete'],'an unsuccessful explicit repair must not create an automatic retry loop');
+ assert.equal(f.rows.get('complete').status,'error');
+}
+// Uncertain completion and files that are still pending cannot be unlocked.
+{
+ const f=fixture(async()=>({})),draft={key:'start'};
+ f.add('start',{kind:'sale_start',status:'synced',blob:null,result:{draftId:3}});
+ f.add('complete',{kind:'sale_complete',status:'local',blob:null,data:{draft},errorStatus:503,error:'Timeout'});
+ await assert.rejects(f.run('repairSaleQueue(["start","complete"],{draftId:3,total:1,sold:1,price:"400.00"})'),/Исправление недоступно/);
+ assert.equal(f.rows.size,2);assert.equal(f.calls.length,0);
+ f.rows.get('complete').status='error';f.rows.get('complete').errorStatus=409;f.rows.get('complete').error='Сначала загрузите все выбранные фотографии: 0/1.';
+ f.add('pending',{kind:'sale_selected',status:'local',data:{draft}});
+ await assert.rejects(f.run('repairSaleQueue(["start","pending","complete"],{draftId:3,total:1,sold:1,price:"400.00"})'),/Исправление недоступно/);
+ assert.ok(f.rows.get('pending').blob);assert.equal(f.rows.size,3);
+}
+// Later retry windows must never cancel the earliest pending retry.
+{
  const f=fixture(async()=>({ok:true}));f.add('earlier',{retryAt:130000});f.add('later',{retryAt:190000});
  await f.run('flushOutbox()');assert.deepEqual(f.timers.map(t=>t.delay),[30000]);
 }

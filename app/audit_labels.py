@@ -80,6 +80,7 @@ ACTIONS = {
     'offline_attendance_reviewed': 'Проверена отметка смены, сделанная без сети',
     'package_created': 'Добавлен пакет съёмки', 'paid_expense_recorded': 'Записан оплаченный расход',
     'paid_expense_voided': 'Отменена запись о расходе', 'sale_draft_started': 'Начато оформление продажи',
+    'sale_counts_corrected': 'Исправлено количество кадров в продаже',
     'sale_receipt_captured': 'Принят чек продажи', 'setting_changed': 'Изменена настройка',
     'shift_check_in_started': 'Начато подтверждение прихода на смену',
     'shift_check_out_started': 'Начато подтверждение окончания смены',

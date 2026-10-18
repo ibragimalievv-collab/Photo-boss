@@ -3,13 +3,25 @@ import {esc} from './domain.js';
 
 let active=null,generation=0;
 const interruptedText='[Ответ ИИ прерван; неуслышанная часть исключена из разбора.]';
-const recovery=new Map();
+const recovery=new Map(),display=new Map();
+function renderStatus(s){
+ const root=host(s.id);if(!root)return;
+ const state=display.get(s.id)||{};
+ const phase=s.ending?'stopping':s.finishing?'saving':s.closed?'stopped':s.pc?.connectionState==='connected'?(s.muted?'muted':'active'):'connecting';
+ root.dataset.realtimePhase=phase;
+ const labels={connecting:'Подключаем разговор',active:'Живой разговор идёт',muted:'Микрофон выключен',stopping:'Завершаем разговор',stopped:'Разговор завершён',saving:'Сохраняем разбор'};
+ const write=(selector,text)=>{const node=root.querySelector(selector);if(node&&node.textContent!==text)node.textContent=text;};
+ write('[data-realtime-state]',labels[phase]);
+ if(state.message)write('[data-realtime-status]',state.message);
+ write('[data-realtime-meter]',s.closed||s.ending?'Микрофон выключен':s.muted?'Микрофон выключен':state.meter||'Ожидаем подключение микрофона');
+ const seconds=s.seconds||0;write('[data-realtime-clock]',s.began?`${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')} / 10:00`:'');
+}
 const host=id=>document.querySelector(`.realtime-training[data-realtime-session="${Number(id)}"]`);
 const key=id=>`pb_live_training_${Number(id)}`;
-const notice=(id,text)=>{const node=host(id)?.querySelector('[data-realtime-status]');if(node)node.textContent=text;};
+const notice=(id,text)=>{const state=display.get(id)||{};state.message=text;display.set(id,state);const node=host(id)?.querySelector('[data-realtime-status]');if(node&&node.textContent!==text)node.textContent=text;const s=active?.id===id?active:recovery.get(id);if(s)renderStatus(s);};
 function remember(s){
- const value={id:s.id,revision:s.revision,leaseId:s.leaseId,mode:s.mode,items:s.items,missing:s.missing||false,closed:!!s.closed};
- recovery.set(s.id,value);
+ const value={id:s.id,revision:s.revision,leaseId:s.leaseId,mode:s.mode,items:s.items,missing:s.missing||false,closed:!!s.closed,seconds:s.seconds||0,began:s.began||null};
+ recovery.set(s.id,s);
  try{sessionStorage.setItem(key(s.id),JSON.stringify(value));}catch{}
 }
 function recovered(id){
@@ -21,21 +33,21 @@ function forget(id){recovery.delete(id);try{sessionStorage.removeItem(key(id));}
 function pending(s){return s.items.some(i=>i.done&&i.text&&!i.saved);}
 function controls(s){
  const root=host(s.id);if(!root)return;
- const on=active===s&&!s.closed;
+ const on=active===s&&!s.closed,busy=s.ending||s.finishing;renderStatus(s);
  for(const button of root.querySelectorAll('[data-realtime-action]')){
   const action=button.dataset.realtimeAction;
   button.hidden=action==='start'?on:action==='mute'||action==='sound'? !on:action==='stop'?!on:action==='retry'?(on||!pending(s)):false;
-  button.disabled=action==='finish'?(on||s.finishing):action==='start'?s.finishing:false;
+  button.disabled=Boolean(busy||(action==='finish'&&(on||!s.leaseId)));
   if(action==='mute'){const label=s.muted?'Включить микрофон':'Выключить микрофон';if(button.textContent!==label)button.textContent=label;}
  }
- const selector=root.querySelector('[data-realtime-mode]');if(selector){selector.disabled=on||pending(s);selector.value=s.mode;}
+ const selector=root.querySelector('[data-realtime-mode]');if(selector){selector.disabled=Boolean(on||busy||pending(s));selector.value=s.mode;}
  if(on&&s.audio&&root.querySelector('[data-realtime-player]')!==s.audio){const old=root.querySelector('[data-realtime-player]');if(old)old.replaceWith(s.audio);}
 }
 export function realtimeControls(session){
  if(session.status!=='ACTIVE')return '';
  const id=Number(session.id),s=active?.id===id?active:recovered(id);
  const mode=s?.mode||'coach';
- return `<section class="notice section realtime-training" data-realtime-session="${id}" data-realtime-revision="${Number(session.revision)}"><h3>Живой разговор с ИИ Photo Boss</h3><p>Говорите обычным голосом: ИИ услышит паузу и ответит. Можно перебивать. Собеседник — искусственный интеллект; текст разговора сохраняется в истории обучения после остановки.</p><label class="field">С кем говорить<select class="input" data-realtime-mode><option value="coach" ${mode==='coach'?'selected':''}>ИИ-наставник: объясняет и помогает</option><option value="guest" ${mode==='guest'?'selected':''}>Гость: тренировка диалога</option></select></label><div class="row wrap section"><button type="button" class="btn primary" data-realtime-action="start">Начать живой разговор</button><button type="button" class="btn ghost" data-realtime-action="mute" hidden>Выключить микрофон</button><button type="button" class="btn ghost" data-realtime-action="sound" hidden>Включить звук ИИ</button><button type="button" class="btn ghost" data-realtime-action="stop" hidden>Остановить разговор</button><button type="button" class="btn ghost" data-realtime-action="retry" ${s?.items?.some(i=>i.done&&i.text&&!i.saved)?'':'hidden'}>Сохранить реплики повторно</button><button type="button" class="btn primary" data-realtime-action="finish">Получить разбор разговора</button></div><p role="status" data-realtime-status>${s?.items?.some(i=>i.done&&i.text&&!i.saved)?'Есть несохранённые реплики. Повторите сохранение перед продолжением.':'Разрешите микрофон после нажатия. Один разговор — до 10 минут.'}</p><p class="small" data-realtime-meter>Микрофон выключен</p><p class="small" data-realtime-clock></p><audio data-realtime-player controls hidden></audio><details><summary>Текст живого разговора</summary><div data-realtime-transcript>${s?transcriptHTML(s):''}</div></details><p class="small">Нужен интернет. Если микрофон недоступен внутри Telegram, откройте этот же Photo Boss в Safari или Chrome и разрешите микрофон для сайта.</p></section>`;
+ return `<section class="notice section realtime-training" data-realtime-session="${id}" data-realtime-revision="${Number(session.revision)}"><h3>Живой разговор с ИИ Photo Boss</h3><p>Говорите обычным голосом: ИИ услышит паузу и ответит. Можно перебивать. Собеседник — искусственный интеллект; текст разговора сохраняется в истории обучения после остановки.</p><label class="field">С кем говорить<select class="input" data-realtime-mode><option value="coach" ${mode==='coach'?'selected':''}>ИИ-наставник: объясняет и помогает</option><option value="guest" ${mode==='guest'?'selected':''}>Гость: тренировка диалога</option></select></label><div class="row wrap section"><button type="button" class="btn primary" data-realtime-action="start">Начать живой разговор</button><button type="button" class="btn ghost" data-realtime-action="mute" hidden>Выключить микрофон</button><button type="button" class="btn ghost" data-realtime-action="sound" hidden>Включить звук ИИ</button><button type="button" class="btn ghost" data-realtime-action="stop" hidden>Остановить разговор</button><button type="button" class="btn ghost" data-realtime-action="retry" ${s?.items?.some(i=>i.done&&i.text&&!i.saved)?'':'hidden'}>Сохранить реплики повторно</button><button type="button" class="btn primary" data-realtime-action="finish">Получить разбор разговора</button></div><div class="training-state"><strong data-realtime-state>Разговор не начат</strong></div><p role="status" data-realtime-status>${s?.items?.some(i=>i.done&&i.text&&!i.saved)?'Есть несохранённые реплики. Повторите сохранение перед продолжением.':'Разрешите микрофон после нажатия. Один разговор — до 10 минут.'}</p><p class="small" data-realtime-meter>Микрофон выключен</p><p class="small" data-realtime-clock></p><audio data-realtime-player controls hidden></audio><details><summary>Текст живого разговора</summary><div data-realtime-transcript>${s?transcriptHTML(s):''}</div></details><p class="small">Нужен интернет. Если микрофон недоступен внутри Telegram, откройте этот же Photo Boss в Safari или Chrome и разрешите микрофон для сайта.</p></section>`;
 }
 function transcriptHTML(s){return s.items.filter(i=>i.text).map(i=>`<p><strong>${i.role==='employee'?'Вы':i.role==='coach'?'ИИ-наставник':'ИИ-гость'}:</strong> ${esc(i.text)}${i.saved?'':' <small>пока в этой вкладке</small>'}</p>`).join('');}
 function renderTranscript(s){const node=host(s.id)?.querySelector('[data-realtime-transcript]');if(node)node.innerHTML=transcriptHTML(s);}
@@ -143,7 +155,7 @@ function meter(s){
   s.context=new Audio();void s.context.resume().catch(()=>{});
   const source=s.context.createMediaStreamSource(s.stream),analyser=s.context.createAnalyser();analyser.fftSize=256;source.connect(analyser);
   const samples=new Uint8Array(analyser.fftSize);
-  s.meterTimer=setInterval(()=>{analyser.getByteTimeDomainData(samples);const level=Math.sqrt(samples.reduce((sum,x)=>sum+(x-128)**2,0)/samples.length);const node=host(s.id)?.querySelector('[data-realtime-meter]');if(node)node.textContent=s.muted?'Микрофон выключен':level>2?'Микрофон слышит ваш голос':'Микрофон включён · ожидает речь';},250);
+  s.meterTimer=setInterval(()=>{analyser.getByteTimeDomainData(samples);const level=Math.sqrt(samples.reduce((sum,x)=>sum+(x-128)**2,0)/samples.length);const state=display.get(s.id)||{};state.meter=s.muted?'Микрофон выключен':level>2?'Микрофон слышит ваш голос':'Микрофон включён · ожидает речь';display.set(s.id,state);renderStatus(s);},250);
  }catch{}
 }
 function release(s){
@@ -161,7 +173,7 @@ async function endLease(s,keepalive=false){
 async function stop(s,message='Разговор остановлен. Реплики сохранены; можно продолжить или получить разбор.',unloading=false){
  if(s.stopping)return s.stopping;
  s.stopping=(async()=>{
-  s.ending=true;
+  s.ending=true;controls(s);
   for(const track of s.stream?.getAudioTracks()||[])track.enabled=false;
   s.audio?.pause();
   if(!s.closed&&!unloading){
@@ -178,11 +190,11 @@ async function stop(s,message='Разговор остановлен. Репли
   let failure='';
   try{await flush(s);}catch(error){failure=error.message+' Есть несохранённые реплики — повторите сохранение.';}
   try{await endLease(s,unloading);}catch{failure+=' Соединение закроется автоматически; повторное подключение может потребовать ожидания.';}
-  notice(s.id,(failure||message)+(s.missing?' Последняя реплика не распознана полностью и не включена в разбор.':''));renderTranscript(s);controls(s);
+  s.ending=false;notice(s.id,(failure||message)+(s.missing?' Последняя реплика не распознана полностью и не включена в разбор.':''));renderTranscript(s);controls(s);
   remember(s);
   if(!unloading)document.dispatchEvent(new CustomEvent('pb-voice-turn-saved',{detail:{id:s.id}}));
  })();
- try{await s.stopping;}finally{s.stopping=null;}
+ try{await s.stopping;}finally{s.stopping=null;s.ending=false;controls(s);}
 }
 function microphoneError(error){
  if(error.name==='NotAllowedError'||error.name==='SecurityError')return 'Микрофон запрещён. Разрешите микрофон для Photo Boss в настройках браузера. В Telegram Web откройте приложение в Safari или Chrome.';
@@ -197,7 +209,7 @@ async function start(root){
  const ready=new CustomEvent('pb-live-voice-starting',{detail:{id},cancelable:true});if(!document.dispatchEvent(ready))throw Error('Сначала отправьте или удалите записанный голосовой ответ.');
  if(!window.isSecureContext||!navigator.mediaDevices?.getUserMedia||typeof RTCPeerConnection==='undefined')throw Error('Живой разговор требует HTTPS и браузер с микрофоном. Откройте Photo Boss в Safari или Chrome.');
  const ticket=++generation,s={id,revision:Number(root.dataset.realtimeRevision),mode:root.querySelector('[data-realtime-mode]').value,items:[],closed:false,muted:false,leaseId:null};
- active=s;document.documentElement.dataset.pbLiveVoice=String(id);controls(s);notice(id,'Разрешите микрофон. Подключаем живого ИИ…');
+ display.delete(id);active=s;document.documentElement.dataset.pbLiveVoice=String(id);controls(s);notice(id,'Разрешите микрофон. Подключаем живого ИИ…');
  let timeout;
  try{
   const granted=navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
@@ -227,8 +239,8 @@ async function start(root){
   s.leaseId=response.leaseId;s.model=response.model;
   if(s.closed||ticket!==generation){await endLease(s);return;}
   remember(s);await s.pc.setRemoteDescription({type:'answer',sdp:response.sdp});
-  meter(s);const began=Date.now();
-  s.clockTimer=setInterval(()=>{const node=host(id)?.querySelector('[data-realtime-clock]');if(node)node.textContent=`${Math.floor((Date.now()-began)/60000)}:${String(Math.floor((Date.now()-began)/1000)%60).padStart(2,'0')} · ИИ Photo Boss`;},1000);
+  meter(s);s.began=Date.now();s.seconds=0;
+  s.clockTimer=setInterval(()=>{s.seconds=Math.floor((Date.now()-s.began)/1000);renderStatus(s);},1000);
   s.limitTimer=setTimeout(()=>void stop(s,'Время разговора завершилось. Получите разбор или начните новый разговор.'),Math.min(Number(response.maxSeconds)||600,600)*1000);
   s.connectTimer=setTimeout(()=>{if(s.pc?.connectionState!=='connected')void stop(s,'Не удалось установить голосовую связь. Проверьте сеть и подключитесь повторно.');},25000);
   notice(id,s.pc.connectionState==='connected'?'Разговор подключён. Говорите обычным голосом.':'Устанавливаем голосовую связь…');controls(s);
@@ -265,6 +277,6 @@ document.addEventListener('click',async event=>{
 });
 function leave(){generation++;if(active){const s=active;if(s.ending){s.closed=true;release(s);}void stop(s,'Разговор остановлен при закрытии экрана.',true);}}
 window.addEventListener('pagehide',leave);window.addEventListener('hashchange',leave);
-document.addEventListener('pb-chat-account-reset',()=>{leave();for(const id of recovery.keys())forget(id);try{for(const name of Object.keys(sessionStorage))if(name.startsWith('pb_live_training_'))sessionStorage.removeItem(name);}catch{}});
+document.addEventListener('pb-chat-account-reset',()=>{leave();for(const id of recovery.keys())forget(id);display.clear();try{for(const name of Object.keys(sessionStorage))if(name.startsWith('pb_live_training_'))sessionStorage.removeItem(name);}catch{}});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)leave();});
-new MutationObserver(()=>{if(active){if(!host(active.id))leave();else controls(active);}}).observe(document.body,{childList:true,subtree:true});
+new MutationObserver(()=>{if(active){if(!host(active.id))leave();else controls(active);}for(const s of recovery.values())if(s.id!==active?.id&&host(s.id))controls(s);}).observe(document.body,{childList:true,subtree:true});

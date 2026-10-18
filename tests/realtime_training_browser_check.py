@@ -15,7 +15,9 @@ from playwright.async_api import async_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "https://photo-boss-realtime-training.invalid"
-FIXTURE = """<!doctype html><html lang="ru"><body><main id="fixture"></main>
+FIXTURE = """<!doctype html><html lang="ru"><head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/app/css/styles.css"></head><body><main id="fixture"></main>
 <script type="module">
 import {realtimeControls} from '/app/js/realtime-training.js';
 window.streams=[];window.peers=[];window.sent=[];window.requests=[];
@@ -112,6 +114,9 @@ async def fixture_page(context):
         if path == "/app/js/api.js":
             return await request.fulfill(content_type="text/javascript",
                                          body="export const api=(...args)=>window.fixtureApi(...args);")
+        if path == "/app/css/styles.css":
+            return await request.fulfill(content_type="text/css",
+                                         body=(ROOT / "app/webapp/css/styles.css").read_text())
         raise AssertionError(f"Unexpected request: {request.request.url}")
 
     await page.route("**/*", route)
@@ -156,8 +161,12 @@ async def check_browser(capture_path):
                 assert "ИИ-наставником Photo Boss" in await page.evaluate("sent[0].response.instructions")
                 await page.evaluate("window.renderMutations=0;new MutationObserver(()=>renderMutations++).observe(document.body,{childList:true,subtree:true});window.playingAudio=document.querySelector('[data-realtime-player]');renderFixture()")
                 await page.wait_for_function("document.querySelector('[data-realtime-player]')===playingAudio")
+                assert await page.locator('[data-realtime-state]').inner_text() == 'Живой разговор идёт'
                 await page.locator('[data-realtime-action="mute"]').click()
                 assert await page.evaluate("!streams.at(-1).getAudioTracks()[0].enabled")
+                await page.evaluate('renderFixture()')
+                await page.wait_for_function("document.querySelector('[data-realtime-state]').textContent==='Микрофон выключен'")
+                assert '/ 10:00' in await page.locator('[data-realtime-clock]').inner_text()
                 assert await page.locator('[data-realtime-action="mute"]').inner_text() == "Включить микрофон"
                 await page.locator('[data-realtime-action="mute"]').click()
                 assert await page.evaluate("streams.at(-1).getAudioTracks()[0].enabled")

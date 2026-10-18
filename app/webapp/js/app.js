@@ -3,7 +3,7 @@ import {setFormActor,captureForms,restoreForms} from './form-state.js';
 import {academyCoachScreen,academyTrackSwitch,academyTrack,loadAcademyCoach,resetAcademyCoach,openAcademyLesson} from './academy-coach.js';
 import {loadShootControl,shootControlView,loadDeliveryContacts,deliveryContactsView} from './delivery.js';
 import {loadGalleries,galleriesView,mountGalleries,deactivateGalleries} from './galleries.js';
-import {loadWorkflow,workflowView,workflowClick,workflowSubmit,workflowSelect,workflowFolderChange} from './workflow.js';
+import {loadWorkflow,workflowView,workflowClick,workflowSubmit,workflowSelect,workflowFolderChange,openWorkflowBooking} from './workflow.js';
 import {developmentView,loadDevelopment,developmentClick,developmentSubmit} from './development.js';
 import {setOutboxUser} from './outbox.js';
 import {workdayView,loadWorkday,workdayClick,workdaySubmit} from './workday.js';
@@ -155,7 +155,7 @@ function field(label,html){return `<label class="field"><span>${label}</span>${h
 function formError(e){const el=$('#formError');if(el){el.hidden=false;el.textContent=e.message;}else toast(e.message);}
 
 function periodForm(){if(state.me.permissions.financeScope!=='all')return toast('Этот выбор доступен только владельцу.');showSheet('Период отчёта',`<form id="periodForm" class="form-grid"><div class="form-row">${field('С даты',`<input type="date" class="input" name="from" value="${state.customFrom||state.me.today.slice(0,8)+'01'}" max="${state.me.today}" required>`)}${field('По дату',`<input type="date" class="input" name="to" value="${state.customTo||state.me.today}" max="${state.me.today}" required>`)}</div><div class="notice">Даты включительно. Один отчёт — не более года.</div><p id="formError" class="form-error" hidden></p><button class="btn primary" type="submit">Показать отчёт</button></form>`);}
-async function shiftForm(team=false){const s=await request(`/schedule?from=${state.me.today}&to=${state.me.today}`);if(!s.employees.length||!s.hotels.length)return showSheet('Подготовьте график',`<p>${!s.hotels.length?'Добавьте активный отель. ':''}${!s.employees.length?'Добавьте сотрудника и назначьте рабочую роль.':''}</p>${btn('Открыть сотрудников','people','primary')}`);showSheet(team?'Общий график команды':'График сотрудника',scheduleEditor(s,state.day,state.me.today,team));}
+async function shiftForm(team=false){const s=await request(`/schedule?from=${state.me.today}&to=${state.me.today}`,{allowSnapshot:false});showSheet(team?'Общий график команды':'График сотрудника',scheduleEditor(s,state.day,state.me.today,team));}
 async function photographerForm(id){const booking=[...state.bookings,...(state.dashboard?.bookings||[])].find(b=>b.id===id);if(!booking)return;const data=await request('/booking-photographers');showSheet('Назначить фотографа',`<form id="photographerAssignment" data-booking="${id}" data-previous="${booking.photographerId||''}" class="form-grid"><p>Съёмка №${id}. Назначение можно изменить до начала съёмки.</p><label class="field">Фотограф<select class="input" name="photographerId" required><option value="">Выберите фотографа</option>${data.items.map(p=>`<option value="${p.id}" ${p.id===booking.photographerId?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label><p id="formError" class="form-error" hidden></p><button class="btn primary" type="submit">Назначить</button></form>`);}
 function showBooking(id){
  const b=[...state.bookings,...(state.dashboard?.bookings||[])].find(x=>x.id===id);if(!b)return;
@@ -191,7 +191,7 @@ async function action(name){
   if(name==='ai-probe'){const result=await request('/diagnostics/ai/probe',{method:'POST',body:{},timeoutMs:90000});toast(result.message);}
   const d=await request('/diagnostics/ai');showSheet('Диагностика ИИ',`<p>Провайдер: OpenAI. Ключ: ${d.configured?'настроен':'не настроен'}.</p><p>Академия: ${esc(d.models.academy)}; чеки: ${esc(d.models.receipts)}.</p>${d.checks.map(c=>`<p>${esc(c.purpose)}: ${esc(c.status)} ${esc(c.errorCode||'')} · ${esc(c.checkedAt)}</p>`).join('')||'<p>После запуска сервера ещё нет результатов запросов.</p>'}<p>${esc(d.note)}</p><button class="btn primary" data-action="ai-probe">Проверить реальный ответ OpenAI</button>`);return;
  }
- if(['new-sale','new-booking'].includes(name)){await go('workflow');const form=$('#workflowBooking'),target=name==='new-booking'?form?.elements.client_name:$('#workflowSalePick');if(name==='new-booking'&&form)form.closest('details').open=true;target?.scrollIntoView({block:'center'});target?.focus();return;}
+ if(['new-sale','new-booking'].includes(name)){await go('workflow');if(name==='new-booking')return openWorkflowBooking();const target=$('#workflowSalePick');target?.scrollIntoView({block:'center'});target?.focus();return;}
  if(name==='close')return closeSheet();if(name==='refresh')return state.me?loadRoute():boot();
  if(name==='themes')return showSheet('Ваш стиль',`${themeChoices()}<p class="compact-note">Только оформление. Роль и доступ к деньгам не меняются.</p>`);
  if(name==='practice'){closeSheet();return openPractice();}
