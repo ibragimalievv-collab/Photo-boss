@@ -260,3 +260,25 @@ def test_malformed_success_response_is_recoverable_and_does_not_expose_contents(
         asyncio.run(YandexDisk('secret-token-value').metadata(ROOT))
     assert 'private provider details' not in str(error.value)
     assert 'secret-token-value' not in str(error.value)
+
+
+@pytest.mark.parametrize('status', [201, 202, 204, 404])
+def test_bodyless_accepted_response_does_not_report_false_cleanup_failure(monkeypatch, status):
+    from app import yandex_disk as module
+    class Response:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def json(self, **kwargs): return None
+    response = Response()
+    response.status = status
+    class Session:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        def request(self, *args, **kwargs): return response
+    monkeypatch.setattr(module.aiohttp, 'ClientSession', Session)
+    disk = YandexDisk('token')
+    if status == 201:
+        assert asyncio.run(disk.ensure_dir(ROOT+'/system')) == {}
+    else:
+        assert asyncio.run(disk.delete(ROOT+'/system/test.txt')) is None

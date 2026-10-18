@@ -93,6 +93,11 @@ class YandexDisk:
                     code = data.get("error") if isinstance(data, dict) else None
                     detail = code if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_]{1,100}", code) else "provider_error"
                     raise YandexDiskError(f"Yandex.Disk HTTP {response.status}" + (f": {detail}" if detail else ""))
+                # aiohttp returns None (rather than raising JSONDecodeError)
+                # for an empty 204 body. DELETE's bodyless acknowledgements,
+                # including an already absent file, are valid results.
+                if data is None and response.status != 200:
+                    return {}
                 if not isinstance(data, dict) or (malformed and response.status == 200):
                     raise YandexDiskError("Яндекс.Диск вернул некорректный ответ. Повторите попытку.")
                 return data
