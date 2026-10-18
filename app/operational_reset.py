@@ -14,6 +14,8 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import MetaData, and_, func, inspect, select, text
 
+from .operations_guard import sqlite_operation_barrier
+
 GENERATION_KEY = 'operations:generation'
 RESET_AT_KEY = 'operations:reset_at'
 ARCHIVE_TABLE = 'operational_reset_archives'
@@ -296,7 +298,7 @@ async def reset(engine, request_id, owner_id, *, expected_preview_sha256=None, e
     from .audit_context import actor_id
     token = actor_id.set(owner_id)
     try:
-        async with engine.begin() as conn:
+        async with sqlite_operation_barrier(engine), engine.begin() as conn:
             tables = await _reflect(conn)
             await _lock(conn, tables)
             await _owner(conn, tables, owner_id)
@@ -375,7 +377,7 @@ async def restore(engine, request_id, owner_id):
     from .audit_context import actor_id
     token = actor_id.set(owner_id)
     try:
-        async with engine.begin() as conn:
+        async with sqlite_operation_barrier(engine), engine.begin() as conn:
             tables = await _reflect(conn)
             await _lock(conn, tables)
             await _owner(conn, tables, owner_id)

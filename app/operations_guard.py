@@ -3,7 +3,9 @@
 Locks use a separate unpooled connection: a long file upload must not consume a
 slot needed by the handler's own transaction and deadlock the application pool.
 """
+import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from weakref import WeakKeyDictionary
 
 from sqlalchemy import text
@@ -16,6 +18,12 @@ ADVISORY_KEY = 7620182632501
 GENERATION_KEY = 'operations:generation'
 MAINTENANCE_KEY = 'operations:maintenance'
 _lease_engines = WeakKeyDictionary()
+_sqlite_locks = WeakKeyDictionary()
+
+
+@dataclass(frozen=True)
+class _SQLiteLeaseSnapshot:
+    generation: str
 
 
 class OperationsResetError(AccessError):
@@ -25,6 +33,8 @@ class OperationsResetError(AccessError):
 
 
 async def current_generation(conn):
+    if isinstance(conn, _SQLiteLeaseSnapshot):
+        return conn.generation
     result = await conn.execute(text('SELECT value FROM settings WHERE key=:key'), {'key': GENERATION_KEY})
     return result.scalar() or ''
 
@@ -44,8 +54,44 @@ def _lease_engine(engine):
     return _lease_engines[engine]
 
 
+def _is_sqlite(engine):
+    # The sync SQLite test adapter exposes its dialect through .inner.
+    dialect = getattr(engine, 'dialect', None) or getattr(getattr(engine, 'inner', None), 'dialect', None)
+    return getattr(dialect, 'name', None) == 'sqlite'
+
+
+@asynccontextmanager
+async def sqlite_operation_barrier(engine):
+    """Serialize SQLite writers without holding a database read lock.
+
+    PostgreSQL uses its cross-process advisory transaction locks. The SQLite
+    mutex is shared by operational handlers, reset and restore; the latter
+    keep their own database transaction locks for atomicity.
+    """
+    if not _is_sqlite(engine):
+        yield
+        return
+    if engine not in _sqlite_locks:
+        _sqlite_locks[engine] = asyncio.Lock()
+    async with _sqlite_locks[engine]:
+        yield
+
+
 @asynccontextmanager
 async def operation_lease(engine):
+    if _is_sqlite(engine):
+        async with sqlite_operation_barrier(engine):
+            async with engine.connect() as conn:
+                maintenance = (await conn.execute(text('SELECT value FROM settings WHERE key=:key'),
+                                                  {'key': MAINTENANCE_KEY})).scalar()
+                generation = await current_generation(conn)
+            if maintenance:
+                raise AccessError('Обновляются рабочие данные. Повторите действие через минуту.', 503)
+            # A reader on another SQLite connection can block COMMIT. Release
+            # it before the handler opens its own transaction; the mutex keeps
+            # the cached generation stable until the handler has completed.
+            yield _SQLiteLeaseSnapshot(generation)
+        return
     async with _lease_engine(engine).begin() as conn:
         if conn.dialect.name == 'postgresql':
             await conn.execute(text('SELECT pg_advisory_xact_lock_shared(:key)'), {'key': ADVISORY_KEY})

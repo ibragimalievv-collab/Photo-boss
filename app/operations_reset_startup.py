@@ -6,7 +6,12 @@ import re
 from sqlalchemy import text
 
 from .operational_reset import ResetError, inspect_archive, preview, reset
-from .operations_guard import ADVISORY_KEY, MAINTENANCE_KEY, current_generation
+from .operations_guard import (
+    ADVISORY_KEY,
+    MAINTENANCE_KEY,
+    current_generation,
+    sqlite_operation_barrier,
+)
 
 logger = logging.getLogger(__name__)
 REQUEST_ENV = 'PHOTO_BOSS_OPERATIONS_RESET_REQUEST'
@@ -36,7 +41,7 @@ async def startup_reset(engine, raw, admin_ids):
         logger.info('Operations reset preview: %s', json.dumps(summary, sort_keys=True))
         return None
     request_id = request['requestId']
-    async with engine.begin() as conn:
+    async with sqlite_operation_barrier(engine), engine.begin() as conn:
         if conn.dialect.name == 'postgresql':
             await conn.execute(text('SELECT pg_advisory_xact_lock(:key)'), {'key': ADVISORY_KEY})
         existing = (await conn.execute(text('SELECT id FROM operational_reset_archives WHERE request_id=:request'),
