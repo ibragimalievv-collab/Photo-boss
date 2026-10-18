@@ -170,7 +170,9 @@ async def anomalies(api, conn):
                 add(f"sale:{s['id']}:unusual-price",'Цена кадра существенно отличается от истории','sale',s['id'],
                     {'unitPrice':cents(unit),'medianUnitPrice':cents(baseline),'sampleSize':len(group),'from':str(group[0][0]),'to':str(group[-1][0]),'hotelId':s['hotel_id'],'packageId':s['package_id'],'rule':'Не менее 10 предшествующих продаж за 90 дней; цена ≥3 медиан или ≤1/5 медианы. Возможное объяснение — изменение тарифа; нужна проверка.'})
         group.append((at,unit))
-    for row in await api.rows(conn, "SELECT id,entity_id,details,created_at FROM audit_logs WHERE entity='sales' AND action='row.update' ORDER BY id DESC LIMIT 500"):
+    # Audit history survives an operational reset. Only extant sales can have
+    # actionable sale-change findings; archived sales must not reappear as alerts.
+    for row in await api.rows(conn, "SELECT a.id,a.entity_id,a.details,a.created_at FROM audit_logs a JOIN sales s ON s.id=a.entity_id WHERE a.entity='sales' AND a.action='row.update' ORDER BY a.id DESC LIMIT 500"):
         data = parsed(row['details'])
         before, after = data.get('before') or {}, data.get('after') or {}
         changed = {k: {'before': before.get(k), 'after': after.get(k)} for k in ('amount','credited_user_id','booking_id','sold_photos') if before.get(k) != after.get(k)}

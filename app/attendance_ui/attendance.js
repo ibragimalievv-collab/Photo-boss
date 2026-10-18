@@ -120,10 +120,11 @@ function install() {
  }
  function updateCard(){root.querySelector('#attendanceCard')?.remove();card();}
  function message(text){const el=dialog.querySelector('#attError');if(el){el.textContent=text;el.hidden=false;}}
- async function refresh(){if(loading)return;loading=true;try{
-  data=await api('/attendance');const today=localDay(new Date());
+ async function refresh(){if(loading)return;loading=true;const version=generation;try{
+  const latest=await api('/attendance');if(version!==generation)return;data=latest;const today=localDay(new Date());
   if(data.date!==today&&data._offline)data={...data,date:today,start:null,end:null};
-  for(const row of await outboxRows())if(row.kind==='attendance'&&row.date===data.date&&row.status!=='error'){
+  const rows=await outboxRows();if(version!==generation)return;
+  for(const row of rows)if(row.kind==='attendance'&&row.date===data.date&&row.status!=='error'){
    const part=row.data.purpose==='start'?'start':'end';
    if(!['STARTED','FINISHED'].includes(data[part]?.status)&&(row.status!=='synced'||!data[part]&&data._offline))data[part]={status:row.result?.attendanceStatus||'PENDING_REVIEW',claimedAt:row.data.claimedAt};
   }
@@ -131,8 +132,10 @@ function install() {
  }catch(e){failure=e.message;}finally{loading=false;updateCard();}}
  async function queueOffline(){
   if(!point||Date.now()-pointAt>300000||!photoAt)throw new Error('Получите свежую геолокацию и сделайте фото повторно.');
+  const version=generation;
   const bytes=Uint8Array.from(atob(photo.split(',')[1]),c=>c.charCodeAt(0));
   await enqueueOperation('attendance',localDay(new Date(photoAt)),{purpose,claimedAt:photoAt,...point},new Blob([bytes],{type:'image/jpeg'}));
+  if(version!==generation)return;
   data[purpose==='start'?'start':'end']={status:'PENDING_REVIEW',claimedAt:photoAt};
   photo=null;point=null;photoAt=null;
  }
@@ -188,24 +191,32 @@ function install() {
     const captured=await getLocation(tg);if(version!==generation)return;
     const claimedDate=localDay(new Date());
     if(navigator.onLine&&data.start?.status!=='PENDING_REVIEW'){
-     try{data=await api('/attendance/location',{method:'POST',body:{purpose,date:claimedDate,...captured}});}
+     try{const saved=await api('/attendance/location',{method:'POST',body:{purpose,date:claimedDate,...captured}});if(version!==generation)return;data=saved;}
      catch(e){if(e.status&&e.status<500)throw e;}
     }
     point=captured;pointAt=Date.now();data.date=claimedDate;photo=null;photoAt=null;
    }else if(act==='confirm'){
     if(!photo)throw new Error('Сначала сделайте фотографию камерой.');
     if(!navigator.onLine||data.start?.status==='PENDING_REVIEW')await queueOffline();
-    else try{data=await api('/attendance/photo',{method:'POST',body:{purpose,date:data.date,image:photo}});photo=null;point=null;}
+    else try{const saved=await api('/attendance/photo',{method:'POST',body:{purpose,date:data.date,image:photo}});if(version!==generation)return;data=saved;photo=null;point=null;}
     catch(e){if(e.status&&e.status<500)throw e;await queueOffline();}
+    if(version!==generation)return;
     openReport=purpose==='end';
    }
    failure='';
-  }catch(error){failure=error.message;}
-  finally{busy=false;updateCard();draw();if(openReport){close();location.hash='workday';}}
+  }catch(error){if(version===generation)failure=error.message;}
+  finally{if(version===generation){busy=false;updateCard();draw();if(openReport){close();location.hash='workday';}}}
  },true);
  dialog.addEventListener('cancel',e=>{if(busy)e.preventDefault();else{generation++;stopCamera();photo=null;}});
  new MutationObserver(card).observe(root,{childList:true,subtree:false});
  window.addEventListener('hashchange',()=>{if(!busy&&dialog.open)close();card();});
+ window.addEventListener('pb-operations-reset',()=>{
+  generation++;stopCamera();photo=null;point=null;pointAt=0;photoAt=null;data=null;busy=false;
+  failure='Рабочие данные обнулены. Получите геолокацию и сделайте новое фото.';
+  if(dialog.open)dialog.close();updateCard();
+  // A pre-reset status request may still finish; its generation check above
+  // discards it. The next open/visibility refresh fetches the cleared ledger.
+ });
  document.addEventListener('visibilitychange',()=>{
   if(document.hidden){if(cameraActive){stopCamera();failure='Камера была выключена, потому что приложение свернули.';}}
   else if(!busy){refresh().then(draw);}

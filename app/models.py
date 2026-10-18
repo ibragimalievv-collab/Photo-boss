@@ -968,3 +968,26 @@ class AcademyPracticeReview(Base):
     result: Mapped[str] = mapped_column(Text)
     photos: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class OperationalResetArchive(Base):
+    """Append-only, complete recovery snapshot for an owner-authorized reset."""
+    __tablename__ = 'operational_reset_archives'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(100), unique=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    generation: Mapped[str] = mapped_column(String(36), unique=True)
+    payload: Mapped[str] = mapped_column(Text)
+    payload_sha256: Mapped[str] = mapped_column(String(64))
+    row_counts: Mapped[str] = mapped_column(Text)
+
+
+class OperationalResetRestore(Base):
+    """Separate receipt so restoring never mutates the immutable archive."""
+    __tablename__ = 'operational_reset_restores'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    archive_id: Mapped[int] = mapped_column(ForeignKey('operational_reset_archives.id'), unique=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    generation: Mapped[str] = mapped_column(String(36), unique=True)

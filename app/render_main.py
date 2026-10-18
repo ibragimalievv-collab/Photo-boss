@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.26-academy-personal-mentor"
+RELEASE = "miniapp-3.27-archived-operations-reset"
 
 
 async def health(request):
@@ -69,6 +69,8 @@ async def on_startup(app):
     config.validate()
     await wait_for_database()
     await init_db()
+    from .operations_reset_startup import REQUEST_ENV, startup_reset
+    await startup_reset(engine, os.getenv(REQUEST_ENV, ''), config.admin_ids)
     bot = app["bot"]
     me = await bot.me()
     expected = os.getenv("EXPECTED_BOT_ID", "").strip()
@@ -128,6 +130,8 @@ async def on_cleanup(app):
                 await task
     await app["dispatcher"].storage.close()
     await app["bot"].session.close()
+    from .operations_guard import close_operation_leases
+    await close_operation_leases(engine)
     await engine.dispose()
 
 

@@ -93,12 +93,17 @@ async def daily_control(session, now, tz_name):
     async def rows(conn, sql, **params):
         return list((await conn.execute(text(sql), params)).mappings())
     api = SimpleNamespace(rows=rows, tz=zone, today=lambda: local.date())
+    from .miniapp_security import utc_bounds
+    from .services.discipline import operational_reset_at
+    reset_at = await operational_reset_at(session)
+    _day_start, day_end = utc_bounds(day, day, zone)
+    archived_day = reset_at is not None and day_end <= reset_at.replace(tzinfo=None)
     owners = await rows(session, "SELECT u.id FROM users u JOIN user_roles r ON r.user_id=u.id WHERE u.active=TRUE AND r.role='OWNER'")
     count = 0
     findings = await anomalies(api,session) if owners else []
     for owner in owners:
         events = await sync_events(api, session, owner['id'],items=findings)
-        if local.hour < 1:
+        if local.hour < 1 or archived_day:
             continue
         key = f'daily:{day}'
         if await rows(session, 'SELECT id FROM notifications WHERE user_id=:uid AND event_key=:key', uid=owner['id'], key=key):

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const code = fs.readFileSync(new URL('../app/webapp/js/outbox.js', import.meta.url), 'utf8')
-  .replace(/^import .*;\n/gm, '').replaceAll('export ', '');
+  .replace(/^import .*;\n/gm, '').replaceAll('export ', '') + '\nasync function writeOperations(items){for(const row of items)await localAction(\"operations\",\"readwrite\",store=>store.put(row));return true;}';
 const rows = new Map();
 const add = (key, kind, blob = null) => rows.set(key, {
   key, userId: 42, kind, date: '2026-10-13', data: {shooting: {id: 7}},

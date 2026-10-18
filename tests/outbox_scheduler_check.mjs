@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source=fs.readFileSync(new URL('../app/webapp/js/outbox.js',import.meta.url),'utf8')
- .replace(/^import .*;\n/gm,'').replaceAll('export ','');
+ .replace(/^import .*;\n/gm,'').replaceAll('export ','') + '\nasync function writeOperations(items){for(const row of items)await localAction(\"operations\",\"readwrite\",store=>store.put(row));return true;}';
 const settle=async()=>{for(let i=0;i<8;i++)await new Promise(setImmediate);};
 function fixture(api){
  const rows=new Map(),calls=[],handlers={},timers=[];
@@ -242,3 +242,32 @@ function fixture(api){
  }
 }
 console.log('PASS: backoff isolates rows, in-flight additions flush, renewed auth recovers 401, foreground resumes uploads');
+
+// Old durable packets cannot be relabelled with the new reset generation.
+{
+ const packets=[];const f=fixture(async op=>{packets.push(op);return {ok:true};});
+ f.add('legacy',{blob:null});f.add('old-generation',{blob:null,generation:'before'});f.add('new-generation',{blob:null,generation:'after'});
+ await f.run('setOutboxUser(42,"after")');
+ assert.deepEqual(f.calls,['new-generation']);assert.equal(packets[0].generation,'after');
+ assert.equal(f.rows.get('legacy').status,'local');assert.equal(f.rows.get('old-generation').status,'local');
+ await f.run('enqueueBatch([{key:"fresh-reset-operation",kind:"booking",date:"2026-10-17",data:{}}])');await settle();
+ assert.equal(f.rows.get('fresh-reset-operation').generation,'after');
+ assert.ok(packets.every(op=>op.generation==='after'));
+}
+// A result returning after a reset may not recreate a purged local row.
+{
+ let finish;const f=fixture(()=>new Promise(resolve=>{finish=resolve;}));
+ f.add('in-flight',{blob:null});const flushing=f.run('flushOutbox()');await settle();
+ f.rows.clear();f.handlers['pb-operations-reset']({detail:{userId:42,generation:'after'}});
+ finish({ok:true});await flushing;await settle();assert.equal(f.rows.size,0);
+}
+console.log('PASS: durable reset generations and stale in-flight completion cannot resurrect old operations');
+// Expenses are outside the authorized reset; preserve legacy request payloads.
+{
+ const packets=[];const f=fixture(async op=>{packets.push(op);return {ok:true};});
+ f.add('retained-expense',{kind:'cash_expense',blob:null,data:{note:'retained'}});
+ await f.run('setOutboxUser(42,"after")');
+ assert.deepEqual(f.calls,['retained-expense']);
+ assert.equal(Object.hasOwn(packets[0],'generation'),false,'legacy expense hash must remain unchanged');
+}
+console.log('PASS: retained cash expense replays its exact legacy packet after operational reset');

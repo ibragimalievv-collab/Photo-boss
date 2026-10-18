@@ -185,7 +185,7 @@ function employeeDetail(id){const f=state.route==='finance'?state.finance:state.
 async function action(name){
  if(['browser-login','browser-password'].includes(name)){closeSheet();return startBrowserLogin(async()=>{preferBrowserSession();history.replaceState(null,'','#home');await boot();if(state.me&&(name==='browser-password'||!state.me.passwordConfigured))showSheet('Личный пароль',passwordForm(state.me));});}
  if(name==='password-settings')return showSheet('Личный пароль',passwordForm(state.me));
- if(name==='switch-account'){bootGeneration++;state.requestId++;resetWorkChat();setOutboxUser(null);preferBrowserSession();try{await accountCall('logout');stopBrowserLogin();accountChanged();}catch(error){setOutboxUser(state.me.user.id);resetAcademyCoach(state.me.user.id,state.me.user.roles);initWorkChat(state.me);throw error;}return;}
+ if(name==='switch-account'){bootGeneration++;state.requestId++;resetWorkChat();setOutboxUser(null);preferBrowserSession();try{await accountCall('logout');stopBrowserLogin();accountChanged();}catch(error){setOutboxUser(state.me.user.id,state.me.operationsGeneration);resetAcademyCoach(state.me.user.id,state.me.user.roles);initWorkChat(state.me);throw error;}return;}
  if(name==='browser-login-check')return checkBrowserLogin();
  if(name==='ai-diagnostics'||name==='ai-probe'){
   if(name==='ai-probe'){const result=await request('/diagnostics/ai/probe',{method:'POST',body:{},timeoutMs:90000});toast(result.message);}
@@ -265,7 +265,7 @@ for(const event of ['copy','cut','contextmenu','dragstart'])document.addEventLis
 function privacy(active){$('#privacyScreen').hidden=state.me?.screenCaptureAllowed?true:active;}
 document.addEventListener('visibilitychange',()=>privacy(!document.hidden));try{tg?.onEvent('deactivated',()=>privacy(false));tg?.onEvent('activated',()=>privacy(true));tg?.BackButton?.onClick(()=>go('home'));}catch{}
 window.addEventListener('hashchange',()=>{if(state.me)loadRoute(location.hash.slice(1)||'home');});
-async function boot(){const ticket=++bootGeneration;stopBrowserLogin();try{const nextMe=await request('/me');if(ticket!==bootGeneration)return;state.me=nextMe;setFormActor(state.me.user.id);initWorkChat(state.me);setOutboxUser(state.me.user.id);resetAcademyCoach(state.me.user.id,state.me.user.roles);if(!state.me._offline){await request('/session',{method:'POST',body:{}});if(ticket!==bootGeneration)return;for(const path of ['/workflow','/workday','/dashboard','/shoot-control',`/bookings?day=${state.me.today}`,`/schedule?from=${state.me.today}&to=${addDays(state.me.today,6)}`])request(path).catch(()=>{});}state.period='today';state.day=state.me.today;state.week=state.me.today;state.dashboard=null;state.schedule=null;state.finance=null;state.academy=null;state.audit=null;state.bookings=[];state.hotels=[];state.expandedHotels.clear();state.onlyReady=false;state.bookingTrash=false;state.search='';state.academyTab='home';setTheme(state.me.user.theme||defaultTheme(state.me.user.roles));await loadRoute(location.hash.slice(1)||'home');}catch(e){if(ticket===bootGeneration)showError(e);}}
+async function boot(){const ticket=++bootGeneration;stopBrowserLogin();try{const nextMe=await request('/me');if(ticket!==bootGeneration)return;state.me=nextMe;setFormActor(state.me.user.id,state.me.operationsGeneration);initWorkChat(state.me);setOutboxUser(state.me.user.id,state.me.operationsGeneration);resetAcademyCoach(state.me.user.id,state.me.user.roles);if(!state.me._offline){await request('/session',{method:'POST',body:{}});if(ticket!==bootGeneration)return;for(const path of ['/workflow','/workday','/dashboard','/shoot-control',`/bookings?day=${state.me.today}`,`/schedule?from=${state.me.today}&to=${addDays(state.me.today,6)}`])request(path).catch(()=>{});}state.period='today';state.day=state.me.today;state.week=state.me.today;state.dashboard=null;state.schedule=null;state.finance=null;state.academy=null;state.audit=null;state.bookings=[];state.hotels=[];state.expandedHotels.clear();state.onlyReady=false;state.bookingTrash=false;state.search='';state.academyTab='home';setTheme(state.me.user.theme||defaultTheme(state.me.user.roles));await loadRoute(location.hash.slice(1)||'home');}catch(e){if(ticket===bootGeneration)showError(e);}}
 window.addEventListener('storage',event=>{if(event.key==='pb-account-changed'){bootGeneration++;state.requestId++;resetWorkChat();}});
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/app/sw.js',{scope:'/app/'}).catch(()=>{});
 boot();
@@ -279,7 +279,7 @@ const offlineBanner=document.createElement('div');offlineBanner.className='offli
 function offlineState(){offlineBanner.hidden=navigator.onLine;offlineBanner.textContent='Без сети. Доступны ранее сохранённые данные. Новые фото и действия остаются в очереди до синхронизации.';}
 async function reconnectWithoutReset(){
  offlineState();if(!state.me)return boot();const previous=state.me.user.id;
- try{const me=await request('/me');if(!state.me||me.user.id!==previous)return boot();state.me=me;setOutboxUser(me.user.id);}
+ try{const me=await request('/me');if(!state.me||me.user.id!==previous)return boot();state.me=me;setOutboxUser(me.user.id,me.operationsGeneration);}
  catch(error){if([401,403].includes(error.status))showError(error);else toast('Связь ещё не восстановлена. Заполненная форма сохранена.');}
 }
 window.addEventListener('online',reconnectWithoutReset);window.addEventListener('offline',offlineState);offlineState();
@@ -291,3 +291,12 @@ document.addEventListener('pb-open-academy-coach',()=>{state.academyTab='coach';
 
 document.addEventListener('pb-booking-diagnostic-updated',()=>{if(state.me&&state.route==='academy')render();});
 document.addEventListener('pb-booking-diagnostic-completed',async()=>{if(state.me&&state.route==='academy'){await loadAcademyCoach('booking');render();}});
+
+// A server-confirmed operational reset discards old forms before they can be
+// submitted with the new generation. Authentication and training stay stored.
+let operationsReloading=false;
+window.addEventListener('pb-operations-reset',event=>{
+ if(!state.me||state.me.user.id!==event.detail?.userId||operationsReloading)return;
+ operationsReloading=true;setOutboxUser(null);window.location.reload();
+});
+window.addEventListener('pb-operations-stale',()=>{if(!operationsReloading)void reconnectWithoutReset();});

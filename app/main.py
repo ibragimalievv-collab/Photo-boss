@@ -24,6 +24,8 @@ from .handlers import (
     sales,
     training,
 )
+from .miniapp_security import AccessError
+from .operations_guard import close_operation_leases, operation_lease
 from .services.photo_storage import storage_loop
 from .ui import CompactUiMiddleware, enable_compact_ui
 from .yandex_disk import YandexDisk, configured_from_env
@@ -40,7 +42,7 @@ async def operations_loop(bot, interval=300):
         for name, job in (("operations", run_operations_once), ("backup", maybe_send_daily_backup)):
             try:
                 # An export failure must not roll back or skip independent work.
-                async with Session() as session:
+                async with Session() as session, operation_lease(session.bind):
                     value = await job(session, bot)
                     await session.commit()
                 if name == "operations":
@@ -49,6 +51,10 @@ async def operations_loop(bot, interval=300):
                     result["backups"] = value
             except asyncio.CancelledError:
                 raise
+            except AccessError as exc:
+                if exc.status != 503:
+                    failed.append(name)
+                    logger.exception("Background job failed: %s", name)
             except Exception:
                 failed.append(name)
                 logger.exception("Background job failed: %s", name)
@@ -57,9 +63,13 @@ async def operations_loop(bot, interval=300):
         if delivery:
             try:
                 from .delivery_bot import run_guest_messages
-                result['guest_messages'] = await run_guest_messages(delivery.api, bot)
+                async with operation_lease(delivery.api.engine):
+                    result['guest_messages'] = await run_guest_messages(delivery.api, bot)
             except asyncio.CancelledError:
                 raise
+            except AccessError as exc:
+                if exc.status != 503:
+                    logger.exception('Guest delivery messages failed')
             except Exception:
                 logger.exception('Guest delivery messages failed')
         if any(result.values()):
@@ -95,6 +105,9 @@ def create_dispatcher():
     from .audit_context import ActorMiddleware
     dispatcher.update.outer_middleware(ActorMiddleware())
     dispatcher.update.outer_middleware(CompactUiMiddleware())
+    from .operational_bot import OperationalBotMiddleware
+    dispatcher.message.outer_middleware(OperationalBotMiddleware(engine))
+    dispatcher.callback_query.outer_middleware(OperationalBotMiddleware(engine))
     from .delivery_bot import r as delivery_router
     dispatcher.include_routers(
         delivery_router, common.r, receipts.r, admin.r, photographer.r, manager.r, sales.r,
@@ -162,6 +175,7 @@ async def main():
             await bot.session.close()
     finally:
         clear_ready_file()
+        await close_operation_leases(engine)
         await engine.dispose()
 
 

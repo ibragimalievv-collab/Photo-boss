@@ -2,6 +2,8 @@
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import text
+
 from ..miniapp_security import utc_bounds
 from ..models import utc_now
 from .insights import change
@@ -13,12 +15,34 @@ def utc(value):
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
+async def operational_reset_at(conn):
+    """Start of the active operating history; schedules remain unchanged."""
+    value = await conn.scalar(text("SELECT value FROM settings WHERE key='operations:reset_at'"))
+    if not value:
+        return None
+    try:
+        return utc(value)
+    except (ValueError, TypeError):
+        return None
+
+
 async def period(api, conn, start, end):
     lo, hi = utc_bounds(start, end, api.tz)
+    reset_at = await operational_reset_at(conn)
+    args = {'start': start, 'end': end}
+    attendance_scope = ''
+    plan_scope = ''
+    if reset_at is not None:
+        args.update(start=max(start, reset_at.astimezone(api.tz).date()),
+                    reset_at=reset_at.replace(tzinfo=None))
+        attendance_scope = ' AND initiated_at>=:reset_at'
+        # Keep the shift spanning the reset: employees can confirm it again.
+        # Completed pre-reset plans must not turn into fresh absences.
+        plan_scope = ' AND end_at>:reset_at'
     people = await api.rows(conn, 'SELECT id,name,active FROM users ORDER BY name,id')
-    ins = await api.rows(conn, 'SELECT id,user_id,shift_date,status,late,started_at FROM shift_check_ins WHERE shift_date>=:start AND shift_date<=:end', start=start, end=end)
-    outs = await api.rows(conn, 'SELECT id,user_id,shift_date,status,ended_at FROM shift_check_outs WHERE shift_date>=:start AND shift_date<=:end', start=start, end=end)
-    plans = await api.rows(conn, "SELECT id,user_id,start_at,end_at FROM shifts WHERE start_at>=:lo AND start_at<:hi AND status<>'CANCELLED'", lo=lo, hi=hi)
+    ins = await api.rows(conn, 'SELECT id,user_id,shift_date,status,late,started_at FROM shift_check_ins WHERE shift_date>=:start AND shift_date<=:end'+attendance_scope, **args)
+    outs = await api.rows(conn, 'SELECT id,user_id,shift_date,status,ended_at FROM shift_check_outs WHERE shift_date>=:start AND shift_date<=:end'+attendance_scope, **args)
+    plans = await api.rows(conn, "SELECT id,user_id,start_at,end_at FROM shifts WHERE start_at>=:lo AND start_at<:hi AND status<>'CANCELLED'"+plan_scope, lo=lo, hi=hi, **({'reset_at':args['reset_at']} if reset_at else {}))
     def grouped(rows):
         result = defaultdict(list)
         for row in rows:

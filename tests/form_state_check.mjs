@@ -6,7 +6,7 @@ const storage=new Map();
 const events={};
 let forms=[];
 const document={querySelectorAll:()=>forms,addEventListener:(name,fn)=>events[name]=fn,createElement:()=>({dataset:{},setAttribute(){}})};
-const context=()=>vm.createContext({document,window:{addEventListener(){}},Map,Set,Date,Number,Object,JSON,Boolean,DataTransfer:class{constructor(){this.files=[];this.items={add:f=>this.files.push(f)};}},sessionStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)}});
+const context=()=>vm.createContext({document,window:{addEventListener(){}},Map,Set,Date,Number,Object,JSON,Boolean,DataTransfer:class{constructor(){this.files=[];this.items={add:f=>this.files.push(f)};}},sessionStorage:{get length(){return storage.size;},key:i=>[...storage.keys()][i],getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)}});
 let c=context();vm.runInContext(source,c);vm.runInContext('setFormActor(42)',c);
 const make=()=>{const fields=[{name:'total',value:'150',type:'number'},{name:'selected',files:[{name:'family.jpg'}],type:'file'}];for(const f of fields)fields[f.name]=f;return {id:'workflowSale',dataset:{draftScope:'7'},elements:fields,querySelector(){return null;},append(n){this.notice=n;}};};
 let original=make();forms=[original];vm.runInContext('captureForms()',c);
@@ -20,3 +20,21 @@ reload.dataset.pendingKeys='["key1"]';vm.runInContext('captureForms()',c);
 let queued=make();queued.elements.total.value='';forms=[queued];vm.runInContext('restoreForms()',c);assert.equal(queued.dataset.pendingKeys,'["key1"]');
 c.f=queued;vm.runInContext('clearForm(f)',c);assert.equal(storage.size,0);
 console.log('PASS: per-account text drafts, redraw file handles, honest reload warning, queued operation keys, clear on completion');
+
+// A server reset clears only this actor's operational drafts; Academy and the
+// next actor stay intact, even on first adoption of a nonempty generation.
+c=context();vm.runInContext(source,c);vm.runInContext('setFormActor(42)',c);
+const sale=make(),training=make(),other=make();training.id='salesTrainingForm';
+forms=[sale,training];vm.runInContext('captureForms()',c);
+vm.runInContext('setFormActor(43)',c);forms=[other];vm.runInContext('captureForms()',c);
+vm.runInContext('setFormActor(42,"reset-1")',c);
+assert.ok(!storage.has('pb-form-draft-v1:42:workflowSale:7'));
+assert.ok(storage.has('pb-form-draft-v1:42:salesTrainingForm:7'));
+assert.ok(storage.has('pb-form-draft-v1:43:workflowSale:7'));
+const fresh=make();fresh.elements.total.value='';forms=[fresh];vm.runInContext('restoreForms()',c);assert.equal(fresh.elements.total.value,'');
+fresh.elements.total.value='3';vm.runInContext('captureForms()',c);
+assert.ok(storage.has('pb-form-draft-v1:42:workflowSale:7:reset-1'));
+vm.runInContext('setFormActor(42,"reset-1")',c);fresh.elements.total.value='';vm.runInContext('restoreForms()',c);assert.equal(fresh.elements.total.value,'3');
+vm.runInContext('setFormActor(42,"reset-2")',c);fresh.elements.total.value='';vm.runInContext('restoreForms()',c);assert.equal(fresh.elements.total.value,'');
+assert.ok(storage.has('pb-form-draft-v1:42:salesTrainingForm:7'));
+console.log('PASS: reset generation discards only owned operational drafts, first adoption, repeated login and later reset');

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source=fs.readFileSync(new URL('../app/webapp/js/outbox.js',import.meta.url),'utf8')
-  .replace(/^import .*;\n/gm,'').replaceAll('export ','');
+  .replace(/^import .*;\n/gm,'').replaceAll('export ','') + '\nasync function writeOperations(items){for(const row of items)await localAction(\"operations\",\"readwrite\",store=>store.put(row));return true;}';
 const rows=new Map(),calls=[];
 let active=0,maximum=0,failure=null,seed=0;
 const localAction=async(_table,_mode,fn)=>fn({
