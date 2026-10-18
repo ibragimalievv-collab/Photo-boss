@@ -65,8 +65,8 @@ async def recent_inventory(engine, storage, *, limit=12):
                     data = await storage.metadata(path)
                 if data.get('type') != 'file' or data.get('size') != item['bytes']:
                     item['diskStatus'] = 'mismatch'
-                elif digest and data.get('sha256') == digest:
-                    item['diskStatus'] = 'verified'
+                elif digest and data.get('sha256'):
+                    item['diskStatus'] = 'verified' if data['sha256'] == digest else 'mismatch'
                 else:
                     item['diskStatus'] = 'unverified'
             except YandexDiskError as exc:

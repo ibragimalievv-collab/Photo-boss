@@ -27,8 +27,8 @@ from app.services.insights import change, compare_periods, receipt_check, sync_e
 from app.services.receipts import validate_extraction
 
 
-async def fixture():
-    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+async def fixture(url='sqlite+aiosqlite:///:memory:'):
+    engine = create_async_engine(url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await upgrade(conn)

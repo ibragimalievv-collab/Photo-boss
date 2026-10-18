@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -25,7 +26,16 @@ BASE='https://photo-boss-update.invalid'
 
 
 async def main():
-    engine,_factory,_api=await fixture()
+    # Browser boot prefetches while the outbox writes. In-memory SQLite gives
+    # both requests the same physical connection: closing a reader can roll
+    # back the writer. A disposable file provides independent transactions,
+    # matching the isolation of the production PostgreSQL connections.
+    with tempfile.TemporaryDirectory() as directory:
+        await run('sqlite+aiosqlite:///'+directory+'/browser.db')
+
+
+async def run(database_url):
+    engine,_factory,_api=await fixture(database_url)
     bot=SimpleNamespace(token=TOKEN,send_message=AsyncMock(),me=AsyncMock(return_value=SimpleNamespace(username='fixture_bot')))
     app=web.Application(client_max_size=25*1024*1024)
     api=install_miniapp(app,engine=engine,bot=bot,lessons=ACADEMY_LESSONS,blocks=ACADEMY_BLOCKS)
