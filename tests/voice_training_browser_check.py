@@ -7,7 +7,9 @@ from playwright.async_api import async_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "https://photo-boss-voice-training.invalid"
-FIXTURE = """<!doctype html><html lang="ru"><body><main id="fixture"></main>
+FIXTURE = """<!doctype html><html lang="ru"><head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/app/css/styles.css"></head><body><main id="fixture"></main>
 <script type="module">
 import {voiceControls} from '/app/js/voice-training.js';
 window.attempts=[];window.streams=[];window.failSend=true;window.lastAudio=null;
@@ -48,6 +50,9 @@ async def main():
             if path == "/app/js/api.js":
                 return await request.fulfill(content_type="text/javascript",
                     body="export const api=(...args)=>window.fixtureApi(...args);")
+            if path == "/app/css/styles.css":
+                return await request.fulfill(content_type="text/css",
+                    body=(ROOT / "app/webapp/css/styles.css").read_text())
             if path == "/app/js/realtime-training.js":
                 return await request.fulfill(content_type="text/javascript",
                     body="export const realtimeControls=()=>'';")
@@ -62,6 +67,8 @@ async def main():
             # A background Academy refresh replaces the controls while capture runs.
             await page.evaluate("renderFixture()")
             await page.locator('[data-voice-action="stop"]').wait_for(state="visible")
+            assert await page.locator('[data-voice-state]').inner_text() == 'Идёт запись'
+            assert '/ 1:30' in await page.locator('[data-voice-clock]').inner_text()
             await page.wait_for_function("document.querySelector('[data-voice-level]').value>0")
             await page.locator('[data-voice-action="stop"]').click()
             await page.locator('[data-voice-action="send"]').wait_for(state="visible")
@@ -69,6 +76,8 @@ async def main():
             await page.evaluate("renderFixture()")
             await page.locator('[data-voice-action="send"]').wait_for(state="visible")
             assert await page.locator('[data-voice-preview]').get_attribute("src")
+            assert await page.locator('[data-voice-state]').inner_text() == 'Запись завершена'
+            assert 'Микрофон выключен' in await page.locator('[data-voice-status]').inner_text()
             await page.locator('[data-voice-action="send"]').click()
             await page.wait_for_function("attempts.length===1&&document.querySelector('[data-voice-status]').textContent.includes('повторной отправки')")
             await page.locator('[data-voice-action="send"]').click()
@@ -83,6 +92,15 @@ async def main():
             await page.evaluate("renderFixture()")
             await page.locator('[data-voice-action="send"]').wait_for(state="visible")
             await page.locator('[data-voice-action="cancel"]').click()
+            # An Academy repaint must keep the pending permission request cancellable.
+            await page.evaluate("() => { navigator.mediaDevices.getUserMedia=()=>new Promise(()=>{}); }")
+            await page.locator('[data-voice-action="record"]').click()
+            await page.evaluate("renderFixture()")
+            await page.locator('[data-voice-action="cancel"]').wait_for(state="visible")
+            assert await page.locator('[data-voice-state]').inner_text() == 'Ожидание микрофона'
+            assert await page.locator('[data-voice-action="record"]').is_hidden()
+            await page.locator('[data-voice-action="cancel"]').click()
+            assert await page.locator('[data-voice-state]').inner_text() == 'Микрофон выключен'
             await page.evaluate("window.dispatchEvent(new Event('pagehide'))")
             assert not errors, errors
             print(json.dumps({"ok": True, "realMediaRecorderBytes": await page.evaluate("attempts[0].size"),

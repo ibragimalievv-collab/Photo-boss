@@ -24,6 +24,15 @@ PASSWORD = 'browser-test-password-2026'
 async def run():
     fixture = fixtures.MiniAppTests()
     await fixture.asyncSetUp()
+    # More than a normal staff page: the '+' and team dialogs must expose the
+    # last employee too, including people without hotel assignments or shifts.
+    with fixture.engine.inner.begin() as conn:
+        for uid in range(8, 113):
+            conn.execute(text('INSERT INTO users VALUES (:id,:tg,:name,TRUE)'),
+                         {'id': uid, 'tg': 1000+uid,
+                          'name': f'Сотрудник №{uid} с длинным именем для проверки переноса текста'})
+            conn.execute(text('INSERT INTO user_roles VALUES (:id,:role)'),
+                         {'id': uid, 'role': 'PHOTOGRAPHER' if uid == 112 else 'MANAGER'})
     app = web.Application()
     fixture.service.register(app)
     runner = web.AppRunner(app)
@@ -63,7 +72,7 @@ async def run():
             browser = await playwright.chromium.launch(headless=True, args=['--no-sandbox'])
             for mobile in [False, True]:
                 context = await browser.new_context(ignore_https_errors=True,
-                    viewport={'width':390 if mobile else 1366,'height':844 if mobile else 900},
+                    viewport={'width':320 if mobile else 1366,'height':844 if mobile else 900},
                     is_mobile=mobile,has_touch=mobile,service_workers='block',locale='ru-RU')
                 # Unrelated extension entrypoints are excluded; app/account/editor modules are real.
                 for path in ['/shift/attendance.js','/people/people.js','/work-chat/chat.js',
@@ -95,6 +104,28 @@ async def run():
                 await page.locator('#bottomNav [data-go=schedule]' if mobile else '#sidebar [data-go=schedule]').click()
                 await page.locator('[data-action=new-shift]').click()
                 await page.locator('#shiftForm').wait_for()
+                assert await page.locator('#shiftForm [name=userId] option').count() == 108
+                assert 'Фотограф' in await page.locator('#shiftForm [name=userId] option[value="3"]').inner_text()
+                assert '№3' in await page.locator('#shiftForm [name=userId] option[value="3"]').inner_text()
+                roster_search = page.locator('#shiftForm [data-roster-search]')
+                previous = await page.locator('#shiftForm [name=userId]').input_value()
+                await roster_search.fill('№112')
+                await roster_search.press('Enter')
+                assert await page.locator('#shiftForm').is_visible()
+                with fixture.engine.inner.connect() as conn:
+                    assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == (24 if mobile else 0)
+                assert 'Найдено: 1 из 108' in await page.locator('#scheduleRosterCount').inner_text()
+                assert await page.locator('#shiftForm [name=userId]').input_value() == previous
+                await page.locator('#shiftForm [name=userId]').select_option('112')
+                await roster_search.fill('несуществующее имя')
+                assert 'Найдено: 0 из 108' in await page.locator('#scheduleRosterCount').inner_text()
+                assert await page.locator('#shiftForm [name=userId]').input_value() == '112'
+                await roster_search.fill('')
+                assert await page.locator('#shiftForm [name=userId] option').count() == 108
+                assert await page.locator('#shiftForm [name=userId]').input_value() == '112'
+                await page.get_by_text('Не видите нужного сотрудника?', exact=True).click()
+                assert await page.get_by_text('Inactive · №6: в архиве', exact=False).count() == 1
+                assert await page.get_by_text('No role · №7: назначьте роль', exact=False).count() == 1
                 await page.locator('#shiftForm [name=userId]').select_option('3')
                 tomorrow = fixture.service.today()+timedelta(days=4 if mobile else 1)
                 await page.locator('#shiftForm [name=from]').fill(str(tomorrow))
@@ -109,6 +140,10 @@ async def run():
                 await page.locator('[data-action=append-shift-days]').click()
                 assert await page.locator('.shift-slot').count() == 6
                 assert await page.locator('#shiftForm [name=userId]').count() == 1
+                await page.locator('[data-action=add-shift-slot]').click()
+                assert await page.locator('.shift-slot').count() == 7
+                await page.locator('.shift-slot').last.locator('[data-action=remove-shift-slot]').click()
+                assert await page.locator('.shift-slot').count() == 6
                 await page.screenshot(path=str(qa/f'schedule-period-{mobile}.png'),full_page=True)
                 await page.locator('#shiftForm [type=submit]').click()
                 await page.locator('#sheet[open]').wait_for(state='hidden')
@@ -119,6 +154,30 @@ async def run():
                 # Group editor: separate templates must preserve other employees' rows.
                 await page.locator('[data-action=new-team-shift]').click()
                 await page.locator('#shiftForm').wait_for()
+                assert await page.locator('#shiftForm [name=teamUser]').count() == 108
+                assert await page.locator('#shiftForm [data-roster-search]').input_value() == ''
+                await page.locator('#shiftForm [data-roster-search]').fill('№112')
+                assert await page.locator('[data-roster-person]:visible').count() == 1, await page.locator('[data-roster-person]').evaluate_all('(rows)=>rows.slice(0,3).map(row=>({id:row.dataset.rosterPerson,hidden:row.hidden,display:getComputedStyle(row).display}))')
+                await page.locator('[data-action=select-roster-visible]').click()
+                assert await page.locator('[name=teamUser][value="112"]').is_checked()
+                await page.locator('#shiftForm [data-roster-search]').fill('User 3')
+                assert await page.locator('[data-roster-person]:visible').count() == 1
+                assert await page.locator('[name=teamUser][value="112"]').is_checked()
+                await page.locator('[data-action=select-roster-visible]').click()
+                assert 'Выбрано: 2' in await page.locator('#scheduleRosterCount').inner_text()
+                await page.locator('[data-action=clear-roster-visible]').click()
+                assert 'Выбрано: 1' in await page.locator('#scheduleRosterCount').inner_text()
+                await page.locator('#shiftForm [data-roster-search]').fill('№112')
+                await page.locator('[data-action=clear-roster-visible]').click()
+                await page.locator('#shiftForm [data-roster-search]').fill('')
+                assert await page.locator('[data-roster-person]:visible').count() == 108
+                assert 'Выбрано: 0' in await page.locator('#scheduleRosterCount').inner_text()
+                assert await page.evaluate('document.querySelector("#sheetContent").scrollWidth <= document.querySelector("#sheetContent").clientWidth')
+                assert await page.locator('[data-roster-person]').evaluate_all('''rows=>rows.every((row,index)=>{
+                    const box=row.getBoundingClientRect(),text=row.querySelector('span').getBoundingClientRect();
+                    return text.top>=box.top&&text.bottom<=box.bottom+1&&(!index||rows[index-1].getBoundingClientRect().bottom<=box.top+1);
+                })'''), 'Long employee names must fit their own rows, including at 320px.'
+                await page.screenshot(path=str(qa/f'roster-all-108-{mobile}.png'),full_page=True)
                 team_day = fixture.service.today()+timedelta(days=10 if mobile else 7)
                 await page.locator('#shiftForm [name=from]').fill(str(team_day))
                 await page.locator('#shiftForm [name=to]').fill(str(team_day+timedelta(days=2)))
@@ -175,7 +234,10 @@ async def run():
             await browser.close()
         print(json.dumps({'status':'PASS','forms':'desktop and mobile','checks':
             ['Telegram bootstrap','personal password setup','password login','wrong password',
-             'switch account','one employee for three days and two hotels','three employees across three days and two hotels','group overlap rejected before save','no page errors']},ensure_ascii=False))
+             'switch account','all 108 employees in plus and team editors','search last employee without changing selection',
+             'search keeps hidden team selections','add and remove shift buttons',
+             'one employee for three days and two hotels','three employees across three days and two hotels',
+             'group overlap rejected before save','320px layout without roster overflow','no page errors']},ensure_ascii=False))
     finally:
         await runner.cleanup()
         await fixture.asyncTearDown()

@@ -191,3 +191,51 @@ def test_history_endpoint_is_scoped_and_shows_additive_totals():
         finally:
             await engine.dispose()
     asyncio.run(run())
+
+
+def test_pending_sale_listing_keeps_counts_amount_and_responsible_employee():
+    """An unfinished sale remains visible before any Sale row has been created."""
+    class Request(dict):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.query = {}
+
+    async def run():
+        engine, factory = await fixture()
+        try:
+            async with factory() as session:
+                actor = await session.get(User, 1)
+                booking = await create_booking_record(session, actor, booking_data())
+                booking.photographer_id = 2
+                booking.status = 'READY_FOR_SALE'
+                draft = await start_sale_draft(session, actor, {'MANAGER'}, booking.id)
+                await capture_draft_receipt(session, actor, draft, 'receipt', 'unique', 'hash', {'status': 'unavailable'})
+                from app.models import Receipt
+                session.add(Receipt(booking_id=booking.id, uploaded_by_id=actor.id, purpose='DEPOSIT',
+                    file_id='deposit', file_unique_id='deposit', expected_amount=Decimal(400),
+                    verified_amount=Decimal(400), status='APPROVED'))
+                await session.flush()
+                await set_sale_counts(session, actor, draft, 150, 2)
+                session.add(SaleDraftPhoto(draft_id=draft.id, telegram_file_id='selected',
+                    telegram_unique_id='selected', storage_path='app:/sales/one.jpg', sha256='one', byte_size=100))
+                # Future bookings fill the recent-booking cap; the older open
+                # draft must still be returned without an explicit lookup.
+                session.add_all(Booking(hotel_id=booking.hotel_id, client_id=booking.client_id,
+                    room=f'future-{n}', shoot_date=date(2030, 1, 1), shoot_time=booking.shoot_time,
+                    package_id=booking.package_id, manager_id=actor.id) for n in range(201))
+                await session.commit()
+            api = Workflow(SimpleNamespace(engine=engine, today=lambda: date(2026, 10, 16)))
+            response = json.loads((await api.listing(Request(miniapp_actor={'id': 1, 'roles': ['MANAGER']}))).text)
+            assert len(response['bookings']) == 201
+            row = next(row for row in response['bookings'] if row['id'] == booking.id)
+            assert row['sales'] == [] and row['soldTotal'] == 0 and Decimal(row['salesAmount']) == 0
+            assert row['totalFrames'] == 150
+            assert row['draft']['status'] == 'AWAITING_SELECTED'
+            assert row['draft']['selected'] == 1 and row['draft']['sold'] == 2
+            assert row['draft']['total'] == 150 and row['draft']['amount'] == '800.00'
+            assert row['draft']['expectedAmount'] == '400.00'
+            assert row['draft']['createdByName'] == 'Manager'
+            assert row['draft']['receiptStored'] is True
+        finally:
+            await engine.dispose()
+    asyncio.run(run())

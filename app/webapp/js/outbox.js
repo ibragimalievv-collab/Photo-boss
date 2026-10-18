@@ -1,6 +1,6 @@
 import {api} from './api.js';
 import {localAction,openLocal} from './localstore.js';
-let userId=null,running=false,timer=null,retryDue=0,rerunRequested=false,authEpoch=0;
+let userId=null,running=false,timer=null,retryDue=0,rerunRequested=false,authEpoch=0,queueRepairing=false;
 const scheduleRetry=delay=>{
  const wait=Math.min(2147483647,Math.max(1000,delay)),due=Date.now()+wait;
  // Keep the earliest wake-up: a later blocked row must not postpone an earlier one.
@@ -21,10 +21,49 @@ const legacyMediaError=row=>row.status==='error'&&row.errorStatus===400&&row.leg
 const renewedAuth=row=>row.status==='error'&&row.errorStatus===401&&(row.authEpoch||0)<authEpoch;
 // A sale's receipt, counts, selected photos and completion share one draft key.
 // Their server-side stages must stay ordered while unrelated files keep moving.
-const saleChain=row=>row.kind==='sale_start'?row.key:row.kind?.startsWith('sale_')?row.data?.draft?.key:null;
+const saleChain=row=>row.kind==='sale_start'?row.key:row.kind?.startsWith('sale_')?(row.data?.draft?.key||(row.data?.draft?.id?'draft:'+row.data.draft.id:null)):null;
+const countCompletionError=row=>row?.kind==='sale_complete'&&row.status==='error'&&row.errorStatus===409&&(
+ /^Сначала загрузите все выбранные фотографии: \d+\/\d+\.$/.test(row.error||'')||
+ /^Загружено \d+ выбранных кадров, а продано указано \d+\. Исправьте количество кадров в этой продаже\.$/.test(row.error||'')||
+ /^Полная съёмка содержит \d+ кадров\. Общее количество менять нельзя\.$/.test(row.error||'')||
+ row.error==='Количество проданных кадров изменилось. Проверьте продажу.');
+export function saleQueueRepairable(rows){
+ const completions=rows.filter(row=>row?.kind==='sale_complete'),complete=completions[0];
+ return Boolean(rows.length>1&&rows.every(Boolean)&&completions.length===1&&countCompletionError(complete)&&
+  rows.some(row=>row.kind==='sale_start'&&row.result?.draftId)&&rows.every(row=>row===complete||row.status==='synced')&&
+  (!complete.resumeByKey||rows.some(row=>row.key===complete.resumeByKey&&row.status==='synced')));
+}
+export async function repairSaleQueue(keys,{draftId,total,sold,price},files=[]){
+ if(running||queueRepairing)throw new Error('Дождитесь завершения текущей отправки, затем исправьте продажу.');
+ queueRepairing=true;let committed=false;
+ try{
+ const actor=userId,all=await outboxRows(),rows=keys.map(key=>all.find(row=>row.key===key));
+ const complete=rows.find(row=>row?.kind==='sale_complete'),start=rows.find(row=>row?.kind==='sale_start');
+ if(!actor||!saleQueueRepairable(rows)||start.result.draftId!==draftId||!Number.isInteger(total)||!Number.isInteger(sold)||sold<1||sold>total||total>10000)
+  throw new Error('Исправление недоступно: сначала дождитесь результата всех фото и чека.');
+ if(complete.resumeByKey&&!all.some(row=>row.key===complete.resumeByKey&&row.status==='synced'))throw new Error('Предыдущее исправление ещё отправляется.');
+ for(const file of files)if(!file||!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>20*1024*1024)throw new Error('Нужен JPEG, PNG или WebP до 20 МБ.');
+ const at=Date.now(),draft={id:draftId},items=[{kind:'sale_counts',data:{draft,total,sold,price}},...files.map(blob=>({kind:'sale_selected',data:{draft},blob}))];
+ const added=items.map((item,order)=>({...item,key:crypto.randomUUID(),userId:actor,date:complete.date,blob:item.blob||null,filename:item.blob?.name||'',status:'local',createdAt:at,order}));
+ const last=added[added.length-1];last.resumeCompleteKey=complete.key;
+ // Only local recovery metadata changes. The original completion key and its
+ // request payload remain untouched; accepted receipt/photo operations stay put.
+ complete.resumeByKey=last.key;
+ if(actor!==userId||running)throw new Error('Состояние отправки изменилось. Откройте исправление продажи ещё раз.');
+ await localAction('operations','readwrite',store=>{for(const row of added)store.add(row);store.put(complete);});
+ committed=true;changed();return added;
+ }finally{queueRepairing=false;if(committed||rerunRequested)void flushOutbox();}
+}
+async function resumeRepairedCompletion(repair){
+ if(repair.userId!==userId||repair.status!=='synced'||!repair.resumeCompleteKey)return;
+ const complete=await localAction('operations','readonly',store=>store.get(repair.resumeCompleteKey));
+ if(complete?.userId!==userId||complete.resumeByKey!==repair.key||complete.repairAppliedKey===repair.key||!countCompletionError(complete))return;
+ complete.status='local';complete.error='';complete.errorStatus=0;complete.retryAt=0;complete.repairAppliedKey=repair.key;
+ await update(complete);rerunRequested=true;changed();
+}
 const SALE_DEPENDENCY_RECOVERY='sale-dependency-recovery-v1-20261017';
 function legacySaleDependency(row,previous){
- if(row.status!=='error'||row.errorStatus!==409||row.saleDependencyRecovery===SALE_DEPENDENCY_RECOVERY)return false;
+ if(row.resumeByKey||row.status!=='error'||row.errorStatus!==409||row.saleDependencyRecovery===SALE_DEPENDENCY_RECOVERY)return false;
  const required={sale_counts:'sale_receipt',sale_selected:'sale_counts',sale_complete:'sale_selected'}[row.kind];
  const stageError=row.kind==='sale_counts'?row.error==='Черновик продажи уже закрыт.':row.kind==='sale_selected'?row.error==='Сначала сохраните чек и количество кадров.':row.kind==='sale_complete'&&(row.error==='Продажа уже завершена или отменена.'||/^Сначала загрузите все выбранные фотографии: \d+\/\d+\.$/.test(row.error||''));
  // Old clients sent later sale stages after a receipt/photo failed. Recheck
@@ -111,13 +150,17 @@ export async function syncOutboxNow(){
 export async function flushOutbox(){
  if(!userId)return {state:'no-account'};
  if(!navigator.onLine)return {state:'offline'};
- if(running){rerunRequested=true;return {state:'running'};}
+ if(running||queueRepairing){rerunRequested=true;return {state:'running'};}
  rerunRequested=false;
  running=true;
  const actor=userId,summary={state:'done',completed:0,failed:0,temporary:0},blockedSales=new Set(),saleSteps=new Map();
  try{
+  // A tab may close after the correction was accepted but before its original
+  // completion was reactivated. Recover that link on the next foreground pass.
+  for(const repair of await outboxRows())if(repair.status==='synced'&&repair.resumeCompleteKey)await resumeRepairedCompletion(repair);
   for(const item of await outboxRows()){
    if(actor!==userId)break;
+   if(item.resumeByKey){const repair=await localAction('operations','readonly',store=>store.get(item.resumeByKey));if(repair?.status!=='synced')continue;}
    const sale=saleChain(item);
    if(sale&&blockedSales.has(sale))continue;
    const previous=sale?saleSteps.get(sale)||[]:[];
@@ -166,7 +209,7 @@ export async function flushOutbox(){
     if(e.status===401)break;
     continue;
    }
-   await update(row);changed();
+   await update(row);changed();if(row.resumeCompleteKey)await resumeRepairedCompletion(row);
   }
  }finally{running=false;changed();if(userId&&(userId!==actor||rerunRequested))void flushOutbox();}
  return summary;

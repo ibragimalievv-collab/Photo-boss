@@ -55,3 +55,25 @@ assert.equal(browser.sent[0].headers['X-Telegram-Init-Data'],undefined);
 assert.equal(browser.sent[0].headers['X-PhotoBoss-Owner-Launch'],undefined);
 assert.equal(browser.sent[0].headers['X-PhotoBoss-Session'],'1');
 console.log('PASS: confirmed browser login uses the new session instead of old launch credentials');
+
+async function rosterScenario({online,allowSnapshot}){
+ let fetches=0,error,result;
+ const context=vm.createContext({URL,URLSearchParams,FormData,AbortController,Date,Number,Promise,setTimeout,clearTimeout,atob,
+  allowSnapshot,navigator:{onLine:online},location:{hash:'#home',origin:'https://photo-boss.onrender.com'},
+  window:{Telegram:{WebApp:{initData:fresh}},dispatchEvent(){}},
+  sessionStorage:{getItem:()=>null,setItem(){},removeItem(){}},
+  fetch:async(url,options)=>{fetches++;assert.equal(options.allowSnapshot,undefined);throw new TypeError('Network unavailable');}});
+ vm.runInContext(source.replace('const readSnapshot=async()=>null,','const readSnapshot=async()=>({marker:"old roster"}),'),context);
+ try{result=await vm.runInContext("api('/schedule',{allowSnapshot})",context);}catch(caught){error=caught;}
+ return {result,error,fetches};
+}
+for(const online of [false,true]){
+ const cached=await rosterScenario({online,allowSnapshot:true});
+ assert.equal(cached.result.marker,'old roster');
+ const current=await rosterScenario({online,allowSnapshot:false});
+ assert.equal(current.result,undefined);
+ assert.equal(current.error.name,'Error');
+ assert.equal(current.error.status,0);
+ assert.equal(current.fetches,online?1:0);
+}
+console.log('PASS: schedule editor requires a fresh employee roster during offline and network failure');

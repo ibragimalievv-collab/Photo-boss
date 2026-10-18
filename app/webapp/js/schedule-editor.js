@@ -1,19 +1,61 @@
-import {esc,addDays,dateLabel} from './domain.js';
+import {esc,addDays,dateLabel,ROLE_NAMES} from './domain.js';
 
 const field=(label,input)=>`<label class="field"><span>${label}</span>${input}</label>`;
 let hotels=[],employees=[],minimum='',team=false;
-const employeeOptions=selected=>employees.map(e=>`<option value="${e.id}" ${String(selected)===String(e.id)?'selected':''}>${esc(e.name)}</option>`).join('');
+const employeeLabel=e=>`${e.name}${e.roles?.length?' · '+e.roles.map(role=>ROLE_NAMES[role]||role).join(' / '):''} · №${e.id}`;
+const employeeOptions=selected=>employees.map(e=>`<option value="${e.id}" ${String(selected)===String(e.id)?'selected':''}>${esc(employeeLabel(e))}</option>`).join('');
 const hotelOptions=selected=>hotels.map(h=>`<option value="${h.id}" ${String(selected)===String(h.id)?'selected':''}>${esc(h.name)}</option>`).join('');
+const searchable=value=>String(value).toLocaleLowerCase('ru').replaceAll('ё','е').trim();
+function rosterPicker(){
+ return `<section class="schedule-roster form-grid" aria-label="Выбор сотрудников">${field('Поиск сотрудника по имени, роли или номеру', '<input class="input" type="search" data-roster-search placeholder="Имя, роль или номер" autocomplete="off" aria-describedby="scheduleRosterCount">')}<p id="scheduleRosterCount" class="small" role="status" aria-live="polite">Показаны все: ${employees.length}.${team?' Выбрано: 0.':''}</p>${team?`<div class="row wrap"><button class="btn small ghost" type="button" data-action="select-roster-visible">Выбрать найденных</button><button class="btn small ghost" type="button" data-action="clear-roster-visible">Снять выбор найденных</button></div><div class="schedule-roster-list" role="group" aria-label="Сотрудники для общего графика">${employees.map(e=>`<label class="schedule-roster-person" data-roster-person="${e.id}"><input type="checkbox" name="teamUser" value="${e.id}"><span>${esc(employeeLabel(e))}</span></label>`).join('')}</div>`:field('Сотрудник · один на весь график',`<select name="userId" class="input" required aria-describedby="scheduleRosterCount">${employeeOptions()}</select>`)}</section>`;
+}
+function filterRoster(form){
+ const query=searchable(form.querySelector('[data-roster-search]')?.value||'');
+ const found=employees.filter(e=>searchable(employeeLabel(e)).includes(query));
+ const foundIds=new Set(found.map(e=>String(e.id)));
+ const group=form.dataset.team==='true',select=form.elements.userId;
+ let preserved=false;
+ if(group){
+  for(const row of form.querySelectorAll('[data-roster-person]'))row.hidden=!foundIds.has(row.dataset.rosterPerson);
+ }else if(select){
+  const selected=String(select.value),current=employees.find(e=>String(e.id)===selected);
+  preserved=Boolean(current&&!foundIds.has(selected));
+  const visible=preserved?[current,...found]:found;
+  select.innerHTML=visible.map(e=>`<option value="${e.id}" ${selected===String(e.id)?'selected':''}>${preserved&&selected===String(e.id)?'Выбран: ':''}${esc(employeeLabel(e))}</option>`).join('');
+  select.value=selected;
+ }
+ const count=form.querySelector('#scheduleRosterCount');
+ if(count)count.textContent=`${query?`Найдено: ${found.length} из ${employees.length}.`:`Показаны все: ${employees.length}.`}${group?` Выбрано: ${form.querySelectorAll('[name=teamUser]:checked').length}.`:preserved?' Выбранный сотрудник сохранён.':''}`;
+}
+// The dialog is recreated when it opens; delegate so search never keeps an old
+// roster or loses checked employees when a different search hides their rows.
+document.addEventListener('input',event=>{
+ const form=event.target.closest?.('#shiftForm');
+ if(form&&(event.target.matches('[data-roster-search]')||['teamUser','userId'].includes(event.target.name)))filterRoster(form);
+});
+document.addEventListener('keydown',event=>{
+ if(event.key==='Enter'&&event.target.matches?.('#shiftForm [data-roster-search]'))event.preventDefault();
+});
+function rosterInfo(data){
+ const unavailable=data.unavailableEmployees||[];
+ return `<section class="panel panel-pad"><p class="small" role="status">Доступно сотрудников: ${employees.length}. Список получен с сервера.</p><details><summary>Не видите нужного сотрудника?</summary><p class="small">В график входят активные фотографы и менеджеры по записи. Привязка к отелю и наличие других смен не скрывают сотрудника.</p>${unavailable.length?`<ul class="small">${unavailable.map(e=>`<li>${esc(employeeLabel(e))}: ${e.reason==='inactive'?'в архиве — восстановите сотрудника':'назначьте роль «Фотограф» или «Менеджер по записи»'}.</li>`).join('')}</ul>`:'<p class="small">Все зарегистрированные сотрудники с рабочей ролью доступны.</p>'}<button class="btn ghost" type="button" data-action="people">Сотрудники и роли</button></details></section>`;
+}
 function slotMarkup({hotelId=hotels[0]?.id,date=minimum,start='09:00',end='19:00',userId=employees[0]?.id}={}){
  return `<fieldset class="shift-slot panel panel-pad"><legend>${esc(dateLabel(date,{weekday:'short',day:'numeric',month:'short'}))}</legend><div class="form-row">${team?field('Сотрудник',`<select class="input" data-slot="userId" required>${employeeOptions(userId)}</select>`):''}${field('Дата',`<input type="date" class="input" data-slot="date" value="${esc(date)}" min="${minimum}" required>`)}${field('Отель',`<select class="input" data-slot="hotelId" required>${hotelOptions(hotelId)}</select>`)}</div><div class="form-row">${field('Начало · Москва',`<input type="time" class="input" data-slot="start" value="${esc(start)}" required>`)}${field('Окончание · Москва',`<input type="time" class="input" data-slot="end" value="${esc(end)}" required>`)}</div><button class="btn small ghost" type="button" data-action="remove-shift-slot">Удалить смену</button></fieldset>`;
 }
 export function scheduleEditor(data,day,today,group=false){
- hotels=data.hotels;employees=data.employees;team=group;minimum=today;day=day<today?today:day;
- return `<form id="shiftForm" class="form-grid" data-team="${team}">${team?`<p class="small">Выберите сотрудников для шаблона. Уже добавленные смены других сотрудников сохранятся.</p><div class="row wrap">${employees.map(e=>`<label><input type="checkbox" name="teamUser" value="${e.id}"> ${esc(e.name)}</label>`).join('')}</div>`:field('Сотрудник · один на весь график',`<select name="userId" class="input" required>${employeeOptions()}</select>`)}<div class="form-row">${field('С даты',`<input type="date" class="input" name="from" value="${day}" min="${today}" required>`)}${field('По дату',`<input type="date" class="input" name="to" value="${day}" min="${today}" required>`)}</div><div class="row wrap">${[['1','Пн'],['2','Вт'],['3','Ср'],['4','Чт'],['5','Пт'],['6','Сб'],['0','Вс']].map(([n,label])=>`<label><input type="checkbox" name="weekday" value="${n}" checked> ${label}</label>`).join('')}</div><details><summary>Шаблон для выбранных дней</summary><div class="form-grid section">${field('Отель по шаблону',`<select class="input" name="templateHotel">${hotelOptions()}</select>`)}<div class="form-row">${field('Начало','<input type="time" name="templateStart" class="input" value="09:00" required>')}${field('Окончание','<input type="time" name="templateEnd" class="input" value="19:00" required>')}</div><button class="btn ghost" type="button" data-action="fill-shift-days">Заполнить период по шаблону</button><button class="btn ghost" type="button" data-action="append-shift-days">Добавить ещё один шаблон к периоду</button></div></details><p class="small">До 31 дня. В каждой смене можно изменить отель и время. Для второго отеля в тот же день добавь ещё одну смену.</p><div id="shiftSlots" class="stack">${team?'':slotMarkup({date:day})}</div><button class="btn ghost" type="button" data-action="add-shift-slot">Добавить смену</button><p id="formError" class="form-error" hidden></p><button class="btn primary" type="submit">Сохранить весь график</button></form>`;
+ hotels=data.hotels||[];employees=data.employees||[];team=group;minimum=today;day=day<today?today:day;
+ const roster=rosterInfo(data);
+ if(!employees.length||!hotels.length)return `${roster}<p>${!hotels.length?'Добавьте активный отель. ':''}${!employees.length?'Восстановите сотрудника из архива или назначьте ему рабочую роль.':''}</p><button class="btn primary" type="button" data-action="people">Открыть сотрудников</button>`;
+ return `${roster}<form id="shiftForm" class="form-grid" data-team="${team}">${team?'<p class="small">Выберите сотрудников для шаблона. Уже добавленные смены других сотрудников сохранятся. Поиск не снимает выбранных сотрудников.</p>':''}${rosterPicker()}<div class="form-row">${field('С даты',`<input type="date" class="input" name="from" value="${day}" min="${today}" required>`)}${field('По дату',`<input type="date" class="input" name="to" value="${day}" min="${today}" required>`)}</div><div class="row wrap">${[['1','Пн'],['2','Вт'],['3','Ср'],['4','Чт'],['5','Пт'],['6','Сб'],['0','Вс']].map(([n,label])=>`<label><input type="checkbox" name="weekday" value="${n}" checked> ${label}</label>`).join('')}</div><details><summary>Шаблон для выбранных дней</summary><div class="form-grid section">${field('Отель по шаблону',`<select class="input" name="templateHotel">${hotelOptions()}</select>`)}<div class="form-row">${field('Начало','<input type="time" name="templateStart" class="input" value="09:00" required>')}${field('Окончание','<input type="time" name="templateEnd" class="input" value="19:00" required>')}</div><button class="btn ghost" type="button" data-action="fill-shift-days">Заполнить период по шаблону</button><button class="btn ghost" type="button" data-action="append-shift-days">Добавить ещё один шаблон к периоду</button></div></details><p class="small">До 31 дня. В каждой смене можно изменить отель и время. Для второго отеля в тот же день добавь ещё одну смену.</p><div id="shiftSlots" class="stack">${team?'':slotMarkup({date:day})}</div><button class="btn ghost" type="button" data-action="add-shift-slot">Добавить смену</button><p id="formError" class="form-error" hidden></p><button class="btn primary" type="submit">Сохранить весь график</button></form>`;
 }
 
 export function scheduleEditorAction(name,button){
  const form=document.querySelector('#shiftForm'),host=form?.querySelector('#shiftSlots');if(!host)return false;
+ if(['select-roster-visible','clear-roster-visible'].includes(name)){
+  for(const row of form.querySelectorAll('[data-roster-person]:not([hidden])'))row.querySelector('input').checked=name==='select-roster-visible';
+  filterRoster(form);return true;
+ }
  if(name==='remove-shift-slot'){button.closest('.shift-slot').remove();return true;}
  const slot={date:form.elements.from.value,hotelId:form.elements.templateHotel.value,start:form.elements.templateStart.value,end:form.elements.templateEnd.value};
  const selected=team?Array.from(form.querySelectorAll('[name=teamUser]:checked'),e=>e.value):[null];

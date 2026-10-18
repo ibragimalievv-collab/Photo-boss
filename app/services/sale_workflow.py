@@ -1,4 +1,5 @@
 """Sale workflow helpers: photographer percentage is final only after full-shoot upload."""
+import json
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -164,7 +165,6 @@ async def start_sale_draft(session, actor, roles, booking_id):
 
 
 async def capture_draft_receipt(session, actor, draft, file_id, unique_id, digest, analysis):
-    import json
     if draft.created_by_id != actor.id or draft.status != 'AWAITING_RECEIPT':
         raise ValueError('Этот черновик продажи уже закрыт.')
     op_key = operation_key(analysis.get('fields', {}))
@@ -204,10 +204,15 @@ async def validate_remaining_photos(session, booking, total, sold):
 
 
 async def set_sale_counts(session, actor, draft, total, sold):
-    if draft.created_by_id != actor.id or draft.status != 'AWAITING_COUNTS':
+    if draft.created_by_id != actor.id or draft.status not in {'AWAITING_COUNTS', 'AWAITING_SELECTED'}:
         raise ValueError('Черновик продажи уже закрыт.')
     if type(total) is not int or type(sold) is not int or not 0 < sold <= total <= 10000:
         raise ValueError('Проверьте общее и проданное количество кадров.')
+    accepted = await selected_count(session, draft.id)
+    if sold < accepted:
+        raise ValueError(f'Уже загружено {accepted} выбранных кадров. Проданное количество не может быть меньше; сохранённые фото не удалены.')
+    before_counts = (draft.declared_photo_count, draft.sold_photos)
+    correcting = draft.status == 'AWAITING_SELECTED'
     booking = await session.get(Booking, draft.booking_id)
     package = await session.get(Package, booking.package_id)
     if package is None:
@@ -223,6 +228,11 @@ async def set_sale_counts(session, actor, draft, total, sold):
     draft.sold_photos = sold
     draft.expected_amount = expected or None
     draft.status = 'AWAITING_SELECTED'
+    if correcting and before_counts != (total, sold):
+        await audit(session, actor, 'sale_counts_corrected', 'sale_draft', draft.id,
+                    json.dumps({'before': {'declared_photo_count': before_counts[0], 'sold_photos': before_counts[1]},
+                                'after': {'declared_photo_count': total, 'sold_photos': sold}, 'selected': accepted},
+                               ensure_ascii=False))
     return amount
 
 
@@ -242,6 +252,8 @@ async def complete_sale(session, actor, draft_id):
     if draft.status != "AWAITING_SELECTED":
         raise ValueError("Продажа уже завершена или отменена.")
     count = await selected_count(session, draft.id)
+    if draft.sold_photos and count > draft.sold_photos:
+        raise ValueError(f'Загружено {count} выбранных кадров, а продано указано {draft.sold_photos}. Исправьте количество кадров в этой продаже.')
     if not draft.sold_photos or count != draft.sold_photos:
         raise ValueError(f"Сначала загрузите все выбранные фотографии: {count}/{draft.sold_photos or 0}.")
     already_sold = await session.scalar(select(func.coalesce(func.sum(Sale.sold_photos), 0)).where(Sale.booking_id == booking.id))

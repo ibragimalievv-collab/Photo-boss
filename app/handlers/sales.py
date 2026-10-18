@@ -359,15 +359,30 @@ async def selected_photo(m, state, current_user):
         await storage.ensure_dir(selected_dir)
         path = selected_dir + f"/{current + 1}_{digest[:12]}.{ext}"
         await storage.upload_bytes(path, payload, content_type=mime)
-    except (OSError, ValueError, YandexDiskError):
+    except (OSError, ValueError, YandexDiskError, TelegramAPIError, aiohttp.ClientError, TimeoutError):
         return await m.answer(
             "Не удалось сохранить выбранный кадр. Повторите отправку чуть позже."
         )
 
     async with Session() as session:
         draft = await session.get(SaleDraft, draft_id, with_for_update=True)
-        if draft is None or draft.status != "AWAITING_SELECTED":
+        if (draft is None or draft.created_by_id != current_user.id
+                or draft.status != "AWAITING_SELECTED"):
             return await m.answer("Черновик продажи уже закрыт.")
+        # Album items upload concurrently; capacity must be checked again under
+        # the draft lock after Disk I/O, otherwise a one-photo sale can receive
+        # two rows and become impossible to complete.
+        current = await selected_count(session, draft.id)
+        if current >= (draft.sold_photos or 0):
+            return await m.answer(
+                "Все выбранные фотографии уже загружены. Нажмите «Выбранные загружены».",
+                reply_markup=inline([[("✅ Выбранные загружены", f"sale:finalize:{draft.id}", "success")]]),
+            )
+        duplicate = await session.scalar(select(SaleDraftPhoto.id).where(
+            SaleDraftPhoto.draft_id == draft.id, SaleDraftPhoto.sha256 == digest,
+        ).limit(1))
+        if duplicate:
+            return await m.answer("Этот выбранный кадр уже загружен.")
         try:
             session.add(
                 SaleDraftPhoto(
