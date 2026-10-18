@@ -14,6 +14,8 @@ class ScheduleBatchTests(unittest.IsolatedAsyncioTestCase):
         await self.fixture.asyncSetUp()
         self.api = self.fixture.service
         self.day = self.api.today()
+        with self.fixture.engine.inner.begin() as conn:
+            conn.execute(text('INSERT INTO hotel_employees VALUES (2,1),(2,2)'))
 
     async def asyncTearDown(self):
         await self.fixture.asyncTearDown()

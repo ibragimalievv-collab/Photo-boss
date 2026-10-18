@@ -464,6 +464,8 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         assert "PBIC-2026-000003-ABCD" in response.text
 
     async def test_schedule_conflicts_cancellation_and_scope(self):
+        with self.engine.inner.begin() as conn:
+            conn.execute(text('INSERT INTO hotel_employees VALUES (2,1)'))
         day = str(self.service.today() + timedelta(days=1))
         body = {"userId": "3", "hotelId": "1", "date": day, "start": "09:00", "end": "19:00"}
         status, data, _ = await self.call("/schedule", uid=1002, method="POST", body=body)

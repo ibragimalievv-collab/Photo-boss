@@ -105,6 +105,27 @@ function fixture(api){
  }
  assert.equal(f.rows.get('denied').status,'error');
 }
+// A duplicate receipt is a definitive rejection, so replace it in this sale
+// instead of stranding all selected photos behind a permanently bad receipt.
+{
+ const f=fixture(async()=>({ok:true})),draft={key:'start'};
+ f.add('start',{kind:'sale_start',status:'synced',blob:null,result:{draftId:3}});
+ f.add('receipt',{kind:'sale_receipt',status:'error',errorStatus:409,error:'Этот чек уже использовался или похож на ранее загруженный.',data:{draft}});
+ f.add('selected',{kind:'sale_selected',data:{draft}});
+ f.add('complete',{kind:'sale_complete',blob:null,data:{draft}});
+ assert.equal(await f.run('canReplaceOperationFile(rows.get("receipt"))'),true);
+ await f.run('replaceOperationFile("receipt",new Blob(["new receipt"],{type:"image/jpeg"}))');
+ assert.deepEqual(f.calls,['receipt','selected','complete']);assert.equal(f.rows.size,4);
+ assert.ok([...f.rows.values()].every(row=>row.status==='synced'));
+}
+// A lost receipt response may already be accepted. Never substitute another
+// check for it, nor for arbitrary access/conflict errors.
+for(const [status,message] of [[503,'Timeout'],[409,'Этот черновик продажи уже закрыт.'],[403,'Нет доступа']]){
+ const f=fixture(async()=>({}));
+ f.add('receipt',{kind:'sale_receipt',status:'error',errorStatus:status,error:message,data:{draft:{key:'start'}}});
+ await assert.rejects(f.run('replaceOperationFile("receipt",new Blob(["other"],{type:"image/jpeg"}))'),/Этот файл нельзя заменять/);
+ assert.equal(await f.rows.get('receipt').blob.text(),'original');assert.equal(f.calls.length,0);
+}
 // A genuine closed sale is rechecked at most once. Financial/duplicate conflicts
 // and an unproven chain never qualify for automatic legacy recovery.
 {
@@ -118,6 +139,43 @@ function fixture(api){
  await f.run('flushOutbox()');await f.run('flushOutbox()');
  assert.deepEqual(f.calls,['closed-counts']);
  for(const key of ['closed-counts','price-change','duplicate','unproven'])assert.equal(f.rows.get(key).status,'error');
+}
+// An original upload may close while a sale form still has an older total.
+// Rejected counts previously locked the form before even its first photo.
+{
+ const f=fixture(async op=>op.kind==='sale_complete'?{saleId:12,amount:'400.00',soldPhotos:1}:{draftId:3}),draft={key:'stale-start'},keys=['stale-start','saved-receipt','wrong-total','queued-photo','queued-complete'];
+ f.add('stale-start',{kind:'sale_start',status:'synced',blob:null,data:{booking:{id:7}},result:{draftId:3}});
+ f.add('saved-receipt',{kind:'sale_receipt',status:'synced',blob:null,data:{draft}});
+ f.add('wrong-total',{kind:'sale_counts',status:'error',blob:null,data:{draft,total:150,sold:1,price:'400.00'},errorStatus:409,error:'Полная съёмка содержит 1 кадров. Общее количество менять нельзя.'});
+ f.add('queued-photo',{kind:'sale_selected',data:{draft}});
+ f.add('queued-complete',{kind:'sale_complete',blob:null,data:{draft,price:'400.00'}});
+ const receipt=JSON.stringify(f.rows.get('saved-receipt')),originalPhoto=await f.rows.get('queued-photo').blob.text();
+ assert.equal(await f.run('saleQueueRepairable(["stale-start","saved-receipt","wrong-total","queued-photo","queued-complete"].map(key=>rows.get(key)))'),true);
+ const added=await f.run('repairSaleQueue(["stale-start","saved-receipt","wrong-total","queued-photo","queued-complete"],{draftId:3,total:1,sold:1,price:"400.00"})');await settle();
+ assert.equal(added.length,0,'reuse the rejected counts and existing photos instead of creating another sale');
+ assert.deepEqual(f.calls,['wrong-total','queued-photo','queued-complete']);assert.equal(f.rows.size,keys.length);
+ assert.equal(f.rows.get('wrong-total').data.total,1);assert.equal(f.rows.get('queued-complete').status,'synced');
+ assert.equal(JSON.stringify(f.rows.get('saved-receipt')),receipt,'accepted receipt stays unchanged');
+ assert.equal(originalPhoto,'original');
+}
+// Counts that might already have been accepted, or queues with later work in
+// flight, may not be overwritten under an idempotency key.
+for(const laterStatus of ['syncing','synced']){
+ const f=fixture(async()=>({})),draft={key:'start'};
+ f.add('start',{kind:'sale_start',status:'synced',blob:null,result:{draftId:3}});
+ f.add('counts',{kind:'sale_counts',status:'error',blob:null,data:{draft,total:150,sold:1,price:'400.00'},errorStatus:409,error:'Полная съёмка содержит 1 кадров. Общее количество менять нельзя.'});
+ f.add('photo',{kind:'sale_selected',status:laterStatus,data:{draft}});
+ f.add('complete',{kind:'sale_complete',blob:null,data:{draft}});
+ await assert.rejects(f.run('repairSaleQueue(["start","counts","photo","complete"],{draftId:3,total:1,sold:1,price:"400.00"})'),/Исправление недоступно/);
+ assert.equal(f.rows.get('counts').data.total,150);assert.equal(f.calls.length,0);
+}
+{
+ const f=fixture(async()=>({})),draft={key:'start'};
+ f.add('start',{kind:'sale_start',status:'synced',blob:null,result:{draftId:3}});
+ f.add('counts',{kind:'sale_counts',status:'error',blob:null,data:{draft,total:150,sold:1,price:'400.00'},errorStatus:503,error:'Timeout'});
+ f.add('complete',{kind:'sale_complete',blob:null,data:{draft}});
+ await assert.rejects(f.run('repairSaleQueue(["start","counts","complete"],{draftId:3,total:1,sold:1,price:"400.00"})'),/Исправление недоступно/);
+ assert.equal(f.rows.get('counts').data.total,150);assert.equal(f.calls.length,0);
 }
 // Later retry windows must never cancel the earliest pending retry.
 {

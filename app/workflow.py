@@ -347,7 +347,10 @@ class Workflow:
                 path = await self.save_selected(draft, raw)
                 duplicate.storage_path = path
                 duplicate.telegram_file_id = 'ydisk:' + path
-                return result | {'photoId': duplicate.id, 'duplicate': True, 'storageVerified': True}
+                return result | {'photoId': duplicate.id, 'duplicate': True, 'storageVerified': True,
+                    'selectedPhotos': await selected_count(session, draft.id),
+                    'declaredSold': draft.sold_photos, 'declaredTotal': draft.declared_photo_count,
+                    'draftStatus': draft.status}
             if await selected_count(session, draft.id) >= draft.sold_photos:
                 raise AccessError('Все выбранные кадры уже сохранены.', 409)
             if await already_purchased_photo(session, booking.id, digest):
@@ -363,7 +366,9 @@ class Workflow:
             complete = await complete_sale(session, actor, draft.id)
             result |= {'saleId': complete.sale.id, 'amount': str(complete.sale_amount), 'soldPhotos': complete.sale.sold_photos,
                        'paymentStatus': complete.sale.payment_status}
-        return result
+        return result | {'selectedPhotos': await selected_count(session, draft.id),
+            'declaredSold': draft.sold_photos, 'declaredTotal': draft.declared_photo_count,
+            'draftStatus': draft.status}
 
     async def receipt(self, session, actor, roles, data, raw):
         fields(data, 'booking purpose')

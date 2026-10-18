@@ -16,7 +16,7 @@ from pathlib import Path
 from aiohttp import web
 from sqlalchemy import text
 
-from .miniapp_security import AccessError
+from .miniapp_security import AccessError, utc_bounds
 
 WORK_ROLES = frozenset({'PHOTOGRAPHER', 'MANAGER'})
 MAX_JSON = 900_000
@@ -66,6 +66,28 @@ class Attendance:
 
     def now(self):
         return datetime.now(timezone.utc)
+
+    async def day_in_scope(self, conn, actor, user_id, day):
+        """Attendance has no hotel FK: only that day's plan can establish scope.
+
+        Shared or unplanned days stay owner-only; membership/GPS cannot prove
+        which hotel's attendance and possible fine is being reviewed.
+        """
+        if 'OWNER' in actor['roles']:
+            return True
+        lo, hi = utc_bounds(day, day, self.api.tz)
+        rows = await self.api.rows(conn, '''SELECT s.hotel_id,
+            CASE WHEN EXISTS (SELECT 1 FROM hotel_employees he
+                WHERE he.user_id=:actor AND he.hotel_id=s.hotel_id) THEN 1 ELSE 0 END AS allowed
+            FROM shifts s WHERE s.user_id=:uid AND s.status<>'CANCELLED'
+            AND s.start_at<:hi AND s.end_at>:lo''',
+            actor=actor['id'], uid=user_id, lo=lo, hi=hi)
+        return bool(rows) and all(r['allowed'] for r in rows)
+
+    async def require_day_scope(self, conn, actor, user_id, day):
+        if not await self.day_in_scope(conn, actor, user_id, day):
+            raise AccessError('Нет однозначной привязки отметки к назначенным вам отелям. '
+                'Проверить её может владелец; нужен план смены за этот день.', 403)
 
     async def payload(self, request, *, photo=False):
         limit = MAX_JSON if photo else 8192
@@ -259,15 +281,40 @@ class Attendance:
     async def pending(self, request):
         from .people import check_editor
         check_editor(request['miniapp_actor']['roles'])
-        items = []
+        actor, items = request['miniapp_actor'], []
         async with self.api.engine.connect() as conn:
+            scopes = {}
             for purpose in ('start', 'end'):
                 table, _, _, _ = attendance_fields(purpose)
-                rows = await self.api.rows(conn, f'''SELECT s.id,s.user_id,u.name,s.shift_date,s.offline_claimed_at,s.location_received_at,s.latitude,s.longitude
-                    FROM {table} s JOIN users u ON u.id=s.user_id WHERE s.status='PENDING_REVIEW' ORDER BY s.shift_date,s.id LIMIT 200''')
-                items += [dict(r) | {'purpose': purpose, 'shift_date': str(r['shift_date']),
-                    'offline_claimed_at': utc(r['offline_claimed_at']).isoformat(), 'location_received_at': utc(r['location_received_at']).isoformat()} for r in rows]
-        return web.json_response({'items': items})
+                # Filter before the visible-page limit. Foreign hotels must not
+                # fill the first page and hide an administrator's own requests.
+                cursor, visible = None, 0
+                while visible < 200:
+                    where = '' if cursor is None else 'AND (s.shift_date>:cursor_day OR (s.shift_date=:cursor_day AND s.id>:cursor_id))'
+                    rows = await self.api.rows(conn, f'''SELECT s.id,s.user_id,u.name,s.shift_date,s.offline_claimed_at,s.location_received_at,s.latitude,s.longitude
+                        FROM {table} s JOIN users u ON u.id=s.user_id WHERE s.status='PENDING_REVIEW'
+                        {where} ORDER BY s.shift_date,s.id LIMIT 200''',
+                        **({'cursor_day': cursor[0], 'cursor_id': cursor[1]} if cursor else {}))
+                    if not rows:
+                        break
+                    for r in rows:
+                        day = datetime.fromisoformat(str(r['shift_date'])).date()
+                        key = r['user_id'], day
+                        if key not in scopes:
+                            scopes[key] = await self.day_in_scope(conn, actor, key[0], day)
+                        if scopes[key]:
+                            items.append(dict(r) | {'purpose': purpose, 'shift_date': str(r['shift_date']),
+                                'offline_claimed_at': utc(r['offline_claimed_at']).isoformat(),
+                                'location_received_at': utc(r['location_received_at']).isoformat()})
+                            visible += 1
+                            if visible == 200:
+                                break
+                    cursor = rows[-1]['shift_date'], rows[-1]['id']
+                    if len(rows) < 200:
+                        break
+        return web.json_response({'items': items,
+            'scopeNotice': '' if 'OWNER' in actor['roles'] else
+                'Показаны отметки со сменами только в назначенных вам отелях. Без плана или с другими отелями проверяет владелец.'})
 
     async def evidence(self, request):
         from .academy_practice import BoundedPhoto
@@ -275,7 +322,10 @@ class Attendance:
         check_editor(request['miniapp_actor']['roles'])
         table, field, _, _ = attendance_fields(request.match_info['purpose'])
         async with self.api.engine.connect() as conn:
-            rows = await self.api.rows(conn, f'SELECT {field} AS photo FROM {table} WHERE id=:id AND offline_claimed_at IS NOT NULL', id=positive_id(request.match_info['id']))
+            rows = await self.api.rows(conn, f'SELECT user_id,shift_date,{field} AS photo FROM {table} WHERE id=:id AND offline_claimed_at IS NOT NULL', id=positive_id(request.match_info['id']))
+            if rows:
+                await self.require_day_scope(conn, request['miniapp_actor'], rows[0]['user_id'],
+                    datetime.fromisoformat(str(rows[0]['shift_date'])).date())
         if not rows or not rows[0]['photo']:
             raise AccessError('Фото не найдено.', 404)
         buffer = BoundedPhoto()
@@ -296,7 +346,8 @@ class Attendance:
         if when and (when.astimezone(self.api.tz).date() != day or when > self.now()):
             raise AccessError('Подтверждённое время должно относиться к дню смены и не быть будущим.', 400)
         async with self.api.engine.begin() as conn:
-            await People(self.api).current_editor(conn, actor['id'], uid)
+            roles = await People(self.api).current_editor(conn, actor['id'], uid)
+            await self.require_day_scope(conn, actor | {'roles': roles}, uid, day)
             start, end = await self.records(conn, uid, day, lock=True)
             row = start if body['purpose'] == 'start' else end
             if not row or not row['offline_claimed_at']:

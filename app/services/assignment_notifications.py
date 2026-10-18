@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..miniapp_security import AccessError
@@ -55,17 +55,30 @@ async def assignment_items(conn, user_id, today):
              'date': str(r['shoot_date']), 'time': str(r['shoot_time'])[:5], 'room': r['room']} for r in rows]
 
 
+async def _pending_assignment_ids(session):
+    """Scan a fixed queue snapshot without holding discovery transactions open."""
+    pending = (Notification.kind == KIND, Notification.sent.is_(False),
+               Notification.resolved_at.is_(None))
+    high_water = await session.scalar(select(func.max(Notification.id)).where(*pending)) or 0
+    await session.rollback()
+    cursor = 0
+    while cursor < high_water:
+        ids = list(await session.scalars(select(Notification.id).where(*pending,
+            Notification.id > cursor, Notification.id <= high_water)
+            .order_by(Notification.id).limit(100)))
+        await session.rollback()
+        if not ids:
+            return
+        for nid in ids:
+            cursor = nid
+            yield nid
+
+
 async def deliver_assignments(engine, bot, *, booking_id=None, limit=10):
     """Booking -> notice -> user lock order matches assignment transactions."""
     sent, attempted = 0, 0
     async with AsyncSession(engine, expire_on_commit=False) as session:
-        candidates = list(await session.scalars(select(Notification).where(
-            Notification.kind == KIND, Notification.sent.is_(False),
-            Notification.resolved_at.is_(None)).order_by(Notification.id).limit(max(100, limit))))
-        # Finish the discovery transaction before taking write locks per notice.
-        ids = [n.id for n in candidates]
-        await session.rollback()
-        for nid in ids:
+        async for nid in _pending_assignment_ids(session):
             if attempted >= limit:
                 break
             candidate = await session.get(Notification, nid)

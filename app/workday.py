@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import json
+import logging
 from datetime import timedelta
 from pathlib import Path
 
@@ -15,6 +16,36 @@ from .operations_guard import require_generation
 from .people import People, positive_id
 from .services.booking_access import booking_scope_sql
 from .services.insights import cents, parsed
+
+logger = logging.getLogger(__name__)
+
+
+def operation_diagnostic(body, *, result=None, error=None):
+    """Log only known operation fields; never file bytes, names or request keys."""
+    kinds = {'sale_start', 'sale_receipt', 'sale_counts', 'sale_selected', 'sale_complete',
+             'shoot_photo', 'shoot_complete', 'shoot_retry', 'booking_receipt'}
+    if not isinstance(body, dict) or not isinstance(body.get('kind'), str) or body['kind'] not in kinds:
+        return
+    detail = {'kind': body['kind']}
+    if isinstance(result, dict):
+        for field in ('bookingId', 'draftId', 'shootingId', 'photoId', 'saleId',
+                      'selectedPhotos', 'declaredSold', 'declaredTotal'):
+            value = result.get(field)
+            if type(value) is int:
+                detail[field] = value
+        detail['duplicate'] = result.get('duplicate') is True
+        logger.info('Operation accepted: %s', json.dumps(detail, sort_keys=True))
+    if error is not None:
+        message = str(error)
+        reason = ('full_count_changed' if message.startswith('Полная съёмка содержит ') else
+                  'selected_photos_missing' if message.startswith('Сначала загрузите все выбранные фотографии:') else
+                  'selected_photo_already_sold' if message.startswith('Этот кадр уже куплен') else
+                  'price_changed' if message.startswith('Цена пакета изменилась') else
+                  'storage_unavailable' if 'Яндекс.Диск' in message else
+                  'dependency_pending' if getattr(error, 'status', 0) == 424 else
+                  'access_denied' if getattr(error, 'status', 0) == 403 else 'validation_rejected')
+        detail.update(status=getattr(error, 'status', 409), reason=reason)
+        logger.info('Operation rejected: %s', json.dumps(detail, sort_keys=True))
 
 
 class Workday:
@@ -112,8 +143,14 @@ class Workday:
 
     async def execute(self, a, body, raw=None):
         try:
-            return await self._execute(a, body, raw)
+            response = await self._execute(a, body, raw)
+            operation_diagnostic(body, result=json.loads(response.text))
+            return response
+        except AccessError as exc:
+            operation_diagnostic(body, error=exc)
+            raise
         except IntegrityError as exc:
+            operation_diagnostic(body, error=AccessError('Conflict', 409))
             raise AccessError('Операция или вложение уже учтены. Обновите данные перед повтором.', 409) from exc
 
     async def _execute(self, a, body, raw=None):

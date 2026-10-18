@@ -13,4 +13,16 @@ rows.forEach(r=>r.status='synced');await assert.rejects(vm.runInContext('workflo
 const beforeSync=automaticSync;
 await vm.runInContext(`workflowClick({dataset:{workflow:'sync'}})`,c);
 assert.equal(manualSync,1,'Sync now must invoke the explicit manual cooldown override');assert.equal(automaticSync,beforeSync);
+const progress=vm.runInContext(`saleTransferProgress([
+ {kind:'sale_start',status:'synced',result:{draftId:2}},
+ {kind:'sale_receipt',status:'synced'},
+ {kind:'sale_selected',status:'synced',result:{photoId:1,selectedPhotos:1}},
+ {kind:'sale_selected',status:'synced',result:{photoId:1,duplicate:true,selectedPhotos:1}},
+ {kind:'sale_selected',status:'local'},
+ {kind:'sale_selected',status:'syncing'},
+ {kind:'sale_selected',status:'error'}])`,c);
+assert.match(progress,/разных кадров: 1/);assert.match(progress,/Файлов принято 2 из 5/);
+assert.match(progress,/повторных копий: 1/);assert.match(progress,/Ожидают отправки: 1; передаются: 1; ошибки файлов: 1/);
+const legacyProgress=vm.runInContext(`saleTransferProgress([{kind:'sale_selected',status:'synced',result:{photoId:7}},{kind:'sale_selected',status:'synced',result:{photoId:7,duplicate:true}}])`,c);
+assert.match(legacyProgress,/В этой отправке подтверждено разных кадров: 1/,'older successful operations without progress fields still distinguish duplicate copies');
 console.log('PASS: sale fields do not reset, receipt/photos are queued once, repeat uses the same operations');
