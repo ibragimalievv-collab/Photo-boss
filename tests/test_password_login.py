@@ -135,15 +135,18 @@ class PasswordLoginTests(unittest.IsolatedAsyncioTestCase):
         assert (await self.login('staff', 'changed-test-password-123')).status == 200
 
     async def test_csrf_and_rate_limit(self):
-        assert (await self.setup()).status == 200
-        for headers in [{'Origin': 'https://evil.example'}, {'Sec-Fetch-Site': 'cross-site'}, {'X-PhotoBoss-Session': ''}]:
-            assert (await self.login(headers=headers)).status == 403
-            req = self.request('/auth/password/logout', headers=headers)
-            assert (await self.service.endpoint(req)).status == 403
-        for _ in range(10):
-            assert (await self.login(password='invalid-test-password')).status == 401
-        self.service = PasswordLogin(self.api, ORIGIN)
-        assert (await self.login()).status == 429
+        # Keep this fixed-window test away from a wall-clock bucket boundary.
+        now = int(time.time())
+        with patch('app.password_login.time.time', return_value=now):
+            assert (await self.setup()).status == 200
+            for headers in [{'Origin': 'https://evil.example'}, {'Sec-Fetch-Site': 'cross-site'}, {'X-PhotoBoss-Session': ''}]:
+                assert (await self.login(headers=headers)).status == 403
+                req = self.request('/auth/password/logout', headers=headers)
+                assert (await self.service.endpoint(req)).status == 403
+            for _ in range(10):
+                assert (await self.login(password='invalid-test-password')).status == 401
+            self.service = PasswordLogin(self.api, ORIGIN)
+            assert (await self.login()).status == 429
 
     async def test_validation_and_no_telegram_approval_reuse_after_logout(self):
         for login, password in [('xx', PASSWORD), ('owner', 'short'), ('owner', 'x'*129)]:
