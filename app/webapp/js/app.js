@@ -284,6 +284,10 @@ async function reconnectWithoutReset(){
 }
 window.addEventListener('online',reconnectWithoutReset);window.addEventListener('offline',offlineState);offlineState();
 
+document.addEventListener('pb-academy-mentor-updated',()=>{if(state.me&&state.route==='academy')render();});
 document.addEventListener('pb-academy-coach-updated',()=>{if(state.me&&state.route==='academy')render();});
 document.addEventListener('pb-academy-lesson-completed',()=>{if(state.me&&state.route==='academy')loadRoute('academy');});
 document.addEventListener('pb-open-academy-coach',()=>{state.academyTab='coach';loadRoute('academy');});
+
+document.addEventListener('pb-booking-diagnostic-updated',()=>{if(state.me&&state.route==='academy')render();});
+document.addEventListener('pb-booking-diagnostic-completed',async()=>{if(state.me&&state.route==='academy'){await loadAcademyCoach('booking');render();}});

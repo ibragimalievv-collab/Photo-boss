@@ -17,7 +17,15 @@ from .services.academy_curriculum import (
     grade_quiz,
     public_quiz,
 )
-from .services.development_ai import STR, STRINGS, obj, structured, valid_value
+from .services.booking_readiness import booking_readiness
+from .services.development_ai import (
+    STR,
+    STRINGS,
+    obj,
+    structured,
+    valid_booking_roleplay,
+    valid_value,
+)
 from .services.insights import parsed
 from .services.training import CATEGORY_BY_SLUG
 
@@ -84,6 +92,9 @@ class AcademyCoach:
             comparison = []
             allowed = []
             practice_ready = True
+            assessment = None
+            readiness = None
+            needs_diagnostic = False
             if track == 'photographer':
                 snapshots = await self.api.rows(conn, '''SELECT r.id,r.assignment_id,r.result,r.photos,r.created_at
                     FROM academy_practice_reviews r JOIN training_assignments a ON a.id=r.assignment_id
@@ -109,13 +120,17 @@ class AcademyCoach:
                 practice_ready = all(x["slug"] in completed for x in lessons if x["block"] == block_number) or any(a["status"] in {"ACTIVE", "PENDING_REVIEW"} for a in assignments)
                 course_done = all(x['slug'] in completed for x in lessons) and all(
                     not b['practiceCategories'] or bool(set(b['practiceCategories']) & accepted) for b in self.api.blocks)
-                allowed = list(CATEGORY_BY_SLUG) if course_done else list(block['practiceCategories']) if block else list(CATEGORY_BY_SLUG)
+                allowed = list(CATEGORY_BY_SLUG) if course_done else list(block['practiceCategories']) if block else [slug for slug in CATEGORY_BY_SLUG if slug != 'final_exam']
                 if not allowed:
-                    allowed = list(CATEGORY_BY_SLUG)
+                    allowed = [slug for slug in CATEGORY_BY_SLUG if slug != 'final_exam']
                 lessons = [dict(x, locked=x['block'] > block_number) for x in lessons]
             else:
-                sessions = await self.api.rows(conn, "SELECT id,evaluation FROM sales_training_sessions WHERE user_id=:uid AND client_type LIKE 'booking-%' AND status='COMPLETED' ORDER BY id DESC LIMIT 50", uid=uid)
-                reviews = [parsed(r['evaluation']) for r in reversed(sessions)]
+                sessions = await self.api.rows(conn, "SELECT id,client_type,evaluation FROM sales_training_sessions WHERE user_id=:uid AND client_type LIKE 'booking-%' AND status='COMPLETED' ORDER BY id DESC", uid=uid)
+                reviews = [parsed(r['evaluation']) for r in reversed(sessions[:50])]
+                from .academy_diagnostic import load_diagnostic
+                assessment = await load_diagnostic(self.api, conn, uid)
+                readiness = booking_readiness({r['topic_slug'] for r in progress}, sessions)
+                needs_diagnostic = assessment is None and not any(valid_booking_roleplay(parsed(r['evaluation']), True) for r in sessions)
             skill_reviews = list(reviews)
             if track == 'photographer':
                 for row in reversed(shoot):
@@ -132,11 +147,13 @@ class AcademyCoach:
             done = sorted({r['topic_slug'] for r in progress} & {x['slug'] for x in lessons})
             evidence = {'track': track, 'skills': skills, 'reviews': reviews[-10:],
                         'shoots': [{'id': r['id'], 'result': parsed(r['result'])} for r in shoot], 'completed': done,
-                        'allowedCategories': sorted(allowed), 'practiceReady': practice_ready, 'version': 1}
+                        'allowedCategories': sorted(allowed), 'practiceReady': practice_ready,
+                        'diagnosticAssessment': assessment, 'bookingReadiness': readiness, 'version': 2}
             fingerprint = hashlib.sha256(json.dumps(evidence, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
             plans = await self.api.rows(conn, '''SELECT id,data,fingerprint FROM academy_coaching_plans
                 WHERE user_id=:uid AND track=:track ORDER BY id DESC LIMIT 1''', uid=uid, track=track)
         return {'track': track, 'practiceReady': practice_ready, 'configured': bool(config.openai_api_key), 'skills': skills,
+                'diagnosticAssessment': assessment, 'bookingReadiness': readiness, 'needsDiagnostic': needs_diagnostic,
                 'lessons': lessons, 'completed': done, 'passedQuizzes': [r['topic_slug'] for r in quizzes],
                 'comparison': comparison, 'plan': ({'id': plans[0]['id'], **parsed(plans[0]['data'])} if plans else None),
                 'stale': not plans or plans[0]['fingerprint'] != fingerprint,
@@ -155,6 +172,8 @@ class AcademyCoach:
             raise AccessError('Задание формируется по сохранённым результатам.', 400)
         async with self.locks.setdefault((actor['id'], track), asyncio.Lock()):
             data = await self.evidence(actor['id'], track)
+            if track == 'booking' and data['needsDiagnostic']:
+                raise AccessError('Сначала пройдите входную диагностику: наставник подберёт обучение по результатам.', 409)
             if not data['stale']:
                 return web.json_response({'plan': data['plan'], 'diagnostic': data['diagnostic']})
             if not config.openai_api_key:
@@ -165,14 +184,21 @@ class AcademyCoach:
                 'Ты AI-наставник Photo Boss. Сам назначь одно конкретное упражнение по подтверждённым слабым местам. '
                 'Сравнивай критерии в процентах: они имеют разный максимальный балл. '
                 'При отсутствии оценок дай диагностическое упражнение, не называй выдуманные слабости. '
+                'diagnosticAssessment — предварительная проверка знаний менеджера, не доказательство навыка в разговоре. '
+                'Учитывай её level, skills и recommendedLessonSlugs: новичку объясни основу и одну задачу; '
+                'опытному дай сложный сценарий по слабому месту. Подтверди уровень реальными учебными диалогами. '
                 'Используй только доступные уроки, категорию текущего блока и существующие сценарии. Если practiceReady=false, предложи сначала непройденные уроки текущего блока. '
                 'Задание фотографа включает пять различных кадров по плану категории; дополнительные указания развивают слабый критерий. '
                 'Задание менеджера по записи — диалог с гостем до записи, а не продажа фотографий. '
                 'Уважай отказ, объясняй условия и согласие на контакт. Не обещай скидок. '
                 'Дай 3–5 шагов и 2–4 проверяемых критерия успеха. Не меняй зарплаты, статусы работы и назначения съёмок. '
                 + BOOKING_RULES)
+            # Planning needs objectives, not the full expanded textbook on every refresh.
+            lesson_briefs = [{key: item[key] for key in ('slug', 'title', 'day', 'block') if key in item}
+                             | {'objective': item.get('materials', {}).get('objective', item.get('body', '')[:300])}
+                             for item in lessons]
             response = await structured(instructions, [{'type': 'input_text', 'text': json.dumps(
-                {'evidence': data['_evidence'], 'lessons': lessons, 'scenarios': data['scenarios']}, ensure_ascii=False)}], schema, 'academy_personal_plan', limit=2400)
+                {'evidence': data['_evidence'], 'lessons': lesson_briefs, 'scenarios': data['scenarios']}, ensure_ascii=False)}], schema, 'academy_personal_plan', limit=2400)
             if response['status'] != 'completed' or not valid_value(response.get('data'), schema):
                 raise AccessError(response.get('message') or 'AI временно недоступен. Прошлый план сохранён; повторите позже.', 503)
             plan = dict(response['data'], diagnostic=data['diagnostic'])

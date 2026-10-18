@@ -6,6 +6,14 @@ from zoneinfo import ZoneInfo
 from ..config import config
 
 TRAINING_ASSET_DIR = Path(__file__).resolve().parents[1] / "assets" / "training"
+FINAL_EXAM_SLUG = "final_exam"
+FINAL_EXAM_REQUIREMENTS = (
+    "Одна новая законченная серия: пять собственных отобранных кадров, а не пять дублей.",
+    "В серии есть общий, средний и крупный планы, взаимодействие людей и движение.",
+    "Покажите как минимум два разных световых условия: например, открытая тень и боковой свет окна.",
+    "Контролируйте резкость на главном объекте, детали в светах, фон, края кадра и естественный цвет кожи.",
+    "Загрузите лучшие пять JPEG в порядке заданий. Оценка относится к видимой серии; без исходников и EXIF нельзя подтвердить настройки и весь процесс отбора.",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,9 +22,12 @@ class TrainingCategory:
     title: str
     directory: str
     shot_plan: tuple[str, ...]
+    reference_files: tuple[str, ...] = ()
 
     @property
     def image_paths(self) -> tuple[Path, ...]:
+        if self.reference_files:
+            return tuple(TRAINING_ASSET_DIR / filename for filename in self.reference_files)
         return tuple(
             TRAINING_ASSET_DIR / self.directory / f"{index:02}.jpg"
             for index in range(1, 6)
@@ -78,6 +89,16 @@ TRAINING_CATEGORIES = (
         "Крупный портрет · уровень глаз · плечи под углом",
         "Низкая точка · движение · объём через одежду и позу",
         "Сидя сбоку · линии рук и ног не сливаются")),
+    TrainingCategory(FINAL_EXAM_SLUG, "🎓 Выпускной практический экзамен", "", (
+        "Общий план · одна пара или группа взрослых · первое световое условие, чистый фон и все лица видны",
+        "Средний план · те же участники · ракурс 3/4, понятное взаимодействие и свободные руки",
+        "Крупный портрет участника серии · второе световое условие, например боковой свет окна · резкость на глазах и детали кожи",
+        "Движение тех же участников · другая точка съёмки · осознанный контроль выдержки и резкости главного объекта",
+        "Завершающий кадр той же истории · новый план, высота или действие · отберите для серии без близких дублей и с согласованным цветом",
+    ), reference_files=(
+        "adult-group/01.jpg", "couple/02.jpg", "woman/03.jpg",
+        "family/03.jpg", "adult-group/05.jpg",
+    )),
 )
 
 CATEGORY_BY_SLUG = {category.slug: category for category in TRAINING_CATEGORIES}

@@ -16,9 +16,12 @@ from ..models import (
     TrainingSubmission,
     User,
 )
+from ..services.academy_growth import final_exam_unlocked
 from ..services.core import ROLES, audit, get_user
 from ..services.training import (
     CATEGORY_BY_SLUG,
+    FINAL_EXAM_REQUIREMENTS,
+    FINAL_EXAM_SLUG,
     category_rows,
     shot_instruction,
     training_day,
@@ -88,6 +91,12 @@ async def send_reference_set(message, assignment):
         return await message.answer(
             "Фотографии временно недоступны. Обратитесь к владельцу."
         )
+    is_exam = category.slug == FINAL_EXAM_SLUG
+    if is_exam:
+        await message.answer(
+            "🎓 Выпускной экзамен\n\n" + "\n".join(FINAL_EXAM_REQUIREMENTS)
+            + "\n\nРеференсы показывают отдельные принципы. Снимите собственную цельную серию; копировать людей и место не нужно."
+        )
     for pose_index, path in enumerate(category.image_paths, start=1):
         await message.answer_photo(
             FSInputFile(path),
@@ -95,7 +104,10 @@ async def send_reference_set(message, assignment):
                      f"{shot_instruction(category, pose_index)} {pose_index}/5"),
         )
     await message.answer(
-        "Все 5 эталонов показаны. Теперь пришлите сюда 5 своих повторов "
+        "Референсы показаны. Пришлите пять своих экзаменационных кадров по порядку заданий. "
+         "Проходной балл — 85; при спорной оценке потребуется повторная проверка или пересъёмка."
+         if is_exam else
+         "Все 5 эталонов показаны. Теперь пришлите сюда 5 своих повторов "
         "по порядку — от первого кадра к пятому. Одинаковый ракурс дважды "
         "не засчитывается: меняйте точку, высоту, план или действие."
     )
@@ -210,12 +222,15 @@ async def training_menu(message):
                 "✅ Сегодняшнее обучение выполнено: 5/5. Новые позы откроются завтра."
             )
         excluded = latest.category_slug if latest is not None else None
+        allowed = set(CATEGORY_BY_SLUG)
+        if not await final_exam_unlocked(session, user.id):
+            allowed.discard(FINAL_EXAM_SLUG)
         await message.answer(
             "🎓 Обучение\n\n"
             "Выберите одну категорию на сегодня. В ней 5 разных поз. После выбора "
             "категория закрепится за вами, пока вы не пришлёте все 5 повторов. "
             "На следующий день откроется другой набор.",
-            reply_markup=inline(category_rows(excluded)),
+            reply_markup=inline(category_rows(excluded, allowed_slugs=allowed)),
         )
 
 
@@ -233,8 +248,15 @@ async def training_reference(callback: CallbackQuery):
     async with Session() as session:
         user = await get_user(session, callback.from_user.id)
         await session.get(User, user.id, with_for_update=True)
+        if category.slug == FINAL_EXAM_SLUG and not await final_exam_unlocked(session, user.id):
+            return await callback.answer(
+                "Выпускной экзамен откроется после 28 уроков и принятых практик всех семи блоков.",
+                show_alert=True,
+            )
         plan = await session.scalar(select(AcademyCoachingPlan).where(AcademyCoachingPlan.user_id == user.id, AcademyCoachingPlan.track == "photographer").order_by(AcademyCoachingPlan.id.desc()).limit(1))
-        if not plan or json.loads(plan.data).get("category") != category.slug:
+        if category.slug != FINAL_EXAM_SLUG and (
+            not plan or json.loads(plan.data).get("category") != category.slug
+        ):
             return await callback.answer("AI назначает категорию по вашим результатам. Откройте AI-наставника в Академии приложения.", show_alert=True)
         unfinished = await latest_assignment(
             session, user.id, unfinished_only=True, lock=True

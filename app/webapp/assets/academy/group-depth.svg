@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600" viewBox="0 0 900 600" role="img" aria-labelledby="title description">
+  <title id="title">Глубина расстановки группы: вид сверху</title>
+  <desc id="description">В левой схеме люди находятся на сильно разных дистанциях до камеры, справа ряды ближе по глубине. Уменьшение глубины помогает подобрать резкость, но её всё равно проверяют на тестовом кадре по каждому лицу. Зелёный фон справа не означает гарантированную резкость.</desc>
+  <rect width="900" height="600" rx="24" fill="#f5f7fa"/>
+  <g font-family="Arial, sans-serif" fill="#142b43">
+    <text x="40" y="55" font-size="28" font-weight="700">Группа: вид сверху</text>
+    <text x="40" y="90" font-size="18">Схема без масштаба и без расчёта конкретной зоны резкости.</text>
+    <rect x="35" y="120" width="400" height="320" rx="18" fill="#fff0d5"/>
+    <rect x="465" y="120" width="400" height="320" rx="18" fill="#e1f1e9"/>
+    <text x="60" y="157" font-size="21" font-weight="700">Большая глубина рядов</text>
+    <text x="490" y="157" font-size="21" font-weight="700">Ряды ближе по глубине</text>
+    <path d="M235 365 L120 195 M235 365 L350 195 M665 365 L550 195 M665 365 L780 195" stroke="#87a5ba" stroke-width="2" stroke-dasharray="7 6" fill="none"/>
+    <g fill="#296b9a" stroke="#f5f7fa" stroke-width="3">
+      <circle cx="150" cy="215" r="19"/><circle cx="320" cy="215" r="19"/>
+      <circle cx="190" cy="325" r="19"/><circle cx="280" cy="325" r="19"/>
+      <circle cx="585" cy="230" r="19"/><circle cx="745" cy="230" r="19"/>
+      <circle cx="625" cy="267" r="19"/><circle cx="705" cy="267" r="19"/>
+    </g>
+    <rect x="210" y="365" width="50" height="30" rx="6" fill="#294b67"/>
+    <rect x="640" y="365" width="50" height="30" rx="6" fill="#294b67"/>
+    <text x="190" y="422" font-size="18">Камера</text>
+    <text x="620" y="422" font-size="18">Камера</text>
+    <text x="40" y="486" font-size="21" font-weight="700">Проверьте ближайшее и самое дальнее нужное лицо.</text>
+    <text x="40" y="526" font-size="20">Диафрагма, дистанция и фокус выбираются по тесту.</text>
+    <text x="40" y="564" font-size="18">Меньшая глубина не гарантирует резкость; не забудьте видимость каждого лица.</text>
+  </g>
+</svg>

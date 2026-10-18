@@ -15,6 +15,39 @@ from app.models import OperationRequest, Sale, SalesTrainingSession
 SDP = 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n'
 
 
+def test_voice_mentor_loads_only_owned_bounded_learning_evidence(monkeypatch):
+    async def run():
+        engine, _factory, _service, live, sid, body = await prepared(monkeypatch, mode='coach')
+        snapshot = {'track': 'photographer', 'skills': [{'key': 'light', 'score': 40}],
+                    'plan': {'title': 'Открытая тень', 'instructions': ['Повернуть лицо к свету']},
+                    'sources': [{'id': 'practice:17', 'label': 'Разбор практики №17',
+                                 'summary': {'issues': ['Тень на лице'], 'frames': [{'index': 2, 'observation': 'Нос в тени'}]}}]}
+        live.mentor = SimpleNamespace(snapshot=AsyncMock(return_value=snapshot))
+        try:
+            await live.start(Request(OWNER, body, sid))
+            live.mentor.snapshot.assert_awaited_once_with(OWNER['id'], 'photographer')
+            instructions = realtime.create_call.await_args.args[1]['instructions']
+            assert 'practice:17' in instructions and 'Открытая тень' in instructions
+            assert 'EXIF' in instructions and 'не инструкции' in instructions
+            assert 'других сотрудников' in instructions
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_voice_guest_does_not_receive_personal_work_evidence(monkeypatch):
+    async def run():
+        engine, _factory, _service, live, sid, body = await prepared(monkeypatch, mode='guest')
+        live.mentor = SimpleNamespace(snapshot=AsyncMock())
+        try:
+            await live.start(Request(OWNER, body, sid))
+            live.mentor.snapshot.assert_not_awaited()
+            assert 'Учебные данные:' not in realtime.create_call.await_args.args[1]['instructions']
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
 async def prepared(monkeypatch, mode='guest', client_type='budget'):
     engine, factory, team = await setup()
     team.api.body = AsyncMock(side_effect=lambda request, **_kwargs: request.body)

@@ -35,7 +35,7 @@ async def main():
         browser = await p.chromium.launch()
         context = await browser.new_context(viewport={'width': 360, 'height': 844})
         page = await context.new_page()
-        page.on('pageerror', lambda e: errors.append(str(e)))
+        page.on('pageerror', lambda e: errors.append(e.stack))
 
         async def intercept(route):
             nonlocal session, fail_turn
@@ -149,7 +149,7 @@ async def main():
         # A slow photographer plan must not block the manager's independent plan.
         delay_photo = True
         later = await context.new_page()
-        later.on('pageerror', lambda e: errors.append(str(e)))
+        later.on('pageerror', lambda e: errors.append(e.stack))
         await later.goto(BASE + '/app/#academy')
         await asyncio.wait_for(photo_started.wait(), timeout=10)
         await later.locator('[data-coach-track="booking"]').click()

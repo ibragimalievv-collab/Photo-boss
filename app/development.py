@@ -122,6 +122,14 @@ class Development:
         if not config.openai_api_key: raise AccessError('AI-тренажёр не подключён. Учебные материалы доступны.',503)
         scenario=next(s for s in [*ai.SALES_SCENARIOS,*ai.BOOKING_SCENARIOS] if s['type']==body['clientType'])
         async with self.api.engine.begin() as conn:
+            if body['clientType'].startswith('booking-'):
+                from .academy_diagnostic import load_diagnostic
+                baseline = await load_diagnostic(self.api, conn, a['id'])
+                if baseline is None:
+                    previous = await self.api.rows(conn, '''SELECT evaluation FROM sales_training_sessions
+                        WHERE user_id=:uid AND client_type LIKE 'booking-%' AND status='COMPLETED' ''', uid=a['id'])
+                    if not any(ai.valid_booking_roleplay(parsed(row['evaluation']), True) for row in previous):
+                        raise AccessError('Сначала пройдите входную диагностику менеджера: наставник подберёт первое задание по вашим ответам.',409)
             rows=await self.api.rows(conn,"INSERT INTO sales_training_sessions(user_id,client_type,transcript,status,revision,created_at) VALUES (:uid,:type,:transcript,'ACTIVE',1,:now) RETURNING id",uid=a['id'],type=body['clientType'],transcript=json.dumps([{'role':'client','text':scenario['opening']}],ensure_ascii=False),now=utc_now())
         return web.json_response({'id':rows[0]['id']},status=201)
 

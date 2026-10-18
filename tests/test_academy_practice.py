@@ -28,6 +28,9 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         await baseline.MiniAppTests.asyncSetUp(self)
         with self.engine.inner.begin() as conn:
+            conn.execute(text("""CREATE TABLE IF NOT EXISTS operation_requests(id INTEGER PRIMARY KEY,
+                user_id INTEGER,request_key TEXT,payload_hash TEXT,result TEXT,created_at DATETIME,
+                UNIQUE(user_id,request_key))"""))
             for name in ("assigned_date", "assigned_at", "completed_at", "review_source"):
                 conn.execute(text(f"ALTER TABLE training_assignments ADD COLUMN {name} TEXT"))
             conn.execute(text("""CREATE TABLE training_submissions(id INTEGER PRIMARY KEY,
@@ -109,6 +112,75 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
         self.storage.upload_bytes.side_effect = YandexDiskError("offline")
         assert (await self.request(f"/{aid}/photos/2", payload=payload[:-2]+b"2\xff\xd9"))[0] == 503
         assert sum(s["uploaded"] for s in (await self.request(f"/{aid}"))[1]["shots"]) == 1
+
+    async def test_assignment_keeps_original_goal_and_revisits_concrete_previous_review(self):
+        initial = {"category": "woman", "focus": "light", "title": "Мягкий свет",
+                   "instructions": ["Снимите лицо у окна"], "successCriteria": ["В глазах видны блики"]}
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("""INSERT INTO academy_coaching_plans(user_id,track,fingerprint,data,created_at)
+                VALUES (3,'photographer','original',:data,'2020-01-01')"""), {"data": json.dumps(initial)})
+        aid = await self.start()
+        newer = initial | {"instructions": ["Снимите жёсткий контровой свет"], "successCriteria": ["Контур волос отделён"]}
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("""INSERT INTO academy_coaching_plans(user_id,track,fingerprint,data,created_at)
+                VALUES (3,'photographer','later',:data,'2020-01-02')"""), {"data": json.dumps(newer)})
+        data = (await self.request(f"/{aid}"))[1]
+        assert data["personalInstructions"] == initial["instructions"]
+        assert data["successCriteria"] == initial["successCriteria"]
+        await self.upload_all(aid)
+        revision = {"status": "completed", "review": {"decision": "REVISION", "score": 75,
+                    "reshoot_indexes": [2], "issues": ["Кадр 2: глаз в глубокой тени"],
+                    "strengths": [], "next_action": "Повернитесь к окну"}}
+        analyzer = AsyncMock(return_value=revision)
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), \
+                patch("app.academy_practice.analyze_training_set", analyzer):
+            await self.practice.process_pending(self.storage)
+        context = analyzer.await_args.kwargs["assignment_context"]
+        assert context["successCriteria"] == initial["successCriteria"]
+        assert context["planFingerprint"] == "original"
+        await self.request(f"/{aid}/photos/2", payload=b"\xff\xd8\xffreshoot\xff\xd9")
+        analyzer.reset_mock()
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), \
+                patch("app.academy_practice.analyze_training_set", analyzer):
+            await self.practice.process_pending(self.storage)
+        assert analyzer.await_args.kwargs["assignment_context"] == context
+        assert analyzer.await_args.kwargs["previous_review"]["review"] == revision["review"]
+        assert analyzer.await_args.kwargs["previous_review"]["sameAssignment"] is True
+
+    async def test_legacy_assignment_never_adopts_a_plan_created_after_assignment(self):
+        aid = await self.start()
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("DELETE FROM operation_requests"))
+            conn.execute(text("UPDATE training_assignments SET assigned_at='2020-01-01' WHERE id=:id"), {"id": aid})
+            conn.execute(text("""INSERT INTO academy_coaching_plans(user_id,track,fingerprint,data,created_at)
+                VALUES (3,'photographer','future',:data,'2021-01-01')"""), {"data": json.dumps({
+                    "category": "woman", "instructions": ["Будущее задание"], "successCriteria": ["Не было при старте"]})})
+        await self.upload_all(aid)
+        analyzer = AsyncMock(return_value={"status": "unavailable"})
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), \
+                patch("app.academy_practice.analyze_training_set", analyzer):
+            await self.practice.process_pending(self.storage)
+        assert analyzer.await_args.kwargs["assignment_context"]["planId"] is None
+        assert analyzer.await_args.kwargs["assignment_context"]["successCriteria"] == []
+
+    async def test_first_attempt_uses_same_category_history_without_claiming_reshoot(self):
+        previous = {"status": "completed", "review": {"decision": "ACCEPT", "score": 86,
+                    "issues": ["Кадр 1: фон отвлекает"], "next_action": "Упростите фон"}}
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("""INSERT INTO training_assignments(id,user_id,category_slug,status,completed_at)
+                VALUES (99,3,'woman','COMPLETED','2020-01-01')"""))
+            conn.execute(text("""INSERT INTO academy_practice_reviews(assignment_id,result,photos,created_at)
+                VALUES (99,:result,'[]','2020-01-01')"""), {"result": json.dumps(previous)})
+            conn.execute(text("INSERT INTO academy_lesson_progress(user_id,topic_slug) VALUES(3,'next')"))
+        aid = await self.start()
+        await self.upload_all(aid)
+        analyzer = AsyncMock(return_value={"status": "unavailable"})
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), \
+                patch("app.academy_practice.analyze_training_set", analyzer):
+            await self.practice.process_pending(self.storage)
+        history = analyzer.await_args.kwargs["previous_review"]
+        assert history["assignmentId"] == 99 and history["sameAssignment"] is False
+        assert history["review"] == previous["review"]
 
     async def test_ai_only_review_retry_reshoot_and_archived_originals(self):
         aid = await self.start()
@@ -257,7 +329,7 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
         second_worker = AcademyPractice(self.service)
         entered, release = asyncio.Event(), asyncio.Event()
 
-        async def analyze(*args):
+        async def analyze(*args, **kwargs):
             entered.set()
             await release.wait()
             return {"status": "completed", "review": {"decision": "ACCEPT", "score": 90,
