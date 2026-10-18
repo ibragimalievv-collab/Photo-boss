@@ -94,6 +94,18 @@ class MentorTests(unittest.IsolatedAsyncioTestCase):
             await self.mentor.ask(Request(body=body | {'question': 'Другой вопрос'}))
         assert mismatch.value.status == 409
 
+    async def test_followup_keeps_own_track_conversation_and_not_another_users_chat(self):
+        provider = AsyncMock(return_value={'status': 'completed', 'data': reply()})
+        with patch('app.academy_mentor.structured', provider):
+            await self.mentor.ask(Request(body={'question': 'Как проверить фокус?', 'requestId': 'chat_first_123456'}))
+            await self.mentor.ask(Request(body={'question': 'Объясни подробнее', 'requestId': 'chat_next_1234567'}))
+            content = json.loads(provider.await_args.args[1][0]['text'])
+            assert content['conversation'][0]['question'] == 'Как проверить фокус?'
+            assert content['conversation'][0]['answer'] == reply()['answer']
+            await self.mentor.ask(Request(uid=5, body={'question': 'Объясни подробнее', 'requestId': 'chat_other_123456'}))
+            other = json.loads(provider.await_args.args[1][0]['text'])
+            assert other['conversation'] == []
+
     async def test_new_evidence_invalidates_question_cache_but_not_original_receipt(self):
         provider = AsyncMock(return_value={'status': 'completed', 'data': reply()})
         body = {'question': 'Как улучшить свет?', 'requestId': 'request_1234567890'}

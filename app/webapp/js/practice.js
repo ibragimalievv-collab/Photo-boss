@@ -93,7 +93,8 @@ async function preparePhoto(file){
  if(file.size>25*1024*1024)throw new Error('Исходное фото больше 25 МБ. Выберите уменьшенную копию.');
  if(file.type==='image/jpeg'){
   if(file.size>8*1024*1024)throw new Error('JPEG больше 8 МБ. Сохраните отдельную копию до 8 МБ; её детализация может быть ниже.');
-  return file;
+  // A byte copy preserves EXIF and avoids file-backed multipart transport differences.
+  return new Blob([await file.arrayBuffer()],{type:'image/jpeg'});
  }
  const image=await createImageBitmap(file);
  try{
