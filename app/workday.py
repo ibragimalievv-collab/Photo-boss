@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .miniapp_security import AccessError, utc_bounds
 from .models import utc_now
+from .operations_guard import require_generation
 from .people import People, positive_id
 from .services.booking_access import booking_scope_sql
 from .services.insights import cents, parsed
@@ -119,7 +120,12 @@ class Workday:
         from .workflow import KINDS, Workflow
         if not isinstance(body, dict):
             raise AccessError('Некорректная операция.', 400)
-        if set(body)!={'key','kind','date','data','actorId'} or not isinstance(body['key'],str) or not 16<=len(body['key'])<=80 or not isinstance(body['data'],dict): raise AccessError('Некорректная операция.',400)
+        required = {'key','kind','date','data','actorId'}
+        if (set(body) not in (required, required | {'generation'})
+                or not isinstance(body['key'],str) or not 16<=len(body['key'])<=80
+                or not isinstance(body['data'],dict)
+                or ('generation' in body and not isinstance(body['generation'], str))):
+            raise AccessError('Некорректная операция.',400)
         if body['key'].startswith(('academy-', 'mentor-', 'realtime-')):
             raise AccessError('Некорректный идентификатор операции.', 400)
         if not isinstance(body['kind'], str) or body['kind'] not in KINDS | {'checklist','shift_report','attendance','cash_expense'}: raise AccessError('Этот тип операции не поддерживает синхронизацию.',400)
@@ -127,6 +133,11 @@ class Workday:
         payload = json.dumps(body,sort_keys=True,ensure_ascii=False).encode()
         digest=hashlib.sha256(payload + (b'\x00'+hashlib.sha256(raw).digest() if raw is not None else b'')).hexdigest()
         async with self.api.engine.begin() as conn:
+            # Never acknowledge a pre-reset operation, even if its key remains
+            # in the shared idempotency ledger. Manual cash outflows survive
+            # the reset and retain their original payload hash and replay.
+            if body['kind'] != 'cash_expense':
+                await require_generation(conn, body.get('generation', ''))
             users=await self.api.rows(conn,'SELECT id,active FROM users WHERE id=:uid FOR UPDATE',uid=a['id'])
             if not users or not users[0]['active']: raise AccessError('Доступ отключён.',403)
             roles={r['role'] for r in await self.api.rows(conn,'SELECT role FROM user_roles WHERE user_id=:uid',uid=a['id'])}

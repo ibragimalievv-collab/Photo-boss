@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 const source=fs.readFileSync(new URL('../app/webapp/js/outbox.js',import.meta.url),'utf8')
- .replace(/^import .*;\n/gm,'').replaceAll('export ','');
+ .replace(/^import .*;\n/gm,'').replaceAll('export ','') + '\nasync function writeOperations(items){for(const row of items)await localAction(\"operations\",\"readwrite\",store=>store.put(row));return true;}';
 const rows=new Map(),calls=[],timers=[];
 let now=100000,mode='rate';
 const photo=new Blob(['original bytes'],{type:'image/jpeg'});

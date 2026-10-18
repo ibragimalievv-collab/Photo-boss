@@ -9,6 +9,7 @@ import hashlib
 import html
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from itertools import pairwise
@@ -34,6 +35,12 @@ from .miniapp_security import (
     validate_init_data,
     validate_owner_launch_token,
 )
+from .operations_guard import (
+    OperationsResetError,
+    current_generation,
+    operation_lease,
+    require_generation,
+)
 from .services.academy_growth import personal_tip
 from .services.booking_access import booking_scope_sql
 from .yandex_disk import YandexDiskError
@@ -41,6 +48,46 @@ from .yandex_disk import YandexDiskError
 logger = logging.getLogger(__name__)
 PREFIX = "/api/miniapp"
 ROLE_ORDER = ("OWNER", "ADMIN", "PHOTOGRAPHER", "MANAGER")
+OPERATIONS_GENERATION_HEADER = "X-PhotoBoss-Operations-Generation"
+
+
+def operational_mutation(request):
+    """Only reset-owned workflows participate in the reset write barrier.
+
+    Planned shifts, staff, settings, Academy, chat and manual cash movements are
+    retained. Outbox envelopes validate their durable generation in Workday;
+    unlike an HTTP header it cannot be refreshed onto an old queued operation.
+    Guest capabilities need the barrier but never a staff generation header.
+    """
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return False
+    path = request.path
+    if path.startswith(("/feedback/", "/g/")):
+        return True
+    if not path.startswith(PREFIX + "/"):
+        return False
+    path = path[len(PREFIX):]
+    return bool(
+        path.startswith(("/attendance/", "/bookings/", "/sales/", "/photos/",
+                         "/receipts/", "/sale-drafts/", "/payroll/", "/operations/"))
+        or re.match(r"^/(?:delivery|galleries)/[0-9]+(?:/|$)", path)
+        or path == "/events/scan"
+        or re.fullmatch(r"/events/[0-9]+/acknowledge", path)
+    )
+
+
+def operation_header_required(request):
+    return (request.path.startswith(PREFIX + "/")
+            and not request.path.startswith(PREFIX + "/operations/"))
+
+
+def operation_lease_required(request):
+    # Public album views and downloads increment reset-owned counters and may
+    # finish after a long storage read. Drain those writers before archiving.
+    return (operational_mutation(request)
+            or (request.method == "GET" and request.path.startswith("/g/")))
+
+
 ACTIONS = {
     "row.insert": "Созданы данные", "row.update": "Изменены данные", "row.delete": "Удалены данные",
     "work_call_history": "Изменён статус звонка",
@@ -165,7 +212,8 @@ class MiniApp:
 
     @web.middleware
     async def middleware(self, request, handler):
-        if not (request.path.startswith(PREFIX) or request.path.startswith("/app/")):
+        guarded = operation_lease_required(request)
+        if not (request.path.startswith(PREFIX) or request.path.startswith("/app/") or guarded):
             return await handler(request)
         from .audit_context import actor_id
         actor_token = actor_id.set(None)
@@ -175,7 +223,13 @@ class MiniApp:
                     raise AccessError("Пользователь и роль определяются сервером.", 400)
                 request["miniapp_actor"] = await self.actor(request)
                 actor_id.set(request["miniapp_actor"]["id"])
-            response = await handler(request)
+            if guarded:
+                async with operation_lease(self.engine) as conn:
+                    if operation_header_required(request):
+                        await require_generation(conn, request.headers.get(OPERATIONS_GENERATION_HEADER, ""))
+                    response = await handler(request)
+            else:
+                response = await handler(request)
             if request.path.startswith(PREFIX) and response.status < 400:
                 try:
                     await miniapp_sessions.refresh(self.engine, request, response)
@@ -185,6 +239,8 @@ class MiniApp:
                     logger.warning("Mini App session refresh failed: %s", request.path, exc_info=True)
         except AccessError as exc:
             body = {"error": str(exc)}
+            if isinstance(exc, OperationsResetError):
+                body.update(code="operations_reset", operationsGeneration=exc.generation)
             if exc.status == 403 and request.get("miniapp_telegram_id"):
                 # Signed account identity only; never disclose a different user or roles.
                 body["telegramId"] = request["miniapp_telegram_id"]
@@ -274,6 +330,7 @@ class MiniApp:
             theme = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=f"miniapp:theme:{actor['id']}")
             capture = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=f"miniapp:screen_capture:{actor['id']}")
             password = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=f"miniapp:password:{actor['id']}")
+            generation = await current_generation(conn)
         capture_allowed = (
             True
             if "OWNER" in actor["roles"]
@@ -285,6 +342,7 @@ class MiniApp:
             "permissions": actor["permissions"], "screenCaptureAllowed": capture_allowed,
             "passwordConfigured": bool(password),
             "passwordLogin": json.loads(password[0]['value'])['login'] if password else '',
+            "operationsGeneration": generation,
             "today": self.today().isoformat(),
             "timezone": str(self.tz), "mode": "live"})
 

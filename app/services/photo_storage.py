@@ -13,7 +13,9 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from ..db import Session
+from ..miniapp_security import AccessError
 from ..models import PhotoStorage
+from ..operations_guard import operation_lease
 from ..yandex_disk import ROOT, YandexDisk, YandexDiskError, validate_saved
 
 logger = logging.getLogger(__name__)
@@ -227,17 +229,21 @@ async def sync_one(bot, storage: YandexDisk) -> bool:
 async def storage_loop(bot, storage: YandexDisk, *, interval=15, batch=3):
     while True:
         try:
-            processed = 0
-            for _ in range(batch):
-                if not await sync_one(bot, storage):
-                    break
-                processed += 1
-            from ..photo_edits import process_one
-            await process_one(storage)
-            if processed:
-                logger.info("Yandex.Disk photo sync cycle: processed=%s", processed)
+            async with Session() as guard_session, operation_lease(guard_session.bind):
+                processed = 0
+                for _ in range(batch):
+                    if not await sync_one(bot, storage):
+                        break
+                    processed += 1
+                from ..photo_edits import process_one
+                await process_one(storage)
+                if processed:
+                    logger.info("Yandex.Disk photo sync cycle: processed=%s", processed)
         except asyncio.CancelledError:
             raise
+        except AccessError as exc:
+            if exc.status != 503:
+                logger.exception("Yandex.Disk photo sync unavailable")
         except Exception:
             logger.exception("Yandex.Disk photo sync loop failed")
         await asyncio.sleep(interval)

@@ -1,4 +1,4 @@
-import {readSnapshot,saveSnapshot,setSnapshotUser} from './localstore.js';
+import {readSnapshot,saveSnapshot,setSnapshotUser,reconcileOperationsGeneration} from './localstore.js';
 export class ApiError extends Error {constructor(message,status=0,telegramId=null,retryAfterMs=0){super(message);this.status=status;this.retryAfterMs=retryAfterMs;this.telegramId=Number.isSafeInteger(telegramId)&&telegramId>0?telegramId:null;}}
 
 const SECURE_INIT_KEY='photo_boss_init_data_v1';
@@ -6,6 +6,7 @@ const SESSION_INIT_KEY='pb_init_data_v1';
 const SESSION_OWNER_KEY='pb_owner_launch_v1';
 const SESSION_MAX_AGE_SECONDS=23*60*60;
 let serverSessionActive=false;
+let operationsGeneration=null;
 const SESSION_BROWSER_KEY='pb_browser_session_only';
 let browserSessionOnly=sessionGet(SESSION_BROWSER_KEY)==='1';
 export function preferBrowserSession(){browserSessionOnly=true;serverSessionActive=false;setSnapshotUser(null);sessionSet(SESSION_BROWSER_KEY,'1');sessionSet(SESSION_OWNER_KEY,'');forgetInitData();}
@@ -125,7 +126,7 @@ export async function api(path,{body,method='GET',timeoutMs,responseType,allowSn
  try {
   const multipart=body instanceof FormData;
   const payload=body===undefined?undefined:multipart?body:JSON.stringify(body);
-  const send=credential=>fetch(url,{...options,method,signal:controller.signal,cache:'no-store',credentials:'same-origin',redirect:'error',headers:{...(!multipart?{'Content-Type':'application/json'}:{}),'X-PhotoBoss-Session':'1',...authHeaders(credential.kind,credential.value)},body:payload});
+  const send=credential=>fetch(url,{...options,method,signal:controller.signal,cache:'no-store',credentials:'same-origin',redirect:'error',headers:{...(!multipart?{'Content-Type':'application/json'}:{}),'X-PhotoBoss-Session':'1',...(operationsGeneration!==null?{'X-PhotoBoss-Operations-Generation':operationsGeneration}:{}),...authHeaders(credential.kind,credential.value)},body:payload});
   let response=await send(primary);
   if(response.status===401&&alternate){
    if(primary.kind==='telegram'&&primary.source!=='live')forgetInitData();
@@ -139,13 +140,24 @@ export async function api(path,{body,method='GET',timeoutMs,responseType,allowSn
   if(response.ok&&responseType==='blob')return await response.blob();
   const data=await response.json().catch(()=>null);
   if(!response.ok){
+   if(data?.code==='operations_reset')window.dispatchEvent(new Event('pb-operations-stale'));
    const header=response.headers?.get?.('Retry-After');
    const seconds=header&&/^\d+(?:\.\d+)?$/.test(header.trim())?Number(header):null;
    const retryAfterMs=seconds!==null?seconds*1000:header?Math.max(0,Date.parse(header)-Date.now()):0;
    throw new ApiError(data?.error||(response.status>=500?'Сервис временно недоступен. Повторите попытку.':`Запрос отклонён (${response.status}).`),response.status,data?.telegramId,Number.isFinite(retryAfterMs)?Math.max(0,retryAfterMs):0);
   }
   if(!data)throw new ApiError('Сервер вернул некорректный ответ.');
-  if(path==='/me')setSnapshotUser(data.user?.telegramId);
+  if(path==='/me'){
+   // Finish local reconciliation before boot is allowed to flush its outbox.
+   // No reset token is adopted from offline snapshots or unverified errors.
+   const generation=typeof data.operationsGeneration==='string'?data.operationsGeneration:'';
+   const previousGeneration=operationsGeneration;
+   const changed=await reconcileOperationsGeneration(data.user?.id,data.user?.telegramId,generation);
+   operationsGeneration=generation;setSnapshotUser(data.user?.telegramId);
+   // Another tab may already have reconciled the shared database. The current
+   // tab's old forms still need to be discarded when its generation changes.
+   if(changed||(previousGeneration!==null&&previousGeneration!==generation))window.dispatchEvent(new CustomEvent('pb-operations-reset',{detail:{userId:data.user.id,generation}}));
+  }
   if(method==='GET')try{await saveSnapshot(path,data);}catch{window.dispatchEvent(new Event('pb-local-storage-error'));}
   return data;
  }catch(e){if(method==='GET'&&allowSnapshot&&!e.status)try{const cached=await readSnapshot(path);if(cached)return cached;}catch{}if(e.name==='AbortError')throw new ApiError('Сервер отвечает дольше обычного. Повторите попытку.');if(e instanceof ApiError)throw e;throw new ApiError('Нет соединения с сервером. Демо-данные не подставляются.');}finally{clearTimeout(timer);}

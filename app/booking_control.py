@@ -51,13 +51,16 @@ async def activity(session, *, now=None, hotel_ids=None):
     if hotel_ids is not None:
         hotels = [h for h in hotels if h.id in hotel_ids]
     allowed = {h.id for h in hotels}
+    from .services.discipline import operational_reset_at
+    reset_at = await operational_reset_at(session)
     shifts = (await session.execute(select(Shift, User, ShiftCheckIn.started_at)
         .join(User, User.id == Shift.user_id).join(ShiftCheckIn, ShiftCheckIn.user_id == User.id)
         .where(Shift.hotel_id.in_(allowed), Shift.status != 'CANCELLED', User.active.is_(True),
                Shift.start_at <= moment, Shift.end_at > moment,
                ShiftCheckIn.shift_date == local.date(), ShiftCheckIn.status == 'STARTED',
                ~select(ShiftCheckOut.id).where(ShiftCheckOut.user_id == User.id,
-                    ShiftCheckOut.shift_date == local.date(), ShiftCheckOut.status == 'FINISHED').exists()))).all()
+                    ShiftCheckOut.shift_date == local.date(), ShiftCheckOut.status == 'FINISHED').exists(),
+               *([ShiftCheckIn.started_at >= reset_at.replace(tzinfo=None)] if reset_at else [])))).all()
     roles = {}
     for uid, role in (await session.execute(select(UserRole.user_id, UserRole.role))).all():
         roles.setdefault(uid, set()).add(role)

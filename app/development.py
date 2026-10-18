@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from .config import config
 from .miniapp_security import AccessError
 from .models import Booking, Photo, Sale, ShootDevelopmentReview, Shooting, utc_now
+from .operations_guard import operation_lease
 from .people import positive_id
 from .services import development_ai as ai
 from .services.insights import parsed
@@ -184,9 +185,14 @@ async def development_loop(engine,bot):
     factory=async_sessionmaker(engine,expire_on_commit=False)
     while True:
         try:
-            async with factory() as session: await queue_reviews(session)
-            await review_one(factory,bot)
+            async with operation_lease(engine):
+                async with factory() as session: await queue_reviews(session)
+                await review_one(factory,bot)
         except asyncio.CancelledError: raise
+        except AccessError as exc:
+            if exc.status != 503:
+                import logging
+                logging.getLogger(__name__).warning('Development review cycle unavailable',exc_info=False)
         except (SQLAlchemyError, OSError, ValueError, TypeError):
             import logging
             logging.getLogger(__name__).warning('Development review cycle unavailable',exc_info=False)

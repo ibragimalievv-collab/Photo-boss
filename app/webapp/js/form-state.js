@@ -1,15 +1,29 @@
 /* Drafts belong to the authenticated account. Never store passwords or tokens.
  * Text survives a reload in this tab. File handles survive a redraw only;
  * after submission their bytes are durably owned by the existing outbox. */
-let actor=null;
+let actor=null,generation='',operationalReset=false;
 const drafts=new Map();
 const allowed=new Set(['workflowBooking','workflowSale','workflowShoot','salesTrainingForm','bookingTrainingForm']);
+const operational=new Set(['workflowBooking','workflowSale','workflowShoot']);
 const prefix='pb-form-draft-v1:';
 const ttl=7*86400000;
-function key(form){return actor&&allowed.has(form.id)?`${prefix}${actor}:${form.id}:${form.dataset?.draftScope||'default'}`:null;}
+function key(form){return actor&&allowed.has(form.id)&&!(operationalReset&&operational.has(form.id))?`${prefix}${actor}:${form.id}:${form.dataset?.draftScope||'default'}${operational.has(form.id)&&generation?':'+generation:''}`:null;}
 function saved(k){if(drafts.has(k))return drafts.get(k);try{const d=JSON.parse(sessionStorage.getItem(k)||'null');if(d&&Date.now()-d.at<ttl){drafts.set(k,d);return d;}}catch{}return null;}
 function persist(k,d){drafts.set(k,d);try{sessionStorage.setItem(k,JSON.stringify({...d,files:undefined}));}catch{}}
-export function setFormActor(id){if(actor!==id){drafts.clear();actor=Number.isSafeInteger(id)&&id>0?id:null;}}
+export function setFormActor(id,nextGeneration=''){
+ const nextActor=Number.isSafeInteger(id)&&id>0?id:null;
+ const next=typeof nextGeneration==='string'?nextGeneration:'';
+ if(actor!==nextActor){drafts.clear();operationalReset=false;}
+ actor=nextActor;generation=next;
+ if(!actor||!generation)return;
+ try{
+  const marker=`pb-form-generation-v1:${actor}`;
+  if(sessionStorage.getItem(marker)===generation)return;
+  for(const k of [...drafts.keys()])if([...operational].some(form=>k.startsWith(`${prefix}${actor}:${form}:`)))drafts.delete(k);
+  for(let i=sessionStorage.length-1;i>=0;i--){const k=sessionStorage.key(i);if(k&&[...operational].some(form=>k.startsWith(`${prefix}${actor}:${form}:`)))sessionStorage.removeItem(k);}
+  sessionStorage.removeItem(`pb-workflow-sale:${actor}`);sessionStorage.setItem(marker,generation);
+ }catch{}
+}
 export function captureForm(form){
  const k=key(form);if(!k)return;
  const fields={},files={},names={};
@@ -54,3 +68,4 @@ export function restoreForms(root=document){
 for(const event of ['input','change'])document.addEventListener(event,e=>{const form=e.target?.closest?.('form');if(form)captureForm(form);});
 window.addEventListener('pagehide',()=>captureForms());
 document.addEventListener('pb-chat-account-reset',()=>setFormActor(null));
+window.addEventListener('pb-operations-reset',event=>{const sameActor=actor===event.detail?.userId;setFormActor(event.detail?.userId,event.detail?.generation);if(sameActor)operationalReset=true;});

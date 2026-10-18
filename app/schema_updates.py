@@ -124,3 +124,5 @@ async def upgrade(connection):
         'acknowledged_at': 'TIMESTAMP', 'resolved_at': 'TIMESTAMP',
     })
     await connection.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_event ON notifications(user_id,event_key)'))
+    from .operational_reset import install_archive_guards
+    await install_archive_guards(connection)

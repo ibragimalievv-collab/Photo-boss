@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 const source=fs.readFileSync(new URL('../app/webapp/js/api.js',import.meta.url),'utf8')
- .replace("import {readSnapshot,saveSnapshot,setSnapshotUser} from './localstore.js';",'const readSnapshot=async()=>null,saveSnapshot=async()=>{},setSnapshotUser=()=>{};').replaceAll('export ','');
+ .replace("import {readSnapshot,saveSnapshot,setSnapshotUser,reconcileOperationsGeneration} from './localstore.js';",'const readSnapshot=async()=>null,saveSnapshot=async()=>{},setSnapshotUser=()=>{},reconcileOperationsGeneration=async()=>false;').replaceAll('export ','');
 const fresh=`auth_date=${Math.floor(Date.now()/1000)}&user=${encodeURIComponent('{"id":1001}')}&hash=${'a'.repeat(64)}`;
 async function scenario({hash,live='',status=200,afterLoadHash,options={},browserLogin=false}){
  const storage=new Map(),sent=[];
@@ -77,3 +77,24 @@ for(const online of [false,true]){
  assert.equal(current.fetches,online?1:0);
 }
 console.log('PASS: schedule editor requires a fresh employee roster during offline and network failure');
+
+// A second tab may already have purged IndexedDB. A changed in-memory token
+// must still discard this tab's old forms and apply the server's new header.
+{
+ const sent=[],events=[];let generation='before',reject=false;
+ const context=vm.createContext({URL,URLSearchParams,FormData,AbortController,Date,Number,Promise,setTimeout,clearTimeout,atob,Event,
+  CustomEvent:class extends Event{constructor(type,options){super(type);this.detail=options.detail;}},
+  location:{hash:'#home',origin:'https://photo-boss.onrender.com'},
+  window:{Telegram:{WebApp:{initData:fresh}},dispatchEvent:event=>events.push(event)},
+  sessionStorage:{getItem:()=>null,setItem(){},removeItem(){}},
+  fetch:async(url,options)=>{sent.push(options);return {status:reject?409:200,ok:!reject,headers:{get:()=>null},json:async()=>reject?{error:'Рабочие данные обнулены.',code:'operations_reset'}:{user:{id:1,telegramId:1001},operationsGeneration:generation}};}});
+ vm.runInContext(source,context);
+ await vm.runInContext("api('/me')",context);assert.equal(events.length,0);
+ generation='after';await vm.runInContext("api('/me')",context);
+ assert.equal(events.length,1);assert.equal(events[0].type,'pb-operations-reset');assert.equal(events[0].detail.generation,'after');
+ await vm.runInContext("api('/bookings',{method:'POST',body:{}})",context);
+ assert.equal(sent.at(-1).headers['X-PhotoBoss-Operations-Generation'],'after');
+ reject=true;await assert.rejects(vm.runInContext("api('/bookings',{method:'POST',body:{}})",context),error=>error.status===409);
+ assert.equal(events.at(-1).type,'pb-operations-stale');
+}
+console.log('PASS: changed token in an already-reconciled tab reloads old UI, direct requests carry generation and server reset requests refresh identity');

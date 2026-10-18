@@ -49,6 +49,8 @@ jobs:
           for test in tests/*_check.mjs; do node "$test"; done
       - name: Verify concurrent sale and upload closure on disposable PostgreSQL
         run: python tests/release_blockers_postgres_check.py
+      - name: Verify recoverable operational reset and concurrency on disposable PostgreSQL
+        run: python tests/operational_reset_postgres_check.py
       - name: Archive exact verified source
         if: always()
         run: |

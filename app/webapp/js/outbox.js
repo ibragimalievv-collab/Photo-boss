@@ -1,6 +1,6 @@
 import {api} from './api.js';
-import {localAction,openLocal} from './localstore.js';
-let userId=null,running=false,timer=null,retryDue=0,rerunRequested=false,authEpoch=0,queueRepairing=false;
+import {localAction,openLocal,writeOperations} from './localstore.js';
+let userId=null,operationsGeneration='',running=false,timer=null,retryDue=0,rerunRequested=false,authEpoch=0,queueRepairing=false;
 const scheduleRetry=delay=>{
  const wait=Math.min(2147483647,Math.max(1000,delay)),due=Date.now()+wait;
  // Keep the earliest wake-up: a later blocked row must not postpone an earlier one.
@@ -8,7 +8,7 @@ const scheduleRetry=delay=>{
  clearTimeout(timer);retryDue=due;
  timer=setTimeout(()=>{timer=null;retryDue=0;void flushOutbox();},wait);
 };
-const update=row=>localAction('operations','readwrite',s=>s.put(row));
+const update=row=>writeOperations([row]);
 const changed=()=>window.dispatchEvent(new Event('pb-outbox'));
 // Older servers converted every domain error to this generic 400. Recheck such
 // media once, with the original key and bytes; never reset arbitrary bad requests.
@@ -44,13 +44,13 @@ export async function repairSaleQueue(keys,{draftId,total,sold,price},files=[]){
  if(complete.resumeByKey&&!all.some(row=>row.key===complete.resumeByKey&&row.status==='synced'))throw new Error('Предыдущее исправление ещё отправляется.');
  for(const file of files)if(!file||!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>20*1024*1024)throw new Error('Нужен JPEG, PNG или WebP до 20 МБ.');
  const at=Date.now(),draft={id:draftId},items=[{kind:'sale_counts',data:{draft,total,sold,price}},...files.map(blob=>({kind:'sale_selected',data:{draft},blob}))];
- const added=items.map((item,order)=>({...item,key:crypto.randomUUID(),userId:actor,date:complete.date,blob:item.blob||null,filename:item.blob?.name||'',status:'local',createdAt:at,order}));
+ const added=items.map((item,order)=>({...item,key:crypto.randomUUID(),userId:actor,generation:operationsGeneration,date:complete.date,blob:item.blob||null,filename:item.blob?.name||'',status:'local',createdAt:at,order}));
  const last=added[added.length-1];last.resumeCompleteKey=complete.key;
  // Only local recovery metadata changes. The original completion key and its
  // request payload remain untouched; accepted receipt/photo operations stay put.
  complete.resumeByKey=last.key;
  if(actor!==userId||running)throw new Error('Состояние отправки изменилось. Откройте исправление продажи ещё раз.');
- await localAction('operations','readwrite',store=>{for(const row of added)store.add(row);store.put(complete);});
+ if(!await writeOperations([...added,complete],{addKeys:added.map(row=>row.key)}))throw new Error('Рабочие данные обнулены. Обновите приложение перед продолжением.');
  committed=true;changed();return added;
  }finally{queueRepairing=false;if(committed||rerunRequested)void flushOutbox();}
 }
@@ -70,7 +70,7 @@ function legacySaleDependency(row,previous){
  // only those exact failures once their original local predecessors succeeded.
  return Boolean(required&&stageError&&previous.some(step=>step.kind==='sale_start')&&previous.some(step=>step.kind===required)&&previous.every(step=>step.status==='synced'));
 }
-export function setOutboxUser(id){userId=id;if(id)authEpoch=Math.max(Date.now(),authEpoch+1);return flushOutbox();}
+export function setOutboxUser(id,generation=''){userId=id;operationsGeneration=typeof generation==='string'?generation:'';if(id)authEpoch=Math.max(Date.now(),authEpoch+1);return flushOutbox();}
 export async function outboxRows(){
  if(!userId)return [];const actor=userId,db=await openLocal();
  try{return await new Promise((resolve,reject)=>{
@@ -84,8 +84,8 @@ export async function enqueueBatch(items){
  if(!userId)throw new Error('Сначала откройте приложение при доступной сети.');
  if(!items.length)throw new Error('Нет действий для сохранения.');
  const at=Date.now(),actor=userId;
- const rows=items.map((item,i)=>({key:item.key||crypto.randomUUID(),userId:actor,kind:item.kind,date:item.date,data:item.data,blob:item.blob||null,filename:item.blob?.name||'',status:'local',createdAt:at,order:i}));
- await localAction('operations','readwrite',s=>{for(const row of rows)s.add(row);});
+ const rows=items.map((item,i)=>({key:item.key||crypto.randomUUID(),userId:actor,generation:operationsGeneration,kind:item.kind,date:item.date,data:item.data,blob:item.blob||null,filename:item.blob?.name||'',status:'local',createdAt:at,order:i}));
+ if(!await writeOperations(rows,{add:true}))throw new Error('Рабочие данные обнулены. Обновите приложение перед продолжением.');
  changed();void flushOutbox();return rows;
 }
 export async function enqueueOperation(kind,date,data,blob=null){return (await enqueueBatch([{kind,date,data,blob}]))[0];}
@@ -104,19 +104,19 @@ export async function replaceOperationFile(key,file){
 // Store one original locally, send it, and wait for confirmation before loading
 // the next file into IndexedDB. This bounds browser storage for large folders.
 export async function enqueueFilesOneByOne(files,operationFor,onProgress=()=>{}){
- const actor=userId,total=files.length;
+ const actor=userId,generation=operationsGeneration,total=files.length;
  if(!actor)throw new Error('Войдите в свой аккаунт Photo Boss.');
  if(!total)throw new Error('В выбранной папке нет подходящих фотографий.');
  for(let i=0;i<total;i++){
-  if(actor!==userId)throw new Error('Аккаунт сменился. Выберите папку снова.');
+  if(actor!==userId||generation!==operationsGeneration)throw new Error('Рабочие данные или аккаунт изменились. Выберите папку снова.');
   const file=files[i];
   // Wait for any previous upload to leave the shared worker before scheduling the next.
   while(running&&actor===userId)await new Promise(done=>setTimeout(done,100));
-  if(actor!==userId)throw new Error('Аккаунт сменился. Выберите папку снова.');
+  if(actor!==userId||generation!==operationsGeneration)throw new Error('Рабочие данные или аккаунт изменились. Выберите папку снова.');
   const [saved]=await enqueueBatch([{...operationFor(file,i),blob:file}]);
   onProgress({done:i,total,name:file.name,state:'sending'});
   for(;;){
-   if(actor!==userId)throw new Error('Аккаунт сменился. Сохранённые фото остались в очереди прежнего аккаунта.');
+   if(actor!==userId||generation!==operationsGeneration)throw new Error('Рабочие данные или аккаунт изменились. Обновите раздел перед продолжением.');
    const current=await localAction('operations','readonly',s=>s.get(saved.key));
    if(!current)throw new Error('Кадр не найден в очереди.');
    if(current.status==='synced'){onProgress({done:i+1,total,name:file.name,state:'synced',result:current.result});break;}
@@ -153,13 +153,16 @@ export async function flushOutbox(){
  if(running||queueRepairing){rerunRequested=true;return {state:'running'};}
  rerunRequested=false;
  running=true;
- const actor=userId,summary={state:'done',completed:0,failed:0,temporary:0},blockedSales=new Set(),saleSteps=new Map();
+ const actor=userId,generation=operationsGeneration,active=()=>actor===userId&&generation===operationsGeneration,summary={state:'done',completed:0,failed:0,temporary:0},blockedSales=new Set(),saleSteps=new Map();
  try{
   // A tab may close after the correction was accepted but before its original
   // completion was reactivated. Recover that link on the next foreground pass.
   for(const repair of await outboxRows())if(repair.status==='synced'&&repair.resumeCompleteKey)await resumeRepairedCompletion(repair);
   for(const item of await outboxRows()){
-   if(actor!==userId)break;
+   if(!active())break;
+   // Legacy rows remain legacy packets; never stamp a freshly adopted reset
+   // generation onto an old action, even if another tab held a stale cursor.
+   if(item.kind!=='cash_expense'&&(item.generation||'')!==generation)continue;
    if(item.resumeByKey){const repair=await localAction('operations','readonly',store=>store.get(item.resumeByKey));if(repair?.status!=='synced')continue;}
    const sale=saleChain(item);
    if(sale&&blockedSales.has(sale))continue;
@@ -167,7 +170,7 @@ export async function flushOutbox(){
    if(sale&&!saleSteps.has(sale))saleSteps.set(sale,previous);
    if(!['local','syncing'].includes(item.status)&&!legacyMediaError(item)&&!renewedAuth(item)&&!legacySaleDependency(item,previous)){if(sale){previous.push(item);if(item.status!=='synced')blockedSales.add(sale);}continue;}
    const row=await localAction('operations','readonly',s=>s.get(item.key));
-   if(actor!==userId)break;
+   if(!active())break;
    if(!row)continue;
    if(!['local','syncing'].includes(row.status)&&!legacyMediaError(row)&&!renewedAuth(row)&&!legacySaleDependency(row,previous)){if(sale){previous.push(row);if(row.status!=='synced')blockedSales.add(sale);}continue;}
    if(legacySaleDependency(row,previous)){row.saleDependencyRecovery=SALE_DEPENDENCY_RECOVERY;row.status='local';row.error='';row.retryAt=0;await update(row);}
@@ -176,9 +179,10 @@ export async function flushOutbox(){
    if(renewedAuth(row)){row.status='local';row.error='';row.retryAt=0;}
    if(row.retryAt>Date.now()){if(sale)blockedSales.add(sale);scheduleRetry(row.retryAt-Date.now());summary.state='backoff';continue;}
    row.authEpoch=authEpoch;
-   row.status='syncing';await update(row);changed();
+   row.status='syncing';if(!await update(row))break;changed();
    try{
-    const operation={actorId:row.userId,key:row.key,kind:row.kind,date:row.date,data:row.data};
+    if(!active())break;
+    const operation={actorId:row.userId,key:row.key,kind:row.kind,date:row.date,data:row.data,...(row.generation!==undefined?{generation:row.generation}:{})};
     let body=operation,path='/operations/sync';
     if(row.blob){
      const bytes=await row.blob.arrayBuffer();
@@ -188,9 +192,11 @@ export async function flushOutbox(){
      path='/operations/media';
     }
     row.result=await api(path,{method:'POST',body,timeoutMs:180000});
+    if(!active())break;
     row.status='synced';row.error='';row.errorStatus=0;row.retryAt=0;row.blob=null;
     summary.completed++;
    }catch(e){
+    if(!active())break;
     if(sale)blockedSales.add(sale);
     // Missing dependencies and receipt failures must not strand independent shoot photos.
     // Keep their blobs on this device and retry without marking a dependent sale as failed.
@@ -211,10 +217,11 @@ export async function flushOutbox(){
    }
    await update(row);changed();if(row.resumeCompleteKey)await resumeRepairedCompletion(row);
   }
- }finally{running=false;changed();if(userId&&(userId!==actor||rerunRequested))void flushOutbox();}
+ }finally{running=false;changed();if(userId&&(!active()||rerunRequested))void flushOutbox();}
  return summary;
 }
 window.addEventListener('online',()=>flushOutbox());
 // Mobile browsers suspend timers in the background even while onLine stays true.
 for(const event of ['focus','pageshow'])window.addEventListener(event,()=>flushOutbox());
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)void flushOutbox();});
+window.addEventListener('pb-operations-reset',event=>{if(event.detail?.userId===userId){operationsGeneration=event.detail.generation;clearTimeout(timer);timer=null;retryDue=0;rerunRequested=false;}});
