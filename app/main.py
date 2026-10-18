@@ -24,6 +24,7 @@ from .handlers import (
     sales,
     training,
 )
+from . import salary_manual
 from .services.photo_storage import storage_loop
 from .ui import CompactUiMiddleware, enable_compact_ui
 from .yandex_disk import YandexDisk, configured_from_env
@@ -97,7 +98,7 @@ def create_dispatcher():
     dispatcher.update.outer_middleware(CompactUiMiddleware())
     from .delivery_bot import r as delivery_router
     dispatcher.include_routers(
-        delivery_router, common.r, receipts.r, admin.r, photographer.r, manager.r, sales.r,
+        delivery_router, common.r, salary_manual.r, receipts.r, admin.r, photographer.r, manager.r, sales.r,
         operations.r, academy.r, training.r,
     )
     return dispatcher
