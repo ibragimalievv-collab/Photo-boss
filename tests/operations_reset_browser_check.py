@@ -12,6 +12,8 @@ async def main():
         browser = await playwright.chromium.launch()
         try:
             page = await browser.new_page()
+            page_errors = []
+            page.on('pageerror', lambda error: page_errors.append(str(error)))
 
             async def route(request):
                 if request.request.url.endswith('/localstore.js'):
@@ -63,7 +65,28 @@ async def main():
                 'accepted': True, 'second': True, 'recleared': True, 'noLateWrite': True,
                 'laterWrite': False, 'retainedExpenseWrite': True, 'empty': False, 'legacyKept': True,
             }, result
+            clone_result = await page.evaluate('''async()=>{
+              const m=await import('/localstore.js');
+              const get=key=>m.localAction('operations','readonly',store=>store.get(key));
+              const row=(key,data)=>({key,userId:42,generation:'reset-2',kind:'sale_counts',data});
+              await m.writeOperations([row('existing-safe',{total:1})]);
+              const results=[];
+              for(const add of [false,true]){
+                const first=add?row('new-safe',{total:2}):row('existing-safe',{total:999});
+                const invalid=row('uncloneable',{invalid(){}});
+                try{await m.writeOperations([first,invalid],{add});results.push('unexpected success');}
+                catch(error){results.push(error.name);}
+              }
+              const original=await get('existing-safe'),fresh=await get('new-safe'),invalid=await get('uncloneable');
+              const recovered=await m.writeOperations([row('after-clone-error',{total:3})],{add:true});
+              return {results,original:original.data.total,fresh:!!fresh,invalid:!!invalid,recovered};
+            }''')
+            assert clone_result == {'results': ['DataCloneError', 'DataCloneError'],
+                                    'original': 1, 'fresh': False, 'invalid': False,
+                                    'recovered': True}, clone_result
+            assert not page_errors, page_errors
             print('PASS: real IndexedDB first adoption, atomic reset, account isolation, Academy preservation, repeated login, second reset and legacy compatibility')
+            print('PASS: uncloneable add/put batches reject and roll back atomically without uncaught browser errors; later writes succeed')
         finally:
             await browser.close()
 

@@ -52,14 +52,21 @@ export async function writeOperations(rows,{add=false,addKeys=[]}={}){
  if(rows.some(row=>row.userId!==actor))throw new Error('Операции разных аккаунтов нельзя сохранять вместе.');
  const db=await openLocal();
  try{return await new Promise((resolve,reject)=>{
-  const tx=db.transaction(['operations','snapshots'],'readwrite'),store=tx.objectStore('operations');let accepted=false;
+  const tx=db.transaction(['operations','snapshots'],'readwrite'),store=tx.objectStore('operations');let accepted=false,failure=null;
   const marker=tx.objectStore('snapshots').get(`operations-generation:${actor}`);
   marker.onsuccess=()=>{
-   const generation=marker.result?.generation||'';
-   accepted=rows.every(row=>row.kind==='cash_expense'||(row.generation||'')===generation);
-   if(accepted)for(const row of rows)store[add||addKeys.includes(row.key)?'add':'put'](row);
+   try{
+    const generation=marker.result?.generation||'';
+    accepted=rows.every(row=>row.kind==='cash_expense'||(row.generation||'')===generation);
+    if(accepted)for(const row of rows)store[add||addKeys.includes(row.key)?'add':'put'](row);
+   }catch(error){
+    // IDB cloning can throw synchronously inside this asynchronous callback.
+    // Abort the whole batch, including writes already enqueued before this row,
+    // and reject the caller instead of leaking an uncaught browser page error.
+    failure=error;try{tx.abort();}catch{}reject(error);
+   }
   };
   tx.oncomplete=()=>{if(!accepted)window.dispatchEvent(new Event('pb-operations-stale'));resolve(accepted);};
-  tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('Не удалось сохранить рабочие операции.'));
+  tx.onerror=()=>reject(failure||tx.error);tx.onabort=()=>reject(failure||tx.error||new Error('Не удалось сохранить рабочие операции.'));
  });}finally{db.close();}
 }
