@@ -85,6 +85,9 @@ async def create_booking_record(session, actor, data, photographer_id=None):
     session.add(Shooting(booking_id=booking.id, status='PENDING_CONFIRMATION'))
     await audit(session, actor, 'booking_created', 'booking', booking.id)
     await session.flush()
+    if photographer_id is not None:
+        from .assignment_notifications import queue_assignment
+        await queue_assignment(await session.connection(), booking.id, photographer_id)
     return booking
 
 
@@ -143,31 +146,11 @@ async def booking_card(session, booking: Booking):
 
 
 async def notify_photographer_assignment(bot, session, booking: Booking):
+    """Compatibility for bot entry points; delivery always uses the durable queue."""
     if not booking.photographer_id:
         return False
-    photographer = await session.get(User, booking.photographer_id)
-    shooting = await session.scalar(
-        select(Shooting).where(Shooting.booking_id == booking.id)
-    )
-    hotel = await session.get(Hotel, booking.hotel_id)
-    if photographer is None or not photographer.active or shooting is None:
-        return False
-    try:
-        await bot.send_message(
-            photographer.tg_id,
-            f"📸 Вам назначена фотосессия #{booking.id}\n"
-            f"🏨 {hotel.name if hotel else 'Отель'}\n"
-            f"📅 {booking.shoot_date:%d.%m.%Y} · {booking.shoot_time:%H:%M}\n"
-            f"👥 Гостей: {booking.guest_count}\n\n"
-            "Когда примете съёмку, нажмите «Забрать съёмку».",
-            reply_markup=inline(
-                [[("📥 Забрать съёмку", f"photo:pickup:{shooting.id}", "primary")]]
-            ),
-            disable_notification=False,
-        )
-        return True
-    except TelegramAPIError:
-        return False
+    from .assignment_notifications import deliver_assignments
+    return bool(await deliver_assignments(session.bind, bot, booking_id=booking.id))
 
 
 async def send_manager_ready_message(bot, manager_tg_id, booking_id):

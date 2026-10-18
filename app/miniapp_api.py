@@ -250,7 +250,11 @@ class MiniApp:
         except YandexDiskError as exc:
             # The provider may be down while the application and database are healthy.
             # Preserve the original outbox row and do not expose provider URLs or tokens.
-            logger.warning("Mini App storage temporarily unavailable: %s", request.path)
+            # Keep only the numeric provider status; never log signed URLs or tokens.
+            import re
+            code = re.search(r'HTTP (\d{3})', str(exc))
+            logger.warning("Mini App storage temporarily unavailable: %s providerStatus=%s",
+                           request.path, code.group(1) if code else 'unconfirmed')
             if 'HTTP 404' in str(exc):
                 response = web.json_response({'error': 'Файл не найден на подключённом Яндекс.Диске. Он мог остаться на прежнем Диске. Загрузите исходную фотографию повторно в эту же съёмку.'}, status=404)
             else:
@@ -513,7 +517,18 @@ class MiniApp:
                 await conn.execute(text("INSERT INTO shootings (booking_id,status) VALUES (:bid,'ASSIGNED')"), {"bid": bid})
             await self.audit_write(conn, actor, "miniapp_photographer_assigned", "booking", bid,
                                    f"Фотограф: {previous} → {uid}")
+            from .services.assignment_notifications import queue_assignment
+            await queue_assignment(conn, bid, uid)
         return web.json_response({"ok": True, "photographerId": uid})
+
+    async def assignment_notifications(self, request):
+        actor = request['miniapp_actor']
+        items = []
+        if 'PHOTOGRAPHER' in actor['roles']:
+            from .services.assignment_notifications import assignment_items
+            async with self.engine.connect() as conn:
+                items = await assignment_items(conn, actor['id'], self.today())
+        return web.json_response({'items': items}, headers={'Cache-Control': 'no-store'})
 
     async def shooting_action(self, request):
         """Run exactly the same state transitions used by the Telegram photographer bot."""
@@ -673,6 +688,9 @@ class MiniApp:
                 "bookings": await self.bookings_data(conn, actor, today),
                 "finance": await self.finance_data(conn, actor, today, today, "today"),
                 "updatedAt": datetime.now(timezone.utc).isoformat()}
+            if 'PHOTOGRAPHER' in actor['roles']:
+                from .services.assignment_notifications import assignment_items
+                result['assignments'] = await assignment_items(conn, actor['id'], today)
         return web.json_response(result)
 
     async def schedule(self, request):
@@ -1003,6 +1021,7 @@ class MiniApp:
                    "js/realtime-training.js", "js/voice-training.js", "js/booking-control.js", "js/form-state.js", "js/galleries.js", "js/gallery-view.js", "js/gallery-client.js", "css/galleries.css", "js/development.js", "js/academy-coach.js", "js/academy-mentor.js", "js/booking-diagnostic.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg", "assets/academy/exposure.svg", "assets/academy/window-light.svg", "assets/academy/perspective.svg", "assets/academy/group-depth.svg"}
+        allowed.add('js/sale-files.js')
         if name not in allowed:
             raise web.HTTPNotFound()
         path = self.static_dir / name
@@ -1019,6 +1038,7 @@ class MiniApp:
         routes = [("GET", "/diagnostics/ai", self.ai_diagnostics), ("POST", "/diagnostics/ai/probe", self.ai_probe), ("GET", "/me", self.me), ("POST", "/session", self.session_open), ("PUT", "/preferences", self.preferences),
             ("GET", "/dashboard", self.dashboard), ("GET", "/bookings", self.bookings),
             ("GET", "/booking-photographers", self.booking_photographers),
+            ("GET", "/assignment-notifications", self.assignment_notifications),
             ("POST", r"/bookings/{id:\d+}/photographer", self.assign_booking_photographer),
             ("POST", r"/bookings/{id:\d+}/shooting/{action:pickup|start|finish|ready}", self.shooting_action),
             ("GET", "/finance", self.finance), ("GET", "/schedule", self.schedule),

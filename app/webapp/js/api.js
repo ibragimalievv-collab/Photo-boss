@@ -7,9 +7,10 @@ const SESSION_OWNER_KEY='pb_owner_launch_v1';
 const SESSION_MAX_AGE_SECONDS=23*60*60;
 let serverSessionActive=false;
 let operationsGeneration=null;
+let accountRevision=0;
 const SESSION_BROWSER_KEY='pb_browser_session_only';
 let browserSessionOnly=sessionGet(SESSION_BROWSER_KEY)==='1';
-export function preferBrowserSession(){browserSessionOnly=true;serverSessionActive=false;setSnapshotUser(null);sessionSet(SESSION_BROWSER_KEY,'1');sessionSet(SESSION_OWNER_KEY,'');forgetInitData();}
+export function preferBrowserSession(){accountRevision++;operationsGeneration=null;browserSessionOnly=true;serverSessionActive=false;setSnapshotUser(null);sessionSet(SESSION_BROWSER_KEY,'1');sessionSet(SESSION_OWNER_KEY,'');forgetInitData();}
 
 function sessionGet(key){try{return sessionStorage.getItem(key)||'';}catch{return '';}}
 function sessionSet(key,value){try{if(value)sessionStorage.setItem(key,value);else sessionStorage.removeItem(key);}catch{}}
@@ -111,7 +112,9 @@ function authHeaders(kind,value){
 }
 
 export async function api(path,{body,method='GET',timeoutMs,responseType,allowSnapshot=true,...options}={}){
- if(method==='GET'&&!responseType&&typeof navigator!=='undefined'&&navigator.onLine===false){if(allowSnapshot){const cached=await readSnapshot(path);if(cached)return cached;}throw new ApiError(allowSnapshot?'Без сети: откройте этот раздел при подключении, чтобы сохранить данные.':'Для актуального списка сотрудников нужно соединение с сервером. Подключитесь к сети и откройте график ещё раз.');}
+ const revision=accountRevision;
+ const current=()=>{if(revision!==accountRevision)throw new ApiError('Аккаунт изменился. Откройте раздел заново.',409);};
+ if(method==='GET'&&!responseType&&typeof navigator!=='undefined'&&navigator.onLine===false){if(allowSnapshot){const cached=await readSnapshot(path);current();if(cached)return cached;}throw new ApiError(allowSnapshot?'Без сети: откройте этот раздел при подключении, чтобы сохранить данные.':'Для актуального списка сотрудников нужно соединение с сервером. Подключитесь к сети и откройте график ещё раз.');}
  const cfg=window.PHOTO_BOSS_CONFIG||{};
  const ownerToken=browserSessionOnly?'':ownerTokenFresh(HASH_OWNER_LAUNCH_TOKEN)?HASH_OWNER_LAUNCH_TOKEN:storedOwnerLaunchToken();
  const telegram=browserSessionOnly?{value:'',source:'none'}:await telegramInitData();
@@ -126,7 +129,7 @@ export async function api(path,{body,method='GET',timeoutMs,responseType,allowSn
  try {
   const multipart=body instanceof FormData;
   const payload=body===undefined?undefined:multipart?body:JSON.stringify(body);
-  const send=credential=>fetch(url,{...options,method,signal:controller.signal,cache:'no-store',credentials:'same-origin',redirect:'error',headers:{...(!multipart?{'Content-Type':'application/json'}:{}),'X-PhotoBoss-Session':'1',...(operationsGeneration!==null?{'X-PhotoBoss-Operations-Generation':operationsGeneration}:{}),...authHeaders(credential.kind,credential.value)},body:payload});
+  const send=async credential=>{current();const response=await fetch(url,{...options,method,signal:controller.signal,cache:'no-store',credentials:'same-origin',redirect:'error',headers:{...(!multipart?{'Content-Type':'application/json'}:{}),'X-PhotoBoss-Session':'1',...(operationsGeneration!==null?{'X-PhotoBoss-Operations-Generation':operationsGeneration}:{}),...authHeaders(credential.kind,credential.value)},body:payload});current();return response;};
   let response=await send(primary);
   if(response.status===401&&alternate){
    if(primary.kind==='telegram'&&primary.source!=='live')forgetInitData();
@@ -137,8 +140,9 @@ export async function api(path,{body,method='GET',timeoutMs,responseType,allowSn
   if(response.status===401){serverSessionActive=false;setSnapshotUser(null);}
   if(response.ok&&primary.kind==='telegram')rememberInitData(primary.value);
   if(response.ok&&responseType==='response')return response;
-  if(response.ok&&responseType==='blob')return await response.blob();
+  if(response.ok&&responseType==='blob'){const blob=await response.blob();current();return blob;}
   const data=await response.json().catch(()=>null);
+  current();
   if(!response.ok){
    if(data?.code==='operations_reset')window.dispatchEvent(new Event('pb-operations-stale'));
    const header=response.headers?.get?.('Retry-After');
@@ -153,13 +157,15 @@ export async function api(path,{body,method='GET',timeoutMs,responseType,allowSn
    const generation=typeof data.operationsGeneration==='string'?data.operationsGeneration:'';
    const previousGeneration=operationsGeneration;
    const changed=await reconcileOperationsGeneration(data.user?.id,data.user?.telegramId,generation);
+   current();
    operationsGeneration=generation;setSnapshotUser(data.user?.telegramId);
    // Another tab may already have reconciled the shared database. The current
    // tab's old forms still need to be discarded when its generation changes.
    if(changed||(previousGeneration!==null&&previousGeneration!==generation))window.dispatchEvent(new CustomEvent('pb-operations-reset',{detail:{userId:data.user.id,generation}}));
   }
   if(method==='GET')try{await saveSnapshot(path,data);}catch{window.dispatchEvent(new Event('pb-local-storage-error'));}
+  current();
   return data;
- }catch(e){if(method==='GET'&&allowSnapshot&&!e.status)try{const cached=await readSnapshot(path);if(cached)return cached;}catch{}if(e.name==='AbortError')throw new ApiError('Сервер отвечает дольше обычного. Повторите попытку.');if(e instanceof ApiError)throw e;throw new ApiError('Нет соединения с сервером. Демо-данные не подставляются.');}finally{clearTimeout(timer);}
+ }catch(e){current();if(method==='GET'&&allowSnapshot&&!e.status)try{const cached=await readSnapshot(path);current();if(cached)return cached;}catch(error){if(error instanceof ApiError)throw error;}if(e.name==='AbortError')throw new ApiError('Сервер отвечает дольше обычного. Повторите попытку.');if(e instanceof ApiError)throw e;throw new ApiError('Нет соединения с сервером. Демо-данные не подставляются.');}finally{clearTimeout(timer);}
 }
 

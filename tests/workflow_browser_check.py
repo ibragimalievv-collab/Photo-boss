@@ -5,6 +5,7 @@ import json
 import os
 import ssl
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -31,9 +32,11 @@ from app.models import (
     Shooting,
     User,
     UserRole,
+    utc_now,
 )
 from app.people import install_people
 from app.services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
+from app.services.assignment_notifications import queue_assignment
 from app.services.bookings import create_booking_record
 from app.work_calls import install_work_calls
 from app.work_chat import install_work_chat
@@ -277,6 +280,24 @@ async def main():
                     await repair_form.locator('[name=selected]').set_input_files([
                         'app/webapp/assets/academy/couple.jpg', 'app/webapp/assets/academy/couple.jpg'])
                     await repair_form.locator('button').first.click()
+                    await page.get_by_text('Выбрано файлов: 2, разных фотографий: 1.', exact=False).wait_for()
+                    assert not await repair_form.get_attribute('data-pending-keys')
+                    # Simulate an existing queue from an older client that did
+                    # not check duplicate file contents before submission.
+                    await page.evaluate("""async()=>{
+                        const form=document.querySelector('#workflowSale');
+                        const {enqueueBatch}=await import('/app/js/outbox.js');
+                        const {captureForm}=await import('/app/js/form-state.js');
+                        const {todayKey}=await import('/app/js/domain.js');
+                        const items=[],add=(kind,data,blob=null)=>{const row={key:crypto.randomUUID(),kind,date:todayKey(),data,blob};items.push(row);return {key:row.key};};
+                        const draft=add('sale_start',{booking:{id:3},price:'400.00'});
+                        add('sale_receipt',{draft},form.elements.receipt.files[0]);
+                        add('sale_counts',{draft,total:150,sold:2,price:'400.00'});
+                        for(const photo of form.elements.selected.files)add('sale_selected',{draft},photo);
+                        add('sale_complete',{draft,price:'400.00'});
+                        await enqueueBatch(items);form.dataset.pendingKeys=JSON.stringify(items.map(r=>r.key));captureForm(form);
+                        window.dispatchEvent(new Event('pb-outbox'));
+                    }""")
                     try:
                         await repair_form.locator('[data-workflow="repair-sale"]').wait_for(state='visible')
                     except Exception:
@@ -311,6 +332,34 @@ async def main():
                     output = Path(os.getenv('CALLS_QA_DIR', '/tmp/photo-boss-calls-qa'))
                     output.mkdir(parents=True, exist_ok=True)
                     await page.screenshot(path=str(output/'offline-replay-mobile.png'), full_page=True)
+                    # A photographer sees a future assignment and opens that
+                    # exact booking from both the home card and Telegram link.
+                    async with factory() as session:
+                        assigned = await create_booking_record(session, await session.get(User, 1),
+                            booking_data() | {'shoot_date': str(utc_now().date()+timedelta(days=1)), 'room': 'notify-room'})
+                        assigned.photographer_id, assigned.status = 2, 'ASSIGNED'
+                        (await session.scalar(select(Shooting).where(Shooting.booking_id == assigned.id))).status = 'ASSIGNED'
+                        await session.flush()
+                        await queue_assignment(await session.connection(), assigned.id, 2)
+                        await session.commit()
+                        assigned_id = assigned.id
+                    photographer = await browser.new_context(ignore_https_errors=True,
+                        viewport={'width': 320, 'height': 844}, is_mobile=True)
+                    await photographer.add_init_script('window.Telegram={WebApp:{initData:'+json.dumps(signed(2))+',ready(){},expand(){},setHeaderColor(){},setBackgroundColor(){},onEvent(){},BackButton:{show(){},hide(){},onClick(){}}}};')
+                    await photographer.route('https://telegram.org/**', lambda r: r.fulfill(status=200, content_type='text/javascript', body=''))
+                    photo_page = await photographer.new_page()
+                    photo_page.on('pageerror', lambda e: errors.append(str(e)))
+                    await photo_page.goto(str(server.make_url('/app/#home')))
+                    assignment_button = photo_page.locator(f'#assignmentNotices [data-go="shootings?booking={assigned_id}"]')
+                    await assignment_button.wait_for()
+                    assert await photo_page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                    await assignment_button.click()
+                    await photo_page.locator('#sheet[open]').wait_for()
+                    assert 'notify-room' in await photo_page.locator('#sheetContent').inner_text()
+                    await photo_page.reload()
+                    await photo_page.locator('#sheet[open]').wait_for()
+                    assert 'notify-room' in await photo_page.locator('#sheetContent').inner_text()
+                    await photographer.close()
                     owner = await browser.new_context(ignore_https_errors=True, viewport={'width': 390, 'height': 844}, is_mobile=True)
                     await owner.add_init_script('window.Telegram={WebApp:{initData:'+json.dumps(signed(3))+',ready(){},expand(){},setHeaderColor(){},setBackgroundColor(){},onEvent(){},BackButton:{show(){},hide(){},onClick(){}}}};')
                     await owner.route('https://telegram.org/**', lambda r: r.fulfill(status=200, content_type='text/javascript', body=''))

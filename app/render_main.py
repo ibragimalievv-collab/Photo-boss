@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.28-disk-verification-recovery"
+RELEASE = "miniapp-3.29-sales-academy-assignments"
 
 
 async def health(request):
@@ -110,6 +110,8 @@ async def on_startup(app):
         logger.info("Expired work-chat messages removed on startup: %s", deleted)
     app["operations_task"] = asyncio.create_task(operations_loop(bot))
     app["storage_task"] = asyncio.create_task(storage_loop(bot, app["yandex_disk"]))
+    from .services.assignment_notifications import assignment_loop
+    app['assignment_notification_task'] = asyncio.create_task(assignment_loop(engine, bot))
     from .storage_inventory import log_recent_inventory
     app['storage_inventory_task'] = asyncio.create_task(log_recent_inventory(engine, app['yandex_disk']))
     app["chat_cleanup_task"] = asyncio.create_task(cleanup_loop(engine, app["yandex_disk"]))
@@ -124,7 +126,7 @@ async def on_startup(app):
 async def on_cleanup(app):
     clear_ready_file()
     app["ready"] = False
-    for key in ("realtime_probe_task", "operations_task", "storage_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task"):
+    for key in ("realtime_probe_task", "operations_task", "storage_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task", "assignment_notification_task"):
         task = app.get(key)
         if task:
             task.cancel()

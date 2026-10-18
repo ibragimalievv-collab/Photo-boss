@@ -18,6 +18,7 @@ async def main():
     await fixture.asyncSetUp()
     fixture.finish_lessons()
     errors = []
+    lost_upload_reply = False
     plan = {'title': 'AI-практика света', 'focus': 'light', 'reason': 'Диагностика',
             'lessonSlugs': ['light'], 'category': 'woman', 'scenario': '',
             'instructions': ['Выберите свет', 'Снимите разные планы', 'Проверьте лица'],
@@ -29,6 +30,7 @@ async def main():
         browser = await p.chromium.launch()
         try:
             async def route(r):
+                nonlocal lost_upload_reply
                 if r.request.url.startswith('https://telegram.org/') or any(
                     r.request.url.startswith(BASE + prefix) for prefix in ('/shift/', '/people/', '/work-chat/')):
                     # Isolate unrelated widgets; keep the real Academy navigation/app module.
@@ -40,6 +42,11 @@ async def main():
                                "Content-Type": r.request.headers.get("content-type", "application/json")}
                     response = await fixture.client.request(r.request.method, full_path,
                         data=r.request.post_data_buffer, headers=headers)
+                    if r.request.method == 'POST' and path.endswith('/photos/1') and not lost_upload_reply:
+                        assert response.status == 201
+                        await response.read()
+                        lost_upload_reply = True
+                        return await r.abort('connectionreset')
                     return await r.fulfill(status=response.status, body=await response.read(),
                                            content_type=response.content_type)
                 if path == "/app/":
@@ -68,6 +75,11 @@ async def main():
             for index in range(1, 6):
                 await trainee.locator(f'[data-practice-upload="{index}"]').set_input_files(
                     str(ROOT / f"app/assets/training/woman/{index:02d}.jpg"))
+                if index == 1:
+                    await trainee.locator('.practice-error:not([hidden])').wait_for()
+                    assert len(fixture.files) == 1
+                    await trainee.locator('[data-practice-upload="1"]').set_input_files(
+                        str(ROOT / 'app/assets/training/woman/01.jpg'))
                 if index < 5:
                     try:
                         await trainee.get_by_text(f"Загружено {index}/5.", exact=False).wait_for(timeout=10000)

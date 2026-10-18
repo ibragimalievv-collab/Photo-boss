@@ -85,6 +85,7 @@ jobs:
           node tests/voice_training_client_check.mjs
           node tests/academy_mentor_client_check.mjs
           node tests/practice_original_client_check.mjs
+          node tests/sale_files_check.mjs
           node tests/outbox_receipt_isolation_check.mjs
           node tests/folder_sequential_upload_check.mjs
           node tests/miniapp_launch_auth_check.mjs

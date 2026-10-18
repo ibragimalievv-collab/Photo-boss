@@ -153,6 +153,8 @@ async def main():
         development_task = asyncio.create_task(development_loop(engine,bot))
         operations_task = asyncio.create_task(operations_loop(bot))
         storage_task = asyncio.create_task(storage_loop(bot, storage)) if token else None
+        from .services.assignment_notifications import assignment_loop
+        assignment_task = asyncio.create_task(assignment_loop(engine, bot))
         try:
             me = await bot.me()
             logger.info("Telegram bot @%s is authenticated", me.username)
@@ -161,6 +163,9 @@ async def main():
                 bot, allowed_updates=dispatcher.resolve_used_update_types(), close_bot_session=False,
             )
         finally:
+            assignment_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await assignment_task
             development_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await development_task
