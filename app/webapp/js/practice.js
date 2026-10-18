@@ -27,12 +27,12 @@ function close(){cleanup();clearInterval(pollTimer);panel.close();lastFocus?.foc
 function shell(title,html){cleanup();panel.innerHTML=`<header class="practice-head"><button data-practice-home aria-label="Назад">‹</button><h2 id="practiceTitle">${esc(title)}</h2><button data-practice-close aria-label="Закрыть">×</button></header><div class="practice-body"><p class="practice-error" role="alert" hidden></p>${html}</div>`;if(!panel.open){lastFocus=document.activeElement;panel.showModal();}}
 function error(e){const el=panel.querySelector('.practice-error');if(el){el.hidden=false;el.textContent=e.message||'Не удалось загрузить практику.';}}
 async function photoFetch(path,options={}){
- return api(path,{...options,responseType:'response',timeoutMs:90000});
+ return api(path,{...options,responseType:options.method==='POST'?undefined:'blob',timeoutMs:90000});
 }
 async function loadPhotos(){
  const ticket=version;
  for(const img of panel.querySelectorAll('[data-practice-photo]')){
-  try{const response=await photoFetch(img.dataset.practicePhoto);const blob=await response.blob();if(ticket!==version)return;const url=URL.createObjectURL(blob);urls.add(url);img.src=url;}
+  try{const blob=await photoFetch(img.dataset.practicePhoto);if(ticket!==version)return;const url=URL.createObjectURL(blob);urls.add(url);img.src=url;}
   catch{if(ticket===version){img.alt='Фото не загрузилось. Нажмите «Обновить».';}}
  }
 }
@@ -110,8 +110,8 @@ panel.addEventListener('change',async e=>{
  const input=e.target.closest('[data-practice-upload]');if(!input||!input.files?.[0]||busy)return;
  const aid=current.id;busy=true;input.disabled=true;
  try{const blob=await preparePhoto(input.files[0]);const body=new FormData();body.append('file',blob,'practice.jpg');
-  const response=await photoFetch(`/academy/practice/${aid}/photos/${input.dataset.practiceUpload}`,{method:'POST',body});
-  const data=await response.json();if(panel.open&&current?.id===aid)renderAssignment(data);
+  const data=await photoFetch(`/academy/practice/${aid}/photos/${input.dataset.practiceUpload}`,{method:'POST',body});
+  if(panel.open&&current?.id===aid)renderAssignment(data);
  }catch(err){error(err);input.disabled=false;input.value='';}finally{busy=false;}
 });
 panel.addEventListener('click',async e=>{

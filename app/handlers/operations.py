@@ -124,22 +124,29 @@ async def smart_assign(callback, current_user, current_roles):
         return await callback.answer("Некорректная кнопка.", show_alert=True)
     async with Session() as session:
         booking = await session.get(Booking, booking_id, with_for_update=True)
-        user = await session.get(User, user_id)
+        user = await session.get(User, user_id, with_for_update=True)
         if booking is None or user is None or "PHOTOGRAPHER" not in await roles_of(session, user):
             return await callback.answer("Запись или фотограф недоступны.", show_alert=True)
         if not await can_access_booking(session, current_user.id, current_roles, booking):
             return await callback.answer("Нет доступа к съёмке.", show_alert=True)
-        booking.photographer_id = user.id
-        if booking.status in {"NEW", "CONFIRMED", "PENDING_CONFIRMATION", "RESCHEDULED"}:
-            booking.status = "ASSIGNED"
         shooting = await session.scalar(
-            select(Shooting).where(Shooting.booking_id == booking.id)
+            select(Shooting).where(Shooting.booking_id == booking.id).with_for_update()
         )
-        if shooting and shooting.status in {
-            "PENDING_CONFIRMATION", "CONFIRMED", "ASSIGNED"
-        }:
+        if (not user.active or booking.status not in {'NEW','CONFIRMED','PENDING_CONFIRMATION','RESCHEDULED','ASSIGNED'}
+                or shooting and (shooting.started_at or shooting.completed_at
+                    or shooting.status not in {'NEW','PENDING_CONFIRMATION','CONFIRMED','ASSIGNED'})):
+            return await callback.answer('Съёмка уже начата или фотограф недоступен.', show_alert=True)
+        booking.photographer_id = user.id
+        booking.status = 'ASSIGNED'
+        if shooting:
             shooting.status = "ASSIGNED"
+            shooting.accepted_at = None
+        else:
+            session.add(Shooting(booking_id=booking.id, status='ASSIGNED'))
         await audit(session, current_user, "smart_assignment", "booking", booking.id, f"photographer={user.id}")
+        from ..services.assignment_notifications import queue_assignment
+        await session.flush()
+        await queue_assignment(await session.connection(), booking.id, user.id)
         await session.commit()
         await notify_photographer_assignment(callback.bot, session, booking)
     await callback.answer("Фотограф назначен.")

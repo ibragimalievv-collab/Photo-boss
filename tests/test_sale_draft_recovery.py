@@ -16,6 +16,62 @@ from app.services.sale_workflow import (
 )
 
 
+def test_sixteen_frame_sale_resumes_after_only_four_files_were_stored(monkeypatch):
+    import hashlib
+    import json
+
+    import pytest
+    from test_workflow_replay import ACTOR, packet, setup
+
+    from app.miniapp_security import AccessError
+    from app.models import Booking, Receipt, Sale, SaleDraft
+    from app.workflow import Workflow
+
+    async def telegram(self, actor, raw, **kwargs):
+        digest = hashlib.sha256(raw).hexdigest()
+        return digest, digest
+    async def disk(self, draft, raw):
+        return 'app:/selected/' + hashlib.sha256(raw).hexdigest()
+    monkeypatch.setattr(Workflow, 'save_telegram', telegram)
+    monkeypatch.setattr(Workflow, 'save_selected', disk)
+
+    async def run():
+        engine, factory, work = await setup()
+        try:
+            created = json.loads((await work.execute(ACTOR, packet('16-book', 'booking',
+                booking_data() | {'photographer_id': None}))).text)
+            async with factory() as session:
+                booking = await session.get(Booking, created['bookingId'])
+                booking.photographer_id, booking.status = 2, 'READY_FOR_SALE'
+                await session.commit()
+            start = packet('16-start', 'sale_start', {'booking': {'id': created['bookingId']}, 'price': '400.00'})
+            await work.execute(ACTOR, start)
+            draft = {'key': start['key']}
+            await work.execute(ACTOR, packet('16-receipt', 'sale_receipt', {'draft': draft}), b'\xff\xd8\xff'+b'receipt'*40)
+            await work.execute(ACTOR, packet('16-counts', 'sale_counts', {'draft': draft, 'total': 156, 'sold': 16, 'price': '400.00'}))
+            for n in range(4):
+                await work.execute(ACTOR, packet(f'16-photo-{n}', 'sale_selected', {'draft': draft}), b'\xff\xd8\xff'+bytes([n])*200)
+            finish = packet('16-complete', 'sale_complete', {'draft': draft, 'price': '400.00'})
+            with pytest.raises(AccessError, match='4/16'):
+                await work.execute(ACTOR, finish)
+            async with factory() as session:
+                assert await session.scalar(select(func.count(Sale.id))) == 0
+                assert (await session.scalar(select(SaleDraft))).receipt_file_id
+                assert await session.scalar(select(func.count(SaleDraftPhoto.id))) == 4
+            for n in range(4, 16):
+                await work.execute(ACTOR, packet(f'16-photo-{n}', 'sale_selected', {'draft': draft}), b'\xff\xd8\xff'+bytes([n])*200)
+            result = json.loads((await work.execute(ACTOR, finish)).text)
+            assert result['amount'] == '6400.00' and result['soldPhotos'] == 16
+            assert json.loads((await work.execute(ACTOR, finish)).text) == result
+            async with factory() as session:
+                assert await session.scalar(select(func.count(Sale.id))) == 1
+                assert await session.scalar(select(func.count(Receipt.id))) == 1
+                assert await session.scalar(select(func.count(SaleDraftPhoto.id))) == 16
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
 def test_album_upload_rechecks_capacity_after_disk_write(monkeypatch):
     async def run():
         engine, factory = await fixture()

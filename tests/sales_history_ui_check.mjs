@@ -49,7 +49,7 @@ assert.ok(unfinished.includes('Сумма продажи: <strong>4'));
 assert.ok(unfinished.includes('Ожидаемая доплата: 3'));
 assert.ok(!/name="sold"[^>]*readonly/.test(unfinished),'a saved typo in sold frames must be correctable');
 ctx.FormData=class{constructor(form){this.values=form.values;}get(key){return this.values[key];}};
-ctx.captureForm=()=>{};ctx.outboxRows=async()=>[];ctx.enqueueBatch=async items=>{ctx.enqueued=items;};
+ctx.captureForm=()=>{};ctx.checkSaleFiles=async()=>{};ctx.outboxRows=async()=>[];ctx.enqueueBatch=async items=>{ctx.enqueued=items;};
 let operation=0;ctx.crypto={randomUUID:()=>`operation-${++operation}`};
 ctx.document.querySelector=()=>null;ctx.document.querySelectorAll=()=>[];
 ctx.form={id:'workflowSale',dataset:{},classList:{contains:()=>false},elements:{selected:{files:[]}},values:{total:'10',sold:'7'}};

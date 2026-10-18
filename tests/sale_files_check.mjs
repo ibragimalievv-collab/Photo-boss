@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {webcrypto} from 'node:crypto';
+import fs from 'node:fs';
+if(!globalThis.crypto)Object.defineProperty(globalThis,'crypto',{value:webcrypto});
+const source=fs.readFileSync(new URL('../app/webapp/js/sale-files.js',import.meta.url),'utf8');
+const {checkSaleFiles}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const file=(body,name)=>Object.assign(new Blob([body]),{name});
+await checkSaleFiles([]);
+await checkSaleFiles([file('one','same.jpg'),file('two','same.jpg')]);
+const copies=Array.from({length:16},(_,i)=>file('frame-'+(i%4),`renamed-${i}.jpg`));
+await assert.rejects(checkSaleFiles(copies),/файлов: 16, разных фотографий: 4/);
+await assert.rejects(checkSaleFiles([file('one','one.jpg'),file('one','renamed.png')]),/повторные копии/);
+console.log('PASS: content-based duplicate check rejects 16 selections containing only 4 unique photos');

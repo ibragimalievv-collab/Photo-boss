@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 
@@ -256,7 +257,7 @@ class AcademyPractice:
             raise AccessError("Некорректный номер кадра.", 400)
         async with self.engine.connect() as conn:
             row = await self.assignment(conn, actor, aid)
-            if row["user_id"] != actor["id"] or row["status"] != "ACTIVE":
+            if row["user_id"] != actor["id"]:
                 raise AccessError("Это задание сейчас нельзя изменять.", 409)
         if not request.content_type.startswith("multipart/"):
             raise AccessError("Выберите фото.", 400)
@@ -281,13 +282,21 @@ class AcademyPractice:
         try:
             async with self.lock, self.engine.begin() as conn:
                 row = await self.assignment(conn, actor, aid, lock=True)
-                if row["user_id"] != actor["id"] or row["status"] != "ACTIVE":
+                if row["user_id"] != actor["id"]:
                     raise AccessError("Задание уже отправлено на проверку.", 409)
                 shots = await self.api.rows(conn, "SELECT * FROM training_submissions WHERE assignment_id=:id", id=aid)
-                if any(s["pose_index"] == pose for s in shots):
+                existing = next((s for s in shots if s['pose_index'] == pose), None)
+                if existing and existing['submitted_file_id'].endswith(digest + '.jpg'):
+                    # The upload may have committed before its HTTP response
+                    # was lost, including the fifth photo that starts review.
+                    return web.json_response(await self.detail_data(conn, actor, aid))
+                if existing:
                     raise AccessError("Кадр уже сохранён. Обновите задание.", 409)
+                if row["status"] != "ACTIVE":
+                    raise AccessError("Задание уже отправлено на проверку.", 409)
                 if any(s["submitted_file_id"].endswith(digest + ".jpg") for s in shots):
                     raise AccessError("Этот снимок уже загружен. Нужен другой кадр.", 409)
+                await storage.ensure_dir(ROOT)
                 await storage.ensure_dir(folder)
                 await storage.upload_bytes(path, bytes(payload), content_type="image/jpeg")
                 saved = True
@@ -571,7 +580,38 @@ class AcademyPractice:
             outcomes[row["id"]] = result
         return outcomes
 
+    async def verify_upload_storage(self, storage):
+        """Exercise the Academy folder with a bundled reference, never a staff photo."""
+        folder = ROOT + '/academy'
+        path = folder + '/connection-check-' + secrets.token_hex(12) + '.jpg'
+        payload = CATEGORY_BY_SLUG['woman'].image_paths[0].read_bytes()
+        attempted = False
+        stage = 'directory'
+        try:
+            await storage.ensure_dir(ROOT)
+            await storage.ensure_dir(folder)
+            stage = 'write'
+            attempted = True
+            await storage.upload_bytes(path, payload, content_type='image/jpeg')
+            stage = 'read'
+            if await storage.download_bytes(path, max_bytes=MAX_IMAGE_BYTES) != payload:
+                raise YandexDiskError('Academy probe content mismatch')
+            logger.info('Academy upload-storage probe: write=True read=True')
+            return True
+        except (YandexDiskError, TimeoutError, OSError) as exc:
+            code = re.search(r'HTTP (\d{3})', str(exc))
+            logger.warning('Academy upload-storage probe failed: stage=%s providerStatus=%s',
+                           stage, code.group(1) if code else 'unconfirmed')
+            return False
+        finally:
+            if attempted:
+                try:
+                    await storage.delete(path)
+                except (YandexDiskError, TimeoutError, OSError):
+                    logger.warning('Academy probe cleanup unconfirmed; only its unique test file may remain')
+
     async def worker(self, app):
+        await self.verify_upload_storage(app['yandex_disk'])
         try:
             await self.recover_stalled_storage(app["yandex_disk"])
         except Exception:

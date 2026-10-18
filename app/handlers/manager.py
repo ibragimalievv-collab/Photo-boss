@@ -316,6 +316,10 @@ async def set_booking_decision(c: CallbackQuery):
             audit_action = "booking_rejected"
             answer = "❌ Съёмка отказана."
         await audit(s, manager, audit_action, "booking", booking.id)
+        if action == 'confirm' and booking.photographer_id:
+            from ..services.assignment_notifications import queue_assignment
+            await s.flush()
+            await queue_assignment(await s.connection(), booking.id, booking.photographer_id)
         await s.commit()
         if action == "confirm" and booking.photographer_id:
             await notify_photographer_assignment(c.bot, s, booking)

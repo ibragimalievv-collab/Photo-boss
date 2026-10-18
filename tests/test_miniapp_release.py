@@ -200,6 +200,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                 "CREATE TABLE users(id INTEGER PRIMARY KEY,tg_id BIGINT,name TEXT,active BOOLEAN)",
                 "CREATE TABLE user_roles(user_id INTEGER,role TEXT)",
                 "CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT)",
+                "CREATE TABLE notifications(id INTEGER PRIMARY KEY,user_id INTEGER,text TEXT,sent BOOLEAN,created_at DATETIME,event_key TEXT,priority TEXT,kind TEXT,payload TEXT,acknowledged_at DATETIME,resolved_at DATETIME,UNIQUE(user_id,event_key))",
                 "CREATE TABLE hotels(id INTEGER PRIMARY KEY,name TEXT,active BOOLEAN)",
                 "CREATE TABLE hotel_employees(user_id INTEGER,hotel_id INTEGER)",
                 "CREATE TABLE clients(id INTEGER PRIMARY KEY,name TEXT)",

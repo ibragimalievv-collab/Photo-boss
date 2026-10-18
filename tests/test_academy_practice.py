@@ -107,11 +107,30 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
         assert (await self.request(path, payload=b"<script>bad</script>"))[0] == 415
         payload = b"\xff\xd8\xfffixture\xff\xd9"
         results = await asyncio.gather(self.request(path, payload=payload), self.request(path, payload=payload))
-        assert sorted(status for status, _ in results) == [201, 409]
+        assert sorted(status for status, _ in results) == [200, 201]
         assert (await self.request(f"/{aid}/photos/2", payload=payload))[0] == 409
         self.storage.upload_bytes.side_effect = YandexDiskError("offline")
         assert (await self.request(f"/{aid}/photos/2", payload=payload[:-2]+b"2\xff\xd9"))[0] == 503
         assert sum(s["uploaded"] for s in (await self.request(f"/{aid}"))[1]["shots"]) == 1
+
+    async def test_lost_upload_response_can_replay_the_fifth_frame_without_a_second_write(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        before = self.storage.upload_bytes.await_count
+        status, result = await self.request(f'/{aid}/photos/5', payload=b'\xff\xd8\xfffixture'+bytes([5])+b'\xff\xd9')
+        assert status == 200 and result['status'] == 'PENDING_REVIEW'
+        assert sum(s['uploaded'] for s in result['shots']) == 5
+        assert self.storage.upload_bytes.await_count == before
+        assert (await self.request(f'/{aid}/photos/5', payload=b'\xff\xd8\xffdifferent\xff\xd9'))[0] == 409
+
+    async def test_academy_storage_probe_verifies_its_own_folder_and_cleans_only_its_file(self):
+        assert await self.practice.verify_upload_storage(self.storage)
+        path = self.storage.upload_bytes.await_args.args[0]
+        assert path.startswith('app:/PhotoBoss/academy/connection-check-')
+        self.storage.delete.assert_awaited_once_with(path)
+        self.storage.download_bytes.side_effect = YandexDiskError('Yandex.Disk HTTP 503')
+        assert not await self.practice.verify_upload_storage(self.storage)
+        assert self.storage.delete.await_count == 2
 
     async def test_assignment_keeps_original_goal_and_revisits_concrete_previous_review(self):
         initial = {"category": "woman", "focus": "light", "title": "Мягкий свет",

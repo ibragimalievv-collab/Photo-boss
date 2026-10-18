@@ -56,11 +56,28 @@ function employeeTable(f){
 }
 function teamPerson(x){return `<div class="team-person avatar-colors"><div class="row"><span class="avatar">${esc(initials(x.name))}</span><div class="grow"><div class="name">${esc(x.name.split(' ')[0])}</div><div class="role">${esc(ROLE_NAMES[x.role]||x.role)}</div></div></div><div class="status-line">${mark(x.attendance||'PLANNED')}<span>${esc(x.start)}–${esc(x.end)}</span></div></div>`;}
 function bookingCard(x){return `<button class="booking-row" data-booking="${x.id}"><div class="booking-time">${esc(x.time)}<small>${esc(dateLabel(x.date,{day:'numeric',month:'short',year:'numeric'}))}</small></div><div class="grow"><div class="booking-name">${esc(x.hotel)} · ${esc(x.client)}</div><div class="booking-meta">${esc(x.phone||'Телефон не указан')} · комната ${esc(x.room)}</div><div class="booking-meta">${esc(x.type)} · ${esc(x.manager||'Менеджер не указан')}</div><div class="booking-footer">${mark(x.status)}<small>${esc(x.photographer||'Фотограф не назначен')}</small></div></div>${icon('chevron')}</button>`;}
+function assignmentNoticesView(){
+ if(!state.me?.user.roles.includes('PHOTOGRAPHER'))return '';
+ const items=state.dashboard?.assignments||[];
+ return `<section id="assignmentNotices" class="panel section" aria-live="polite"><h2>Вам назначены съёмки</h2>${items.length?items.map(x=>`<div class="section"><strong>№${x.bookingId} · ${esc(x.hotel)}</strong><p>${esc(dateLabel(x.date))} · ${esc(x.time)} · комната ${esc(x.room)}</p><button class="btn ghost" data-go="shootings?booking=${x.bookingId}">Открыть съёмку</button></div>`).join(''):'<p>Новых назначений нет.</p>'}</section>`;
+}
+let assignmentPollBusy=false;
+async function refreshAssignmentNotices(){
+ if(assignmentPollBusy||document.hidden||state.route!=='home'||!state.me?.user.roles.includes('PHOTOGRAPHER'))return;
+ assignmentPollBusy=true;const uid=state.me.user.id,ticket=state.requestId;
+ try{
+  const d=await request('/assignment-notifications',{allowSnapshot:false,timeoutMs:10000});
+  if(state.me?.user.id!==uid||state.requestId!==ticket||state.route!=='home')return;
+  state.dashboard.assignments=d.items;const el=$('#assignmentNotices');if(el)el.outerHTML=assignmentNoticesView();
+ }catch{}finally{assignmentPollBusy=false;}
+}
+setInterval(refreshAssignmentNotices,30000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refreshAssignmentNotices();});
 function homeView(){
  const d=state.dashboard,p=state.me.permissions;const upcoming=d.bookings.filter(x=>!['COMPLETED','SOLD','REJECTED','CANCELLED','READY_FOR_SALE'].includes(x.status)).sort((a,b)=>a.time.localeCompare(b.time));const ready=d.bookings.filter(x=>x.status==='READY_FOR_SALE').length;
  const photoCount=d.team.filter(x=>x.role==='PHOTOGRAPHER').length,managerCount=d.team.filter(x=>x.role==='MANAGER').length;
  return `${heading('Всё под контролем',`${esc(state.me.user.name.split(' ')[0])}, вот ваш рабочий день.`,`<button class="icon-button" data-action="refresh" aria-label="Обновить данные">${icon('refresh')}</button>`)}
- <div class="team-overview"><div class="section-head"><span class="eyebrow">Команда сегодня</span><button class="text-button" data-go="schedule">График ${icon('arrow')}</button></div><div class="team-overview-people">${d.team.length?d.team.slice(0,6).map(x=>`<button data-go="schedule" class="team-chip"><span class="avatar small-avatar">${esc(initials(x.name))}</span><span class="team-chip-text"><b>${esc(x.name.split(' ')[0])}</b><small>${esc(ROLE_NAMES[x.role]||x.role)}</small></span><i class="dot ${x.attendance==='STARTED'?'positive':'muted'}"></i></button>`).join(''):'<span class="small muted">Смены ещё не назначены</span>'}</div></div>
+ ${assignmentNoticesView()}<div class="team-overview"><div class="section-head"><span class="eyebrow">Команда сегодня</span><button class="text-button" data-go="schedule">График ${icon('arrow')}</button></div><div class="team-overview-people">${d.team.length?d.team.slice(0,6).map(x=>`<button data-go="schedule" class="team-chip"><span class="avatar small-avatar">${esc(initials(x.name))}</span><span class="team-chip-text"><b>${esc(x.name.split(' ')[0])}</b><small>${esc(ROLE_NAMES[x.role]||x.role)}</small></span><i class="dot ${x.attendance==='STARTED'?'positive':'muted'}"></i></button>`).join(''):'<span class="small muted">Смены ещё не назначены</span>'}</div></div>
  ${bookingControlView()}<div class="home-columns"><div>${financeCard(d.finance)}<div class="quick-actions">${p.manageBookings?btn('Новая запись','new-booking','primary','plus'):btn('Моя смена','shift','primary','clock')}${btn('Продажа','new-sale','','wallet')}</div>
  <div class="mini-metrics"><button class="mini-metric" data-go="shootings">${icon('camera')}<strong>${d.bookings.length}</strong><small>${p.financeScope==='self'?'Мои съёмки':'Съёмки сегодня'}</small></button><button class="mini-metric" data-action="ready">${icon('check')}<strong>${ready}</strong><small>Готовы к продаже</small></button><button class="mini-metric" data-go="schedule">${icon('users')}<strong>${d.team.filter(x=>x.attendance==='STARTED').length}</strong><small>Сейчас на смене</small></button></div>
  <section class="section"><div class="section-head"><h2>${p.financeScope==='self'?'Мой результат':'Продажи по сотрудникам'}</h2><button class="text-button" data-go="finance">Подробнее ${icon('arrow')}</button></div>${employeeTable(d.finance)}</section></div>
@@ -119,6 +136,9 @@ function auditInformation(x){return `<p>${esc(x.description||'Сведения, 
 function auditView(){const a=state.audit;return `${heading('Аудит действий','История действий на русском языке · только для владельца',`<button class="btn ghost" data-audit-help>Информация</button>`)}<div class="notice">Нажмите «Информация» у события: кто, когда, что изменил, причина и значения до и после.</div><div class="panel section">${a.items.length?a.items.map(x=>`<article class="audit-row"><div class="audit-time">${esc(new Date(x.at).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'}))}<br><small>${esc(new Date(x.at).toLocaleDateString('ru-RU',{timeZone:'Europe/Moscow',day:'2-digit',month:'2-digit'}))}</small></div><div class="grow"><h3>${esc(x.actor)}</h3><p>${esc(x.title)}</p><small>${esc(x.entityTitle||'Рабочие данные')} ${x.entityId?'№'+esc(x.entityId):''}</small><div class="section"><button class="btn small ghost" data-audit-info="${x.id}" aria-label="Информация о событии ${x.id}">ⓘ Информация</button></div></div></article>`).join(''):empty('Лента пока пуста','','shield')}</div>${a.next?`<div class="section">${btn('Загрузить ещё','more-audit','ghost')}</div>`:''}`;}
 function render(){captureForms();shell();const views={control:shootControlView,contacts:deliveryContactsView,workflow:workflowView,home:homeView,shootings:shootingsView,schedule:scheduleView,academy:academyView,galleries:()=>galleriesView(state.me),more:moreView,profile:profileView,finance:financialView,audit:auditView,insights:insightsView,team:teamView,onboarding:guideView,workday:workdayView,development:developmentView};$('#app').innerHTML=views[state.route]();restoreForms();if(state.route==='workflow')window.dispatchEvent(new Event('pb-workflow-mounted'));if(state.route==='galleries')mountGalleries();}
 async function loadRoute(route=state.route){
+ const [page,query='']=route.split('?');route=page;
+ const assignmentBooking=route==='shootings'?Number(new URLSearchParams(query).get('booking')):0;
+ if(Number.isSafeInteger(assignmentBooking)&&assignmentBooking>0){state.search=String(assignmentBooking);state.onlyReady=false;state.bookingTrash=false;}
  if(!names[route])route='home';if(route==='audit'&&!state.me.permissions.audit){toast('Аудит доступен только владельцу.');route='home';}
  captureForms();state.route=route;const ticket=++state.requestId;shell();$('#app').innerHTML='<div class="loading-screen"><div class="spinner"></div><p>Загружаем данные…</p></div>';
  try{
@@ -138,6 +158,7 @@ async function loadRoute(route=state.route){
   if(route==='insights')await loadInsights();
   if(route==='audit'){const d=await request('/audit');if(ticket!==state.requestId)return;state.audit=d;}
   if(ticket!==state.requestId)return;render();
+  if(assignmentBooking>0){if(state.bookings.some(b=>b.id===assignmentBooking))showBooking(assignmentBooking);else toast('Съёмка недоступна: назначение могло измениться.');}
  }catch(e){if(ticket!==state.requestId)return;showError(e);}
 }
 function showError(error){
