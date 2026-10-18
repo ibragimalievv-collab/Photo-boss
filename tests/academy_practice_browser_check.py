@@ -52,7 +52,7 @@ async def main():
                 context = await browser.new_context(viewport={"width": width, "height": 844})
                 await context.add_init_script("window.Telegram={WebApp:{initData:"+json.dumps(signed(uid+1000))+"}}")
                 page = await context.new_page()
-                page.on("pageerror", lambda e: errors.append(str(e)))
+                page.on("pageerror", lambda e: errors.append(e.stack))
                 await page.route("**/*", route)
                 await page.goto(BASE + '/app/#academy')
                 if uid == 1:
@@ -69,7 +69,12 @@ async def main():
                 await trainee.locator(f'[data-practice-upload="{index}"]').set_input_files(
                     str(ROOT / f"app/assets/training/woman/{index:02d}.jpg"))
                 if index < 5:
-                    await trainee.get_by_text(f"Загружено {index}/5.", exact=False).wait_for()
+                    try:
+                        await trainee.get_by_text(f"Загружено {index}/5.", exact=False).wait_for(timeout=10000)
+                    except Exception:
+                        print("Upload UI diagnostic:", await trainee.locator('.practice-body').inner_text())
+                        print("Page errors:", errors)
+                        raise
             await expect(trainee.locator('[data-practice-status]')).to_have_text('На проверке')
             assert len(fixture.files) == 5
             assert await trainee.evaluate("document.documentElement.scrollWidth<=innerWidth+2")
