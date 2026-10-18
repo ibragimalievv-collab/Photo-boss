@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 const source=fs.readFileSync(new URL('../app/webapp/js/workflow.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,'').replaceAll('export ','');
+const outboxSource=fs.readFileSync(new URL('../app/webapp/js/outbox.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,'').replaceAll('export ','');
+const outboxContext=vm.createContext({window:{addEventListener(){}},document:{addEventListener(){}}});
+vm.runInContext(outboxSource,outboxContext);
 const ctx=vm.createContext({window:{addEventListener(){}},document:{addEventListener(){}},navigator:{onLine:true},Set,Date,Intl,Number,JSON,
+ canReplaceOperationFile:vm.runInContext('canReplaceOperationFile',outboxContext),
  esc:x=>String(x??'').replaceAll('&','&amp;').replaceAll('<','&lt;'),todayKey:()=> '2026-10-16'});
 vm.runInContext(source,ctx);
 vm.runInContext(`data={canBook:false,bookings:[{id:7,client:'Guest <unsafe>',status:'COMPLETED',price:'400.00',date:'2026-10-15',room:'100',fullUploaded:true,totalFrames:10,soldTotal:2,salesAmount:'800.00',paidAmount:'800.00',dueAmount:'0.00',sales:[{id:1,at:'2026-10-15T10:00:00Z',photos:2,amount:'800.00',paymentStatus:'PAID'}]}]};selected=7;queue=[];`,ctx);
@@ -36,6 +40,8 @@ assert.ok(closed.includes('AI пока не прочитал чек'));
 assert.equal(vm.runInContext(`replacementControl({key:'attendance',kind:'attendance',status:'error',errorStatus:413,hasBlob:true})`,ctx),'','attendance must not expose a gallery file picker');
 assert.ok(vm.runInContext(`replacementControl({key:'receipt',kind:'sale_receipt',status:'error',errorStatus:413,hasBlob:true})`,ctx).includes('data-workflow-replace'));
 assert.ok(vm.runInContext(`replacementControl({key:'duplicate',kind:'sale_selected',status:'error',errorStatus:409,error:'Этот кадр уже куплен в предыдущей продаже. Выберите новый кадр для допродажи.',hasBlob:true})`,ctx).includes('data-workflow-replace'));
+assert.ok(vm.runInContext(`replacementControl({key:'used-receipt',kind:'sale_receipt',status:'error',errorStatus:409,error:'Этот чек уже использовался или похож на ранее загруженный.',hasBlob:true})`,ctx).includes('Прикрепить другой чек к этой же продаже'));
+assert.equal(vm.runInContext(`replacementControl({key:'uncertain-receipt',kind:'sale_receipt',status:'local',errorStatus:503,error:'Timeout',hasBlob:true})`,ctx),'','uncertain receipts must preserve their original bytes');
 assert.equal(vm.runInContext(`replacementControl({key:'denied',kind:'sale_selected',status:'error',errorStatus:403,hasBlob:true})`,ctx),'');
 assert.equal(vm.runInContext(`replacementControl({key:'price',kind:'sale_selected',status:'error',errorStatus:409,error:'Цена пакета изменилась. Обновите данные и проверьте продажу.',hasBlob:true})`,ctx),'');
 vm.runInContext(`data.bookings[0].draft=null;data.bookings.push({id:28,client:'Recent Guest',hotel:'Grand',status:'READY_FOR_SALE',price:'400.00',date:'2026-10-16',totalFrames:10,soldTotal:0,sales:[],draft:{id:3,mine:true,status:'AWAITING_SELECTED',total:10,sold:10,selected:7,receiptStored:true,amount:'4000.00',expectedAmount:'3200.00'}});selected=28;`,ctx);

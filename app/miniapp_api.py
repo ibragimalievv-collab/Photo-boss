@@ -649,7 +649,9 @@ class MiniApp:
         lower, upper = utc_bounds(start, end, self.tz)
         own = actor["permissions"]["financeScope"] == "self"
         clause = ""
-        if own and not team:
+        if 'ADMIN' in actor['roles'] and 'OWNER' not in actor['roles']:
+            clause = 'AND s.hotel_id IN (SELECT hotel_id FROM hotel_employees WHERE user_id=:uid)'
+        elif own and not team:
             clause = "AND s.user_id=:uid"
         elif own and team:
             clause = """AND (s.user_id=:uid OR s.hotel_id IN
@@ -719,7 +721,11 @@ class MiniApp:
                     else:
                         unavailable.append({k: person[k] for k in ('id', 'name', 'roles')} |
                             {'reason': 'inactive' if not person['active'] else 'work_role_required'})
-                hotels = [dict(r) for r in await self.rows(conn, "SELECT id,name FROM hotels WHERE active=TRUE ORDER BY name")]
+                hotels = [dict(r) for r in await self.rows(conn,
+                    "SELECT id,name FROM hotels WHERE active=TRUE " +
+                    ("" if 'OWNER' in actor['roles'] else
+                     "AND id IN (SELECT hotel_id FROM hotel_employees WHERE user_id=:uid) ") +
+                    "ORDER BY name", uid=actor['id'])]
         return web.json_response({"items": items, "employees": employees, "hotels": hotels,
                                   "unavailableEmployees": unavailable})
 
@@ -765,17 +771,24 @@ class MiniApp:
         async with self.engine.begin() as conn:
             names = {}
             # Consistent lock order serializes concurrent plans without a lock-order deadlock.
-            for uid in user_ids:
+            for uid in sorted(set(user_ids) | {actor['id']}):
                 users = await self.rows(conn, "SELECT id,name,active FROM users WHERE id=:uid FOR UPDATE", uid=uid)
                 if not users or not users[0]["active"]:
                     raise AccessError("Сотрудник недоступен.", 400)
                 roles = await self.rows(conn, "SELECT role FROM user_roles WHERE user_id=:uid", uid=uid)
-                if not any(r["role"] in {"PHOTOGRAPHER", "MANAGER"} for r in roles):
+                if uid in user_ids and not any(r["role"] in {"PHOTOGRAPHER", "MANAGER"} for r in roles):
                     raise AccessError("Нужен фотограф или менеджер записи.", 400)
                 names[uid] = users[0]['name']
+            editor_roles = {r['role'] for r in await self.rows(conn,
+                'SELECT role FROM user_roles WHERE user_id=:uid', uid=actor['id'])}
+            require_schedule_editor(editor_roles)
             for payload, (uid, hid, start, end) in zip(payloads, parsed):
                 if not await self.rows(conn, "SELECT id FROM hotels WHERE id=:hid AND active=TRUE", hid=hid):
                     raise AccessError("Отель недоступен.", 400)
+                if 'OWNER' not in editor_roles and not await self.rows(conn,
+                        'SELECT hotel_id FROM hotel_employees WHERE user_id=:uid AND hotel_id=:hid',
+                        uid=actor['id'], hid=hid):
+                    raise AccessError('Изменять график можно только в назначенных вам отелях.', 403)
                 if await self.rows(conn, """SELECT id FROM shifts WHERE user_id=:uid AND status<>'CANCELLED'
                     AND start_at<:end AND end_at>:start""", uid=uid, start=start, end=end):
                     raise AccessError(f"У {names[uid]} уже есть смена, пересекающая {payload['date']} {payload['start']}–{payload['end']}.", 409)
@@ -796,10 +809,23 @@ class MiniApp:
         except ValueError as exc:
             raise AccessError("Некорректный номер смены.", 400) from exc
         async with self.engine.begin() as conn:
-            rows = await self.rows(conn, "SELECT * FROM shifts WHERE id=:id FOR UPDATE", id=sid)
+            rows = await self.rows(conn, "SELECT * FROM shifts WHERE id=:id", id=sid)
             if not rows:
                 raise AccessError("Смена не найдена.", 404)
+            # Match planning/check-in lock order and recheck grants inside the mutation.
+            for uid in sorted({actor['id'], rows[0]['user_id']}):
+                users = await self.rows(conn, 'SELECT id,active FROM users WHERE id=:uid FOR UPDATE', uid=uid)
+                if uid == actor['id'] and (not users or not users[0]['active']):
+                    raise AccessError('Рабочий доступ отключён.', 403)
+            editor_roles = {r['role'] for r in await self.rows(conn,
+                'SELECT role FROM user_roles WHERE user_id=:uid', uid=actor['id'])}
+            require_schedule_editor(editor_roles)
+            rows = await self.rows(conn, "SELECT * FROM shifts WHERE id=:id FOR UPDATE", id=sid)
             shift = rows[0]
+            if 'OWNER' not in editor_roles and not await self.rows(conn,
+                    'SELECT hotel_id FROM hotel_employees WHERE user_id=:uid AND hotel_id=:hid',
+                    uid=actor['id'], hid=shift['hotel_id']):
+                raise AccessError('Изменять график можно только в назначенных вам отелях.', 403)
             if shift["status"] == "CANCELLED":
                 return web.json_response({"ok": True})
             day = as_utc(shift["start_at"]).astimezone(self.tz).date()

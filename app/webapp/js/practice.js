@@ -3,7 +3,7 @@ import {esc} from './domain.js';
 
 const panel=document.createElement('dialog');panel.className='practice-dialog';
 panel.setAttribute('aria-labelledby','practiceTitle');document.body.append(panel);
-let current=null,pollTimer=null,version=0,busy=false,lastFocus=null;
+let current=null,pollTimer=null,version=0,busy=false,lastFocus=null,mutation=0;
 const urls=new Set();
 const labels={ACTIVE:'В работе',PENDING_REVIEW:'На проверке',COMPLETED:'Практика принята'};
 const criterionLabels={focus:['Фокус и техника',20],light:['Свет',15],composition:['Композиция',15],pose:['Позирование',20],emotion:['Выразительность',15],variety:['Разнообразие',15]};
@@ -23,8 +23,10 @@ function reviewSummary(data){
  return '';
 }
 function cleanup(){version++;for(const url of urls)URL.revokeObjectURL(url);urls.clear();}
-function close(){cleanup();clearInterval(pollTimer);panel.close();lastFocus?.focus?.();document.dispatchEvent(new CustomEvent('pb-practice-updated'));}
-function shell(title,html){cleanup();panel.innerHTML=`<header class="practice-head"><button data-practice-home aria-label="Назад">‹</button><h2 id="practiceTitle">${esc(title)}</h2><button data-practice-close aria-label="Закрыть">×</button></header><div class="practice-body"><p class="practice-error" role="alert" hidden></p>${html}</div>`;if(!panel.open){lastFocus=document.activeElement;panel.showModal();}}
+function resetPractice(){cleanup();clearInterval(pollTimer);pollTimer=null;mutation++;busy=false;current=null;panel.close();panel.innerHTML='';lastFocus=null;}
+function close(){const focus=lastFocus;resetPractice();focus?.focus?.();document.dispatchEvent(new CustomEvent('pb-practice-updated'));}
+function setBusy(value){busy=value;for(const control of panel.querySelectorAll('[data-practice-upload],button:not([data-practice-close])'))control.disabled=value;const progress=panel.querySelector('.practice-upload-progress');if(progress)progress.hidden=!value;}
+function shell(title,html){cleanup();panel.innerHTML=`<header class="practice-head"><button data-practice-home aria-label="Назад">‹</button><h2 id="practiceTitle">${esc(title)}</h2><button data-practice-close aria-label="Закрыть">×</button></header><div class="practice-body"><p class="practice-error" role="alert" hidden></p><p class="practice-upload-progress" role="status" hidden>Дождитесь подтверждения операции. Во время загрузки не выбирайте следующий кадр.</p>${html}</div>`;if(!panel.open){lastFocus=document.activeElement;panel.showModal();}setBusy(busy);}
 function error(e){const el=panel.querySelector('.practice-error');if(el){el.hidden=false;el.textContent=e.message||'Не удалось загрузить практику.';}}
 async function photoFetch(path,options={}){
  return api(path,{...options,responseType:options.method==='POST'?undefined:'blob',timeoutMs:90000});
@@ -65,33 +67,45 @@ function renderAssignment(data){
   ${data.personalInstructions?.length?`<section class="practice-feedback"><h3>Ваше AI-задание</h3><ol>${data.personalInstructions.map(x=>`<li>${esc(x)}</li>`).join('')}</ol>${data.successCriteria?.length?`<h4>Критерии успеха</h4><ul>${data.successCriteria.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:''}<p class="small">Условия закреплены за этой практикой и сохраняются при пересъёмке.</p></section>`:''}${analysisMarkup(data)}<div class="practice-shots">${data.shots.map(s=>`<article class="practice-shot"><h3>Кадр ${s.index}/5</h3><p>${esc(s.instruction)}</p>
   <div class="practice-pair"><figure><img data-practice-photo="${esc(s.reference)}" alt="Учебный референс ${s.index}"><figcaption>Референс</figcaption></figure>
   ${s.photo?`<figure><img data-practice-photo="${esc(s.photo)}" alt="Работа фотографа ${s.index}"><figcaption>Ваш кадр сохранён</figcaption></figure>`:'<p class="practice-missing">Кадр ещё не загружен</p>'}</div>
-  ${editable&&!s.uploaded?`<label class="practice-upload">Загрузить кадр ${s.index}<input type="file" accept="image/jpeg,image/png,image/webp" data-practice-upload="${s.index}"></label>`:''}</article>`).join('')}</div>
+  ${editable&&!s.uploaded?`<label class="practice-upload">Загрузить кадр ${s.index}<input type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" data-practice-upload="${s.index}"></label>`:''}</article>`).join('')}</div>
   ${editable?'<p>Загрузите исходный JPEG до 8 МБ: размер и EXIF сохраняются. PNG и WebP преобразуются в JPEG без уменьшения; их EXIF не сохраняется. Фото больше 8 МБ нужно уменьшить самостоятельно. После пятого кадра начнётся проверка.</p>':''}
   ${data.canRetry?`<button class="btn primary" data-practice-retry>Повторить AI-проверку</button>`:''}
   ${data.canRetake?'<button class="btn" data-practice-retake>Переснять спорные кадры</button><p>Указанные ИИ кадры откроются для замены. Если номера не указаны — все пять. Прежние работы останутся в истории.</p>':''}
   <button class="practice-refresh" data-practice-refresh>Обновить</button>`);
  loadPhotos();
 }
-async function showAssignment(id){const data=await api(`/academy/practice/${id}`);renderAssignment(data);}
+async function updateAssignment(request){const ticket=version;const data=await request;if(ticket===version&&panel.open)renderAssignment(data);}
+async function showAssignment(id){await updateAssignment(api(`/academy/practice/${id}`));}
 async function home(){
  current=null;
+ const ticket=version;
  const data=await api('/academy/practice');
+ if(ticket!==version||!panel.open)return;
  shell('Практика Академии',`${data.assignment?`<button class="practice-refresh" data-practice-open="${data.assignment.id}">Продолжить: ${esc(data.assignment.title)} · ${esc(statusLabel(data.assignment))}</button>${reviewSummary(data.assignment)?`<p class="practice-feedback">${esc(reviewSummary(data.assignment))}</p>`:''}`:data.todayDone?'<p>Практика принята. Новый набор откроется завтра.</p>':!data.ready?'<p>Завершите четыре урока текущего блока, чтобы открыть практику.</p>':`<p>AI-наставник назначает практику по вашим результатам и текущему блоку.</p><button class="btn primary" data-practice-plan>Открыть персональное AI-задание</button>`}
  ${data.queue.length?`<h3>Проверить работы команды</h3><div class="practice-menu">${data.queue.map(a=>`<button data-practice-open="${a.id}">${esc(a.name)} · ${esc(a.title)}</button>`).join('')}</div>`:''}
  ${data.history.length?`<h3>Мои задания</h3><div class="practice-menu">${data.history.map(a=>`<button data-practice-open="${a.id}">${esc(a.title)} · ${esc(statusLabel(a))}${a.score!==null&&a.score!==undefined?` · ${esc(a.score)}/100`:''}</button>`).join('')}</div>`:''}`);
 }
 export async function openPractice(id=null,category=null){
+ resetPractice();
  shell('Практика Академии','<p>Загружаем задание…</p>');
- try{if(id)await showAssignment(id);else if(category)renderAssignment(await api('/academy/practice/start',{method:'POST',body:{category}}));else await home();}catch(e){error(e);}
+ const ticket=version;
+ try{if(id)await showAssignment(id);else if(category)await updateAssignment(api('/academy/practice/start',{method:'POST',body:{category}}));else await home();}catch(e){if(ticket===version&&panel.open)error(e);}
+ if(!panel.open)return;
  clearInterval(pollTimer);pollTimer=setInterval(async()=>{
   if(!panel.open||!current||current.status!=='PENDING_REVIEW'||busy||document.hidden)return;
-  try{const data=await api(`/academy/practice/${current.id}`);if(panel.open&&current?.id===data.id&&JSON.stringify(data)!==JSON.stringify(current))renderAssignment(data);}catch(e){error(e);}
+  const ticket=version;
+  try{const data=await api(`/academy/practice/${current.id}`);if(ticket===version&&panel.open&&current?.id===data.id&&JSON.stringify(data)!==JSON.stringify(current))renderAssignment(data);}catch(e){if(ticket===version&&panel.open)error(e);}
  },5000);
 }
 async function preparePhoto(file){
- if(!file||!['image/jpeg','image/png','image/webp'].includes(file.type))throw new Error('Выберите JPEG, PNG или WebP.');
+ if(!file)throw new Error('Выберите JPEG, PNG или WebP.');
+ // Some phone/cloud file pickers omit MIME or report a generic binary file.
+ // The server still validates JPEG content; an explicit foreign MIME is rejected.
+ const extension=file.name?.split('.').pop()?.toLowerCase();
+ const kind=!file.type||file.type==='application/octet-stream'?({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp'}[extension]||''):file.type;
+ if(!['image/jpeg','image/png','image/webp'].includes(kind))throw new Error(['heic','heif'].includes(extension)||/heic|heif/.test(file.type)?'HEIC/HEIF не поддерживается. Экспортируйте фото в JPEG и загрузите эту копию.':'Выберите JPEG, PNG или WebP.');
  if(file.size>25*1024*1024)throw new Error('Исходное фото больше 25 МБ. Выберите уменьшенную копию.');
- if(file.type==='image/jpeg'){
+ if(kind==='image/jpeg'){
   if(file.size>8*1024*1024)throw new Error('JPEG больше 8 МБ. Сохраните отдельную копию до 8 МБ; её детализация может быть ниже.');
   // A byte copy preserves EXIF and avoids file-backed multipart transport differences.
   return new Blob([await file.arrayBuffer()],{type:'image/jpeg'});
@@ -108,24 +122,27 @@ async function preparePhoto(file){
 }
 panel.addEventListener('change',async e=>{
  const input=e.target.closest('[data-practice-upload]');if(!input||!input.files?.[0]||busy)return;
- const aid=current.id;busy=true;input.disabled=true;
- try{const blob=await preparePhoto(input.files[0]);const body=new FormData();body.append('file',blob,'practice.jpg');
+ const aid=current.id,ticket=version,operation=++mutation;setBusy(true);
+ try{const blob=await preparePhoto(input.files[0]);if(ticket!==version||!panel.open)return;const body=new FormData();body.append('file',blob,'practice.jpg');
   const data=await photoFetch(`/academy/practice/${aid}/photos/${input.dataset.practiceUpload}`,{method:'POST',body});
-  if(panel.open&&current?.id===aid)renderAssignment(data);
- }catch(err){error(err);input.disabled=false;input.value='';}finally{busy=false;}
+  if(ticket===version&&panel.open&&current?.id===aid)renderAssignment(data);
+ }catch(err){if(ticket===version&&panel.open){error(err);input.value='';}}finally{if(operation===mutation)setBusy(false);}
 });
 panel.addEventListener('click',async e=>{
  const b=e.target.closest('button');if(!b)return;
  if(b.hasAttribute('data-practice-close'))return close();
  if(busy)return;
+ const ticket=version,operation=++mutation;
  try{
-  if(b.hasAttribute('data-practice-retake')){busy=true;b.disabled=true;const indexes=current.analysis?.review?.reshoot_indexes;return renderAssignment(await api(`/academy/practice/${current.id}/retake`,{method:'POST',body:{indexes:indexes?.length?indexes:[1,2,3,4,5]}}));}
-  if(b.hasAttribute('data-practice-retry')){await api(`/academy/practice/${current.id}/retry`,{method:'POST',body:{}});return await showAssignment(current.id);}
+  setBusy(true);
+  if(b.hasAttribute('data-practice-retake')){const indexes=current.analysis?.review?.reshoot_indexes;return await updateAssignment(api(`/academy/practice/${current.id}/retake`,{method:'POST',body:{indexes:indexes?.length?indexes:[1,2,3,4,5]}}));}
+  if(b.hasAttribute('data-practice-retry')){const id=current.id;await api(`/academy/practice/${id}/retry`,{method:'POST',body:{}});if(ticket===version&&panel.open)return await showAssignment(id);return;}
   if(b.hasAttribute('data-practice-plan')){close();document.dispatchEvent(new CustomEvent('pb-open-academy-coach'));return;}
   if(b.hasAttribute('data-practice-home'))return await home();
   if(b.dataset.practiceOpen)return await showAssignment(Number(b.dataset.practiceOpen));
   if(b.hasAttribute('data-practice-refresh'))return current?await showAssignment(current.id):await home();
-  if(b.dataset.practiceStart){busy=true;b.disabled=true;renderAssignment(await api('/academy/practice/start',{method:'POST',body:{category:b.dataset.practiceStart}}));}
- }catch(err){error(err);b.disabled=false;}finally{busy=false;}
+  if(b.dataset.practiceStart)await updateAssignment(api('/academy/practice/start',{method:'POST',body:{category:b.dataset.practiceStart}}));
+ }catch(err){if(ticket===version&&panel.open)error(err);}finally{if(operation===mutation)setBusy(false);}
 });
 panel.addEventListener('cancel',e=>{e.preventDefault();close();});
+document.addEventListener('pb-chat-account-reset',resetPractice);

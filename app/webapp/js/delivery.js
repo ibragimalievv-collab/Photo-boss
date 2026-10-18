@@ -2,10 +2,19 @@ import {api} from './api.js';
 import {esc,todayKey} from './domain.js';
 import {enqueueBatch,enqueueOperation,outboxRows,retryOperation,syncOutboxNow,enqueueFilesOneByOne} from './outbox.js';
 let dialog=null,bookingId=null,album=null,objects=[],version=0,control=null,contacts=null,folderBusy=false,controlPresentation={};
+let photoViewer=null,photoURL=null,photoVersion=0;
 const labels={shoot:'Нужно снять',sale:'Нужно продать',payment:'Проверить оплату',delivery:'Выдать фотографии'};
 const date=value=>value?new Date(value+'Z').toLocaleString('ru-RU'):'Нет отметки';
 function revoke(){for(const url of objects)URL.revokeObjectURL(url);objects=[];}
-function shell(){if(dialog)return;dialog=document.createElement('dialog');dialog.className='sheet delivery-sheet';dialog.setAttribute('aria-label','Галерея выдачи');document.body.append(dialog);dialog.addEventListener('close',()=>{version++;revoke();});dialog.addEventListener('click',click);dialog.addEventListener('submit',submit);dialog.addEventListener('change',folderChange);}
+function clearPhotoViewer(){
+ photoVersion++;const viewer=photoViewer;photoViewer=null;
+ if(photoURL){URL.revokeObjectURL(photoURL);photoURL=null;}
+ if(viewer?.open)viewer.close();viewer?.remove();
+}
+function closeDelivery(){version++;clearPhotoViewer();revoke();if(dialog?.open)dialog.close();album=null;bookingId=null;}
+function shell(){if(dialog)return;dialog=document.createElement('dialog');dialog.className='sheet delivery-sheet';dialog.setAttribute('aria-label','Галерея выдачи');document.body.append(dialog);dialog.addEventListener('close',()=>{if(dialog.open)return;version++;clearPhotoViewer();revoke();album=null;bookingId=null;});dialog.addEventListener('click',click);dialog.addEventListener('submit',submit);dialog.addEventListener('change',folderChange);}
+window.addEventListener('hashchange',closeDelivery);window.addEventListener('pagehide',closeDelivery);window.addEventListener('pb-operations-reset',closeDelivery);
+document.addEventListener('pb-chat-account-reset',()=>{closeDelivery();control=null;contacts=null;});
 function message(text){const el=dialog?.querySelector('[data-delivery-status]');if(el)el.textContent=text;}
 const queueLabels={local:'Сохранено на устройстве',syncing:'Отправляется',synced:'Сохранено на сервере',error:'Ошибка'};
 function photoSetSection(a,set){
@@ -16,7 +25,9 @@ function photoSetSection(a,set){
  return `<section class="section" data-delivery-set="${set}"><h3>${title} · ${photos.length}</h3><p class="small">${set==='ALL'?'Загрузите полную серию этой съёмки.':'Загрузите отдельные готовые файлы с устройства.'}</p>${a.canEdit?`<form id="${formId}" class="form-grid"><label class="field"><span>${title}: JPEG или PNG до 20 МБ</span><input class="input" name="photos" type="file" accept="image/jpeg,image/png" multiple required></label><button class="btn primary">${set==='ALL'?'Загрузить все фотографии':'Загрузить выбранные фотографии'}</button></form><label class="field section"><span>Выбрать папку — загрузить по одному автоматически</span><input class="input" data-delivery-folder="${set}" type="file" accept="image/jpeg,image/png" webkitdirectory multiple></label>`:''}<div class="delivery-grid">${photos.map(p=>`<figure><button class="btn ghost" data-delivery="view" data-photo="${p.id}"><img data-server-photo="${p.id}" alt="${esc(p.name)}" loading="lazy"><span>${esc(p.name)}</span></button></figure>`).join('')||'<p>В этой папке ещё нет фотографий.</p>'}</div></section>`;
 }
 async function render(){
- const queue=(await outboxRows()).filter(r=>r.kind.startsWith('delivery_')&&r.data.booking===bookingId),a=album;
+ const ticket=version,bid=bookingId,a=album;
+ const queue=(await outboxRows()).filter(r=>r.kind.startsWith('delivery_')&&r.data.booking===bid);
+ if(ticket!==version||bid!==bookingId||!dialog.open||!a)return;
  dialog.innerHTML=`<button class="icon-button close-sheet" data-delivery="close" aria-label="Закрыть">×</button><h2>Галерея съёмки №${bookingId}</h2><p>Фотограф: ${esc(a.photographer||'Не назначен')}</p>${a._offline?`<p class="notice">Сохранённые сведения от ${new Date(a._cachedAt).toLocaleString('ru-RU')}. Для просмотра серверных фото и выдачи нужна сеть. Новые фото можно сохранить в очередь.</p>`:''}<p data-delivery-status role="status" aria-live="polite"></p><button class="btn ghost" data-delivery="ai-review">AI-разбор этой съёмки</button>
  ${photoSetSection(a,'ALL')}${photoSetSection(a,'SELECTED')}
  ${a.canEdit?` <form id="deliverySettingsForm" class="form-grid section"><label class="field"><span>Название альбома</span><input class="input" name="title" maxlength="120" value="${esc(a.title)}" required></label><label class="field"><span>Пароль ${a.passwordEnabled?'установлен':'не установлен'} (пустое поле сохраняет текущий)</span><input class="input" name="password" type="password" minlength="6" maxlength="100" autocomplete="new-password"></label>${a.passwordEnabled?'<label><input name="clearPassword" type="checkbox"> Убрать пароль</label>':''}<label class="field"><span>Срок доступа</span><select class="input" name="days"><option value="keep">Сохранить текущий срок</option><option value="7">7 дней с сегодняшнего дня</option><option value="30">30 дней</option><option value="90">90 дней</option><option value="0">Без ограничения</option></select></label><p class="small">Доступ до: ${a.expiresAt?date(a.expiresAt):'без ограничения'}</p><label class="field"><span>Что увидит гость</span><select class="input" name="deliveryMode"><option value="SELECTED" ${a.deliveryMode==='SELECTED'?'selected':''}>Только выбранные</option><option value="ALL" ${a.deliveryMode==='ALL'?'selected':''}>Все фото</option></select></label><label><input name="published" type="checkbox" ${a.published?'checked':''}> Открыть фотографии гостю</label><button class="btn">Сохранить настройки / создать ссылку гостя</button></form>`:''}
@@ -24,14 +35,13 @@ async function render(){
  ${a.published&&a.clientUrl?`<section class="section"><h3>QR-код Photo Boss</h3><img class="delivery-qr" alt="QR-код для клиента" data-delivery-qr><p class="small">Гость сканирует QR и сразу открывает Photo Boss в браузере. Telegram не нужен. Доступны только фотографии выбранного режима выдачи.</p><input class="input" readonly value="${esc(a.clientUrl)}" aria-label="Прямая ссылка Photo Boss"><button class="btn" data-delivery="copy-client">Скопировать прямую ссылку</button>${a.canEdit?'<button class="btn ghost" data-delivery="rotate">Заменить ссылку (старая перестанет работать)</button>':''}</section>`:''}
  <section class="section"><h3>Выдача</h3><p>Бот запущен: ${date(a.botStartedAt)}</p><p>Ссылка отправлена: ${date(a.botLinkSentAt)}</p><p>Запрос просмотра альбома: ${date(a.openedAt)}</p><p>Запрос скачивания: ${date(a.downloadedAt)}</p><p>Выдано сотрудником: ${date(a.handedAt)}</p>${a.canEdit?`<button class="btn" data-delivery="handoff">${a.handedAt?'Снять отметку выдачи':'Отметить выданным'}</button>`:''}</section>
  <section class="section"><h3>Очередь этой съёмки</h3>${queue.map(r=>`<p>${r.kind==='delivery_photo'?`Фото · ${(r.data.photoSet==='SELECTED'||r.data.selected)?'Выбранные':'Все фотографии'}`:'Выдача'} · ${esc(queueLabels[r.status])} ${esc(r.error||'')}${r.status==='error'?`<button class="btn small" data-delivery="retry" data-key="${esc(r.key)}">Повторить</button>`:''}</p>`).join('')||'<p>Нет операций.</p>'}<button class="btn ghost" data-delivery="refresh">Обновить</button><button class="btn ghost" data-delivery="sync">Синхронизировать</button></section>`;
- const ticket=version,bid=bookingId;
  if(a._offline)return;
- const jobs=a.photos.map(p=>async()=>{try{const blob=await api(`/delivery/${bid}/photos/${p.id}?preview=1`,{responseType:'blob'});if(ticket!==version)return;const url=URL.createObjectURL(blob);objects.push(url);for(const img of dialog.querySelectorAll(`[data-server-photo="${p.id}"]`))img.src=url;}catch{for(const img of dialog.querySelectorAll(`[data-server-photo="${p.id}"]`))img.alt='Фото пока недоступно';}});
- if(a.published&&a.clientUrl)jobs.push(async()=>{try{const blob=await api(`/delivery/${bid}/qr`,{responseType:'blob'});if(ticket!==version)return;const url=URL.createObjectURL(blob);objects.push(url);const img=dialog.querySelector('[data-delivery-qr]');if(img)img.src=url;}catch{message('QR-код недоступен. Можно скопировать прямую ссылку Photo Boss.')}});
+ const jobs=a.photos.map(p=>async()=>{try{const blob=await api(`/delivery/${bid}/photos/${p.id}?preview=1`,{responseType:'blob'});if(ticket!==version)return;const url=URL.createObjectURL(blob);objects.push(url);for(const img of dialog.querySelectorAll(`[data-server-photo="${p.id}"]`))img.src=url;}catch{if(ticket!==version)return;for(const img of dialog.querySelectorAll(`[data-server-photo="${p.id}"]`))img.alt='Фото пока недоступно';}});
+ if(a.published&&a.clientUrl)jobs.push(async()=>{try{const blob=await api(`/delivery/${bid}/qr`,{responseType:'blob'});if(ticket!==version)return;const url=URL.createObjectURL(blob);objects.push(url);const img=dialog.querySelector('[data-delivery-qr]');if(img)img.src=url;}catch{if(ticket!==version)return;message('QR-код недоступен. Можно скопировать прямую ссылку Photo Boss.')}});
  // Limit simultaneous image downloads and keep memory bounded to the current album.
  for(let i=0;i<jobs.length&&ticket===version;i+=4)await Promise.allSettled(jobs.slice(i,i+4).map(job=>job()));
 }
-export async function openDelivery(id){shell();const ticket=++version;bookingId=Number(id);revoke();dialog.innerHTML='<p role="status">Загружаем галерею…</p><button class="btn" data-delivery="close">Закрыть</button>';if(!dialog.open)dialog.showModal();try{const a=await api(`/delivery/${bookingId}`);if(ticket!==version)return;album=a;await render();}catch(e){if(ticket===version)dialog.innerHTML=`<p>${esc(e.message)}</p><button class="btn" data-delivery="close">Закрыть</button>`;}}
+export async function openDelivery(id){shell();const ticket=++version;bookingId=Number(id);clearPhotoViewer();revoke();dialog.innerHTML='<p role="status">Загружаем галерею…</p><button class="btn" data-delivery="close">Закрыть</button>';if(!dialog.open)dialog.showModal();try{const a=await api(`/delivery/${bookingId}`);if(ticket!==version)return;album=a;await render();}catch(e){if(ticket===version)dialog.innerHTML=`<p>${esc(e.message)}</p><button class="btn" data-delivery="close">Закрыть</button>`;}}
 async function folderChange(e){
  const input=e.target;
  if(!input.matches('[data-delivery-folder]'))return;
@@ -57,7 +67,15 @@ async function click(e){const b=e.target.closest('[data-delivery]');if(!b)return
  if(kind==='ai-review'){await api('/academy/coach/shoots',{method:'POST',body:{bookingId}});message('Все загруженные кадры съёмки поставлены в очередь AI-разбора. Результат — в Академии.');return;}
  if(kind==='close'){dialog.close();return;}
  if(kind.startsWith('copy-')){const value=album.clientUrl;try{await navigator.clipboard.writeText(value);message('Ссылка скопирована.')}catch{message('Скопируйте ссылку из поля.')}return;}
- if(kind==='view'){const bid=bookingId;const blob=await api(`/delivery/${bid}/photos/${b.dataset.photo}`,{responseType:'blob'});const url=URL.createObjectURL(blob);const viewer=document.createElement('dialog');viewer.className='delivery-viewer';const close=document.createElement('button');close.className='btn';close.textContent='Закрыть';close.onclick=()=>viewer.close();const full=document.createElement('img');full.src=url;full.alt=album.photos.find(p=>p.id===Number(b.dataset.photo))?.name||'Фотография';viewer.append(close,full);viewer.addEventListener('close',()=>{URL.revokeObjectURL(url);viewer.remove()});document.body.append(viewer);viewer.showModal();return;}
+ if(kind==='view'){
+  clearPhotoViewer();const ticket=version,photoTicket=photoVersion,bid=bookingId;
+  const blob=await api(`/delivery/${bid}/photos/${b.dataset.photo}`,{responseType:'blob'});
+  if(ticket!==version||photoTicket!==photoVersion||bid!==bookingId||!dialog.open)return;
+  const viewer=document.createElement('dialog');viewer.className='delivery-viewer';viewer.setAttribute('aria-label','Фотография съёмки');
+  const close=document.createElement('button');close.type='button';close.className='btn';close.textContent='Закрыть';close.onclick=()=>viewer.close();
+  const full=document.createElement('img');photoURL=URL.createObjectURL(blob);full.src=photoURL;full.alt=album.photos.find(p=>p.id===Number(b.dataset.photo))?.name||'Фотография';
+  viewer.append(close,full);viewer.addEventListener('close',()=>{if(photoViewer===viewer)clearPhotoViewer();},{once:true});photoViewer=viewer;document.body.append(viewer);viewer.showModal();return;
+ }
  if(kind==='handoff'){await enqueueOperation('delivery_handoff',todayKey(),{booking:bookingId,delivered:!album.handedAt});message('Отметка сохранена в очередь. Обновите после синхронизации.');return;}
  if(kind==='rotate'){if(!confirm('Заменить ссылку? Старые ссылки и QR-коды перестанут работать.'))return;album=await api(`/delivery/${bookingId}`,{method:'POST',body:{rotate:true}});revoke();await render();return;}
  if(kind==='retry')await retryOperation(b.dataset.key);if(kind==='sync')await syncOutboxNow();if(['refresh','sync','retry'].includes(kind))await openDelivery(bookingId);

@@ -12,5 +12,11 @@ const payload=await prepare(file);
 assert.equal(payload.type,'image/jpeg');
 assert.deepEqual(Buffer.from(await payload.arrayBuffer()),original,'Original bytes and EXIF must remain identical');
 assert.ok(!(payload instanceof File),'Use a memory-backed byte copy for consistent multipart transports');
+for(const type of ['', 'application/octet-stream']){
+ const picked=await prepare(new File([original],'Camera.JPG',{type}));
+ assert.deepEqual(Buffer.from(await picked.arrayBuffer()),original,'Cloud picker JPEG without MIME must preserve bytes');
+}
+await assert.rejects(()=>prepare(new File([original],'camera.HEIC',{type:'image/heic'})),/HEIC\/HEIF.*JPEG/);
+await assert.rejects(()=>prepare(new File([original],'spoof.jpg',{type:'image/svg+xml'})),/JPEG, PNG или WebP/);
 await assert.rejects(()=>prepare(new File([new Uint8Array(8*1024*1024+1)],'large.jpg',{type:'image/jpeg'})),/8 МБ/);
 console.log('PASS: original JPEG byte preservation, bounded multipart copy and explicit oversize rejection');

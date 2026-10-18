@@ -19,6 +19,10 @@ async def main():
     fixture.finish_lessons()
     errors = []
     lost_upload_reply = False
+    delayed_upload_started = asyncio.Event()
+    delayed_upload_release = asyncio.Event()
+    delayed_upload_finished = asyncio.Event()
+    delayed_assignment = None
     plan = {'title': 'AI-практика света', 'focus': 'light', 'reason': 'Диагностика',
             'lessonSlugs': ['light'], 'category': 'woman', 'scenario': '',
             'instructions': ['Выберите свет', 'Снимите разные планы', 'Проверьте лица'],
@@ -30,7 +34,7 @@ async def main():
         browser = await p.chromium.launch()
         try:
             async def route(r):
-                nonlocal lost_upload_reply
+                nonlocal lost_upload_reply, delayed_assignment
                 if r.request.url.startswith('https://telegram.org/') or any(
                     r.request.url.startswith(BASE + prefix) for prefix in ('/shift/', '/people/', '/work-chat/')):
                     # Isolate unrelated widgets; keep the real Academy navigation/app module.
@@ -47,6 +51,15 @@ async def main():
                         await response.read()
                         lost_upload_reply = True
                         return await r.abort('connectionreset')
+                    if r.request.method == 'POST' and path.endswith('/photos/2') and delayed_assignment is None:
+                        assert response.status == 201
+                        raw = await response.read()
+                        delayed_assignment = int(path.split('/')[-3])
+                        delayed_upload_started.set()
+                        await delayed_upload_release.wait()
+                        await r.fulfill(status=response.status, body=raw, content_type=response.content_type)
+                        delayed_upload_finished.set()
+                        return
                     return await r.fulfill(status=response.status, body=await response.read(),
                                            content_type=response.content_type)
                 if path == "/app/":
@@ -73,8 +86,26 @@ async def main():
             trainee = await page_for(3, 320)
             await trainee.locator('[data-practice-upload="1"]').wait_for()
             for index in range(1, 6):
+                if index == 3:
+                    continue  # Uploaded while the older response for frame 2 is deliberately held.
                 await trainee.locator(f'[data-practice-upload="{index}"]').set_input_files(
                     str(ROOT / f"app/assets/training/woman/{index:02d}.jpg"))
+                if index == 2:
+                    await asyncio.wait_for(delayed_upload_started.wait(), timeout=10)
+                    await expect(trainee.locator('[data-practice-upload]:not(:disabled)')).to_have_count(0)
+                    await expect(trainee.locator('.practice-upload-progress')).to_be_visible()
+                    await trainee.locator('[data-practice-close]').click()
+                    await expect(trainee.locator('.practice-dialog[aria-labelledby="practiceTitle"]')).not_to_be_visible()
+                    assert await trainee.locator('.practice-dialog[aria-labelledby="practiceTitle"]').inner_html() == ''
+                    await trainee.evaluate("async id=>{const p=await import('/app/js/practice.js');await p.openPractice(id);}", delayed_assignment)
+                    await trainee.get_by_text('Загружено 2/5.', exact=False).wait_for()
+                    await trainee.locator('[data-practice-upload="3"]').set_input_files(
+                        str(ROOT / 'app/assets/training/woman/03.jpg'))
+                    await trainee.get_by_text('Загружено 3/5.', exact=False).wait_for()
+                    delayed_upload_release.set()
+                    await asyncio.wait_for(delayed_upload_finished.wait(), timeout=10)
+                    await expect(trainee.locator('.practice-body')).to_contain_text('Загружено 3/5.')
+                    continue
                 if index == 1:
                     await trainee.locator('.practice-error:not([hidden])').wait_for()
                     assert len(fixture.files) == 1
@@ -137,12 +168,17 @@ async def main():
             await owner.locator('[data-practice-refresh]').click()
             await expect(owner.locator('[data-practice-status]')).to_have_text('Практика принята')
             await expect(trainee.locator('[data-practice-status]')).to_have_text('Практика принята', timeout=10000)
+            await trainee.evaluate("document.dispatchEvent(new Event('pb-chat-account-reset'))")
+            await expect(trainee.locator('.practice-dialog[aria-labelledby="practiceTitle"]')).not_to_be_visible()
+            assert await trainee.locator('.practice-dialog[aria-labelledby="practiceTitle"]').inner_html() == ''
             assert fixture.bot.send_message.await_count == 0
             assert not errors, errors
             assert trainee.url == BASE + '/app/#academy' and owner.url == BASE + '/app/#academy'
             await trainee.screenshot(path='/tmp/photo-boss-calls-qa/academy-practice.png')
             print(json.dumps({'ok': True, 'fivePhotos': True, 'aiReview': True, 'manualReviewDisabled': True,
-                              'reshoot': True, 'uncertainRetake': True, 'resultInApp': True, 'botHandoffs': 0, 'pageErrors': errors}))
+                              'reshoot': True, 'uncertainRetake': True, 'resultInApp': True,
+                              'slowUploadControls': True, 'staleReplyIgnored': True, 'accountResetCleared': True,
+                              'botHandoffs': 0, 'pageErrors': errors}))
         finally:
             await browser.close()
             await fixture.asyncTearDown()
