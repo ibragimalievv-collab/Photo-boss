@@ -30,6 +30,7 @@ from .models import (
     SaleDraftPhoto,
     Shooting,
     User,
+    utc_now,
 )
 from .services.booking_access import booking_scope, can_access_booking
 from .services.bookings import create_booking_record
@@ -57,7 +58,13 @@ from .services.sale_workflow import (
     set_sale_counts,
     start_sale_draft,
 )
-from .yandex_disk import ROOT, YandexDisk, YandexDiskError, configured_from_env
+from .yandex_disk import (
+    ROOT,
+    YandexDisk,
+    YandexDiskError,
+    configured_from_env,
+    validate_saved,
+)
 
 KINDS = frozenset({'booking', 'sale_start', 'sale_counts', 'sale_complete', 'sale_receipt',
                    'sale_selected', 'booking_receipt', 'shoot_photo', 'shoot_complete', 'shoot_retry', 'photo_edit', 'delivery_photo', 'delivery_handoff'})
@@ -230,6 +237,10 @@ class Workflow:
             'date': str(self.api.today()), 'actorId': a['id']})
 
     async def save_telegram(self, actor, raw, *, receipt=False):
+        from .push_notifications import app_channel
+        if app_channel():
+            from .services.media_files import save_private_media
+            return await save_private_media(actor.id, raw)
         from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
         from aiogram.types import BufferedInputFile
         ext, _ = image_format(raw)
@@ -267,16 +278,32 @@ class Workflow:
             return await save_private_media(actor.id, raw)
 
     async def save_selected(self, draft, raw):
+        return await self.save_disk_original(f'/sales/draft-{draft.id}/selected', raw)
+
+    async def save_disk_original(self, folder, raw):
         token, client_id = configured_from_env()
         if not token:
             raise AccessError('Яндекс.Диск не подключён. Фото остаётся в локальной очереди.', 503)
         ext, mime = image_format(raw)
         digest = hashlib.sha256(raw).hexdigest()
         storage = YandexDisk(token, client_id)
-        for path in (ROOT + '/sales', ROOT + f'/sales/draft-{draft.id}', ROOT + f'/sales/draft-{draft.id}/selected'):
-            await storage.ensure_dir(path)
-        path = ROOT + f'/sales/draft-{draft.id}/selected/{digest}.{ext}'
-        await storage.upload_bytes(path, raw, content_type=mime)
+        path = ROOT + folder + f'/{digest}.{ext}'
+        try:
+            validate_saved(await storage.metadata(path), raw)
+            return path
+        except YandexDiskError as exc:
+            if not any(reason in str(exc) for reason in ('HTTP 404', 'не совпадает')):
+                raise
+        try:
+            await storage.upload_bytes(path, raw, content_type=mime)
+        except YandexDiskError as exc:
+            if not any(code in str(exc) for code in ('HTTP 404', 'HTTP 409')):
+                raise
+            parent = ROOT
+            for part in folder.strip('/').split('/'):
+                parent += '/' + part
+                await storage.ensure_dir(parent)
+            await storage.upload_bytes(path, raw, content_type=mime)
         return path
 
     async def apply(self, conn, actor_data, kind, data, raw=None):
@@ -448,8 +475,30 @@ class Workflow:
                         json.dumps(recovery))
             return {'shootingId': sid, **recovery}
         if kind == 'shoot_photo':
+            from .push_notifications import app_channel
             digest = hashlib.sha256(raw).hexdigest()
             duplicate = await session.scalar(select(PhotoStorage).where(PhotoStorage.shooting_id == sid, PhotoStorage.sha256 == digest).limit(1))
+            if app_channel():
+                if not duplicate and (shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at):
+                    raise AccessError('Загрузка новых кадров уже закрыта или ещё недоступна.', 409)
+                path = await self.save_disk_original(f'/shootings/{sid}', raw)
+                if duplicate:
+                    photo = await session.get(Photo, duplicate.photo_id)
+                    storage = duplicate
+                else:
+                    photo = Photo(shooting_id=sid, file_id=path)
+                    session.add(photo)
+                    await session.flush()
+                    storage, _ = await ensure_photo_storage(session, photo_id=photo.id, shooting_id=sid,
+                        file_id=path, file_unique_id='web-sha256:' + digest, source_kind='DOCUMENT')
+                photo.file_id = storage.telegram_file_id = storage.disk_path = path
+                storage.sha256, storage.byte_size = digest, len(raw)
+                storage.status, storage.attempts, storage.last_error = 'STORED', 0, None
+                storage.stored_at = storage.updated_at = utc_now()
+                storage.started_at = None
+                await audit(session, actor, 'shoot_photo_uploaded', 'shooting', sid, 'direct_disk; checksum verified')
+                return {'shootingId': sid, 'photoId': photo.id, 'duplicate': bool(duplicate),
+                        'storageStatus': 'STORED', 'storageVerified': True}
             if duplicate:
                 file_id, unique_id = await self.save_telegram(actor, raw)
                 original = await session.get(Photo, duplicate.photo_id)

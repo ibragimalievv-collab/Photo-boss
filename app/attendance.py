@@ -187,6 +187,15 @@ class Attendance:
         return web.json_response(self.result(actor, start, end, self.now()))
 
     async def send_photo(self, actor, raw, purpose):
+        from .push_notifications import app_channel
+        if app_channel():
+            from .services.media_files import save_private_media
+            from .yandex_disk import YandexDiskError
+            try:
+                path, _ = await save_private_media(actor['id'], raw)
+            except YandexDiskError as exc:
+                raise AccessError('Сохранение фото смены на Диске не подтверждено. Повторите отправку.', 503) from exc
+            return path
         from aiogram.types import BufferedInputFile
         title = 'Начало смены · фото в полный рост' if purpose == 'start' else 'Завершение смены · рабочее место'
         async with asyncio.timeout(15):
@@ -325,8 +334,8 @@ class Attendance:
                 'Показаны отметки со сменами только в назначенных вам отелях. Без плана или с другими отелями проверяет владелец.'})
 
     async def evidence(self, request):
-        from .academy_practice import BoundedPhoto
         from .people import check_editor, positive_id
+        from .services.media_files import load_private_media
         check_editor(request['miniapp_actor']['roles'])
         table, field, _, _ = attendance_fields(request.match_info['purpose'])
         async with self.api.engine.connect() as conn:
@@ -336,9 +345,8 @@ class Attendance:
                     datetime.fromisoformat(str(rows[0]['shift_date'])).date())
         if not rows or not rows[0]['photo']:
             raise AccessError('Фото не найдено.', 404)
-        buffer = BoundedPhoto()
-        await self.api.bot.download(rows[0]['photo'], destination=buffer, timeout=25)
-        return web.json_response({'image': 'data:image/jpeg;base64,' + base64.b64encode(buffer.getvalue()).decode()}, headers={'Cache-Control': 'no-store'})
+        raw = await load_private_media(self.api.bot, rows[0]['photo'], max_bytes=MAX_PHOTO, timeout=25)
+        return web.json_response({'image': 'data:image/jpeg;base64,' + base64.b64encode(raw).decode()}, headers={'Cache-Control': 'no-store'})
 
     async def review(self, request):
         from .people import People, check_editor, positive_id

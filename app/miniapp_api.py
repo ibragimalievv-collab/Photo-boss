@@ -337,6 +337,8 @@ class MiniApp:
             capture = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=f"miniapp:screen_capture:{actor['id']}")
             password = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=f"miniapp:password:{actor['id']}")
             generation = await current_generation(conn)
+            sales_epoch = await self.rows(conn, 'SELECT value FROM settings WHERE key=:key', key='sales:generation')
+            sales_generation = sales_epoch[0]['value'] if sales_epoch else ''
         capture_allowed = (
             True
             if "OWNER" in actor["roles"]
@@ -349,6 +351,7 @@ class MiniApp:
             "passwordConfigured": bool(password),
             "passwordLogin": json.loads(password[0]['value'])['login'] if password else '',
             "operationsGeneration": generation,
+            "salesGeneration": sales_generation,
             "today": self.today().isoformat(),
             "timezone": str(self.tz), "mode": "live"})
 
@@ -1058,7 +1061,7 @@ class MiniApp:
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg", "assets/academy/exposure.svg", "assets/academy/window-light.svg", "assets/academy/perspective.svg", "assets/academy/group-depth.svg"}
         allowed.add('js/sale-files.js')
-        allowed.update({'js/notifications.js', 'js/lunch.js', 'js/hotel-pricing.js', 'js/bank-payments.js'})
+        allowed.update({'js/storage-audit.js', 'js/notifications.js', 'js/lunch.js', 'js/hotel-pricing.js', 'js/bank-payments.js'})
         if name not in allowed:
             raise web.HTTPNotFound()
         path = self.static_dir / name

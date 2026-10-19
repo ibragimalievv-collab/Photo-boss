@@ -158,10 +158,11 @@ class Workday:
         if not isinstance(body, dict):
             raise AccessError('Некорректная операция.', 400)
         required = {'key','kind','date','data','actorId'}
-        if (set(body) not in (required, required | {'generation'})
+        if (not required <= set(body) or set(body) - required - {'generation', 'salesGeneration'}
                 or not isinstance(body['key'],str) or not 16<=len(body['key'])<=80
                 or not isinstance(body['data'],dict)
-                or ('generation' in body and not isinstance(body['generation'], str))):
+                or ('generation' in body and not isinstance(body['generation'], str))
+                or ('salesGeneration' in body and not isinstance(body['salesGeneration'], str))):
             raise AccessError('Некорректная операция.',400)
         if body['key'].startswith(('academy-', 'mentor-', 'realtime-')):
             raise AccessError('Некорректный идентификатор операции.', 400)
@@ -175,6 +176,10 @@ class Workday:
             # the reset and retain their original payload hash and replay.
             if body['kind'] != 'cash_expense':
                 await require_generation(conn, body.get('generation', ''))
+            if body['kind'].startswith('sale_') or body['kind'] == 'booking':
+                sales_generation = await conn.scalar(text("SELECT value FROM settings WHERE key='sales:generation'"))
+                if sales_generation and body.get('salesGeneration', '') != sales_generation:
+                    raise AccessError('Продажи обнулены владельцем. Обновите приложение и начните продажу заново; старые файлы сохранены.', 409)
             users=await self.api.rows(conn,'SELECT id,active FROM users WHERE id=:uid FOR UPDATE',uid=a['id'])
             if not users or not users[0]['active']: raise AccessError('Доступ отключён.',403)
             roles={r['role'] for r in await self.api.rows(conn,'SELECT role FROM user_roles WHERE user_id=:uid',uid=a['id'])}

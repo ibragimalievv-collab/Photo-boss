@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -22,11 +23,105 @@ from .models import (
     Sale,
     SaleDraft,
     SaleDraftPhoto,
+    Shooting,
     utc_now,
 )
-from .yandex_disk import YandexDiskError
+from .yandex_disk import ROOT, YandexDiskError
 
 logger = logging.getLogger(__name__)
+
+
+async def selected_folder_audit(storage, draft_id, rows, sold):
+    """Compare the actual private folder, including files absent from the DB."""
+    try:
+        items = await storage.list_directory(ROOT + f'/sales/draft-{draft_id}/selected')
+    except YandexDiskError as exc:
+        if 'HTTP 404' not in str(exc):
+            return {'status': 'unavailable', 'diskFiles': None, 'missingSelected': None}
+        items = []
+    files = [i for i in items if i.get('type') == 'file']
+    verified, valid_files = {}, 0
+    for item in files:
+        match = re.fullmatch(r'([a-f0-9]{64})\.(jpg|png|webp)', item['name'])
+        if match and item.get('sha256') == match[1] and type(item.get('size')) is int and item['size'] > 0:
+            valid_files += 1
+            verified[match[1]] = item
+    confirmed = sum(bool(p.sha256 in verified and verified[p.sha256]['size'] == p.byte_size) for p in rows)
+    known = {p.sha256 for p in rows}
+    return {'status': 'checked', 'diskFiles': len(files), 'verifiedUniqueFiles': len(verified),
+            'registeredFiles': len(rows), 'registeredVerified': confirmed,
+            'unregisteredFiles': len(set(verified) - known),
+            'exactDuplicateFiles': valid_files - len(verified),
+            'invalidOrUnexpectedFiles': len(files) - valid_files,
+            'missingSelected': max(0, sold - len(verified)) if sold and len(files) == valid_files else None,
+            'matchesDeclared': bool(sold and len(verified) == sold and confirmed == len(rows) and len(files) == valid_files)}
+
+
+async def full_folder_audit(storage, booking_id, shooting_id, declared, selected_drafts=()):
+    """Union of this booking's originals; copied exports count once by hash."""
+    roots = [(ROOT + f'/delivery/booking-{booking_id}', False)]
+    if shooting_id:
+        roots.append((ROOT + f'/shootings/{shooting_id}', True))
+    roots += [(ROOT + f'/sales/draft-{did}/selected', True) for did in selected_drafts]
+    files = []
+    async def walk(folder, originals, depth=0):
+        if depth > 3:
+            raise YandexDiskError('Слишком глубокая структура папки съёмки.')
+        try:
+            items = await storage.list_directory(folder)
+        except YandexDiskError as exc:
+            if 'HTTP 404' in str(exc):
+                return
+            raise
+        for item in items:
+            name = item['name']
+            if item.get('type') == 'dir':
+                await walk(folder + '/' + name, originals or name in {'Все фото', 'Выбранные'}, depth + 1)
+            elif originals and item.get('type') == 'file' and re.search(r'\.(jpg|jpeg|png|webp)$', name, re.IGNORECASE):
+                files.append(item)
+    try:
+        for folder, originals in roots:
+            await walk(folder, originals)
+    except (YandexDiskError, ValueError):
+        return {'status': 'unavailable', 'uniqueFiles': None, 'missingOriginals': None}
+    verified = [f for f in files if re.fullmatch('[a-f0-9]{64}', f.get('sha256', '')) and f.get('size', 0) > 0]
+    unique = {f['sha256'] for f in verified}
+    return {'status': 'checked', 'diskFiles': len(files), 'uniqueFiles': len(unique) if len(verified) == len(files) else None,
+            'exactDuplicateFiles': len(verified) - len(unique), 'unverifiedFiles': len(files) - len(verified),
+            'missingOriginals': max(0, declared - len(unique)) if declared and len(verified) == len(files) else None,
+            'matchesDeclared': bool(declared and len(unique) == declared and len(verified) == len(files))}
+
+
+async def sales_storage_audit(engine, storage):
+    async with AsyncSession(engine) as session:
+        drafts = list(await session.scalars(select(SaleDraft).order_by(SaleDraft.id.desc()).limit(30)))
+        selected = list(await session.scalars(select(SaleDraftPhoto).where(SaleDraftPhoto.draft_id.in_([d.id for d in drafts]))))
+        shoots = dict((await session.execute(select(Shooting.booking_id, Shooting.id)
+            .where(Shooting.booking_id.in_([d.booking_id for d in drafts])))).all())
+        all_drafts = (await session.execute(select(SaleDraft.booking_id, SaleDraft.id)
+            .where(SaleDraft.booking_id.in_([d.booking_id for d in drafts])))).all()
+    result = []
+    semaphore = asyncio.Semaphore(3)
+    async def inspect(draft):
+        async with semaphore:
+            folder = await selected_folder_audit(storage, draft.id,
+                [p for p in selected if p.draft_id == draft.id], draft.sold_photos)
+            full = await full_folder_audit(storage, draft.booking_id, shoots.get(draft.booking_id),
+                draft.declared_photo_count, [did for bid, did in all_drafts if bid == draft.booking_id])
+            return {'bookingId': draft.booking_id, 'draftId': draft.id, 'draftStatus': draft.status,
+                    'declaredTotal': draft.declared_photo_count, 'declaredSold': draft.sold_photos,
+                    'selectedFolder': folder, 'fullShootFolders': full}
+    result = await asyncio.gather(*(inspect(d) for d in drafts))
+    return {'checkedAt': utc_now().isoformat()+'Z', 'items': result, 'limited': len(drafts) == 30}
+
+
+async def log_sales_storage_audit(engine, storage):
+    try:
+        async with asyncio.timeout(40):
+            data = await sales_storage_audit(engine, storage)
+        logger.info('Sale folder reconciliation: %s', json.dumps(data, ensure_ascii=False))
+    except (SQLAlchemyError, YandexDiskError, TimeoutError, ValueError, TypeError, KeyError) as exc:
+        logger.warning('Sale folder reconciliation unavailable (%s)', type(exc).__name__)
 
 
 async def recent_inventory(engine, storage, *, limit=12):
@@ -132,3 +227,8 @@ def install_inventory(app, api):
         data = await recent_inventory(api.engine, request.app['yandex_disk'])
         return web.json_response(data, headers={'Cache-Control': 'no-store'})
     app.router.add_get('/api/miniapp/storage/inventory', inventory)
+    async def sale_inventory(request):
+        require_owner(request['miniapp_actor']['roles'])
+        data = await sales_storage_audit(api.engine, request.app['yandex_disk'])
+        return web.json_response(data, headers={'Cache-Control': 'no-store'})
+    app.router.add_get('/api/miniapp/storage/sales-audit', sale_inventory)

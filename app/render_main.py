@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.31-app-push-lunch-pricing"
+RELEASE = "miniapp-3.32-sales-fines-disk-audit"
 
 
 async def health(request):
@@ -76,6 +76,13 @@ async def on_startup(app):
     await init_db()
     from .operations_reset_startup import REQUEST_ENV, startup_reset
     await startup_reset(engine, os.getenv(REQUEST_ENV, ''), config.admin_ids)
+    from .sales_reset import REQUEST_ENV as SALES_RESET_ENV
+    from .sales_reset import startup_sales_reset
+    # Preserve pre-reset counts and actual folder evidence before cancellation.
+    if os.getenv(SALES_RESET_ENV, '').strip():
+        from .storage_inventory import log_sales_storage_audit
+        await log_sales_storage_audit(engine, app['yandex_disk'])
+    await startup_sales_reset(engine, os.getenv(SALES_RESET_ENV, ''), config.admin_ids)
     bot = app["bot"]
     me = await bot.me()
     expected = os.getenv("EXPECTED_BOT_ID", "").strip()
@@ -117,7 +124,8 @@ async def on_startup(app):
     app["storage_task"] = asyncio.create_task(storage_loop(bot, app["yandex_disk"]))
     from .services.assignment_notifications import assignment_loop
     app['assignment_notification_task'] = asyncio.create_task(assignment_loop(engine, bot))
-    from .push_notifications import push_loop
+    from .push_notifications import log_push_state, push_loop
+    await log_push_state(engine)
     app['push_notification_task'] = asyncio.create_task(push_loop(engine))
     from .storage_inventory import log_recent_inventory
     app['storage_inventory_task'] = asyncio.create_task(log_recent_inventory(engine, app['yandex_disk']))

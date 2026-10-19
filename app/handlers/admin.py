@@ -494,7 +494,7 @@ async def hotels(m):
     async with Session() as s:
         if not (await guard(m, s))[1]:
             return
-        rows = (await s.execute(select(Hotel))).scalars().all()
+        rows = (await s.execute(select(Hotel).where(Hotel.active.is_(True)))).scalars().all()
         await m.answer(
             "\n".join(f"#{x.id} {x.name} — {x.address or ''}" for x in rows)
             or "Нет отелей."

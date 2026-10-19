@@ -70,7 +70,7 @@ class WorkBreaks:
             ended = await session.scalar(select(ShiftCheckOut.id).where(
                 ShiftCheckOut.user_id == actor.id, ShiftCheckOut.shift_date == day,
                 ShiftCheckOut.ended_at.is_not(None)))
-            if not check or ended:
+            if kind != 'break_end' and (not check or ended):
                 raise AccessError('Сначала начните смену; завершённую смену менять нельзя.', 409)
             now = utc_now()
             current = await session.scalar(select(WorkBreak).where(
@@ -109,7 +109,8 @@ class WorkBreaks:
             lo, hi = utc_bounds(day, day, self.api.tz)
             planned = set(await session.scalars(select(Shift.hotel_id).where(Shift.user_id == actor.id,
                 Shift.status != 'CANCELLED', Shift.start_at < hi, Shift.end_at > lo)))
-            query = select(WorkBreak).where(WorkBreak.shift_date == day)
+            query = select(WorkBreak).where((WorkBreak.shift_date == day) |
+                ((WorkBreak.user_id == actor.id) & WorkBreak.ended_at.is_(None)))
             if 'OWNER' not in roles:
                 query = query.where(WorkBreak.hotel_id.in_(allowed)) if editor else query.where(WorkBreak.user_id == actor.id)
             rows = list(await session.scalars(query.order_by(WorkBreak.started_at)))
