@@ -164,6 +164,33 @@ class HotelEmployee(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
 
 
+class HotelTariff(Base):
+    __tablename__ = 'hotel_tariffs'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    hotel_id: Mapped[int] = mapped_column(ForeignKey('hotels.id'), index=True)
+    name: Mapped[str] = mapped_column(String(150))
+    kind: Mapped[str] = mapped_column(String(20))
+    price: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    photo_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (CheckConstraint("kind IN ('UNIT','PACKAGE')"),
+                     CheckConstraint('price > 0'),
+                     CheckConstraint('photo_count IS NULL OR photo_count > 0'))
+
+
+class WorkBreak(Base):
+    __tablename__ = 'work_breaks'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    hotel_id: Mapped[int] = mapped_column(ForeignKey('hotels.id'), index=True)
+    shift_date: Mapped[date] = mapped_column(Date, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (CheckConstraint('ended_at IS NULL OR ended_at >= started_at'),)
+
+
 class Client(Base):
     __tablename__ = "clients"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -277,6 +304,7 @@ class SaleDraft(Base):
     declared_photo_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sold_photos: Mapped[int | None] = mapped_column(Integer, nullable=True)
     expected_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    pricing_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     __table_args__ = (
@@ -324,6 +352,7 @@ class Sale(Base):
         ForeignKey("sale_drafts.id", ondelete="SET NULL"), nullable=True, unique=True
     )
     amount: Mapped[float] = mapped_column(Float)
+    pricing_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     percent: Mapped[float] = mapped_column(Float, default=0)
     commission: Mapped[float] = mapped_column(Float, default=0)
     commission_finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -359,6 +388,26 @@ class Receipt(Base):
         CheckConstraint("expected_amount > 0"),
         CheckConstraint("verified_amount IS NULL OR verified_amount > 0"),
     )
+
+
+class BankPayment(Base):
+    __tablename__ = 'bank_payments'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    booking_id: Mapped[int] = mapped_column(ForeignKey('bookings.id'), index=True)
+    created_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    request_key: Mapped[str] = mapped_column(String(80), unique=True)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    order_number: Mapped[str] = mapped_column(String(64), unique=True)
+    bank_order_id: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    pricing_snapshot: Mapped[str] = mapped_column(Text)
+    test_mode: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(30), default='CREATING', index=True)
+    payment_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    receipt_id: Mapped[int | None] = mapped_column(ForeignKey('receipts.id'), nullable=True, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (CheckConstraint('amount > 0'),)
 
 
 class Compensation(Base):
@@ -492,6 +541,30 @@ class Notification(Base):
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     __table_args__ = (UniqueConstraint("user_id", "event_key", name="uq_notification_event"),)
+
+
+class PushSubscription(Base):
+    __tablename__ = 'push_subscriptions'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    endpoint_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    subscription: Mapped[str] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class PushDelivery(Base):
+    __tablename__ = 'push_deliveries'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    notification_id: Mapped[int] = mapped_column(ForeignKey('notifications.id', ondelete='CASCADE'))
+    subscription_id: Mapped[int] = mapped_column(ForeignKey('push_subscriptions.id', ondelete='CASCADE'))
+    status: Mapped[str] = mapped_column(String(20), default='PENDING')
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    __table_args__ = (UniqueConstraint('notification_id', 'subscription_id', name='uq_push_notice_device'),)
 
 
 class BookingReminder(Base):

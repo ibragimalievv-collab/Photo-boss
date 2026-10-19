@@ -78,6 +78,9 @@ async def fixture():
                   file_id='receipt-file', file_unique_id='receipt-unique', expected_amount=Decimal('800.25'),
                   verified_amount=Decimal('800.25'), status='APPROVED')
         await put('bank_reconciliations', receipt_id=16, bank_reference='bank-1', amount=Decimal('800.25'))
+        await put('bank_payments', booking_id=10, created_by_id=2, request_key='bank-reset-fixture',
+                  payload_hash='b' * 64, order_number='pb-reset-fixture', amount=Decimal('800.25'),
+                  pricing_snapshot='{}', receipt_id=16)
         await put('booking_reminders', booking_id=10, user_id=2, reminder_kind='2H')
         await put('repeat_sale_leads', booking_id=10, manager_id=1, offer_text='Offer')
         await put('delivery_galleries', id=17, booking_id=10, access_token='g' * 64,
@@ -96,6 +99,8 @@ async def fixture():
                   end_at=datetime(2026, 10, 16, 20, tzinfo=UTC).replace(tzinfo=None))
         await put('shift_check_ins', user_id=2, shift_date=date(2026, 10, 16), late=True, fine_amount=500)
         await put('shift_check_outs', user_id=2, shift_date=date(2026, 10, 16), report_note='Report')
+        await put('work_breaks', user_id=2, hotel_id=1, shift_date=date(2026, 10, 16),
+                  started_at=datetime(2026, 10, 16, 12, tzinfo=UTC).replace(tzinfo=None))
         await put('work_checklist_completions', user_id=2, shift_date=date(2026, 10, 16),
                   item_key='equipment', done=True)
         await put('compensation', user_id=2, role='PHOTOGRAPHER', sales_percent=15)

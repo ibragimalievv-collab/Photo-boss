@@ -165,7 +165,7 @@ class Workday:
             raise AccessError('Некорректная операция.',400)
         if body['key'].startswith(('academy-', 'mentor-', 'realtime-')):
             raise AccessError('Некорректный идентификатор операции.', 400)
-        if not isinstance(body['kind'], str) or body['kind'] not in KINDS | {'checklist','shift_report','attendance','cash_expense'}: raise AccessError('Этот тип операции не поддерживает синхронизацию.',400)
+        if not isinstance(body['kind'], str) or body['kind'] not in KINDS | {'checklist','shift_report','attendance','cash_expense','break_start','break_end'}: raise AccessError('Этот тип операции не поддерживает синхронизацию.',400)
         if type(body['actorId']) is not int or body['actorId'] != a['id']: raise AccessError('Аккаунт изменился. Операция принадлежит другому сотруднику.',403)
         payload = json.dumps(body,sort_keys=True,ensure_ascii=False).encode()
         digest=hashlib.sha256(payload + (b'\x00'+hashlib.sha256(raw).digest() if raw is not None else b'')).hexdigest()
@@ -192,6 +192,9 @@ class Workday:
                 if raw is not None:
                     raise AccessError('Вложение в этой операции не поддерживается.',400)
                 extra=await CashControl(self.api).record(conn,a|{'roles':sorted(roles)},data)
+            elif body['kind'] in {'break_start', 'break_end'}:
+                from .work_breaks import WorkBreaks
+                extra = await WorkBreaks(self.api).record(conn, a | {'roles': sorted(roles)}, day, body['kind'], data)
             elif body['kind'] == 'attendance':
                 from .attendance import Attendance
                 extra = await Attendance(self.api).offline(conn, a | {'roles': sorted(roles)}, day, data, raw)
@@ -252,6 +255,14 @@ class Workday:
 
 def install_workday(app,api):
     service=Workday(api)
+    from .push_notifications import install_push
+    install_push(app, api)
+    from .hotel_pricing import HotelPricing
+    from .work_breaks import install_breaks
+    install_breaks(app, api)
+    from .bank_payments import install_bank_payments
+    install_bank_payments(app, api)
+    app.router.add_post('/api/miniapp/hotel-tariffs', HotelPricing(api).save)
     from .cash_control import install_cash_control
     install_cash_control(app,api)
     from .photo_edits import PhotoFiles

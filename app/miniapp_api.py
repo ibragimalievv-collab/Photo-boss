@@ -69,7 +69,7 @@ def operational_mutation(request):
     path = path[len(PREFIX):]
     return bool(
         path.startswith(("/attendance/", "/bookings/", "/sales/", "/photos/",
-                         "/receipts/", "/sale-drafts/", "/payroll/", "/operations/"))
+                         "/receipts/", "/sale-drafts/", "/payroll/", "/operations/", "/work-breaks", "/hotel-tariffs", "/bank-payments"))
         or re.match(r"^/(?:delivery|galleries)/[0-9]+(?:/|$)", path)
         or path == "/events/scan"
         or re.fullmatch(r"/events/[0-9]+/acknowledge", path)
@@ -676,9 +676,17 @@ class MiniApp:
                 uid=r["user_id"], day=st.date())
             if checks:
                 attendance = "ENDED" if outs else ("STARTED" if st.date() == self.today() else "MISSING_CHECKOUT")
+            breaks = await self.rows(conn, '''SELECT started_at,ended_at FROM work_breaks
+                WHERE user_id=:uid AND hotel_id=:hid AND shift_date=:day ORDER BY started_at''',
+                uid=r['user_id'], hid=r['hotel_id'], day=st.date())
+            if attendance == 'STARTED' and any(not item['ended_at'] for item in breaks):
+                attendance = 'ON_BREAK'
             items.append({"id": r["id"], "userId": r["user_id"], "name": r["name"], "role": r["role"],
                 "hotelId": r["hotel_id"], "hotel": r["hotel"], "date": str(st.date()), "start": st.strftime("%H:%M"),
-                "end": en.strftime("%H:%M"), "status": r["status"], "attendance": attendance})
+                "end": en.strftime("%H:%M"), "status": r["status"], "attendance": attendance,
+                'breaks': [{'start': as_utc(item['started_at']).astimezone(self.tz).strftime('%H:%M'),
+                            'end': as_utc(item['ended_at']).astimezone(self.tz).strftime('%H:%M') if item['ended_at'] else None}
+                           for item in breaks]})
         return items
 
     async def dashboard(self, request):
@@ -1048,6 +1056,7 @@ class MiniApp:
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg", "assets/academy/exposure.svg", "assets/academy/window-light.svg", "assets/academy/perspective.svg", "assets/academy/group-depth.svg"}
         allowed.add('js/sale-files.js')
+        allowed.update({'js/notifications.js', 'js/lunch.js', 'js/hotel-pricing.js', 'js/bank-payments.js'})
         if name not in allowed:
             raise web.HTTPNotFound()
         path = self.static_dir / name

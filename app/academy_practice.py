@@ -575,6 +575,13 @@ class AcademyPractice:
                     {"id": row["id"], "status": status, "source": ("AI_PENDING" if result.get("nextRetryAt") else "AI_UNCERTAIN" if decision == "MANUAL_REVIEW" else "AI_FAILED") if status == "PENDING_REVIEW" else "AI",
                      "score": review.get("score"), "analysis": json.dumps(result, ensure_ascii=False),
                      "completed": datetime.now(UTC).replace(tzinfo=None) if status == "COMPLETED" else None})
+                if review:
+                    from .push_notifications import app_channel
+                    if app_channel():
+                        await conn.execute(text("INSERT INTO notifications(user_id,text,sent,created_at,event_key,priority,kind,payload) "
+                            "VALUES (:uid,:message,FALSE,:now,:key,'info','academy','{}') ON CONFLICT(user_id,event_key) DO NOTHING"),
+                            {'uid': row['user_id'], 'message': 'Готов результат проверки практики.',
+                             'now': datetime.now(UTC).replace(tzinfo=None), 'key': f"academy-result:{row['id']}:{lease}"})
             logger.info("Academy assignment %s review finished decision=%s state=%s code=%s attempts=%s",
                         row["id"], decision or "unavailable", status, result.get("errorCode", "none"), attempts + 1)
             outcomes[row["id"]] = result

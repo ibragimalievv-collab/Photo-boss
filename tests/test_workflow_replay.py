@@ -109,7 +109,11 @@ def test_sale_with_media_replays_once_and_rejects_changed_price(monkeypatch):
                 assert await session.scalar(select(func.count(PayrollEntry.id))) == 1
                 (await session.get(Package, 1)).price_per_photo = 500
                 await session.commit()
-            assert len(uploaded) == 2
+            assert len(uploaded) == 1  # Only the receipt needs Telegram; photos are already confirmed on Disk.
+            extra = packet('completed-photo-retry', 'sale_selected', {'draft': draft})
+            assert json.loads((await work.execute(ACTOR, extra, operations[2][1])).text)['duplicate']
+            completion = packet('completed-command-retry', 'sale_complete', {'draft': draft, 'price': '400.00'})
+            assert json.loads((await work.execute(ACTOR, completion)).text)['saleId'] == sale.id
             # Server acknowledgements win over later price changes on an exact replay.
             assert json.loads((await work.execute(ACTOR, operations[-1][0])).text)['saleId'] == sale.id
             with pytest.raises(AccessError) as err:

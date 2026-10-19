@@ -231,6 +231,14 @@ class Attendance:
         extra = ',late=:late,fine_amount=:fine' if is_start else ''
         await conn.execute(text(f'UPDATE {table} SET {field}=:file,{at}=:now,status=:status{extra} WHERE id=:id'),
             {'file': file_id, 'now': when.replace(tzinfo=None), 'status': final, 'late': late, 'fine': fine, 'id': row['id']})
+        if not is_start:
+            from sqlalchemy.ext.asyncio import AsyncSession
+
+            from .models import User
+            from .work_breaks import close_breaks
+            async with AsyncSession(bind=conn, expire_on_commit=False) as session:
+                await close_breaks(session, row['user_id'], day, when.replace(tzinfo=None), await session.get(User, actor['id']))
+                await session.flush()
         if late:
             await conn.execute(text('''INSERT INTO payroll_entries (user_id,kind,amount,period,note,created_at)
                 VALUES (:uid,'Штраф за опоздание',:amount,:period,:note,:now)'''),

@@ -8,7 +8,7 @@ from sqlalchemy import inspect
 
 TABLES = ('users', 'user_roles', 'hotel_employees', 'bookings', 'shootings', 'sales',
           'sale_drafts', 'receipts', 'payroll_entries', 'compensation', 'shifts',
-          'shift_check_ins', 'shift_check_outs', 'packages', 'bank_reconciliations', 'cash_movements', 'settings')
+          'shift_check_ins', 'shift_check_outs', 'work_breaks', 'hotel_tariffs', 'packages', 'bank_reconciliations', 'cash_movements', 'settings')
 # Opaque media identifiers are not needed to inspect changes to financial records.
 OMIT = {'file_id', 'full_body_file_id', 'workplace_file_id', 'receipt_file_id'}
 

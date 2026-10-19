@@ -23,6 +23,7 @@ RESTORE_TABLE = 'operational_reset_restores'
 _UNSET = object()
 # Child-before-parent order; explicit deletes also capture rows hidden by CASCADE.
 DELETE_TABLES = (
+    'bank_payments', 'work_breaks',
     'guest_feedback', 'bank_reconciliations', 'delivery_booking_responses',
     'delivery_reminders', 'delivery_claims', 'delivery_photos', 'delivery_galleries',
     'photo_edits', 'photo_storage', 'shoot_development_reviews', 'photos',
@@ -201,7 +202,11 @@ async def _snapshot(conn, tables):
     deleted['settings'] = [row for row in await _rows(conn, settings)
                            if row['key'].startswith(OPERATIONAL_SETTING_PREFIXES)]
     notifications = tables['notifications']
-    deleted['notifications'] = await _rows(conn, notifications, notifications.c.kind.in_(OPERATIONAL_NOTIFICATION_KINDS))
+    notice_rows = await _rows(conn, notifications, notifications.c.kind.in_(OPERATIONAL_NOTIFICATION_KINDS))
+    if 'push_deliveries' in tables:
+        delivery = tables['push_deliveries']
+        deleted['push_deliveries'] = await _rows(conn, delivery, delivery.c.notification_id.in_([n['id'] for n in notice_rows]))
+    deleted['notifications'] = notice_rows
     academy = tables['academy_reviews']
     detached = await _rows(conn, academy, academy.c.photo_id.is_not(None))
     previous_epoch = await _rows(conn, settings, settings.c.key.in_(

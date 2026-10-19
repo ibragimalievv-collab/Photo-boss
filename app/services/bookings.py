@@ -175,6 +175,11 @@ async def notify_manager_ready_for_sale(bot, session, booking: Booking):
     manager = await session.get(User, booking.manager_id)
     if manager is None or not manager.active:
         return False
+    from ..push_notifications import app_channel, queue_notice
+    if app_channel():
+        await queue_notice(session, manager.id, kind='sale_ready', event_key=f'sale-ready:{booking.id}',
+            message=f'Съёмка №{booking.id} готова к продаже.', url='/app/#workflow')
+        return True
     return await send_manager_ready_message(bot, manager.tg_id, booking.id)
 
 
@@ -184,6 +189,12 @@ async def notify_photographer_rescheduled(bot, session, booking: Booking):
     photographer = await session.get(User, booking.photographer_id)
     if photographer is None or not photographer.active:
         return False
+    from ..push_notifications import app_channel, queue_notice
+    if app_channel():
+        await queue_notice(session, photographer.id, kind='reminder',
+            event_key=f'rescheduled:{booking.id}:{booking.shoot_date}:{booking.shoot_time}',
+            message=f'Съёмка №{booking.id} перенесена.')
+        return True
     try:
         await bot.send_message(
             photographer.tg_id,
@@ -202,6 +213,12 @@ async def notify_photographer_cancelled(bot, session, booking: Booking):
     photographer = await session.get(User, booking.photographer_id)
     if photographer is None or not photographer.active:
         return False
+    from ..push_notifications import app_channel, queue_notice
+    if app_channel():
+        await queue_notice(session, photographer.id, kind='reminder',
+            event_key=f'cancelled:{booking.id}:{booking.shoot_date}:{booking.shoot_time}',
+            message=f'Съёмка №{booking.id} отменена.')
+        return True
     try:
         await bot.send_message(
             photographer.tg_id,

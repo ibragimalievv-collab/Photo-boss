@@ -85,7 +85,11 @@ async def run_operations_once(session, bot, now=None):
                 f"Телефон: {(client.phone if client else None) or 'не указан'}"
             )
             try:
-                await bot.send_message(user.tg_id, text)
+                from ..push_notifications import app_channel, queue_notice
+                if app_channel():
+                    await queue_notice(session, user.id, kind='reminder', event_key=f'booking-reminder:{booking.id}:{kind}', message=text)
+                else:
+                    await bot.send_message(user.tg_id, text)
             except TelegramAPIError:
                 continue
             session.add(
@@ -133,12 +137,17 @@ async def send_academy_reminders(session, bot, now=None):
         if exists:
             continue
         try:
-            await bot.send_message(
-                user.tg_id,
-                "📚 Photo Boss Academy\n\n"
-                f"Ваш прогресс: {lessons}/28 уроков и {practices}/7 практик. "
-                "Незавершённый урок не сгорает — продолжите с текущего шага.",
-            )
+            from ..push_notifications import app_channel, queue_notice
+            if app_channel():
+                await queue_notice(session, user.id, kind='academy', event_key=f'academy-reminder:{local_now.date()}',
+                    message='Продолжите обучение в Photo Boss Academy.')
+            else:
+                await bot.send_message(
+                    user.tg_id,
+                    "📚 Photo Boss Academy\n\n"
+                    f"Ваш прогресс: {lessons}/28 уроков и {practices}/7 практик. "
+                    "Незавершённый урок не сгорает — продолжите с текущего шага.",
+                )
         except TelegramAPIError:
             continue
         session.add(AcademyReminder(

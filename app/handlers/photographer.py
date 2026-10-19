@@ -338,6 +338,8 @@ async def save_workplace_photo(m, state, current_roles):
         check_out.workplace_file_id = m.photo[-1].file_id
         check_out.ended_at = now_utc
         check_out.status = "FINISHED"
+        from ..work_breaks import close_breaks
+        await close_breaks(s, u.id, check_out.shift_date, now_utc, u)
         await audit(s, u, "shift_finished", "shift_check_out", check_out.id)
         await s.commit()
     await state.clear()

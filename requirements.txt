@@ -7,3 +7,4 @@ redis==6.4.0
 Pillow==12.3.0
 
 qrcode==8.2
+pywebpush==2.5.0

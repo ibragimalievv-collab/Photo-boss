@@ -76,6 +76,9 @@ async def _pending_assignment_ids(session):
 
 async def deliver_assignments(engine, bot, *, booking_id=None, limit=10):
     """Booking -> notice -> user lock order matches assignment transactions."""
+    from ..push_notifications import app_channel
+    if app_channel():
+        return 0  # The durable notice is delivered by the app push worker.
     sent, attempted = 0, 0
     async with AsyncSession(engine, expire_on_commit=False) as session:
         async for nid in _pending_assignment_ids(session):
