@@ -176,7 +176,7 @@ class Workday:
             # the reset and retain their original payload hash and replay.
             if body['kind'] != 'cash_expense':
                 await require_generation(conn, body.get('generation', ''))
-            if body['kind'].startswith('sale_'):
+            if body['kind'].startswith('sale_') or body['kind'] == 'booking':
                 sales_generation = await conn.scalar(text("SELECT value FROM settings WHERE key='sales:generation'"))
                 if sales_generation and body.get('salesGeneration', '') != sales_generation:
                     raise AccessError('Продажи обнулены владельцем. Обновите приложение и начните продажу заново; старые файлы сохранены.', 409)

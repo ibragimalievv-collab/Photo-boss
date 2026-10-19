@@ -29,9 +29,11 @@ GENERATION_KEY = 'sales:generation'
 log = logging.getLogger(__name__)
 
 
-async def reset_sales_fines(engine, request_id, admin_ids):
+async def reset_sales_fines(engine, request_id, admin_ids, *, hide_hotel_name=None, clear_bookings=False):
     if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,100}', request_id):
         raise ResetError('A unique sales reset request ID is required')
+    if hide_hotel_name not in (None, 'Основной отель') or type(clear_bookings) is not bool:
+        raise ResetError('Unsupported reset scope')
     async with sqlite_operation_barrier(engine), engine.begin() as conn:
         tables = await _reflect(conn)
         await _lock(conn, tables)
@@ -65,10 +67,15 @@ async def reset_sales_fines(engine, request_id, admin_ids):
                      (int(links.get('sale', -1)) in sale_ids or int(links.get('booking', -1)) in bids)))
         deleted = {'guest_feedback': [r for r in before['guest_feedback'] if r['sale_id'] in sale_ids],
                    'sales': sales, 'payroll_entries': [r for r in before['payroll_entries'] if remove_payroll(r)]}
+        now = datetime.now(UTC).replace(tzinfo=None)
         changes = {
+            'hotels': [(r, dict(r, active=False)) for r in before['hotels']
+                       if hide_hotel_name and r['name'] == hide_hotel_name and r['active']],
             'sale_drafts': [(r, dict(r, status='CANCELLED')) for r in drafts],
-            'bookings': [(r, dict(r, status='READY_FOR_SALE')) for r in before['bookings']
-                         if r['id'] in bids and r['status'] in {'SOLD', 'COMPLETED'}],
+            'bookings': ([(r, dict(r, status='CANCELLED', cancelled_at=now,
+                                  cancellation_reason='Обнулено владельцем')) for r in before['bookings']]
+                         if clear_bookings else [(r, dict(r, status='READY_FOR_SALE')) for r in before['bookings']
+                         if r['id'] in bids and r['status'] in {'SOLD', 'COMPLETED'}]),
             # Preserve actual arrival time and the late flag as historical fact.
             'shift_check_ins': [(r, dict(r, fine_amount=type(r['fine_amount'])(0))) for r in before['shift_check_ins'] if r['fine_amount']],
             'receipts': [(r, dict(r, status='REJECTED', reviewed_by_id=owner,
@@ -76,10 +83,16 @@ async def reset_sales_fines(engine, request_id, admin_ids):
                          for r in before['receipts'] if r['booking_id'] in bids
                          and r['purpose'] == 'PAYMENT' and r['status'] == 'PENDING'],
         }
-        generation, now = str(uuid4()), datetime.now(UTC).replace(tzinfo=None)
+        generation = str(uuid4())
         old_setting = next((r for r in before['settings'] if r['key'] == GENERATION_KEY), None)
         setting = {'key': GENERATION_KEY, 'value': generation}
         changes['settings'] = [(old_setting, setting)]
+        if clear_bookings:
+            for booking in before['bookings']:
+                key = f'booking:trash:{booking["id"]}'
+                old = next((r for r in before['settings'] if r['key'] == key), None)
+                changes['settings'].append((old, {'key': key, 'value': _canonical({
+                    'by': owner, 'at': now.isoformat()+'Z', 'reason': 'Обнулено владельцем'})}))
         document = {'version': 2, 'scope': 'sales-and-fines', 'request_id': request_id,
                     'deleted': {n: _pack(tables[n], rows) for n, rows in deleted.items()},
                     'changes': {n: {'before': _pack(tables[n], [a for a, _ in pairs if a is not None]),
@@ -88,6 +101,7 @@ async def reset_sales_fines(engine, request_id, admin_ids):
         payload = _canonical(document)
         counts = {n: len(rows) for n, rows in deleted.items()}
         counts.update(cancelled_drafts=len(drafts), cleared_attendance_fines=len(changes['shift_check_ins']))
+        counts.update(hidden_hotels=len(changes['hotels']), cleared_bookings=len(before['bookings']) if clear_bookings else 0)
         await install_archive_guards(conn)
         result = await conn.execute(tables[ARCHIVE_TABLE].insert().values(request_id=request_id,
             owner_id=owner, created_at=now, generation=generation, payload=payload,
@@ -131,8 +145,12 @@ async def startup_sales_reset(engine, raw, admin_ids):
         value = json.loads(raw)
     except (ValueError, TypeError) as exc:
         raise ResetError('Invalid sales reset deployment request') from exc
-    if not isinstance(value, dict) or set(value) != {'requestId', 'scope'} or value['scope'] != 'sales-and-fines':
+    if (not isinstance(value, dict) or not {'requestId', 'scope'} <= set(value)
+            or set(value) - {'requestId', 'scope', 'hideHotelName', 'clearBookings'}
+            or value['scope'] != 'sales-and-fines' or value.get('hideHotelName') not in (None, 'Основной отель')
+            or type(value.get('clearBookings', False)) is not bool):
         raise ResetError('Invalid sales reset deployment scope')
-    result = await reset_sales_fines(engine, value['requestId'], admin_ids)
+    result = await reset_sales_fines(engine, value['requestId'], admin_ids,
+        hide_hotel_name=value.get('hideHotelName'), clear_bookings=value.get('clearBookings', False))
     log.info('Sales and fines reset verified: %s', json.dumps(result, sort_keys=True))
     return result

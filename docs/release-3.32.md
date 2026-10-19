@@ -15,3 +15,5 @@ Under exclusive database locks it writes and verifies a typed immutable archive 
 A stable request ID is idempotent across restarts and cannot erase later work. An independent sales generation blocks stale queued sale packets without invalidating attendance/lunch packets. The archive is version 2 with scope `sales-and-fines`; the legacy full-history restore refuses it. Restoration must use a scope-aware recovery procedure after checking for newer sales; do not pass this archive to the legacy reset restore.
 
 Bank acquiring remains disabled/unmodified.
+
+On the owner's follow-up request, `clearBookings: true` cancels all existing bookings and moves them out of the working list using the existing booking trash markers. The archive retains their previous states, and photos, attendance and lunch remain attached. The same sales generation also blocks stale queued booking creation. `hideHotelName: "Основной отель"` deactivates only the seeded placeholder, retaining its historical records and preventing bootstrap recreation. Other hotels remain active.

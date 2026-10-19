@@ -72,7 +72,7 @@ def test_sales_epoch_blocks_stale_sale_packets_and_keeps_other_operations():
                 await conn.execute(text("INSERT INTO settings(key,value) VALUES ('sales:generation','new-sale-epoch')"))
             with pytest.raises(AccessError, match='Продажи обнулены'):
                 await work.execute(ACTOR, packet('old-sale-packet', 'sale_start', {'booking':{'id':1},'price':'400.00'}))
-            result = await work.execute(ACTOR, packet('fresh-booking', 'booking', booking_data()|{'photographer_id':None}))
+            result = await work.execute(ACTOR, packet('fresh-booking', 'booking', booking_data()|{'photographer_id':None})|{'salesGeneration':'new-sale-epoch'})
             assert json.loads(result.text)['bookingId'] > 0
         finally:
             await engine.dispose()
@@ -199,3 +199,27 @@ def test_count_includes_purchased_originals_when_full_folder_is_missing():
         raise YandexDiskError('HTTP 404')
     result=asyncio.run(full_folder_audit(SimpleNamespace(list_directory=listing),34,1,2,[8]))
     assert result['uniqueFiles']==2 and result['missingOriginals']==0 and result['matchesDeclared']
+
+
+def test_owner_can_clear_booking_list_and_default_hotel_without_losing_files_or_attendance():
+    from app.models import Hotel
+    async def run():
+        engine=await reset_fixture()
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("DELETE FROM settings WHERE key='operations:maintenance'"))
+                await conn.execute(Hotel.__table__.insert().values(id=2,name='Основной отель',active=True))
+                await conn.execute(text('UPDATE bookings SET hotel_id=2 WHERE id=10'))
+            result=await reset_sales_fines(engine,'clear-bookings-hotel-332',{8000000001},
+                hide_hotel_name='Основной отель',clear_bookings=True)
+            assert result['row_counts']['hidden_hotels']==1 and result['row_counts']['cleared_bookings']==1
+            async with engine.connect() as conn:
+                assert not await conn.scalar(text('SELECT active FROM hotels WHERE id=2'))
+                assert await conn.scalar(text('SELECT active FROM hotels WHERE id=1'))
+                assert await conn.scalar(text('SELECT hotel_id FROM bookings WHERE id=10'))==2
+                assert await conn.scalar(text("SELECT count(*) FROM bookings b WHERE NOT EXISTS (SELECT 1 FROM settings st WHERE st.key='booking:trash:' || CAST(b.id AS VARCHAR))"))==0
+                assert await conn.scalar(text('SELECT count(*) FROM photos'))==1
+                assert await conn.scalar(text('SELECT count(*) FROM shift_check_ins'))==1
+        finally:
+            await engine.dispose()
+    asyncio.run(run())

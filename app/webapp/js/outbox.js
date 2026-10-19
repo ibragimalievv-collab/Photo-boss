@@ -207,7 +207,7 @@ export async function flushOutbox(){
    row.status='syncing';if(!await update(row))break;changed();
    try{
     if(!active())break;
-    const operation={actorId:row.userId,key:row.key,kind:row.kind,date:row.date,data:row.data,...(row.generation!==undefined?{generation:row.generation}:{}),...(row.kind.startsWith('sale_')&&row.salesGeneration?{salesGeneration:row.salesGeneration}:{})};
+    const operation={actorId:row.userId,key:row.key,kind:row.kind,date:row.date,data:row.data,...(row.generation!==undefined?{generation:row.generation}:{}),...((row.kind.startsWith('sale_')||row.kind==='booking')&&row.salesGeneration?{salesGeneration:row.salesGeneration}:{})};
     let body=operation,path='/operations/sync';
     if(row.blob){
      const bytes=await row.blob.arrayBuffer();
