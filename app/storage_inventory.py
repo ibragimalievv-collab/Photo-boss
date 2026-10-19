@@ -57,11 +57,12 @@ async def selected_folder_audit(storage, draft_id, rows, sold):
             'matchesDeclared': bool(sold and len(verified) == sold and confirmed == len(rows) and len(files) == valid_files)}
 
 
-async def full_folder_audit(storage, booking_id, shooting_id, declared):
-    """All-photo folders only: selected exports never inflate the full shoot."""
+async def full_folder_audit(storage, booking_id, shooting_id, declared, selected_drafts=()):
+    """Union of this booking's originals; copied exports count once by hash."""
     roots = [(ROOT + f'/delivery/booking-{booking_id}', False)]
     if shooting_id:
         roots.append((ROOT + f'/shootings/{shooting_id}', True))
+    roots += [(ROOT + f'/sales/draft-{did}/selected', True) for did in selected_drafts]
     files = []
     async def walk(folder, originals, depth=0):
         if depth > 3:
@@ -74,8 +75,8 @@ async def full_folder_audit(storage, booking_id, shooting_id, declared):
             raise
         for item in items:
             name = item['name']
-            if item.get('type') == 'dir' and name != 'Выбранные':
-                await walk(folder + '/' + name, originals or name == 'Все фото', depth + 1)
+            if item.get('type') == 'dir':
+                await walk(folder + '/' + name, originals or name in {'Все фото', 'Выбранные'}, depth + 1)
             elif originals and item.get('type') == 'file' and re.search(r'\.(jpg|jpeg|png|webp)$', name, re.IGNORECASE):
                 files.append(item)
     try:
@@ -97,13 +98,16 @@ async def sales_storage_audit(engine, storage):
         selected = list(await session.scalars(select(SaleDraftPhoto).where(SaleDraftPhoto.draft_id.in_([d.id for d in drafts]))))
         shoots = dict((await session.execute(select(Shooting.booking_id, Shooting.id)
             .where(Shooting.booking_id.in_([d.booking_id for d in drafts])))).all())
+        all_drafts = (await session.execute(select(SaleDraft.booking_id, SaleDraft.id)
+            .where(SaleDraft.booking_id.in_([d.booking_id for d in drafts])))).all()
     result = []
     semaphore = asyncio.Semaphore(3)
     async def inspect(draft):
         async with semaphore:
             folder = await selected_folder_audit(storage, draft.id,
                 [p for p in selected if p.draft_id == draft.id], draft.sold_photos)
-            full = await full_folder_audit(storage, draft.booking_id, shoots.get(draft.booking_id), draft.declared_photo_count)
+            full = await full_folder_audit(storage, draft.booking_id, shoots.get(draft.booking_id),
+                draft.declared_photo_count, [did for bid, did in all_drafts if bid == draft.booking_id])
             return {'bookingId': draft.booking_id, 'draftId': draft.id, 'draftStatus': draft.status,
                     'declaredTotal': draft.declared_photo_count, 'declaredSold': draft.sold_photos,
                     'selectedFolder': folder, 'fullShootFolders': full}

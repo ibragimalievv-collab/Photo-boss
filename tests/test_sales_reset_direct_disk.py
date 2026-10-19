@@ -189,3 +189,13 @@ def test_lunch_return_after_midnight_can_close_own_open_interval(monkeypatch):
         finally:
             await engine.dispose()
     asyncio.run(run())
+
+
+def test_count_includes_purchased_originals_when_full_folder_is_missing():
+    async def listing(path):
+        if path.endswith('/sales/draft-8/selected'):
+            return [{'type':'file','name':'a.jpg','size':123,'sha256':'a'*64},
+                    {'type':'file','name':'b.jpg','size':123,'sha256':'b'*64}]
+        raise YandexDiskError('HTTP 404')
+    result=asyncio.run(full_folder_audit(SimpleNamespace(list_directory=listing),34,1,2,[8]))
+    assert result['uniqueFiles']==2 and result['missingOriginals']==0 and result['matchesDeclared']
