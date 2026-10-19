@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.32-sales-fines-disk-audit"
+RELEASE = "miniapp-3.33-hotel-zone-review"
 
 
 async def health(request):
@@ -83,6 +83,9 @@ async def on_startup(app):
         from .storage_inventory import log_sales_storage_audit
         await log_sales_storage_audit(engine, app['yandex_disk'])
     await startup_sales_reset(engine, os.getenv(SALES_RESET_ENV, ''), config.admin_ids)
+    from .hotel_points import REVIEW_ENV, SEED_ENV, review_required, startup_hotel_point
+    await startup_hotel_point(engine, os.getenv(SEED_ENV, ''), config.admin_ids)
+    logger.info('Attendance protection: manual_review=%s flag=%s', review_required(), REVIEW_ENV)
     bot = app["bot"]
     me = await bot.me()
     expected = os.getenv("EXPECTED_BOT_ID", "").strip()

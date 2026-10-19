@@ -1061,7 +1061,7 @@ class MiniApp:
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg", "assets/academy/exposure.svg", "assets/academy/window-light.svg", "assets/academy/perspective.svg", "assets/academy/group-depth.svg"}
         allowed.add('js/sale-files.js')
-        allowed.update({'js/storage-audit.js', 'js/notifications.js', 'js/lunch.js', 'js/hotel-pricing.js', 'js/bank-payments.js'})
+        allowed.update({'js/hotel-points.js', 'js/storage-audit.js', 'js/notifications.js', 'js/lunch.js', 'js/hotel-pricing.js', 'js/bank-payments.js'})
         if name not in allowed:
             raise web.HTTPNotFound()
         path = self.static_dir / name
@@ -1100,6 +1100,8 @@ class MiniApp:
 def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/Moscow"):
     miniapp = MiniApp(engine, bot, lessons, blocks=blocks, tz_name=tz_name)
     miniapp.register(app)
+    from .hotel_points import install_hotel_points
+    install_hotel_points(app, miniapp)
     from .delivery import install_delivery
     install_delivery(app, miniapp)
     from .insights import install_insights
