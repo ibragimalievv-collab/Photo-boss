@@ -292,6 +292,8 @@ class MiniApp:
             if not isinstance(value, dict):
                 raise TypeError("JSON body must be an object")
             return value
+        except (ConnectionResetError, TimeoutError) as exc:
+            raise AccessError('Соединение прервано. Повторите отправку при восстановлении сети.', 503) from exc
         except (ValueError, TypeError, UnicodeDecodeError) as exc:
             if isinstance(exc, AccessError):
                 raise
@@ -579,7 +581,7 @@ class MiniApp:
                         JOIN users u ON u.id=b.manager_id
                         WHERE b.id=:bid AND u.active=TRUE""", bid=bid)
                 if managers:
-                    await send_manager_ready_message(self.bot, managers[0]["tg_id"], bid)
+                    await send_manager_ready_message(self.bot, managers[0]["tg_id"], bid, engine=self.engine)
             except Exception:
                 logger.warning("Could not notify manager for booking %s", bid, exc_info=True)
         return web.json_response({"ok": True, "bookingId": bid,

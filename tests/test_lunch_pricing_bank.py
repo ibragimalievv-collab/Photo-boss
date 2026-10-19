@@ -126,6 +126,10 @@ def test_tariff_editor_checks_current_role_and_hotel_not_request_claim():
             with pytest.raises(AccessError):
                 await HotelPricing(work.api).save(Request({'id':1,'roles':['ADMIN']},body|{'hotelId':2}))
             await HotelPricing(work.api).save(Request({'id':1,'roles':['ADMIN']},body))
+            for invalid in ('NaN', 'Infinity', '-Infinity'):
+                with pytest.raises(AccessError) as err:
+                    await HotelPricing(work.api).save(Request({'id':1}, body|{'price':invalid}))
+                assert err.value.status == 400
         finally:
             await engine.dispose()
     asyncio.run(run())

@@ -24,8 +24,10 @@ class HotelPricing:
             price = money(body['price'])
         except (ValueError, TypeError, InvalidOperation):
             raise AccessError('Укажите корректную цену.', 400) from None
+        if not price.is_finite():
+            raise AccessError('Укажите конечную положительную цену.', 400)
         if (type(body['hotelId']) is not int or not isinstance(body['name'], str) or not 2 <= len(body['name'].strip()) <= 150
-                or body['kind'] not in {'UNIT', 'PACKAGE'} or not 0 < price <= 10000000
+                or not isinstance(body['kind'], str) or body['kind'] not in {'UNIT', 'PACKAGE'} or not 0 < price <= 10000000
                 or (body['photoCount'] is not None and (type(body['photoCount']) is not int or not 1 <= body['photoCount'] <= 10000))
                 or (body['kind'] == 'UNIT' and body['photoCount'] is not None)
                 or (body['replaces'] is not None and type(body['replaces']) is not int)):

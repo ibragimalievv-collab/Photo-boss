@@ -125,6 +125,8 @@ def test_notifications_list_is_private_and_request_role_cannot_grant_access(push
                 await svc.status(Request({'id': 999, 'roles': ['OWNER']}, {}))
             bot = AsyncMock()
             assert await deliver_assignments(engine, bot) == 0
+            from app.services.bookings import send_manager_ready_message
+            await send_manager_ready_message(bot, 1, 34, engine=engine)
             bot.send_message.assert_not_awaited()
         finally:
             await engine.dispose()

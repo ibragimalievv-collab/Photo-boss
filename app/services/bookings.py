@@ -153,8 +153,14 @@ async def notify_photographer_assignment(bot, session, booking: Booking):
     return bool(await deliver_assignments(session.bind, bot, booking_id=booking.id))
 
 
-async def send_manager_ready_message(bot, manager_tg_id, booking_id):
+async def send_manager_ready_message(bot, manager_tg_id, booking_id, *, engine=None):
     """Shared notification for the Telegram bot and the Mini App."""
+    from ..push_notifications import app_channel, queue_for_telegram_id
+    if app_channel():
+        if engine is None:
+            from ..db import engine
+        return await queue_for_telegram_id(engine, manager_tg_id, kind='sale_ready',
+            message=f'Съёмка №{booking_id} готова к продаже.')
     try:
         await bot.send_message(
             manager_tg_id,
