@@ -1,6 +1,6 @@
 import {api} from './api.js';
 import {localAction,openLocal,writeOperations} from './localstore.js';
-let userId=null,operationsGeneration='',running=false,timer=null,retryDue=0,rerunRequested=false,authEpoch=0,queueRepairing=false;
+let userId=null,operationsGeneration='',salesGeneration='',running=false,timer=null,retryDue=0,rerunRequested=false,authEpoch=0,queueRepairing=false;
 const scheduleRetry=delay=>{
  const wait=Math.min(2147483647,Math.max(1000,delay)),due=Date.now()+wait;
  // Keep the earliest wake-up: a later blocked row must not postpone an earlier one.
@@ -65,7 +65,7 @@ export async function repairSaleQueue(keys,{draftId,total,sold,price},files=[]){
  if(complete.resumeByKey&&!all.some(row=>row.key===complete.resumeByKey&&row.status==='synced'))throw new Error('Предыдущее исправление ещё отправляется.');
  for(const file of files)if(!file||!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>20*1024*1024)throw new Error('Нужен JPEG, PNG или WebP до 20 МБ.');
  const at=Date.now(),draft={id:draftId},items=[{kind:'sale_counts',data:{draft,total,sold,price}},...files.map(blob=>({kind:'sale_selected',data:{draft},blob}))];
- const added=items.map((item,order)=>({...item,key:crypto.randomUUID(),userId:actor,generation:operationsGeneration,date:complete.date,blob:item.blob||null,filename:item.blob?.name||'',status:'local',createdAt:at,order}));
+ const added=items.map((item,order)=>({...item,key:crypto.randomUUID(),userId:actor,generation:operationsGeneration,salesGeneration,date:complete.date,blob:item.blob||null,filename:item.blob?.name||'',status:'local',createdAt:at,order}));
  const last=added[added.length-1];last.resumeCompleteKey=complete.key;
  // Only local recovery metadata changes. The original completion key and its
  // request payload remain untouched; accepted receipt/photo operations stay put.
@@ -91,7 +91,7 @@ function legacySaleDependency(row,previous){
  // only those exact failures once their original local predecessors succeeded.
  return Boolean(required&&stageError&&previous.some(step=>step.kind==='sale_start')&&previous.some(step=>step.kind===required)&&previous.every(step=>step.status==='synced'));
 }
-export function setOutboxUser(id,generation=''){userId=id;operationsGeneration=typeof generation==='string'?generation:'';if(id)authEpoch=Math.max(Date.now(),authEpoch+1);return flushOutbox();}
+export function setOutboxUser(id,generation='',saleGeneration=''){userId=id;salesGeneration=typeof saleGeneration==='string'?saleGeneration:'';operationsGeneration=typeof generation==='string'?generation:'';if(id)authEpoch=Math.max(Date.now(),authEpoch+1);return flushOutbox();}
 export async function outboxRows(){
  if(!userId)return [];const actor=userId,db=await openLocal();
  try{return await new Promise((resolve,reject)=>{
@@ -105,7 +105,7 @@ export async function enqueueBatch(items){
  if(!userId)throw new Error('Сначала откройте приложение при доступной сети.');
  if(!items.length)throw new Error('Нет действий для сохранения.');
  const at=Date.now(),actor=userId;
- const rows=items.map((item,i)=>({key:item.key||crypto.randomUUID(),userId:actor,generation:operationsGeneration,kind:item.kind,date:item.date,data:item.data,blob:item.blob||null,filename:item.blob?.name||'',status:'local',createdAt:at,order:i}));
+ const rows=items.map((item,i)=>({key:item.key||crypto.randomUUID(),userId:actor,generation:operationsGeneration,salesGeneration,kind:item.kind,date:item.date,data:item.data,blob:item.blob||null,filename:item.blob?.name||'',status:'local',createdAt:at,order:i}));
  if(!await writeOperations(rows,{add:true}))throw new Error('Рабочие данные обнулены. Обновите приложение перед продолжением.');
  changed();void flushOutbox();return rows;
 }
@@ -207,7 +207,7 @@ export async function flushOutbox(){
    row.status='syncing';if(!await update(row))break;changed();
    try{
     if(!active())break;
-    const operation={actorId:row.userId,key:row.key,kind:row.kind,date:row.date,data:row.data,...(row.generation!==undefined?{generation:row.generation}:{})};
+    const operation={actorId:row.userId,key:row.key,kind:row.kind,date:row.date,data:row.data,...(row.generation!==undefined?{generation:row.generation}:{}),...(row.kind.startsWith('sale_')&&row.salesGeneration?{salesGeneration:row.salesGeneration}:{})};
     let body=operation,path='/operations/sync';
     if(row.blob){
      const bytes=await row.blob.arrayBuffer();

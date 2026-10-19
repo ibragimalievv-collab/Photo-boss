@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from aiohttp import web
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -103,6 +103,8 @@ async def eligible(session, notice, sub):
         if notice.kind == 'daily_summary':
             pref = await session.get(Setting, f'notify:owner:{user.id}')
             return bool(pref and json.loads(pref.value).get('daily'))
+        pref = await session.get(Setting, f'notify:owner:{user.id}')
+        return bool(pref and json.loads(pref.value).get('critical') and notice.priority == 'critical')
     return True
 
 
@@ -199,6 +201,14 @@ async def push_loop(engine):
         except Exception as exc:  # noqa: BLE001 - durable queue retries; no endpoint or credential logging
             log.warning('App notification delivery deferred (%s)', type(exc).__name__)
         await asyncio.sleep(5)
+
+
+async def log_push_state(engine):
+    async with AsyncSession(engine) as session:
+        devices = await session.scalar(select(func.count(PushSubscription.id)).where(PushSubscription.active.is_(True)))
+        pending = await session.scalar(select(func.count(PushDelivery.id)).where(PushDelivery.status == 'PENDING'))
+    log.info('App push status: channel=%s configured=%s active_devices=%s pending_deliveries=%s',
+             'app' if app_channel() else 'telegram', configured(), devices, pending)
 
 
 class AppPush:

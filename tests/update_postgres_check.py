@@ -225,6 +225,20 @@ async def main():
             assert stored.status == 'UPLOADING' and stored.attempts == 1
         print('PostgreSQL concurrent storage claims: exactly one worker owns the original: PASS')
 
+        from app.sales_reset import reset_sales_fines
+        async with engine.connect() as conn:
+            owner_tg = await conn.scalar(text("SELECT u.tg_id FROM users u JOIN user_roles r ON r.user_id=u.id WHERE r.role='OWNER' AND u.active=true LIMIT 1"))
+            before_photos = await conn.scalar(text('SELECT count(*) FROM photos'))
+            before_shifts = await conn.scalar(text('SELECT count(*) FROM shifts'))
+        reset_result = await reset_sales_fines(engine, 'ci-scoped-sales-reset-332', {owner_tg})
+        assert not reset_result['replayed']
+        async with engine.connect() as conn:
+            assert await conn.scalar(text('SELECT count(*) FROM sales')) == 0
+            assert await conn.scalar(text('SELECT count(*) FROM photos')) == before_photos
+            assert await conn.scalar(text('SELECT count(*) FROM shifts')) == before_shifts
+        assert (await reset_sales_fines(engine, 'ci-scoped-sales-reset-332', set()))['replayed']
+        print('PostgreSQL scoped sales/fines reset: archived, originals and shifts preserved, restart safe: PASS')
+
 
 
     finally:

@@ -106,6 +106,32 @@ class YandexDisk:
     async def metadata(self, path: str):
         return await self._json("GET", "/resources", params={"path": safe_path(path)})
 
+    async def list_directory(self, path: str, *, page_size=200, max_items=10000):
+        """Read all pages; unavailable/incomplete is never reported as empty."""
+        path = safe_path(path)
+        items, names = [], set()
+        while True:
+            data = await self._json('GET', '/resources', params={
+                'path': path, 'limit': page_size, 'offset': len(items), 'sort': 'name'})
+            embedded = data.get('_embedded')
+            if data.get('type') != 'dir' or not isinstance(embedded, dict):
+                raise YandexDiskError('Не удалось прочитать список файлов папки.')
+            page, total = embedded.get('items'), embedded.get('total')
+            if not isinstance(page, list) or type(total) is not int or total < 0:
+                raise YandexDiskError('Неполный ответ списка файлов Яндекс.Диска.')
+            for item in page:
+                name = item.get('name') if isinstance(item, dict) else None
+                if not isinstance(name, str) or name in names or '/' in name or name in {'.', '..'}:
+                    raise YandexDiskError('Список файлов изменился во время проверки. Повторите сверку.')
+                names.add(name)
+                items.append(item)
+            if len(items) > max_items:
+                raise YandexDiskError('Папка превышает лимит сверки. Нужна проверка по частям.')
+            if len(items) == total:
+                return items
+            if not page or len(items) > total:
+                raise YandexDiskError('Список файлов изменился во время проверки. Повторите сверку.')
+
     async def ensure_dir(self, path: str):
         path = safe_path(path)
         try:
