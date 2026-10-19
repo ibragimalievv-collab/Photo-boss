@@ -212,6 +212,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                 "CREATE TABLE payroll_entries(id INTEGER PRIMARY KEY,user_id INTEGER,kind TEXT,amount NUMERIC,created_at DATETIME)",
                 "CREATE TABLE receipts(id INTEGER PRIMARY KEY,booking_id INTEGER,status TEXT,verified_amount NUMERIC,reviewed_at DATETIME)",
                 "CREATE TABLE shifts(id INTEGER PRIMARY KEY,user_id INTEGER,hotel_id INTEGER,start_at DATETIME,end_at DATETIME,status TEXT)",
+                "CREATE TABLE work_breaks(id INTEGER PRIMARY KEY,user_id INTEGER,hotel_id INTEGER,shift_date DATE,started_at DATETIME,ended_at DATETIME)",
                 "CREATE TABLE shift_check_ins(id INTEGER PRIMARY KEY,user_id INTEGER,shift_date DATE,started_at DATETIME)",
                 "CREATE TABLE shift_check_outs(id INTEGER PRIMARY KEY,user_id INTEGER,shift_date DATE,ended_at DATETIME)",
                 "CREATE TABLE audit_logs(id INTEGER PRIMARY KEY,user_id INTEGER,action TEXT,entity TEXT,entity_id INTEGER,details TEXT,created_at DATETIME)",

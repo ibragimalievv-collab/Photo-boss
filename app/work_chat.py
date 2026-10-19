@@ -128,6 +128,10 @@ class WorkChat:
         )]])
 
     async def _notify_one(self, tg_id, text_value):
+        from .push_notifications import app_channel, queue_for_telegram_id
+        if app_channel():
+            return await queue_for_telegram_id(self.engine, tg_id,
+                kind='call' if text_value.startswith('☎') else 'chat', message=text_value)
         try:
             await self.bot.send_message(
                 tg_id,

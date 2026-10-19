@@ -17,6 +17,9 @@ from .insights import parsed
 
 
 async def deliver_owner_notifications(session, bot, now, tz_name):
+    from ..push_notifications import app_channel
+    if app_channel():
+        return 0
     day = now.astimezone(ZoneInfo(tz_name)).date()-timedelta(days=1)
     owner_ids = list(await session.scalars(select(UserRole.user_id).where(UserRole.role=='OWNER').order_by(UserRole.user_id)))
     sent = 0

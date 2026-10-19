@@ -203,7 +203,7 @@ async def main():
                     await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.kind==='sale_complete'&&r.status==='local'&&r.error);}")
                     await page.get_by_role('button', name='Синхронизировать сейчас').click()
                     await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');const rows=await m.outboxRows();return rows.length===9&&rows.every(r=>r.status==='synced'&&!r.blob);}")
-                    await page.locator('[data-sale-booking="1"]').filter(has_text='Завершено: 1 фото').wait_for()
+                    await page.locator('[data-sale-booking="1"]').filter(has_text='Продажа оформлена: 1 фото').wait_for()
                     assert 'завершённых продаж — 1, продано кадров — 1' in await page.locator('[data-sales-totals]').inner_text()
                     assert await page.evaluate("""async()=>{
                         const {outboxRows}=await import('/app/js/outbox.js');

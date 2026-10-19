@@ -19,6 +19,16 @@ RAW = b'\x89PNG\r\n\x1a\n' + b'original-pixels' * 20
 PATH = ROOT + '/web-media/7/test.png'
 
 
+def test_connection_loss_during_json_read_is_retryable_without_handler_failure():
+    from app.miniapp_api import MiniApp
+    from app.miniapp_security import AccessError
+    request = SimpleNamespace(content_length=None, content=SimpleNamespace(
+        at_eof=lambda: False, read=AsyncMock(side_effect=ConnectionResetError('Connection lost'))))
+    with pytest.raises(AccessError) as error:
+        asyncio.run(MiniApp.body(None, request))
+    assert error.value.status == 503
+
+
 def test_fallback_write_is_private_actor_scoped_and_checksum_confirmed(monkeypatch):
     disk = SimpleNamespace(ensure_dir=AsyncMock(), upload_bytes=AsyncMock())
     monkeypatch.setattr(media_files, 'configured_storage', lambda: disk)

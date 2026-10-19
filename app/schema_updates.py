@@ -1,4 +1,7 @@
 """Additive, repeatable upgrades for databases created before the current release."""
+import json
+from decimal import Decimal
+
 from sqlalchemy import MetaData, Table, UniqueConstraint, inspect, text
 from sqlalchemy.schema import CreateIndex, CreateTable
 
@@ -111,8 +114,29 @@ async def upgrade(connection):
         })
         await connection.run_sync(_delivery_photo_sets)
     if 'sales' in tables:
+        await add_columns(connection, 'sales', {'pricing_snapshot': 'TEXT'})
         await add_columns(connection,'sales',{'manager_percent_applied':'VARCHAR(60)',
             'manager_payroll_entry_id':'INTEGER REFERENCES payroll_entries(id) ON DELETE SET NULL'})
+    if 'sale_drafts' in tables:
+        await add_columns(connection, 'sale_drafts', {'pricing_snapshot': 'TEXT'})
+        # Freeze pre-upgrade counted drafts before administrators add hotel tariffs.
+        # Legacy calculations used the booking's package unit price.
+        if {'packages', 'bookings'} <= tables:
+            rows = (await connection.execute(text('''SELECT d.id,d.sold_photos,d.declared_photo_count,
+                b.hotel_id,p.name,p.price_per_photo FROM sale_drafts d
+                JOIN bookings b ON b.id=d.booking_id JOIN packages p ON p.id=b.package_id
+                WHERE d.pricing_snapshot IS NULL AND d.sold_photos>0
+                AND d.status IN ('AWAITING_COUNTS','AWAITING_SELECTED')'''))).mappings().all()
+            for row in rows:
+                price = Decimal(str(row['price_per_photo'])).quantize(Decimal('0.01'))
+                quote = {'tariffId': None, 'hotelId': row['hotel_id'], 'name': row['name'], 'kind': 'UNIT',
+                    'price': str(price), 'photoCount': None, 'sold': row['sold_photos'],
+                    'total': row['declared_photo_count'], 'amount': str(price*row['sold_photos'])}
+                await connection.execute(text('UPDATE sale_drafts SET pricing_snapshot=:quote WHERE id=:id'),
+                    {'id': row['id'], 'quote': json.dumps(quote, ensure_ascii=False)})
+    if {'bookings', 'sales'} <= tables:
+        await connection.execute(text("UPDATE bookings SET status='SOLD' WHERE status='READY_FOR_SALE' "
+                                      "AND EXISTS (SELECT 1 FROM sales WHERE sales.booking_id=bookings.id)"))
     for table in ('shift_check_ins', 'shift_check_outs'):
         if table in tables:
             await add_columns(connection, table, {'offline_claimed_at': 'TIMESTAMP'})

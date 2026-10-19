@@ -203,8 +203,8 @@ async def validate_remaining_photos(session, booking, total, sold):
         raise ValueError(f'Уже продано: {previous}. Новая покупка превышает оставшееся количество кадров.')
 
 
-async def set_sale_counts(session, actor, draft, total, sold):
-    if draft.created_by_id != actor.id or draft.status not in {'AWAITING_COUNTS', 'AWAITING_SELECTED'}:
+async def set_sale_counts(session, actor, draft, total, sold, *, tariff_id=None):
+    if draft.created_by_id != actor.id or draft.status not in {'AWAITING_RECEIPT', 'AWAITING_COUNTS', 'AWAITING_SELECTED'}:
         raise ValueError('Черновик продажи уже закрыт.')
     if type(total) is not int or type(sold) is not int or not 0 < sold <= total <= 10000:
         raise ValueError('Проверьте общее и проданное количество кадров.')
@@ -214,16 +214,15 @@ async def set_sale_counts(session, actor, draft, total, sold):
     before_counts = (draft.declared_photo_count, draft.sold_photos)
     correcting = draft.status == 'AWAITING_SELECTED'
     booking = await session.get(Booking, draft.booking_id)
-    package = await session.get(Package, booking.package_id)
-    if package is None:
-        raise ValueError('Пакет недоступен.')
     await validate_remaining_photos(session, booking, total, sold)
-    price = Decimal(str(package.price_per_photo))
-    if not price.is_finite() or price <= 0:
-        raise ValueError('Некорректная цена пакета.')
-    amount = money(Decimal(sold) * price)
+    from .pricing import sale_quote
+    quote = await sale_quote(session, booking, sold, total, tariff_id, draft.pricing_snapshot)
+    amount = money(quote['amount'])
+    draft.pricing_snapshot = json.dumps(quote, ensure_ascii=False)
     before, paid, _ = await payment_totals(session, booking.id)
     expected = max(money(before) + amount - money(paid), Decimal(0))
+    if draft.status == 'AWAITING_RECEIPT' and expected > 0:
+        raise ValueError('Сначала сохраните чек или дождитесь подтверждения оплаты банком.')
     draft.declared_photo_count = total
     draft.sold_photos = sold
     draft.expected_amount = expected or None
@@ -272,16 +271,17 @@ async def complete_sale(session, actor, draft_id):
     package = await session.get(Package, booking.package_id)
     if photographer is None or package is None:
         raise ValueError("Проверьте фотографа и пакет записи.")
-    price = Decimal(str(package.price_per_photo))
-    if not price.is_finite() or price <= 0:
-        raise ValueError("Некорректная цена пакета.")
-    amount = money(draft.expected_amount or 0)
+    from .pricing import sale_quote
+    quote = await sale_quote(session, booking, draft.sold_photos, draft.declared_photo_count,
+                             saved=draft.pricing_snapshot)
+    # Recheck approved payments while holding the booking lock. A deposit may
+    # be approved after counts were entered. Never charge the same deposit twice.
+    previous, paid, _ = await payment_totals(session, booking.id)
+    amount = max(money(previous) + money(quote['amount']) - money(paid), Decimal(0))
+    draft.expected_amount = amount or None
     # expected_amount is the still-unpaid part after approved deposits; the sale itself
     # must always use sold_photos * package price.
-    sale_amount = (
-        Decimal(draft.sold_photos)
-        * Decimal(str(package.price_per_photo))
-    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    sale_amount = money(quote['amount'])
     percent, actual_full_count = await final_photographer_percent(
         session, booking.id
     )
@@ -304,6 +304,7 @@ async def complete_sale(session, actor, draft_id):
         declared_photo_count=draft.declared_photo_count,
         source_draft_id=draft.id,
         amount=float(sale_amount),
+        pricing_snapshot=json.dumps(quote, ensure_ascii=False),
         percent=float(photographer_percent_value),
         commission=float(photographer_commission),
         commission_finalized_at=finalized_at,
@@ -356,6 +357,7 @@ async def complete_sale(session, actor, draft_id):
         sale.manager_payroll_entry_id = manager_entry.id
 
     draft.status = "COMPLETED"
+    booking.status = "SOLD"
     draft.completed_at = datetime.now(UTC).replace(tzinfo=None)
     await audit(
         session,

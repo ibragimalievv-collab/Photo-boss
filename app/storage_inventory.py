@@ -97,7 +97,8 @@ async def recent_sale_audit(engine, *, days=7):
             'drafts': [{'id': d.id, 'bookingId': d.booking_id, 'shootDate': str(day),
                         'status': d.status, 'receiptStored': bool(d.receipt_file_id),
                         'totalFrames': d.declared_photo_count, 'sold': d.sold_photos, 'selected': count,
-                        'calculatedAmount': float(d.sold_photos*price) if d.sold_photos else None,
+                        'calculatedAmount': (float(json.loads(d.pricing_snapshot)['amount']) if d.pricing_snapshot
+                            else float(d.sold_photos*price) if d.sold_photos else None),
                         'expectedPayment': float(d.expected_amount or 0)} for d, day, price, count in drafts],
             'sales': [{'id': sale.id, 'bookingId': sale.booking_id, 'photos': sale.sold_photos,
                        'amount': float(sale.amount), 'paymentStatus': sale.payment_status} for sale in sales],

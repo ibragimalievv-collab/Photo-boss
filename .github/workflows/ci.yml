@@ -81,6 +81,7 @@ jobs:
           node --check app/webapp/js/practice.js
           for file in app/webapp/js/*.js; do node --check "$file"; done
           node tests/install_client_check.mjs
+          node tests/notifications_client_check.mjs
           node tests/account_cache_check.mjs
           node tests/voice_training_client_check.mjs
           node tests/academy_mentor_client_check.mjs

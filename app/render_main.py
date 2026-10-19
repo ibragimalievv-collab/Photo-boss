@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.30-workflow-recovery-and-scope"
+RELEASE = "miniapp-3.31-app-push-lunch-pricing"
 
 
 async def health(request):
@@ -47,8 +47,11 @@ async def health(request):
     storage = request.app.get("yandex_disk")
     storage_state = storage.public_status() if storage is not None else {"configured": False, "connected": False, "writeVerified": False}
     calls_state = ice_config(0)
+    from .push_notifications import app_channel
+    from .push_notifications import configured as push_configured
     return web.json_response({"service": "photo-boss", "status": "ok" if ready else "not_ready",
                               "release": RELEASE, "commit": os.getenv("RENDER_GIT_COMMIT", "")[:12] or None, "app": "/app/",
+                              "notifications": {"channel": "app" if app_channel() else "telegram", "pushConfigured": push_configured()},
                               "calls": {"enabled": "work_calls" in request.app,
                                         "maxParticipants": calls_state["maxParticipants"],
                                         "relayConfigured": calls_state["relayConfigured"]},
@@ -109,9 +112,13 @@ async def on_startup(app):
     if deleted:
         logger.info("Expired work-chat messages removed on startup: %s", deleted)
     app["operations_task"] = asyncio.create_task(operations_loop(bot))
+    from .bank_payments import payment_loop
+    app['bank_payment_task'] = asyncio.create_task(payment_loop(engine))
     app["storage_task"] = asyncio.create_task(storage_loop(bot, app["yandex_disk"]))
     from .services.assignment_notifications import assignment_loop
     app['assignment_notification_task'] = asyncio.create_task(assignment_loop(engine, bot))
+    from .push_notifications import push_loop
+    app['push_notification_task'] = asyncio.create_task(push_loop(engine))
     from .storage_inventory import log_recent_inventory
     app['storage_inventory_task'] = asyncio.create_task(log_recent_inventory(engine, app['yandex_disk']))
     app["chat_cleanup_task"] = asyncio.create_task(cleanup_loop(engine, app["yandex_disk"]))
@@ -126,7 +133,7 @@ async def on_startup(app):
 async def on_cleanup(app):
     clear_ready_file()
     app["ready"] = False
-    for key in ("realtime_probe_task", "operations_task", "storage_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task", "assignment_notification_task"):
+    for key in ("push_notification_task", "bank_payment_task", "realtime_probe_task", "operations_task", "storage_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task", "assignment_notification_task"):
         task = app.get(key)
         if task:
             task.cancel()
