@@ -191,6 +191,8 @@ def main():
     app.on_cleanup.append(on_cleanup)
     from .hr_bot import install_hr_bot
     install_hr_bot(app, engine, config.bot_token)
+    from .avito_hr import install_avito_hr
+    install_avito_hr(app, engine)
     port = int(os.getenv("PORT", "10000"))
     logger.info("Starting Render web service on port %s", port)
     web.run_app(app, host="0.0.0.0", port=port, print=None)
