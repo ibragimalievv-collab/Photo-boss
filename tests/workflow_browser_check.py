@@ -309,9 +309,10 @@ async def main():
                         const {captureForm}=await import('/app/js/form-state.js');
                         const {todayKey}=await import('/app/js/domain.js');
                         const items=[],add=(kind,data,blob=null)=>{const row={key:crypto.randomUUID(),kind,date:todayKey(),data,blob};items.push(row);return {key:row.key};};
-                        const draft=add('sale_start',{booking:{id:3},price:'400.00'});
+                        const tariffId=Number(form.elements.tariffId.value);
+                        const draft=add('sale_start',{booking:{id:3},price:'400.00',tariffId});
                         add('sale_receipt',{draft},form.elements.receipt.files[0]);
-                        add('sale_counts',{draft,total:150,sold:2,price:'400.00'});
+                        add('sale_counts',{draft,total:150,sold:2,price:'400.00',tariffId});
                         for(const photo of form.elements.selected.files)add('sale_selected',{draft},photo);
                         add('sale_complete',{draft,price:'400.00'});
                         await enqueueBatch(items);form.dataset.pendingKeys=JSON.stringify(items.map(r=>r.key));captureForm(form);

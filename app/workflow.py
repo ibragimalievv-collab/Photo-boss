@@ -358,7 +358,7 @@ class Workflow:
 
     async def sale(self, session, actor, roles, kind, data, raw):
         if kind == 'sale_start':
-            fields(data, 'booking price')
+            fields(data, 'booking price tariffId' if 'tariffId' in data else 'booking price')
             bid = await target(session, actor, data['booking'], 'bookingId')
             draft = await start_sale_draft(session, actor, roles, bid)
         else:
@@ -374,12 +374,17 @@ class Workflow:
         booking = await session.get(Booking, draft.booking_id)
         if draft.created_by_id != actor.id or not await can_sell(actor, roles, booking, session=session):
             raise AccessError('Нет доступа к этой продаже.', 403)
-        if 'price' in data and kind != 'sale_start':
+        if 'price' in data:
             from .services.pricing import unit_price
-            # An explicit hotel tariff is checked by sale_quote below. Its price
-            # need not equal the hotel's default unit rate. Legacy clients omit
-            # tariffId and still rely on the default-rate freshness check.
-            explicit_tariff = kind == 'sale_counts' and 'tariffId' in data
+            # Explicit tariffs are checked against the booking's hotel; their
+            # price need not equal the hotel's default unit rate. Legacy
+            # clients omit tariffId and keep the default-rate freshness check.
+            explicit_tariff = kind in {'sale_start', 'sale_counts'} and 'tariffId' in data
+            if kind == 'sale_start' and explicit_tariff:
+                from .models import HotelTariff
+                tariff = await session.get(HotelTariff, data['tariffId'])
+                if not tariff or not tariff.active or tariff.hotel_id != booking.hotel_id:
+                    raise AccessError('Тариф недоступен в этом отеле.', 409)
             # Once counts are accepted, use their immutable tariff snapshot.
             if not isinstance(data['price'], str) or (
                 not draft.pricing_snapshot and not explicit_tariff

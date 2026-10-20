@@ -155,7 +155,9 @@ export async function workflowSubmit(form){
   if(sold<(d?.selected||0))throw new Error(`Уже принято ${d.selected} выбранных фото. Проданное количество не может быть меньше.`);
   if(photos.length>sold||photos.length+(d?.selected||0)<sold)throw new Error(`Нужно прикрепить ${Math.max(0,sold-(d?.selected||0))} новых выбранных кадров. Повторные фотографии не увеличивают количество.`);
   await checkSaleFiles(photos);
-  const draft=add('sale_start',{booking:{id:b.id},price:b.price});
+  const startData={booking:{id:b.id},price:b.price},startTariff=d?.pricing?.tariffId||Number(f.get('tariffId'));
+  if(startTariff>0)startData.tariffId=startTariff;
+  const draft=add('sale_start',startData);
   if(!d||d.status==='AWAITING_RECEIPT'){const receipt=imageFiles(form,'receipt',8*1024*1024)[0];if(receipt)add('sale_receipt',{draft},receipt);else if(!data.bankConfigured&&Number(b.paidAmount||0)<=0)throw new Error('Прикрепите чек продажи или дождитесь подтверждения банка.');}
   if(!d||d.status!=='AWAITING_SELECTED'||total!==Number(d.total)||sold!==Number(d.sold))add('sale_counts',{draft,total,sold,price:b.price,tariffId:d?.pricing?.tariffId||Number(f.get('tariffId'))||null});
   for(const photo of photos)add('sale_selected',{draft},photo);
