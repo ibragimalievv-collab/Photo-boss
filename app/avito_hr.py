@@ -113,7 +113,7 @@ async def own_items(api):
 
 async def refresh_publications(engine, api):
     async with engine.connect() as conn:
-        rows = (await conn.execute(text("SELECT code,publication_id FROM hr_avito_vacancies WHERE publication_id IS NOT NULL AND status IN ('submitted','process','new')"))).mappings().all()
+        rows = (await conn.execute(text("SELECT code,publication_id FROM hr_avito_vacancies WHERE publication_id IS NOT NULL AND status IN ('submitted','process','new','created','unblocked')"))).mappings().all()
     if not rows:
         return
     statuses = await api.request("POST", "/job/v2/vacancies/statuses", {"ids": [r["publication_id"] for r in rows]})
