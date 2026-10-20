@@ -23,6 +23,7 @@ from app.attendance import install_attendance
 from app.miniapp_api import install_miniapp
 from app.models import (
     Booking,
+    HotelTariff,
     OperationRequest,
     PayrollEntry,
     Receipt,
@@ -52,6 +53,8 @@ async def main():
         booking.status = 'READY_FOR_SALE'
         (await session.scalar(select(Shooting))).status = 'READY_FOR_SALE'
         session.add_all([User(id=3, tg_id=3, name='Owner'), UserRole(user_id=3, role='OWNER')])
+        session.add_all(HotelTariff(hotel_id=1, name=f'{price} ₽ за кадр', kind='UNIT', price=price)
+                        for price in (300, 400, 500))
         await session.commit()
     media = {}
     async def upload(_id, file, **kwargs):
