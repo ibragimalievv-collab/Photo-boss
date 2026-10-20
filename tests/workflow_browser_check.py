@@ -23,6 +23,7 @@ from app.attendance import install_attendance
 from app.miniapp_api import install_miniapp
 from app.models import (
     Booking,
+    HotelTariff,
     OperationRequest,
     PayrollEntry,
     Receipt,
@@ -52,6 +53,8 @@ async def main():
         booking.status = 'READY_FOR_SALE'
         (await session.scalar(select(Shooting))).status = 'READY_FOR_SALE'
         session.add_all([User(id=3, tg_id=3, name='Owner'), UserRole(user_id=3, role='OWNER')])
+        session.add_all(HotelTariff(hotel_id=1, name=f'{price} ₽ за кадр', kind='UNIT', price=price)
+                        for price in (300, 400, 500))
         await session.commit()
     media = {}
     async def upload(_id, file, **kwargs):
@@ -149,12 +152,25 @@ async def main():
                     await page.get_by_text('В очереди на этом устройстве — не отправлено', exact=True).wait_for()
                     await page.locator('#workflowSalePick').select_option('1')
                     sale = page.locator('#workflowSale')
+                    tariff = await sale.locator('[name=tariffId] option').evaluate_all(
+                        "options=>options.find(option=>option.textContent.includes('400')).value")
+                    await sale.locator('[name=tariffId]').select_option(tariff)
                     await sale.locator('[name=total]').fill('150')
                     await sale.locator('[name=sold]').fill('1')
                     await sale.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/coast.jpg')
                     await sale.locator('[name=selected]').set_input_files('app/webapp/assets/academy/family.jpg')
                     await sale.locator('button').click()
-                    await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length===6;}")
+                    try:
+                        await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length===6;}")
+                    except Exception:
+                        print('OFFLINE_SALE_DIAGNOSTIC', await page.evaluate("""async()=>{
+                            const {outboxRows}=await import('/app/js/outbox.js');
+                            const form=document.querySelector('#workflowSale');
+                            return {queue:(await outboxRows()).map(r=>({kind:r.kind,status:r.status,error:r.error})),
+                                form:form&&[...form.elements].map(e=>({name:e.name,value:e.value,disabled:e.disabled,files:e.files?.length})),
+                                body:document.body.innerText.slice(-1800)};
+                        }"""))
+                        raise
                     assert await page.locator('#workflowSale [name=total]').input_value() == '150'
                     await page.evaluate("async()=>{const m=await import('/app/js/workflow.js');await m.workflowSubmit(document.querySelector('#workflowSale'));}")
                     assert await page.evaluate("async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length;}") == 6
@@ -274,6 +290,9 @@ async def main():
                         const m=await import('/app/js/workflow.js');await m.loadWorkflow(3);m.workflowSelect(3);
                     }""")
                     repair_form = page.locator('#workflowSale')
+                    tariff = await repair_form.locator('[name=tariffId] option').evaluate_all(
+                        "options=>options.find(option=>option.textContent.includes('400')).value")
+                    await repair_form.locator('[name=tariffId]').select_option(tariff)
                     await repair_form.locator('[name=total]').fill('150')
                     await repair_form.locator('[name=sold]').fill('2')
                     await repair_form.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/evening.jpg')
@@ -290,9 +309,10 @@ async def main():
                         const {captureForm}=await import('/app/js/form-state.js');
                         const {todayKey}=await import('/app/js/domain.js');
                         const items=[],add=(kind,data,blob=null)=>{const row={key:crypto.randomUUID(),kind,date:todayKey(),data,blob};items.push(row);return {key:row.key};};
-                        const draft=add('sale_start',{booking:{id:3},price:'400.00'});
+                        const tariffId=Number(form.elements.tariffId.value);
+                        const draft=add('sale_start',{booking:{id:3},price:'400.00',tariffId});
                         add('sale_receipt',{draft},form.elements.receipt.files[0]);
-                        add('sale_counts',{draft,total:150,sold:2,price:'400.00'});
+                        add('sale_counts',{draft,total:150,sold:2,price:'400.00',tariffId});
                         for(const photo of form.elements.selected.files)add('sale_selected',{draft},photo);
                         add('sale_complete',{draft,price:'400.00'});
                         await enqueueBatch(items);form.dataset.pendingKeys=JSON.stringify(items.map(r=>r.key));captureForm(form);

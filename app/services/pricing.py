@@ -7,6 +7,7 @@ from sqlalchemy import select
 from ..models import HotelTariff, Package
 from .receipts import money
 
+UNIT_PRICES = frozenset({Decimal('300.00'), Decimal('400.00'), Decimal('500.00')})
 
 def snapshot(value):
     return json.loads(value) if value else None
@@ -25,6 +26,8 @@ async def sale_quote(session, booking, sold, total, tariff_id=None, saved=None):
             raise ValueError('Тариф недоступен в этом отеле.')
         quote = {'tariffId': tariff.id, 'hotelId': booking.hotel_id, 'name': tariff.name,
                  'kind': tariff.kind, 'price': str(money(tariff.price)), 'photoCount': tariff.photo_count}
+        if quote['kind'] == 'UNIT' and money(quote['price']) not in UNIT_PRICES:
+            raise ValueError('Цена кадра должна быть 300, 400 или 500 ₽.')
     else:
         # Existing bots and older web clients use the hotel's unit rate.
         tariff = await session.scalar(select(HotelTariff).where(
@@ -37,6 +40,8 @@ async def sale_quote(session, booking, sold, total, tariff_id=None, saved=None):
             raise ValueError('Пакет недоступен.')
         quote = {'tariffId': None, 'hotelId': booking.hotel_id, 'name': package.name,
                  'kind': 'UNIT', 'price': str(money(package.price_per_photo)), 'photoCount': None}
+        if money(quote['price']) not in UNIT_PRICES:
+            raise ValueError('Для новой продажи выберите тариф 300, 400 или 500 ₽ за кадр.')
     price = money(quote['price'])
     if price <= 0:
         raise ValueError('Некорректная цена тарифа.')
@@ -47,7 +52,10 @@ async def sale_quote(session, booking, sold, total, tariff_id=None, saved=None):
         amount = price
     else:
         amount = money(Decimal(sold) * price)
-    return quote | {'sold': sold, 'total': total, 'amount': str(amount)}
+    line = {'type': quote['kind'], 'name': quote['name'], 'price': str(price),
+            'quantity': count if quote['kind'] == 'PACKAGE' else sold,
+            'amount': str(amount)}
+    return quote | {'sold': sold, 'total': total, 'amount': str(amount), 'lines': [line]}
 
 
 async def unit_price(session, booking):

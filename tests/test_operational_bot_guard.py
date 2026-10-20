@@ -252,15 +252,17 @@ def test_worker_selected_rows_are_processed_under_lease_and_sleep_is_outside_it(
             monkeypatch.setattr(photo_edits, 'process_one', backup)
             call = photo_storage.storage_loop(bot, object())
         else:
+            from app.services import shooting_media_audit
             monkeypatch.setattr(development, 'operation_lease', lease)
             monkeypatch.setattr(development, 'asyncio', fake_asyncio)
             monkeypatch.setattr(development, 'async_sessionmaker', lambda *_args, **_kwargs: Session)
             monkeypatch.setattr(development, 'queue_reviews', job)
+            monkeypatch.setattr(shooting_media_audit, 'audit_next_files', backup)
             monkeypatch.setattr(development, 'review_one', backup)
             call = development.development_loop(object(), bot)
         with pytest.raises(asyncio.CancelledError):
             await call
-        assert calls == (['processed', 'second', 'second'] if worker == 'operations' else ['processed', 'second'])
+        assert calls == (['processed', 'second', 'second'] if worker in {'operations', 'development'} else ['processed', 'second'])
         assert not active
 
     asyncio.run(run())

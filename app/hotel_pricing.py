@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .miniapp_security import AccessError
 from .models import HotelTariff, User
 from .services.core import audit, roles_of
+from .services.pricing import UNIT_PRICES
 from .services.receipts import money
 from .work_breaks import hotel_access
 
@@ -28,6 +29,7 @@ class HotelPricing:
             raise AccessError('Укажите конечную положительную цену.', 400)
         if (type(body['hotelId']) is not int or not isinstance(body['name'], str) or not 2 <= len(body['name'].strip()) <= 150
                 or not isinstance(body['kind'], str) or body['kind'] not in {'UNIT', 'PACKAGE'} or not 0 < price <= 10000000
+                or (body['kind'] == 'UNIT' and price not in UNIT_PRICES)
                 or (body['photoCount'] is not None and (type(body['photoCount']) is not int or not 1 <= body['photoCount'] <= 10000))
                 or (body['kind'] == 'UNIT' and body['photoCount'] is not None)
                 or (body['replaces'] is not None and type(body['replaces']) is not int)):
@@ -42,12 +44,15 @@ class HotelPricing:
             old = await session.get(HotelTariff, body['replaces'], with_for_update=True) if body['replaces'] else None
             if body['replaces'] and (not old or old.hotel_id != body['hotelId'] or not old.active):
                 raise AccessError('Тариф уже изменён. Обновите данные.', 409)
+            if body['kind'] == 'UNIT':
+                duplicate = await session.scalar(select(HotelTariff.id).where(
+                    HotelTariff.hotel_id == body['hotelId'], HotelTariff.kind == 'UNIT',
+                    HotelTariff.price == price, HotelTariff.active.is_(True),
+                    HotelTariff.id != (old.id if old else 0)).limit(1))
+                if duplicate:
+                    raise AccessError('Такая цена кадра уже настроена для этого отеля.', 409)
             if old:
                 old.active = False
-            if body['kind'] == 'UNIT':
-                for previous in await session.scalars(select(HotelTariff).where(
-                        HotelTariff.hotel_id == body['hotelId'], HotelTariff.kind == 'UNIT', HotelTariff.active.is_(True))):
-                    previous.active = False
             tariff = HotelTariff(hotel_id=body['hotelId'], name=body['name'].strip(),
                 kind=body['kind'], price=price, photo_count=body['photoCount'])
             session.add(tariff)

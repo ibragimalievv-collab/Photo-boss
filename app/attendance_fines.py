@@ -21,6 +21,8 @@ SINCE_KEY = 'attendance:fines:activated_at'
 DEFAULT_RULES = {'lateAmount': 500, 'earlyAmount': None, 'missingEndAmount': None}
 LABELS = {'late': 'Опоздание / нет прихода вовремя', 'early': 'Ранний уход', 'missing_end': 'Нет отметки ухода'}
 RULE_FIELD = {'late': 'lateAmount', 'early': 'earlyAmount', 'missing_end': 'missingEndAmount'}
+PAYROLL_KINDS = {'late': 'Штраф: опоздание', 'early': 'Штраф: ранний уход',
+                 'missing_end': 'Штраф: нет ухода'}
 
 
 def utc(value):
@@ -85,7 +87,7 @@ async def record_charge(api, conn, uid, day, kind, detected, when, expected, now
     elif effective:
         row = (await api.rows(conn, '''INSERT INTO payroll_entries(user_id,kind,amount,period,note,created_at)
             VALUES (:uid,:kind,:amount,:period,:note,:now) RETURNING id''', uid=uid,
-            kind='Штраф: '+LABELS[kind], amount=-effective, period=str(day), note=key,
+            kind=PAYROLL_KINDS[kind], amount=-effective, period=str(day), note=key,
             now=now.replace(tzinfo=None)))[0]
         value['payrollId'] = row['id']
     value['updatedAt'] = now.isoformat()
@@ -223,7 +225,7 @@ class AttendanceFines:
                     {'amount':-effective,'id':old['payrollId'],'uid':uid})
             elif effective:
                 payroll = (await self.api.rows(conn, '''INSERT INTO payroll_entries(user_id,kind,amount,period,note,created_at)
-                    VALUES (:uid,:kind,:amount,:period,:note,:now) RETURNING id''', uid=uid, kind='Штраф: '+LABELS[body['kind']],
+                    VALUES (:uid,:kind,:amount,:period,:note,:now) RETURNING id''', uid=uid, kind=PAYROLL_KINDS[body['kind']],
                     amount=-effective,period=str(day),note=key,now=now.replace(tzinfo=None)))[0]
                 new['payrollId'] = payroll['id']
             await save_json(conn, key, new)

@@ -1542,6 +1542,8 @@ async def hname(m, state):
         hotel = Hotel(name=name)
         session.add(hotel)
         await session.flush()
+        from ..schema_updates import seed_hotel_unit_prices
+        await seed_hotel_unit_prices(await session.connection(), hotel.id)
         await audit(
             session,
             await get_user(session, m.from_user.id),

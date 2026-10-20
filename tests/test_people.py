@@ -8,6 +8,7 @@ import test_miniapp_release as baseline
 from sqlalchemy import text
 
 from app.miniapp_security import AccessError
+from app.models import HotelTariff
 from app.people import GENERAL_RULES, People, check_editor, positive_id, staff_payload
 
 
@@ -47,6 +48,7 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
             conn.execute(text("ALTER TABLE users ADD COLUMN created_at DATETIME"))
             conn.execute(text("ALTER TABLE users ADD COLUMN terminated_at DATETIME"))
             conn.execute(text("CREATE UNIQUE INDEX unique_tg_id ON users(tg_id)"))
+            HotelTariff.__table__.create(conn, checkfirst=True)
 
     async def asyncTearDown(self):
         await baseline.MiniAppTests.asyncTearDown(self)
@@ -141,6 +143,9 @@ class StaffTests(unittest.IsolatedAsyncioTestCase):
             log = c.execute(text("SELECT details FROM audit_logs WHERE action='hotel_created' ORDER BY id LIMIT 1")).scalar()
             assert json.loads(log)['after']['name'] == 'New Hotel'
             assert json.loads(log)['before'] is None
+            prices = c.execute(text("SELECT price FROM hotel_tariffs WHERE hotel_id=:id AND kind='UNIT' AND active=TRUE"),
+                               {'id': data['hotel']['id']}).scalars().all()
+            assert {float(price) for price in prices} == {300.0, 400.0, 500.0}
         self.bot.send_message.assert_not_awaited()
 
     async def test_hotel_creation_requires_current_role_and_valid_name(self):

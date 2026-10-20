@@ -28,7 +28,7 @@ from .models import (
 
 log = logging.getLogger(__name__)
 ROLES = {'OWNER', 'ADMIN', 'PHOTOGRAPHER', 'MANAGER'}
-KINDS = {'booking_assignment', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test'}
+KINDS = {'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test'}
 
 
 def app_channel():
@@ -62,12 +62,12 @@ def validate_subscription(value):
         raise AccessError('Некорректная подписка уведомлений. Включите их заново в профиле.', 400) from None
 
 
-async def queue_notice(session, user_id, *, kind, event_key, url='/app/#home', message='Новое рабочее событие в Photo Boss.'):
+async def queue_notice(session, user_id, *, kind, event_key, url='/app/#home', message='Новое рабочее событие в Photo Boss.', payload=None):
     existing = await session.scalar(select(Notification.id).where(Notification.user_id == user_id, Notification.event_key == event_key))
     if existing:
         return existing
     row = Notification(user_id=user_id, text=message, kind=kind, event_key=event_key,
-                       payload=json.dumps({'url': url}), sent=False)
+                       payload=json.dumps({'url': url, **(payload or {})}), sent=False)
     session.add(row)
     await session.flush()
     return row.id
@@ -104,14 +104,20 @@ async def eligible(session, notice, sub, *, include_read=False):
     roles = set(await session.scalars(select(UserRole.role).where(UserRole.user_id == notice.user_id)))
     if not user or not user.active or not roles & ROLES:
         return False
-    if notice.kind == 'booking_assignment':
+    if notice.kind in {'booking_assignment', 'booking_reminder'}:
         from .models import Booking
         from .services.assignment_notifications import ACTIVE
         bid = json.loads(notice.payload or '{}').get('bookingId')
         booking = await session.get(Booking, bid) if type(bid) is int else None
         trashed = await session.get(Setting, f'booking:trash:{bid}')
-        return bool(booking and booking.photographer_id == user.id and 'PHOTOGRAPHER' in roles
-                    and booking.status in ACTIVE and not trashed)
+        if not (booking and booking.photographer_id == user.id and 'PHOTOGRAPHER' in roles and not trashed):
+            return False
+        if notice.kind == 'booking_reminder':
+            from .services.booking_reminders import PRE_SHOOT, scheduled_at
+            moment = scheduled_at(booking)
+            return (booking.status in PRE_SHOOT
+                    and json.loads(notice.payload or '{}').get('scheduledAt') == moment.isoformat())
+        return booking.status in ACTIVE
     if notice.kind == 'sale_created':
         from .models import Booking, HotelEmployee, Sale
         try:
@@ -140,11 +146,12 @@ async def eligible(session, notice, sub, *, include_read=False):
 def payload_for(notice):
     urls = {'booking_assignment': '/app/#shootings', 'control': '/app/#insights', 'daily_summary': '/app/#insights',
             'sale_ready': '/app/#workflow', 'sale_created': '/app/#finance', 'academy': '/app/#academy'}
-    titles = {'booking_assignment': 'Назначена съёмка', 'chat': 'Новое сообщение', 'call': 'Входящий звонок',
+    titles = {'booking_assignment': 'Назначена съёмка', 'booking_reminder': 'Скоро съёмка', 'chat': 'Новое сообщение', 'call': 'Входящий звонок',
               'sale_ready': 'Съёмка готова к продаже', 'sale_created': 'Оформлена продажа', 'academy': 'Готов разбор практики', 'push_test': 'Проверка уведомлений'}
     # No guest names, phone numbers, balances, or chat text on the lock screen.
     url = urls.get(notice.kind, '/app/#home')
-    if notice.kind == 'booking_assignment':
+    if notice.kind in {'booking_assignment', 'booking_reminder'}:
+        url = '/app/#shootings'
         bid = json.loads(notice.payload or '{}').get('bookingId')
         if type(bid) is int:
             url += f'?booking={bid}'
@@ -240,6 +247,26 @@ async def log_push_state(engine):
              'app' if app_channel() else 'telegram', configured(), devices, pending)
 
 
+async def push_delivery_state(session, notice, *, active_devices):
+    """Report provider state without claiming that a phone displayed the alert."""
+    if not app_channel() or not configured():
+        return 'OFF'
+    if not active_devices:
+        return 'NO_DEVICE'
+    rows = list(await session.scalars(select(PushDelivery).where(
+        PushDelivery.notification_id == notice.id)))
+    states = {row.status for row in rows}
+    if 'PENDING' in states or not rows:
+        return 'PENDING'
+    if 'ACCEPTED' in states and (states & {'FAILED', 'EXPIRED'}):
+        return 'PARTIAL'
+    if 'ACCEPTED' in states:
+        return 'ACCEPTED'
+    if states & {'FAILED', 'EXPIRED'}:
+        return 'FAILED'
+    return 'PENDING'
+
+
 class AppPush:
     def __init__(self, api):
         self.api = api
@@ -256,11 +283,22 @@ class AppPush:
             actor = await self.actor(session, request)
             rows = list(await session.scalars(select(Notification).where(Notification.user_id == actor.id,
                 Notification.kind.in_(KINDS), Notification.resolved_at.is_(None)).order_by(Notification.id.desc()).limit(30)))
+            active_devices = await session.scalar(select(func.count(PushSubscription.id)).where(
+                PushSubscription.user_id == actor.id, PushSubscription.active.is_(True)))
+            items = []
+            for notice in rows:
+                if not await eligible(session, notice, SimpleNamespace(active=True, user_id=actor.id), include_read=True):
+                    continue
+                payload = json.loads(notice.payload or '{}')
+                items.append({'id': notice.id, 'title': payload_for(notice)['title'],
+                    'description': payload.get('description') or notice.text,
+                    'url': payload_for(notice)['url'], 'read': bool(notice.acknowledged_at),
+                    'createdAt': notice.created_at.isoformat()+'Z',
+                    'pushState': await push_delivery_state(session, notice, active_devices=active_devices)})
             return web.json_response({'configured': configured(), 'channel': 'app' if app_channel() else 'telegram',
+                'activeDevices': active_devices,
                 'publicKey': os.getenv('WEB_PUSH_PUBLIC_KEY') if configured() else None,
-                'items': [{'id': n.id, 'title': payload_for(n)['title'], 'url': payload_for(n)['url'],
-                    'read': bool(n.acknowledged_at), 'createdAt': n.created_at.isoformat()+'Z'} for n in rows
-                    if await eligible(session, n, SimpleNamespace(active=True, user_id=actor.id), include_read=True)]}, headers={'Cache-Control':'no-store'})
+                'items': items}, headers={'Cache-Control':'no-store'})
 
     async def subscribe(self, request):
         if not configured():

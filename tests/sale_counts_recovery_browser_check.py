@@ -18,6 +18,7 @@ from test_workflow_services import booking_data, fixture
 
 from app.miniapp_api import install_miniapp
 from app.models import (
+    HotelTariff,
     OperationRequest,
     Photo,
     Receipt,
@@ -41,6 +42,8 @@ async def main():
             shooting = await session.scalar(select(Shooting).where(Shooting.booking_id == booking.id))
             shooting.status = 'READY_FOR_SALE'
             session.add_all(Photo(shooting_id=shooting.id, file_id=f'original-{i}') for i in range(10))
+            session.add_all(HotelTariff(hotel_id=booking.hotel_id, name=f'{price} ₽ за кадр',
+                                        kind='UNIT', price=price) for price in (300, 400, 500))
             await session.commit()
             bid, sid = booking.id, shooting.id
 
@@ -77,6 +80,9 @@ async def main():
                         await page.goto(str(server.make_url('/app/#workflow')))
                         await page.locator('#workflowSalePick').select_option(str(bid))
                         form = page.locator('#workflowSale')
+                        tariff = await form.locator('[name=tariffId] option').evaluate_all(
+                            "options=>options.find(option=>option.textContent.includes('400')).value")
+                        await form.locator('[name=tariffId]').select_option(tariff)
                         await form.locator('[name=total]').fill('150')
                         await form.locator('[name=sold]').fill('1')
                         await form.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/coast.jpg')
@@ -88,7 +94,17 @@ async def main():
                             await session.commit()
                         await form.locator('button').first.click()
                         repair = form.locator('[data-workflow="repair-sale"]')
-                        await expect(repair).to_be_visible(timeout=20000)
+                        try:
+                            await expect(repair).to_be_visible(timeout=20000)
+                        except Exception:
+                            print('SALE_COUNTS_RECOVERY_DIAGNOSTIC', await page.evaluate("""async()=>{
+                                const {outboxRows}=await import('/app/js/outbox.js');
+                                const form=document.querySelector('#workflowSale');
+                                return {queue:(await outboxRows()).map(r=>({kind:r.kind,status:r.status,error:r.error,errorStatus:r.errorStatus})),
+                                    form:form&&[...form.elements].map(e=>({name:e.name,value:e.value,disabled:e.disabled,files:e.files?.length})),
+                                    body:document.body.innerText.slice(-1800)};
+                            }"""))
+                            raise
                         before = await page.evaluate("""async()=>{
                             const {outboxRows}=await import('/app/js/outbox.js');return await outboxRows();
                         }""")
@@ -124,6 +140,11 @@ async def main():
                         # The server must reject it, and the same form must let
                         # its author attach the actual new receipt in place.
                         await form.get_by_role('button', name='Начать новую операцию').click()
+                        await page.locator('#workflowSalePick').select_option(str(bid))
+                        await expect(form.locator('[name=tariffId] option').filter(has_text='400')).to_have_count(1)
+                        tariff = await form.locator('[name=tariffId] option').evaluate_all(
+                            "options=>options.find(option=>option.textContent.includes('400')).value")
+                        await form.locator('[name=tariffId]').select_option(tariff)
                         await form.locator('[name=sold]').fill('1')
                         await form.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/coast.jpg')
                         await form.locator('[name=selected]').set_input_files('app/webapp/assets/academy/evening.jpg')

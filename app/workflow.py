@@ -193,7 +193,8 @@ class Workflow:
                 history = {'client': customer.name if customer else '', 'phone': customer.phone if customer else None,
                            'hotel': hotel.name if hotel else 'Отель не указан', 'sales': [
                     {'id': sale.id, 'at': sale.created_at.isoformat() + 'Z', 'photos': sale.sold_photos,
-                     'amount': str(money(sale.amount)), 'paymentStatus': sale.payment_status}
+                     'amount': str(money(sale.amount)), 'paymentStatus': sale.payment_status,
+                     'lines': (snapshot(sale.pricing_snapshot) or {}).get('lines', [])}
                     for sale in purchases], 'soldTotal': sum(sale.sold_photos for sale in purchases),
                     'salesAmount': str(total), 'paidAmount': str(paid), 'dueAmount': str(due),
                     'totalFrames': max([original_count or 0, draft.declared_photo_count or 0 if draft else 0] + [sale.declared_photo_count or 0 for sale in purchases])}
@@ -212,7 +213,10 @@ class Workflow:
                         'pricing': snapshot(draft.pricing_snapshot),
                         'amount': ((snapshot(draft.pricing_snapshot) or {}).get('amount') or
                             (str(money(Decimal(effective_price) * draft.sold_photos)) if draft.sold_photos else None)),
-                        'expectedAmount': str(money(draft.expected_amount)) if draft.expected_amount is not None else None,
+                        'expectedAmount': (str(money(max(Decimal(0), total + Decimal(
+                            (snapshot(draft.pricing_snapshot) or {}).get('amount') or
+                            str(money(Decimal(effective_price) * draft.sold_photos))) - paid)))
+                            if draft.sold_photos else None),
                         'receiptStored': bool(draft.receipt_file_id),
                         'receiptImagePath': (f'/sale-drafts/{draft.id}/receipt/image'
                             if draft.receipt_file_id and (draft.created_by_id == a['id'] or {'OWNER', 'ADMIN'} & set(a['roles'])) else None),
@@ -354,7 +358,7 @@ class Workflow:
 
     async def sale(self, session, actor, roles, kind, data, raw):
         if kind == 'sale_start':
-            fields(data, 'booking price')
+            fields(data, 'booking price tariffId' if 'tariffId' in data else 'booking price')
             bid = await target(session, actor, data['booking'], 'bookingId')
             draft = await start_sale_draft(session, actor, roles, bid)
         else:
@@ -372,8 +376,20 @@ class Workflow:
             raise AccessError('Нет доступа к этой продаже.', 403)
         if 'price' in data:
             from .services.pricing import unit_price
+            # Explicit tariffs are checked against the booking's hotel; their
+            # price need not equal the hotel's default unit rate. Legacy
+            # clients omit tariffId and keep the default-rate freshness check.
+            explicit_tariff = kind in {'sale_start', 'sale_counts'} and 'tariffId' in data
+            if kind == 'sale_start' and explicit_tariff:
+                from .models import HotelTariff
+                tariff = await session.get(HotelTariff, data['tariffId'])
+                if not tariff or not tariff.active or tariff.hotel_id != booking.hotel_id:
+                    raise AccessError('Тариф недоступен в этом отеле.', 409)
             # Once counts are accepted, use their immutable tariff snapshot.
-            if not isinstance(data['price'], str) or (not draft.pricing_snapshot and data['price'] != await unit_price(session, booking)):
+            if not isinstance(data['price'], str) or (
+                not draft.pricing_snapshot and not explicit_tariff
+                and data['price'] != await unit_price(session, booking)
+            ):
                 raise AccessError('Цена пакета изменилась. Обновите данные и проверьте продажу.', 409)
         result = {'draftId': draft.id, 'bookingId': booking.id}
         if kind == 'sale_complete' and draft.status == 'COMPLETED':

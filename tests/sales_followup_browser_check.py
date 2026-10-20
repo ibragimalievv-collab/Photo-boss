@@ -16,7 +16,7 @@ from test_miniapp_release import TOKEN, signed
 from test_sales_followups import prepared, purchase
 
 from app.miniapp_api import install_miniapp
-from app.models import Booking, OperationRequest, Receipt, Sale
+from app.models import Booking, HotelTariff, OperationRequest, Receipt, Sale
 from app.services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
 from app.services.receipts import payment_totals, refresh_payment_statuses
 from app.workflow import Workflow
@@ -27,6 +27,8 @@ async def main():
     async with factory() as session:
         original = await purchase(session, bid, 1, 2,
             repeated_hash=hashlib.sha256(Path('app/webapp/assets/academy/child.jpg').read_bytes()).hexdigest())
+        session.add_all(HotelTariff(hotel_id=1, name=f'{price} ₽ за кадр', kind='UNIT', price=price)
+                        for price in (300, 400, 500))
         original.receipt.status, original.receipt.verified_amount = 'APPROVED', 800
         await refresh_payment_statuses(session, bid)
         (await session.get(Booking, bid)).status = 'COMPLETED'
@@ -69,6 +71,9 @@ async def main():
                     await expect(form.locator('[name=total]')).to_have_value('10')
                     assert await form.locator('[name=total]').get_attribute('readonly') is not None
                     await expect(page.get_by_role('heading', name='История покупок')).to_be_visible()
+                    tariff = await form.locator('[name=tariffId] option').evaluate_all(
+                        "options=>options.find(option=>option.textContent.includes('400')).value")
+                    await form.locator('[name=tariffId]').select_option(tariff)
                     await form.locator('[name=sold]').fill('3')
                     await form.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/coast.jpg')
                     await form.locator('[name=selected]').set_input_files([
@@ -95,7 +100,9 @@ async def main():
                     async with factory() as session:
                         sales = list((await session.scalars(select(Sale).order_by(Sale.id))).all())
                         assert len(sales) == 2
-                        assert (sales[0].id, sales[0].amount, sales[0].sold_photos, sales[0].payment_status) == (original_id, 800, 2, 'PAID')
+                        assert (sales[0].id, sales[0].amount, sales[0].sold_photos, sales[0].payment_status) == (original_id, 800, 2, 'PAID'), [
+                            (sale.id, sale.amount, sale.sold_photos, sale.payment_status) for sale in sales
+                        ]
                         assert (sales[1].amount, sales[1].sold_photos, sales[1].payment_status) == (1200, 3, 'UNPAID')
                         assert tuple(await payment_totals(session, bid)) == (2000,800,1200)
                         assert await session.scalar(select(func.count(Receipt.id))) == 2
