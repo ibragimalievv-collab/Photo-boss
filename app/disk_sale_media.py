@@ -13,9 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .disk_folder_audit import child_path, provider_error, read_storage, source_id
 from .miniapp_security import AccessError
 from .models import Booking, SaleDraftPhoto, Setting, User
-from .services.core import audit
+from .services.core import audit, roles_of
 from .services.photo_storage import image_format
-from .services.sale_workflow import already_purchased_photo, can_sell, selected_count
+from .services.sale_workflow import (
+    active_draft,
+    already_purchased_photo,
+    can_sell,
+    selected_count,
+)
 from .services.shooting_media_audit import inspect_original
 from .yandex_disk import YandexDisk, YandexDiskError, safe_disk_read_path
 
@@ -138,19 +143,28 @@ async def select_photo(session, actor, booking, draft, data):
     if metadata.get('md5') and metadata['md5'] != md5:
         raise ValueError('Контрольная сумма фотографии изменилась. Повторите выбор.')
     old = await session.scalar(select(SaleDraftPhoto).where(SaleDraftPhoto.draft_id == draft.id, SaleDraftPhoto.sha256 == digest))
-    if old:
-        return {'photoId': old.id, 'duplicate': True, 'storageVerified': True}
-    if draft.status != 'AWAITING_SELECTED':
+    if draft.status != 'AWAITING_SELECTED' and not (draft.status == 'COMPLETED' and old):
         raise ValueError('Сначала сохраните количество кадров в продаже.')
-    if await selected_count(session, draft.id) >= draft.sold_photos:
+    if not old and await selected_count(session, draft.id) >= draft.sold_photos:
         raise ValueError('Все выбранные кадры уже сохранены.')
-    if await already_purchased_photo(session, booking.id, digest):
+    if not old and await already_purchased_photo(session, booking.id, digest):
         raise ValueError('Этот кадр уже куплен в предыдущей продаже. Выберите новый кадр для допродажи.')
     rid = str(uuid5(NAMESPACE_URL, f'photo-boss:disk-sale:{draft.id}:{digest}'))
     file_id = FILE_PREFIX + rid
-    session.add(Setting(key=REFERENCE + rid, value=json.dumps({
+    value = json.dumps({
         'source': source, 'path': path, 'bookingId': booking.id, 'sha256': digest, 'md5': md5,
-        'bytes': len(raw), 'name': metadata['name']}, ensure_ascii=False)))
+        'bytes': len(raw), 'name': metadata['name']}, ensure_ascii=False)
+    saved = await session.get(Setting, REFERENCE + rid)
+    if saved:
+        saved.value = value
+    else:
+        session.add(Setting(key=REFERENCE + rid, value=value))
+    if old:
+        old.telegram_file_id = old.storage_path = file_id
+        old.byte_size = len(raw)
+        await session.flush()
+        await audit(session, actor, 'sale_disk_photo_relinked', 'sale_draft', draft.id, f'photo={old.id};same_checksum')
+        return {'photoId': old.id, 'duplicate': True, 'storageVerified': True}
     photo = SaleDraftPhoto(draft_id=draft.id, telegram_file_id=file_id,
         telegram_unique_id='disk-selected:' + digest, storage_path=file_id, sha256=digest, byte_size=len(raw))
     session.add(photo)
@@ -169,10 +183,12 @@ class DiskSaleMedia:
         except (ValueError, KeyError) as exc:
             raise AccessError('Съёмка не найдена.', 404) from exc
         a = request['miniapp_actor']
-        actor = await session.get(User, a['id'])
+        actor = await session.get(User, a['id'], with_for_update=lock)
+        roles = (await roles_of(session, actor)) & set(a['roles']) if actor else set()
         booking = await session.get(Booking, bid, with_for_update=lock)
-        if not actor or not actor.active or not await can_sell(actor, set(a['roles']), booking, session=session):
+        if not actor or not actor.active or not await can_sell(actor, roles, booking, session=session):
             raise AccessError('Нет доступа к продаже этой съёмки.', 403)
+        request['disk_sale_roles'] = roles
         return actor, booking
 
     async def folder(self, request):
@@ -185,7 +201,7 @@ class DiskSaleMedia:
                     raise AccessError('Укажите папку или ссылку Яндекс.Диска.', 400)
                 try:
                     requested = parse_source(body['source'])
-                    if requested['kind'] == 'private' and 'OWNER' not in request['miniapp_actor']['roles']:
+                    if requested['kind'] == 'private' and 'OWNER' not in request['disk_sale_roles']:
                         raise AccessError('Закрытую папку рабочего Диска привязывает владелец. Можно прикрепить доступную ссылку.', 403)
                     reader = Reader(requested)
                     metadata = await reader.metadata(requested['root'])
@@ -211,6 +227,28 @@ class DiskSaleMedia:
                 return web.json_response({'connected': False})
             return web.json_response({'connected': True, 'revision': source['revision'], 'root': source['root'],
                 'kind': source['kind'], 'name': source['name'], 'source': source.get('publicKey', source['root'])})
+
+    async def takeover(self, request):
+        if 'OWNER' not in request['miniapp_actor']['roles']:
+            raise AccessError('Продолжить чужой черновик может только владелец.', 403)
+        if await self.api.body(request) != {}:
+            raise AccessError('Некорректный запрос продолжения продажи.', 400)
+        async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
+            actor, booking = await self.authorize(session, request, lock=True)
+            if 'OWNER' not in request['disk_sale_roles']:
+                raise AccessError('Продолжить чужой черновик может только владелец.', 403)
+            draft = await active_draft(session, booking.id)
+            if not draft:
+                raise AccessError('Незавершённая продажа не найдена. Обновите съёмку.', 409)
+            previous = draft.created_by_id
+            if previous != actor.id:
+                draft.created_by_id = actor.id
+                await audit(session, actor, 'sale_draft_taken_over', 'sale_draft', draft.id,
+                            f'previous={previous};booking={booking.id};photos_and_receipt_retained')
+            result = {'draftId': draft.id, 'selectedPhotos': await selected_count(session, draft.id),
+                      'previousActorId': previous, 'changed': previous != actor.id}
+            await session.commit()
+            return web.json_response(result)
 
     async def files(self, request):
         async with AsyncSession(self.api.engine) as session:
@@ -247,3 +285,4 @@ def install_disk_sale_media(app, api):
     app.router.add_route('GET', '/api/miniapp/bookings/{id:\\d+}/disk-folder', feature.folder)
     app.router.add_route('POST', '/api/miniapp/bookings/{id:\\d+}/disk-folder', feature.folder)
     app.router.add_get('/api/miniapp/bookings/{id:\\d+}/disk-files', feature.files)
+    app.router.add_post('/api/miniapp/bookings/{id:\\d+}/sale-takeover', feature.takeover)

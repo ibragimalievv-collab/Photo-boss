@@ -429,10 +429,6 @@ class Workflow:
         elif kind == 'sale_disk_selected':
             from .disk_sale_media import select_photo
             result |= await select_photo(session, actor, booking, draft, data)
-            if draft.status == 'AWAITING_SELECTED' and await selected_count(session, draft.id) == draft.sold_photos:
-                complete = await complete_sale(session, actor, draft.id)
-                result |= {'saleId': complete.sale.id, 'amount': str(complete.sale_amount),
-                           'soldPhotos': complete.sale.sold_photos, 'paymentStatus': complete.sale.payment_status}
         elif kind == 'sale_selected':
             digest = hashlib.sha256(raw).hexdigest()
             duplicate = await session.scalar(select(SaleDraftPhoto).where(SaleDraftPhoto.draft_id == draft.id, SaleDraftPhoto.sha256 == digest))

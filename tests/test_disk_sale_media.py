@@ -27,6 +27,7 @@ from app.services.sale_workflow import (
     start_sale_draft,
 )
 from app.storage_inventory import selected_folder_audit
+from app.workflow import Workflow
 from app.yandex_disk import YandexDisk, YandexDiskError
 
 
@@ -184,3 +185,56 @@ def test_directory_count_changes_cannot_be_reported_as_a_complete_listing():
         {'type':'dir','_embedded':{'total':4,'items':[{'name':'c'},{'name':'d'}]}}])
     with pytest.raises(YandexDiskError,match='изменился'):
         asyncio.run(disk.disk_list_directory('disk:/Hotel',page_size=2))
+
+
+def test_only_owner_can_resume_another_employees_draft_without_losing_data(monkeypatch):
+    async def run():
+        engine,factory,feature,request,source,_disk,did=await prepared(monkeypatch)
+        try:
+            async with factory() as session:
+                draft=await session.get(SaleDraft,did)
+                booking=await session.get(Booking,draft.booking_id)
+                await select_photo(session,await session.get(User,1),booking,draft,
+                                   {'revision':source['revision'],'path':'disk:/Hotel/a.jpg'})
+                draft.created_by_id=2
+                original=(draft.receipt_file_id,draft.pricing_snapshot,draft.sold_photos)
+                await session.commit()
+            request.body={}
+            request['miniapp_actor']={'id':3,'roles':['MANAGER']}
+            with pytest.raises(AccessError): await feature.takeover(request)
+            request['miniapp_actor']={'id':1,'roles':['OWNER']}
+            result=json.loads((await feature.takeover(request)).text)
+            assert result['draftId']==did and result['selectedPhotos']==1 and result['changed']
+            assert not json.loads((await feature.takeover(request)).text)['changed']
+            async with factory() as session:
+                draft=await session.get(SaleDraft,did)
+                assert draft.created_by_id==1
+                assert (draft.receipt_file_id,draft.pricing_snapshot,draft.sold_photos)==original
+                assert await session.scalar(select(func.count(SaleDraftPhoto.id)))==1
+                assert await session.scalar(select(func.count(Sale.id)))==0
+                with pytest.raises(AccessError,match='Нет доступа'):
+                    await Workflow(SimpleNamespace()).sale(session,await session.get(User,2),{'PHOTOGRAPHER'},
+                        'sale_counts',{'draft':{'id':did},'total':150,'sold':2,'price':'400.00'},None)
+        finally: await engine.dispose()
+    asyncio.run(run())
+
+
+def test_reselecting_same_original_repairs_old_storage_reference_without_counting_again(monkeypatch):
+    async def run():
+        engine,factory,_,_,source,disk,did=await prepared(monkeypatch)
+        try:
+            async with factory() as session:
+                raw=disk.raw['disk:/Hotel/a.jpg'];digest=hashlib.sha256(raw).hexdigest()
+                photo=SaleDraftPhoto(draft_id=did,telegram_file_id='app:/PhotoBoss/old.jpg',
+                    telegram_unique_id='old-same-photo',storage_path='app:/PhotoBoss/old.jpg',sha256=digest,byte_size=len(raw))
+                session.add(photo);await session.flush();pid=photo.id
+                draft=await session.get(SaleDraft,did)
+                result=await select_photo(session,await session.get(User,1),await session.get(Booking,draft.booking_id),draft,
+                                         {'revision':source['revision'],'path':'disk:/Hotel/a.jpg'})
+                assert result['duplicate'] and result['photoId']==pid
+                assert photo.storage_path.startswith('disk-ref:')
+                assert await load_reference(session,photo.storage_path)==raw
+                assert await session.scalar(select(func.count(SaleDraftPhoto.id)))==1
+                assert await session.scalar(select(func.count(Sale.id)))==0
+        finally: await engine.dispose()
+    asyncio.run(run())

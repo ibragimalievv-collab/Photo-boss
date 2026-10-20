@@ -18,14 +18,18 @@ from test_miniapp_release import TOKEN, signed
 from work_calls_browser_check import wait_async
 
 from app.miniapp_api import install_miniapp
-from app.models import PayrollEntry, Sale, SaleDraftPhoto
+from app.models import PayrollEntry, Sale, SaleDraft, SaleDraftPhoto
 from app.services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
 
 
 async def main():
     with tempfile.TemporaryDirectory(prefix='disk-sale-browser-') as folder, MonkeyPatch.context() as monkey:
-        engine,factory,_,request,_,disk,_ = await prepared(monkey,'sqlite+aiosqlite:///'+folder+'/test.db')
+        engine,factory,_,request,_,disk,did = await prepared(monkey,'sqlite+aiosqlite:///'+folder+'/test.db')
         bid=int(request.match_info['id'])
+        async with factory() as session:
+            draft=await session.get(SaleDraft,did)
+            draft.created_by_id=2
+            await session.commit()
         bot=SimpleNamespace(token=TOKEN,send_message=AsyncMock(),me=AsyncMock(return_value=SimpleNamespace(username='fixture_bot')))
         app=web.Application(client_max_size=25*1024*1024)
         api=install_miniapp(app,engine=engine,bot=bot,lessons=ACADEMY_LESSONS,blocks=ACADEMY_BLOCKS)
@@ -60,6 +64,7 @@ async def main():
                     page.on('pageerror',lambda e:errors.append(str(e)))
                     await page.goto(str(server.make_url('/app/#workflow')))
                     await page.locator('#workflowSalePick').select_option(str(bid))
+                    await page.get_by_role('button',name='Продолжить продажу как владелец',exact=True).click()
                     form=page.locator('#workflowSale')
                     for label in ['Загрузить с устройства','Прикрепить ссылку','Выбрать на Яндекс.Диске']:
                         await expect(form.get_by_role('radio',name=label,exact=True)).to_be_visible()
@@ -82,7 +87,7 @@ async def main():
                     disk.delete.assert_not_awaited()
                     output=Path('/tmp/photo-boss-calls-qa');output.mkdir(exist_ok=True,parents=True)
                     await page.screenshot(path=str(output/'disk-sale-three-sources.png'),full_page=True)
-                    print('PASS: three photo sources; nested private folder selection; original reads only; lost response replay; one 800-RUB sale and one commission')
+                    print('PASS: owner resumes same draft with receipt; three photo sources; nested folder selection; reads only; lost response replay; one 800-RUB sale and commission')
                 except Exception as exc:
                     print('ORIGINAL ERROR:',str(exc))
                     print('BROWSER DIAGNOSTICS:', await page.locator('body').inner_text(), 'JS ERRORS:', errors)
