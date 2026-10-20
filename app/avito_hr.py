@@ -175,28 +175,83 @@ async def publish(engine, payloads):
     print("AVITO_PUBLICATION_RESULTS", json.dumps([dict(r) for r in rows], ensure_ascii=False))
 
 
-INTRO = ("Здравствуйте! Я автоматический HR-помощник «Фотобосс». Работа в Анапе. "
-    "Можно без опыта: обучение с нуля, последовательное сопровождение наставника и еженедельный разбор работы. "
-    "Оплата — 15% от продаж. Есть бонусы. Выплаты еженедельно; фиксированный доход не гарантируем. "
-    "Жильё компенсируется частично, проезд — после приезда и минимум месяца работы. "
-    "График — 3/1: три рабочих дня, один выходной. Место и суммы компенсаций согласует владелец до выхода. "
-    "Расскажите, пожалуйста, об опыте, из какого вы города и когда готовы начать в Анапе. "
-    "Паспортные и банковские данные не нужны.")
+INTRO = "Здравствуйте! Я автоматический HR-помощник «Фотобосс»."
+DIALOGUE_VERSION = "short-context-v1"
 
 
-def reply(value, role):
-    value = value.lower()
-    if any(w in value for w in ("график", "смен", "выходн", "рабочие дни")):
-        return "График — 3/1: три рабочих дня, один выходной. Точное время смен и место работы владелец согласует с вами до выхода.", False
-    if any(w in value for w in ("бонус", "преми")):
-        return "Да, есть бонусы. Подробные правила начисления согласует с вами владелец до выхода. Частичная компенсация жилья и компенсация проезда — отдельные условия, они не входят в 15% от продаж.", False
-    if any(w in value for w in ("зарплат", "доход", "процент", "оплат", "выплат")):
-        return "Оплата — 15% от продаж. Есть бонусы. Выплаты еженедельно. Доход зависит от результатов, фиксированную сумму не гарантируем. Жильё и проезд — отдельные компенсации, они не входят в эти 15%.", False
-    if any(w in value for w in ("жиль", "прожив", "проезд", "переезд")):
-        return "Предусмотрена частичная компенсация жилья. Проезд компенсируется после приезда и минимум месяца работы. Точные суммы и условия владелец согласует с вами до выхода.", False
-    if any(w in value for w in ("обуч", "опыт", "наставник")):
-        return ("Можно без опыта. " + ("Для фотографа — обучение с нуля и последовательное сопровождение наставника: камера, свет, позирование, общение с гостями и разбор съёмок." if role == "PHOTOGRAPHER" else "Для менеджера — обучение общению с гостями, презентации фотосъёмки и точной записи, с разбором практики.") + " Срок достижения профессионального уровня не гарантируем."), False
-    return "Спасибо! Передам ваш ответ и вопросы владельцу «Фотобосс» для обсуждения следующего шага. Решение о найме и окончательные условия согласует владелец.", True
+def reply(value, role, history=()):
+    """Bounded topic recognition with conversation context; unknowns go to owner."""
+    import re
+    value = value.lower().replace("ё", "е").strip()
+    previous = [m for m in sorted(history, key=lambda m: int(m.get("created", 0)))
+                if m.get("type") == "text"]
+    outbound = [(m.get("content") or {}).get("text", "") for m in previous if m.get("direction") == "out"]
+    last = outbound[-1].lower().replace("ё", "е") if outbound else ""
+    first = not outbound
+    prefix = INTRO + " " if first else ""
+    if any(w in value for w in ("не пишите", "не писать", "не беспокойте", "не интересно", "неинтересно", "не подходит", "отказываюсь")):
+        return "", False
+    answers = []
+    def has(*words):
+        return any(word in value for word in words)
+    # Concrete questions are handled before greetings, even on the first contact.
+    if has("зарплат", "доход", "процент", "оплат", "заработ", "платите", "сколько получ"):
+        answers.append("Оплата — 15% от продаж, есть бонусы.")
+        if has("фикс", "гарант", "в месяц", "в день", "средн", "сколько можно"):
+            answers.append("Фиксированную сумму не гарантируем; подтвержденного среднего заработка у меня нет.")
+    if has("выплат", "расчет", "расчёт", "когда плат", "как часто плат") or (has("когда", "как часто") and "выплат" in last):
+        answers.append("Выплаты еженедельно.")
+    if has("бонус", "преми") and not any("есть бонусы" in a for a in answers):
+        answers.append("Есть бонусы; правила и суммы уточню у владельца." if has("сколько", "как", "сумм", "расчет") else "Да, есть бонусы.")
+    if has("жиль", "прожив", "квартир", "жить"):
+        answers.append("Есть частичная компенсация жилья; сумму и условия нужно согласовать с владельцем.")
+    if has("проезд", "билет", "переезд", "дорог"):
+        answers.append("Проезд компенсируется после приезда и минимум месяца работы; сумму согласует владелец.")
+    if has("график", "выходн", "рабочие дни", "3/1", "3 на 1"):
+        answers.append("График — 3/1: три рабочих дня, один выходной.")
+    if has("час", "во сколько", "длительность смен", "начало смен", "конец смен"):
+        answers.append("Точные часы смен уточню у владельца.")
+    if has("где", "адрес", "отель", "место работ", "каком город"):
+        answers.append("Работа в Анапе; конкретное место согласуем с владельцем до выхода.")
+    if has("обуч", "опыт", "наставник", "науч", "нович"):
+        if has("сколько", "долго", "срок"):
+            answers.append("Точный срок обучения уточню у владельца.")
+        else:
+            answers.append("Можно без опыта: обучение с нуля и помощь наставника." if role == "PHOTOGRAPHER" else "Можно без опыта: обучаем общению с гостями и записи на фотосъемки.")
+    if has("обязанност", "что делать", "чем заним", "что нужно дел"):
+        answers.append("Фотограф снимает гостей; работе с камерой и съемке обучаем." if role == "PHOTOGRAPHER" else "Менеджер общается с гостями, рассказывает о фотосъемках и записывает желающих.")
+    ready = bool(re.search(r"(?:готов[аы]?|могу|хочу)\s+(?:выйти|начать|приступить)", value))
+    unknown = has("договор", "оформлен", "документ", "налог", "штраф", "питан", "форм", "камера своя", "оборудован", "возраст", "гражданств", "виза")
+    needs_owner = unknown or ready or any("уточню" in a for a in answers)
+    if ready:
+        answers.append("Передам владельцу вашу готовность, чтобы согласовать выход.")
+    if unknown:
+        answers.append("Этот вопрос уточню у владельца и вернусь с ответом.")
+    if answers:
+        # One relevant invitation; never repeat a question already asked in history.
+        question = ""
+        if not needs_owner and len(answers) == 1:
+            if "15%" in answers[0]:
+                question = "Подходит такой формат оплаты?"
+            elif "Можно без опыта" in answers[0]:
+                question = "Что хотели бы узнать об обучении?"
+            elif "Менеджер общается" in answers[0] or "Фотограф снимает" in answers[0]:
+                question = "Вам интересны такие задачи?"
+        if question and not any(question in old for old in outbound):
+            answers.append(question)
+        return prefix + " ".join(dict.fromkeys(answers)), needs_owner
+    clean = re.sub(r"[^а-яa-z ]", "", value).strip()
+    if clean in {"здравствуйте", "здравствуй", "добрый день", "добрый вечер", "привет", "интересует вакансия", "актуально", "вакансия актуальна"}:
+        if first:
+            title = "фотографом" if role == "PHOTOGRAPHER" else "менеджером по записи"
+            return prefix + f"Вас интересует работа {title}?", False
+        return "Вакансия актуальна. Что хотели бы узнать о работе?", False
+    if clean in {"спасибо", "понятно", "хорошо", "ок", "да", "интересно"}:
+        if "вас интересует работа" in last:
+            return "Что хотели бы узнать о работе?", False
+        return "Если появятся вопросы по работе, пишите.", False
+    # Never fabricate details or infer a sensitive eligibility decision.
+    return prefix + "Уточню ваш вопрос у владельца и вернусь с ответом.", True
 
 
 class Worker:
@@ -247,8 +302,9 @@ class Worker:
                     continue
                 async with self.engine.connect() as conn:
                     escalated = await conn.scalar(text("SELECT count(*) FROM hr_avito_escalations WHERE chat_id=:chat"), {"chat": chat})
+                    stopped = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE chat_id=:chat AND state='stopped'"), {"chat": chat})
                     greeted = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE event_key=:key"), {"key": "welcome:" + chat})
-                if escalated:
+                if escalated or stopped:
                     continue
                 messages = await self.api.request("GET", f"/messenger/v3/accounts/{self.uid}/chats/{urllib.parse.quote(chat, safe='')}/messages/?limit=100&offset=0")
                 messages = messages if isinstance(messages, list) else messages.get("messages", [])
@@ -262,14 +318,19 @@ class Worker:
                 if not incoming:
                     continue
                 newest = max(incoming, key=lambda m: int(m.get("created", 0)))
-                if not greeted:
-                    # Store the initial inbound id so it cannot trigger an extra reply next cycle.
-                    async with self.engine.begin() as conn:
-                        await conn.execute(text("INSERT INTO hr_avito_outbox(event_key,chat_id,response,state) VALUES (:key,:chat,'','baseline') ON CONFLICT(event_key) DO NOTHING"), {"key": "in:" + chat + ":" + str(newest["id"]), "chat": chat})
-                    await self.send_once("welcome:" + chat, chat, INTRO)
+                # Process all consecutive inbound texts in the current turn, not only
+                # the last fragment. Existing journal keys protect already answered turns.
+                latest_out = max((int(m.get("created", 0)) for m in messages if m.get("direction") == "out" and m.get("type") == "text"), default=-1)
+                pending = sorted([m for m in incoming if int(m.get("created", 0)) > latest_out], key=lambda m: int(m.get("created", 0)))
+                if not pending:
                     continue
                 key = "in:" + chat + ":" + str(newest["id"])
-                answer, escalate = reply((newest.get("content") or {}).get("text", ""), roles[item_id])
+                value = "\n".join((m.get("content") or {}).get("text", "") for m in pending)
+                answer, escalate = reply(value, roles[item_id], messages)
+                if not answer:
+                    async with self.engine.begin() as conn:
+                        await conn.execute(text("INSERT INTO hr_avito_outbox(event_key,chat_id,response,state) VALUES (:key,:chat,'','stopped') ON CONFLICT(event_key) DO NOTHING"), {"key": key, "chat": chat})
+                    continue
                 await self.send_once(key, chat, answer)
                 if escalate:
                     async with self.engine.begin() as conn:
