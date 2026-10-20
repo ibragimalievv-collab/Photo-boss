@@ -3,10 +3,10 @@ import asyncio
 import contextlib
 import hashlib
 import http.client
-import socket
 import json
 import logging
 import os
+import socket
 import time
 import urllib.error
 import urllib.parse

@@ -5,7 +5,7 @@ import hashlib
 import json
 import logging
 import os
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -97,7 +97,22 @@ async def queue_sale_created(session, sale, booking):
                 url='/app/#finance', message=f'Оформлена продажа №{sale.id}. Подробности в кассе.')
 
 
-async def eligible(session, notice, sub, *, include_read=False):
+def current_utc():
+    moment = utc_now()
+    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+
+
+def reminder_deadline(notice):
+    if notice.kind != 'booking_reminder':
+        return None
+    try:
+        moment = datetime.fromisoformat(json.loads(notice.payload or '{}')['scheduledAt'])
+        return moment.astimezone(UTC) if moment.tzinfo else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+async def eligible(session, notice, sub, *, include_read=False, for_delivery=False):
     if not sub.active or sub.user_id != notice.user_id or notice.resolved_at or (notice.acknowledged_at and not include_read):
         return False
     user = await session.get(User, notice.user_id)
@@ -116,7 +131,8 @@ async def eligible(session, notice, sub, *, include_read=False):
             from .services.booking_reminders import PRE_SHOOT, scheduled_at
             moment = scheduled_at(booking)
             return (booking.status in PRE_SHOOT
-                    and json.loads(notice.payload or '{}').get('scheduledAt') == moment.isoformat())
+                    and json.loads(notice.payload or '{}').get('scheduledAt') == moment.isoformat()
+                    and (not for_delivery or moment - timedelta(minutes=20) <= current_utc() < moment))
         return booking.status in ACTIVE
     if notice.kind == 'sale_created':
         from .models import Booking, HotelEmployee, Sale
@@ -155,16 +171,26 @@ def payload_for(notice):
         bid = json.loads(notice.payload or '{}').get('bookingId')
         if type(bid) is int:
             url += f'?booking={bid}'
-    return {'title': 'Photo Boss · ' + titles.get(notice.kind, 'Рабочее уведомление'),
+    payload = {'title': 'Photo Boss · ' + titles.get(notice.kind, 'Рабочее уведомление'),
             'body': 'Откройте Photo Boss, чтобы посмотреть подробности.', 'url': url, 'tag': f'pb-notice-{notice.id}'}
+    deadline = reminder_deadline(notice)
+    if deadline:
+        payload['expiresAt'] = deadline.isoformat()
+    return payload
 
 
 async def send_push(subscription, payload):
     from pywebpush import WebPushException, webpush
+    ttl = 300 if payload['title'].endswith('звонок') else 3600
+    if payload.get('expiresAt'):
+        remaining = (datetime.fromisoformat(payload['expiresAt']) - current_utc()).total_seconds()
+        if remaining <= 0:
+            return None  # The reminder expired before the provider request began.
+        ttl = min(ttl, int(remaining))
     try:
         response = await asyncio.to_thread(webpush, subscription_info=subscription,
             data=json.dumps(payload, ensure_ascii=False), vapid_private_key=os.environ['WEB_PUSH_PRIVATE_KEY'],
-            vapid_claims={'sub': os.environ['WEB_PUSH_SUBJECT']}, ttl=300 if payload['title'].endswith('звонок') else 3600,
+            vapid_claims={'sub': os.environ['WEB_PUSH_SUBJECT']}, ttl=ttl,
             timeout=10, headers={'Urgency': 'high'})
         return response.status_code
     except WebPushException as exc:
@@ -187,7 +213,7 @@ async def deliver_push(engine, *, limit=20):
                 PushDelivery.subscription_id == PushSubscription.id).exists())
             .order_by(Notification.id).limit(100))).all()
         for notice, sub in pairs:
-            status = 'PENDING' if await eligible(session, notice, sub) else 'SKIPPED'
+            status = 'PENDING' if await eligible(session, notice, sub, for_delivery=True) else 'SKIPPED'
             try:
                 async with session.begin_nested():
                     session.add(PushDelivery(notification_id=notice.id, subscription_id=sub.id, status=status))
@@ -206,12 +232,16 @@ async def deliver_push(engine, *, limit=20):
                 continue
             sub = await session.get(PushSubscription, delivery.subscription_id, with_for_update=True)
             notice = await session.get(Notification, delivery.notification_id)
-            if (not notice or not sub or not await eligible(session, notice, sub)
+            if (not notice or not sub or not await eligible(session, notice, sub, for_delivery=True)
                     or notice.created_at < sub.created_at
                     or notice.created_at < utc_now() - timedelta(seconds=60 if notice.kind == 'call' else 86400)):
                 delivery.status = 'SKIPPED'
             else:
                 code = await send_push(json.loads(sub.subscription), payload_for(notice))
+                if code is None:
+                    delivery.status = 'SKIPPED'
+                    await session.commit()
+                    continue
                 delivery.attempts += 1
                 delivery.last_error = None if 200 <= code < 300 else f'provider_http_{code}'
                 if 200 <= code < 300:
@@ -249,6 +279,9 @@ async def log_push_state(engine):
 
 async def push_delivery_state(session, notice, *, active_devices):
     """Report provider state without claiming that a phone displayed the alert."""
+    deadline = reminder_deadline(notice)
+    if deadline and current_utc() >= deadline:
+        return 'EXPIRED'
     if not app_channel() or not configured():
         return 'OFF'
     if not active_devices:
@@ -264,6 +297,8 @@ async def push_delivery_state(session, notice, *, active_devices):
         return 'ACCEPTED'
     if states & {'FAILED', 'EXPIRED'}:
         return 'FAILED'
+    if states == {'SKIPPED'}:
+        return 'SKIPPED'
     return 'PENDING'
 
 

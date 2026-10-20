@@ -1,5 +1,5 @@
 // Cache executable shell only. Authenticated API responses never enter CacheStorage.
-const CACHE='photo-boss-shell-v49-reminders-disk-audit';
+const CACHE='photo-boss-shell-v50-reminder-expiry';
 const SDK='https://telegram.org/js/telegram-web-app.js';
 const STATIC=['/app/','/app/config.js','/app/manifest.webmanifest','/app/css/styles.css','/app/css/galleries.css','/app/assets/icon.svg',
  ...['icon-192','icon-512','icon-maskable-512','apple-touch-icon'].map(n=>`/app/assets/${n}.png`),
@@ -18,6 +18,7 @@ self.addEventListener('fetch',event=>{
 
 self.addEventListener('push',event=>event.waitUntil((async()=>{
  let data={};try{data=event.data?.json()||{};}catch{}
+ if(data.expiresAt!==undefined){const expires=typeof data.expiresAt==='string'?Date.parse(data.expiresAt):NaN;if(!Number.isFinite(expires)||Date.now()>=expires)return;}
  const title=typeof data.title==='string'?data.title.slice(0,120):'Photo Boss';
  let url='/app/#home';try{const target=new URL(data.url,self.location.origin);if(target.origin===self.location.origin&&target.pathname==='/app/')url=target.pathname+target.hash;}catch{}
  await self.registration.showNotification(title,{body:typeof data.body==='string'?data.body.slice(0,250):'Новое событие в Photo Boss.',

@@ -2,8 +2,6 @@
 import json
 from decimal import Decimal
 
-from sqlalchemy import select
-
 from ..models import HotelTariff, Package
 from .receipts import money
 
@@ -29,15 +27,11 @@ async def sale_quote(session, booking, sold, total, tariff_id=None, saved=None):
         if quote['kind'] == 'UNIT' and money(quote['price']) not in UNIT_PRICES:
             raise ValueError('Цена кадра должна быть 300, 400 или 500 ₽.')
     else:
-        # Existing bots and older web clients use the hotel's unit rate.
-        tariff = await session.scalar(select(HotelTariff).where(
-            HotelTariff.hotel_id == booking.hotel_id, HotelTariff.active.is_(True),
-            HotelTariff.kind == 'UNIT').order_by(HotelTariff.id.desc()).limit(1))
-        if tariff:
-            return await sale_quote(session, booking, sold, total, tariff.id)
+        # Older clients and the bot use the package selected for this booking.
+        # Adding another available hotel tariff must not change that rate.
         package = await session.get(Package, booking.package_id)
         if not package:
-            raise ValueError('Пакет недоступен.')
+            raise ValueError('Пакет недоступен. Выберите действующий тариф отеля.')
         quote = {'tariffId': None, 'hotelId': booking.hotel_id, 'name': package.name,
                  'kind': 'UNIT', 'price': str(money(package.price_per_photo)), 'photoCount': None}
         if money(quote['price']) not in UNIT_PRICES:

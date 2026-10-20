@@ -62,10 +62,26 @@ class AcademyPractice:
         self.api, self.engine = api, api.engine
         self.lock = asyncio.Lock()
 
+    @staticmethod
+    def assignment_scope(actor):
+        """Academy work follows current employee/hotel assignments, not role alone."""
+        if "OWNER" in actor["roles"]:
+            return "TRUE"
+        own = "a.user_id=:actor_uid"
+        if "ADMIN" not in actor["roles"]:
+            return own
+        return own + """ OR EXISTS (
+            SELECT 1 FROM hotel_employees employee
+            JOIN hotel_employees administrator ON administrator.hotel_id=employee.hotel_id
+            WHERE employee.user_id=a.user_id AND administrator.user_id=:actor_uid
+        )"""
+
     async def assignment(self, conn, actor, aid, *, lock=False):
         rows = await self.api.rows(conn,
-            "SELECT * FROM training_assignments WHERE id=:id" + (" FOR UPDATE" if lock else ""), id=aid)
-        if not rows or (rows[0]["user_id"] != actor["id"] and not {"OWNER", "ADMIN"} & set(actor["roles"])):
+            "SELECT a.* FROM training_assignments a WHERE a.id=:id AND (" +
+            self.assignment_scope(actor) + ")" + (" FOR UPDATE" if lock else ""),
+            id=aid, actor_uid=actor["id"])
+        if not rows:
             raise AccessError("Задание не найдено.", 404)
         return rows[0]
 
@@ -185,7 +201,8 @@ class AcademyPractice:
             if {"OWNER", "ADMIN"} & set(actor["roles"]):
                 queue = await self.api.rows(conn, """SELECT a.id,u.name,a.category_slug
                     FROM training_assignments a JOIN users u ON u.id=a.user_id
-                    WHERE a.status='PENDING_REVIEW' ORDER BY a.id LIMIT 100""")
+                    WHERE a.status='PENDING_REVIEW' AND (""" + self.assignment_scope(actor) +
+                    ") ORDER BY a.id LIMIT 100", actor_uid=actor["id"])
             result = {"assignment": await self.detail_data(conn, actor, active["id"]) if active else None,
                 "ready": ready and not today_done, "todayDone": today_done,
                 "categories": [{"slug": c.slug, "title": c.title} for c in TRAINING_CATEGORIES
