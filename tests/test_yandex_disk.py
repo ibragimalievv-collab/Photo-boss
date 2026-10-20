@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.yandex_disk import ROOT, YandexDisk, safe_path
+from app.yandex_disk import ROOT, YandexDisk, YandexDiskError, safe_path
 
 
 @pytest.mark.parametrize("path", [
@@ -92,6 +92,7 @@ def test_provider_network_timeouts_have_safe_recoverable_errors(monkeypatch):
 
     with pytest.raises(module.YandexDiskError, match="не ответил") as metadata:
         asyncio.run(disk._json("GET", "/resources"))
+    assert metadata.value.code == "api_timeout"
     assert "private network detail" not in str(metadata.value)
     assert "secret-token-value" not in str(metadata.value)
 
@@ -226,6 +227,7 @@ def test_corrupt_probe_read_is_reported_and_its_file_is_cleaned_up():
     disk.delete = AsyncMock()
     result = asyncio.run(disk.verify())
     assert result['writeVerified'] and not result['readVerified'] and result['error']
+    assert result['errorStage'] == 'read' and result['errorCode'] == 'probe_mismatch'
     assert result['checkedAt']
     disk.delete.assert_awaited_once_with(disk.upload_bytes.await_args.args[0])
 
@@ -233,10 +235,181 @@ def test_corrupt_probe_read_is_reported_and_its_file_is_cleaned_up():
 def test_download_link_api_temporary_failure_is_retried():
     from app.yandex_disk import YandexDiskError
     disk = YandexDisk('token')
-    disk._json = AsyncMock(side_effect=[YandexDiskError('Yandex.Disk HTTP 503'), YandexDiskError('Yandex.Disk HTTP 404')])
+    disk._json = AsyncMock(side_effect=[YandexDiskError('Yandex.Disk HTTP 503', code='api_http', http_status=503),
+                                       YandexDiskError('Yandex.Disk HTTP 404', code='api_http', http_status=404)])
     with pytest.raises(YandexDiskError, match='HTTP 404'):
         asyncio.run(disk.download_bytes(ROOT+'/photo.jpg'))
     assert disk._json.await_count == 2
+
+
+def full_probe_disk():
+    disk = YandexDisk('test-token-never-public')
+    disk.ensure_dir = AsyncMock()
+    disk.upload_bytes = AsyncMock()
+    async def download(path, **kwargs):
+        return disk.upload_bytes.await_args.args[1]
+    disk.download_bytes = AsyncMock(side_effect=download)
+    disk.delete = AsyncMock()
+    return disk
+
+
+def test_directory_only_check_keeps_last_full_evidence_until_connectivity_fails():
+    async def run():
+        disk = full_probe_disk()
+        full = await disk.verify(write_test=True)
+        connected = await disk.verify(write_test=False)
+        assert connected['connected'] and connected['writeVerified'] and connected['readVerified']
+        assert connected['fullCheckedAt'] == full['fullCheckedAt']
+        assert disk.upload_bytes.await_count == disk.download_bytes.await_count == 1
+        disk.ensure_dir.side_effect = YandexDiskError('hidden provider message', code='api_http', http_status=403)
+        unavailable = await disk.verify(write_test=False)
+        assert not any(unavailable[k] for k in ('connected', 'writeVerified', 'readVerified'))
+        assert unavailable['fullCheckedAt'] == full['fullCheckedAt']
+        assert unavailable['errorStage'] == 'root_directory' and unavailable['providerStatus'] == 403
+    asyncio.run(run())
+
+
+def test_directory_check_cannot_clear_failed_file_read_diagnostics():
+    async def run():
+        disk = full_probe_disk()
+        disk.download_bytes = AsyncMock(side_effect=YandexDiskError('hidden network detail', code='download_timeout'))
+        failed = await disk.verify()
+        connected = await disk.verify(write_test=False)
+        assert connected['connected'] and connected['writeVerified'] and not connected['readVerified']
+        for key in ('error', 'errorStage', 'errorCode', 'providerStatus', 'fullCheckedAt'):
+            assert connected[key] == failed[key]
+        assert connected['errorStage'] == 'read' and connected['errorCode'] == 'download_timeout'
+        disk.download_bytes.side_effect = lambda path, **kwargs: disk.upload_bytes.await_args.args[1]
+        recovered = await disk.verify()
+        assert recovered['connected'] and recovered['writeVerified'] and recovered['readVerified']
+        assert all(recovered[key] is None for key in ('error', 'errorStage', 'errorCode', 'providerStatus'))
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('stage,expected_flags', [
+    ('root_directory', (False, False, False)),
+    ('system_directory', (False, False, False)),
+    ('write', (True, False, False)),
+    ('read', (True, True, False)),
+])
+def test_probe_diagnostics_identify_stage_without_exposing_exception(stage, expected_flags, caplog):
+    disk = full_probe_disk()
+    failure = YandexDiskError('https://private-provider.invalid/signed?token=TOP-SECRET',
+                              code='api_http', http_status=503)
+    if stage == 'root_directory':
+        disk.ensure_dir.side_effect = failure
+    elif stage == 'system_directory':
+        disk.ensure_dir.side_effect = [{}, failure]
+    elif stage == 'write':
+        disk.upload_bytes.side_effect = failure
+    else:
+        disk.download_bytes.side_effect = failure
+    result = asyncio.run(disk.verify())
+    assert tuple(result[k] for k in ('connected', 'writeVerified', 'readVerified')) == expected_flags
+    assert result['errorStage'] == stage and result['errorCode'] == 'api_http'
+    assert result['providerStatus'] == 503 and result['fullCheckedAt']
+    assert 'TOP-SECRET' not in str(result) + caplog.text
+    assert 'private-provider' not in str(result) + caplog.text
+    assert 'test-token-never-public' not in str(result) + caplog.text
+
+
+def successful_download_session(monkeypatch):
+    from app import yandex_disk as module
+    calls = []
+    class Body:
+        async def iter_chunked(self, _size): yield b'original'
+    class Response:
+        status, headers, content = 200, {}, Body()
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+    class Session:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        def get(self, href):
+            calls.append(href)
+            return Response()
+    monkeypatch.setattr(module.aiohttp, 'ClientSession', Session)
+    return calls
+
+
+@pytest.mark.parametrize('code,status', [('api_timeout', None), ('api_network', None), ('api_http', 503)])
+def test_download_link_transient_error_retries_once(monkeypatch, code, status):
+    calls = successful_download_session(monkeypatch)
+    disk = YandexDisk('token')
+    disk._json = AsyncMock(side_effect=[
+        YandexDiskError('hidden transport detail', code=code, http_status=status),
+        {'href': 'https://download.example.invalid/file'},
+    ])
+    assert asyncio.run(disk.download_bytes(ROOT+'/photo.jpg')) == b'original'
+    assert disk._json.await_count == 2 and len(calls) == 1
+
+
+@pytest.mark.parametrize('status', [401, 403, 404])
+def test_download_link_persistent_api_failure_is_not_retried(monkeypatch, status):
+    calls = successful_download_session(monkeypatch)
+    disk = YandexDisk('token')
+    disk._json = AsyncMock(side_effect=YandexDiskError('hidden auth detail', code='api_http', http_status=status))
+    with pytest.raises(YandexDiskError) as error:
+        asyncio.run(disk.download_bytes(ROOT+'/photo.jpg'))
+    assert error.value.http_status == status
+    assert disk._json.await_count == 1 and not calls
+
+
+def test_download_unsafe_target_is_not_requested_or_retried(monkeypatch):
+    calls = successful_download_session(monkeypatch)
+    disk = YandexDisk('token')
+    disk._json = AsyncMock(return_value={'href': 'http://untrusted.invalid/file'})
+    with pytest.raises(YandexDiskError) as error:
+        asyncio.run(disk.download_bytes(ROOT+'/photo.jpg'))
+    assert error.value.code == 'unsafe_target'
+    assert disk._json.await_count == 1 and not calls
+
+
+@pytest.mark.parametrize('configured,healthy,expected', [(True, False, 1), (True, True, 0), (False, False, 0)])
+def test_recovery_loop_only_rechecks_configured_degraded_state(monkeypatch, configured, healthy, expected):
+    from app import yandex_disk as module
+    async def run():
+        disk = YandexDisk('token' if configured else '')
+        disk.state.update(connected=healthy, writeVerified=healthy, readVerified=healthy)
+        async def recover(**kwargs):
+            disk.state.update(connected=True, writeVerified=True, readVerified=True)
+        disk.verify = AsyncMock(side_effect=recover)
+        sleeps = []
+        async def sleep(delay):
+            sleeps.append(delay)
+            if len(sleeps) == 2:
+                raise asyncio.CancelledError
+        monkeypatch.setattr(module.asyncio, 'sleep', sleep)
+        with pytest.raises(asyncio.CancelledError):
+            await module.storage_recovery_loop(disk)
+        assert disk.verify.await_count == expected
+        if expected:
+            disk.verify.assert_awaited_once_with(write_test=True)
+        assert sleeps == [300, 300]
+    asyncio.run(run())
+
+
+def test_recovery_loop_contains_provider_errors_and_preserves_cancellation(monkeypatch, caplog):
+    from app import yandex_disk as module
+    async def run():
+        disk = YandexDisk('token')
+        disk.verify = AsyncMock(side_effect=[OSError('TOP-SECRET provider URL'), asyncio.CancelledError()])
+        sleeps = []
+        async def sleep(delay): sleeps.append(delay)
+        monkeypatch.setattr(module.asyncio, 'sleep', sleep)
+        with pytest.raises(asyncio.CancelledError):
+            await module.storage_recovery_loop(disk)
+        assert disk.verify.await_count == 2 and sleeps == [300]
+        assert 'TOP-SECRET' not in caplog.text
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('interval', [0, -1, False, float('nan')])
+def test_recovery_loop_rejects_busy_loop_intervals(interval):
+    from app.yandex_disk import storage_recovery_loop
+    with pytest.raises(ValueError):
+        asyncio.run(storage_recovery_loop(YandexDisk('token'), interval=interval))
 
 
 @pytest.mark.parametrize('invalid_json', [False, True])

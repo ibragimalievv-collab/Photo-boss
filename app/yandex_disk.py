@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import uuid
@@ -27,7 +28,17 @@ _PATH_RE = re.compile(r"^app:/PhotoBoss(?:/[A-Za-zА-Яа-яЁё0-9._()#-]+|/В�
 
 
 class YandexDiskError(RuntimeError):
-    pass
+    CODES = frozenset({
+        "provider_error", "api_http", "api_timeout", "api_network", "invalid_response",
+        "unsafe_target", "integrity", "upload_http", "upload_timeout", "upload_network",
+        "download_http", "download_timeout", "download_network", "download_limit",
+        "probe_mismatch", "not_configured", "validation",
+    })
+
+    def __init__(self, message, *, code="provider_error", http_status=None):
+        super().__init__(message)
+        self.code = code if code in self.CODES else "provider_error"
+        self.http_status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
 
 
 def safe_path(path: str) -> str:
@@ -49,11 +60,11 @@ def configured_from_env() -> tuple[str, str]:
 def validate_saved(metadata, payload):
     """A successful PUT alone is not proof that the expected original was saved."""
     if not isinstance(metadata, dict) or metadata.get('type') != 'file' or metadata.get('size') != len(payload):
-        raise YandexDiskError('Сохранение файла ещё не подтверждено: размер не совпадает.')
+        raise YandexDiskError('Сохранение файла ещё не подтверждено: размер не совпадает.', code="integrity")
     digest = metadata.get('sha256')
     valid = digest == hashlib.sha256(payload).hexdigest() if digest else metadata.get('md5') == hashlib.md5(payload, usedforsecurity=False).hexdigest()
     if not valid:
-        raise YandexDiskError('Сохранение файла ещё не подтверждено: контрольная сумма не совпадает.')
+        raise YandexDiskError('Сохранение файла ещё не подтверждено: контрольная сумма не совпадает.', code="integrity")
 
 
 class YandexDisk:
@@ -69,7 +80,11 @@ class YandexDisk:
             "readVerified": False,
             "root": ROOT,
             "checkedAt": None,
+            "fullCheckedAt": None,
             "error": None,
+            "errorStage": None,
+            "errorCode": None,
+            "providerStatus": None,
         }
 
     @property
@@ -92,17 +107,20 @@ class YandexDisk:
                 if response.status not in ok:
                     code = data.get("error") if isinstance(data, dict) else None
                     detail = code if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_]{1,100}", code) else "provider_error"
-                    raise YandexDiskError(f"Yandex.Disk HTTP {response.status}" + (f": {detail}" if detail else ""))
+                    raise YandexDiskError(f"Yandex.Disk HTTP {response.status}" + (f": {detail}" if detail else ""),
+                                          code="api_http", http_status=response.status)
                 # aiohttp returns None (rather than raising JSONDecodeError)
                 # for an empty 204 body. DELETE's bodyless acknowledgements,
                 # including an already absent file, are valid results.
                 if data is None and response.status != 200:
                     return {}
                 if not isinstance(data, dict) or (malformed and response.status == 200):
-                    raise YandexDiskError("Яндекс.Диск вернул некорректный ответ. Повторите попытку.")
+                    raise YandexDiskError("Яндекс.Диск вернул некорректный ответ. Повторите попытку.", code="invalid_response")
                 return data
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
-            raise YandexDiskError("Яндекс.Диск не ответил на запрос. Повторите попытку.") from exc
+        except asyncio.TimeoutError as exc:
+            raise YandexDiskError("Яндекс.Диск не ответил на запрос. Повторите попытку.", code="api_timeout") from exc
+        except (aiohttp.ClientError, OSError) as exc:
+            raise YandexDiskError("Яндекс.Диск не ответил на запрос. Повторите попытку.", code="api_network") from exc
     async def metadata(self, path: str):
         return await self._json("GET", "/resources", params={"path": safe_path(path)})
 
@@ -155,7 +173,7 @@ class YandexDisk:
         href = data.get("href") if isinstance(data, dict) else None
         method = data.get("method", "PUT") if isinstance(data, dict) else "PUT"
         if not isinstance(href, str) or not href.startswith("https://") or method not in {"PUT", "POST"}:
-            raise YandexDiskError("Yandex.Disk did not return a valid upload target")
+            raise YandexDiskError("Yandex.Disk did not return a valid upload target", code="unsafe_target")
         timeout = aiohttp.ClientTimeout(total=30)
         try:
             async with (
@@ -163,7 +181,7 @@ class YandexDisk:
                 session.request(method, href, data=payload, headers={"Content-Type": content_type}) as response,
             ):
                 if response.status not in (200, 201, 202):
-                    raise YandexDiskError(f"Yandex.Disk upload HTTP {response.status}")
+                    raise YandexDiskError(f"Yandex.Disk upload HTTP {response.status}", code="upload_http", http_status=response.status)
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
             # PUT may have reached the provider before the response was lost.
             # Recover a lost acknowledgement only when size AND checksum match.
@@ -173,7 +191,8 @@ class YandexDisk:
                 return metadata
             except YandexDiskError:
                 pass
-            raise YandexDiskError("Не удалось подтвердить загрузку на Яндекс.Диск. Повторите попытку.") from exc
+            code = "upload_timeout" if isinstance(exc, asyncio.TimeoutError) else "upload_network"
+            raise YandexDiskError("Не удалось подтвердить загрузку на Яндекс.Диск. Повторите попытку.", code=code) from exc
         metadata = await self.metadata(path)
         validate_saved(metadata, payload)
         return metadata
@@ -185,13 +204,14 @@ class YandexDisk:
             try:
                 data = await self._json("GET", "/resources/download", params={"path": path})
             except YandexDiskError as exc:
-                if attempt == 0 and any(f"HTTP {code}" in str(exc) for code in (429, 500, 502, 503, 504)):
+                if attempt == 0 and (exc.code in {"api_timeout", "api_network"}
+                                     or exc.http_status in {429, 500, 502, 503, 504}):
                     await asyncio.sleep(0.2)
                     continue
                 raise
             href = data.get("href") if isinstance(data, dict) else None
             if not isinstance(href, str) or not href.startswith("https://"):
-                raise YandexDiskError("Yandex.Disk did not return a valid download target")
+                raise YandexDiskError("Yandex.Disk did not return a valid download target", code="unsafe_target")
             timeout = aiohttp.ClientTimeout(total=45)
             payload = bytearray()
             try:
@@ -203,19 +223,20 @@ class YandexDisk:
                         await asyncio.sleep(0.2)
                         continue
                     if response.status != 200:
-                        raise YandexDiskError(f"Yandex.Disk download HTTP {response.status}")
+                        raise YandexDiskError(f"Yandex.Disk download HTTP {response.status}", code="download_http", http_status=response.status)
                     length = response.headers.get("Content-Length")
                     if length and length.isdigit() and int(length) > max_bytes:
-                        raise YandexDiskError("Yandex.Disk file exceeds download limit")
+                        raise YandexDiskError("Yandex.Disk file exceeds download limit", code="download_limit")
                     async for chunk in response.content.iter_chunked(64 * 1024):
                         payload.extend(chunk)
                         if len(payload) > max_bytes:
-                            raise YandexDiskError("Yandex.Disk file exceeds download limit")
+                            raise YandexDiskError("Yandex.Disk file exceeds download limit", code="download_limit")
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 if attempt == 0:
                     await asyncio.sleep(0.2)
                     continue
-                raise YandexDiskError("Яндекс.Диск прервал скачивание файла. Повторите запрос.") from exc
+                code = "download_timeout" if isinstance(exc, asyncio.TimeoutError) else "download_network"
+                raise YandexDiskError("Яндекс.Диск прервал скачивание файла. Повторите запрос.", code=code) from exc
             return bytes(payload)
         raise YandexDiskError("Yandex.Disk download temporarily unavailable")
 
@@ -247,36 +268,60 @@ class YandexDisk:
             return await self._verify(write_test=write_test)
 
     async def _verify(self, *, write_test):
-        self.state.update(connected=False, writeVerified=False, readVerified=False, error=None)
+        # Directory-only checks must not erase evidence from the last full
+        # probe. A new full probe clears and recomputes all file evidence.
+        file_error = {key: self.state.get(key) for key in ("error", "errorStage", "errorCode", "providerStatus")}
+        retain_file_error = (not write_test and file_error["errorStage"] in {"write", "read"}
+                             and not (self.state.get("writeVerified") and self.state.get("readVerified")))
+        self.state.update(connected=False, error=None, errorStage=None, errorCode=None, providerStatus=None)
+        if write_test:
+            self.state.update(writeVerified=False, readVerified=False)
         if not self.token:
+            self.state.update(writeVerified=False, readVerified=False,
+                              errorStage="configuration", errorCode="not_configured")
             self.state["error"] = "YANDEX_DISK_TOKEN is not configured"
             self.state["checkedAt"] = datetime.now(timezone.utc).isoformat()
+            if write_test:
+                self.state["fullCheckedAt"] = self.state["checkedAt"]
             logger.warning("Yandex.Disk is not configured")
             return self.public_status()
         marker = SYSTEM + f"/connection-check-{uuid.uuid4().hex}.txt"
         payload = b"Photo Boss Yandex.Disk connectivity check\n" + uuid.uuid4().hex.encode()
         attempted_write = False
+        stage = "root_directory"
         try:
             await self.ensure_dir(ROOT)
+            stage = "system_directory"
             await self.ensure_dir(SYSTEM)
             self.state["connected"] = True
             if write_test:
+                stage = "write"
                 attempted_write = True
                 await self.upload_bytes(
                     marker, payload,
                     content_type="text/plain; charset=utf-8",
                 )
                 self.state["writeVerified"] = True
+                stage = "read"
                 if await self.download_bytes(marker, max_bytes=1024) != payload:
-                    raise YandexDiskError("Проверочный файл прочитан с ошибкой. Повторите проверку Диска.")
+                    raise YandexDiskError("Проверочный файл прочитан с ошибкой. Повторите проверку Диска.", code="probe_mismatch")
                 self.state["readVerified"] = True
+            elif retain_file_error:
+                self.state.update(file_error)
             logger.info(
-                "Yandex.Disk app-folder verified: connected=%s write=%s read=%s root=%s",
-                self.state["connected"], self.state["writeVerified"], self.state["readVerified"], ROOT,
+                "Yandex.Disk app-folder check: full=%s connected=%s write=%s read=%s root=%s",
+                write_test, self.state["connected"], self.state["writeVerified"], self.state["readVerified"], ROOT,
             )
-        except (YandexDiskError, aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        except (YandexDiskError, aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            if not self.state["connected"]:
+                self.state.update(writeVerified=False, readVerified=False)
             self.state["error"] = "Хранилище недоступно или сохранение не подтверждено."
-            logger.warning("Yandex.Disk verification failed: %s", self.state["error"])
+            code = (exc.code if isinstance(exc, YandexDiskError)
+                    else "api_timeout" if isinstance(exc, asyncio.TimeoutError)
+                    else "validation" if isinstance(exc, ValueError) else "api_network")
+            status = exc.http_status if isinstance(exc, YandexDiskError) else None
+            self.state.update(errorStage=stage, errorCode=code, providerStatus=status)
+            logger.warning("Yandex.Disk verification failed: stage=%s code=%s http=%s", stage, code, status)
         finally:
             if attempted_write:
                 try:
@@ -284,7 +329,26 @@ class YandexDisk:
                 except YandexDiskError:
                     logger.warning("Yandex.Disk probe cleanup failed; only its temporary marker may remain")
             self.state["checkedAt"] = datetime.now(timezone.utc).isoformat()
+            if write_test:
+                self.state["fullCheckedAt"] = self.state["checkedAt"]
         return self.public_status()
+
+
+async def storage_recovery_loop(storage, *, interval=300):
+    """Recheck degraded storage independently of photo jobs and database access."""
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not math.isfinite(interval) or interval < 1:
+        raise ValueError("Storage recovery interval must be at least one second")
+    while True:
+        try:
+            state = storage.public_status()
+            if state.get("configured") and not all(state.get(key) for key in ("connected", "writeVerified", "readVerified")):
+                await storage.verify(write_test=True)
+        except asyncio.CancelledError:
+            raise
+        except (YandexDiskError, aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError):
+            # This loop must never log raw provider exceptions or signed links.
+            logger.warning("Yandex.Disk recovery probe failed: code=probe_unavailable")
+        await asyncio.sleep(interval)
 
 
 async def storage_status(request):
