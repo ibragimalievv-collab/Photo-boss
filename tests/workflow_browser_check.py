@@ -245,7 +245,12 @@ async def main():
                     await page.locator('#workflowBooking [name=shoot_time]').fill('15:00')
                     await page.locator('#workflowBooking button').click()
                     await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).filter(r=>r.kind==='booking'&&r.status==='synced').length===2;}")
-                    await page.locator('#workflowBooking [data-workflow="new-operation"]').click()
+                    # Two overlapping shortcut actions must share the reset
+                    # without dereferencing the second call's null result.
+                    await page.evaluate("""async()=>{
+                        const {openWorkflowBooking}=await import('/app/js/workflow.js');
+                        await Promise.all([openWorkflowBooking(),openWorkflowBooking()]);
+                    }""")
                     await page.locator('#workflowBooking [name=client_name]').wait_for(state='visible')
                     assert await page.locator('#workflowBooking [name=client_name]').input_value() == ''
                     assert await page.locator('#workflowBooking [name=client_name]').is_enabled()

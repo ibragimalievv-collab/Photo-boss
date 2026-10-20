@@ -139,8 +139,28 @@ async def main():
                         # A second test purchase reuses that earlier receipt.
                         # The server must reject it, and the same form must let
                         # its author attach the actual new receipt in place.
+                        # A failed refresh keeps the completed form available
+                        # for another attempt instead of removing it first.
+                        async def fail_workflow(route):
+                            await route.fulfill(status=503, content_type='application/json',
+                                body=json.dumps({'error': 'Reset refresh temporarily unavailable'}))
+                        await context.route('**/api/miniapp/workflow*', fail_workflow)
+                        async with page.expect_response(lambda response: '/api/miniapp/workflow' in response.url and response.status == 503):
+                            await form.get_by_role('button', name='Начать новую операцию').click()
+                        await expect(form.get_by_role('button', name='Начать новую операцию')).to_be_enabled()
+                        assert await form.get_attribute('data-pending-keys')
+                        await expect(form.locator('[data-operation-progress]')).to_contain_text('сохранена сервером')
+                        await context.unroute('**/api/miniapp/workflow*', fail_workflow)
+                        # A slow refresh must not let the old selector accept a
+                        # choice that is then discarded by the new-operation render.
+                        async def slow_workflow(route):
+                            await asyncio.sleep(.5)
+                            await route.continue_()
+                        await context.route('**/api/miniapp/workflow*', slow_workflow)
                         await form.get_by_role('button', name='Начать новую операцию').click()
+                        await expect(page.locator('#workflowSalePick')).to_be_disabled()
                         await page.locator('#workflowSalePick').select_option(str(bid))
+                        await context.unroute('**/api/miniapp/workflow*', slow_workflow)
                         await expect(form.locator('[name=tariffId] option').filter(has_text='400')).to_have_count(1)
                         tariff = await form.locator('[name=tariffId] option').evaluate_all(
                             "options=>options.find(option=>option.textContent.includes('400')).value")
@@ -148,9 +168,20 @@ async def main():
                         await form.locator('[name=sold]').fill('1')
                         await form.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/coast.jpg')
                         await form.locator('[name=selected]').set_input_files('app/webapp/assets/academy/evening.jpg')
+                        await expect(form.locator('[name=tariffId]')).to_have_value(tariff)
                         await form.get_by_role('button', name='Добавить допродажу').click()
                         replacement = page.locator('#workflowQueue [data-workflow-replace]')
-                        await expect(replacement).to_be_visible(timeout=20000)
+                        try:
+                            await expect(replacement).to_be_visible(timeout=20000)
+                        except Exception:
+                            print('SALE_RECEIPT_RECOVERY_DIAGNOSTIC', await page.evaluate("""async()=>{
+                                const {outboxRows}=await import('/app/js/outbox.js');
+                                const form=document.querySelector('#workflowSale');
+                                return {queue:(await outboxRows()).map(r=>({kind:r.kind,status:r.status,error:r.error,errorStatus:r.errorStatus,data:r.data})),
+                                    form:form&&[...form.elements].map(e=>({name:e.name,value:e.value,disabled:e.disabled,files:e.files?.length})),
+                                    body:document.body.innerText.slice(-3000)};
+                            }"""))
+                            raise
                         receipt_key = await replacement.get_attribute('data-workflow-replace')
                         original_keys = await page.evaluate("async()=> (await (await import('/app/js/outbox.js')).outboxRows()).map(r=>r.key)")
                         async with factory() as session:
@@ -165,7 +196,7 @@ async def main():
                             assert len(saved) == 2 and all(row.amount == 400 and row.sold_photos == 1 for row in saved)
                             assert await session.scalar(select(func.count(Receipt.id))) == 2
                         assert not errors, errors
-                        print('PASS: counts409 recovers after reload; duplicate receipt409 replaces in place; original keys/photos retained; two separate 400-ruble sales and two receipts')
+                        print('PASS: counts409 recovers after reload; reset503 preserves the completed form; slow reset preserves the selected tariff; duplicate receipt409 replaces in place; original keys/photos retained; two separate 400-ruble sales and two receipts')
                     finally:
                         await browser.close()
         finally:

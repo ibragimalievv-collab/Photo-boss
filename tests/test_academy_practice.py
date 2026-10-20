@@ -101,6 +101,51 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
         assert (await self.request(f"/{aid}/photos/1", uid=1))[0] == 200
         assert (await self.request(f"/{aid}/photos/1", uid=3))[0] == 200
 
+    async def test_admin_practice_access_requires_current_shared_hotel(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("""INSERT INTO training_assignments
+                (id,user_id,category_slug,status,review_source)
+                VALUES (100,5,'woman','PENDING_REVIEW','AI_FAILED'),
+                       (101,2,'woman','PENDING_REVIEW','AI_FAILED')"""))
+        # An administrator without hotels has only their own Academy work.
+        assert (await self.request(f"/{aid}", uid=2))[0] == 404
+        assert (await self.request(f"/{aid}/photos/1", uid=2))[0] == 404
+        assert (await self.request(f"/{aid}/retry", uid=2, body={}))[0] == 404
+        assert (await self.request(f"/{aid}/retake", uid=2, body={"indexes": [1]}))[0] == 404
+        assert (await self.request(f"/{aid}/photos/1", uid=2,
+                                   payload=b"\xff\xd8\xffadmin\xff\xd9"))[0] == 404
+        assert (await self.request("/101", uid=2))[0] == 200
+        assert [r["id"] for r in (await self.request(uid=2))[1]["queue"]] == [101]
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("INSERT INTO hotel_employees VALUES (2,1),(3,1),(5,2)"))
+            conn.execute(text("UPDATE training_assignments SET review_source='AI_FAILED' WHERE id=:id"), {"id": aid})
+        # Supervising one hotel permits its staff's result, photo and deliberate
+        # retry, while another hotel's assignment remains undiscoverable.
+        assert (await self.request(f"/{aid}", uid=2))[0] == 200
+        assert (await self.request(f"/{aid}/photos/1", uid=2))[0] == 200
+        assert (await self.request(f"/{aid}/retry", uid=2, body={}))[0] == 200
+        assert (await self.request("/100", uid=2))[0] == 404
+        assert (await self.request("/100/retry", uid=2, body={}))[0] == 404
+        assert [r["id"] for r in (await self.request(uid=2))[1]["queue"]] == [aid, 101]
+        # Viewing a trainee does not allow submitting or retaking for them.
+        assert (await self.request(f"/{aid}/photos/1", uid=2,
+                                   payload=b"\xff\xd8\xffadmin\xff\xd9"))[0] == 409
+        assert (await self.request(f"/{aid}/retake", uid=2, body={"indexes": [1]}))[0] == 403
+        assert (await self.request(f"/{aid}/review", uid=2, body={}))[0] == 403
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("DELETE FROM hotel_employees WHERE user_id=2"))
+        # A previously authorized URL cannot retain access after reassignment.
+        assert (await self.request(f"/{aid}", uid=2))[0] == 404
+        assert (await self.request(f"/{aid}/photos/1", uid=2))[0] == 404
+        assert (await self.request(f"/{aid}/retry", uid=2, body={}))[0] == 404
+        assert [r["id"] for r in (await self.request(uid=2))[1]["queue"]] == [101]
+        assert (await self.request(f"/{aid}", uid=1))[0] == 200
+        assert (await self.request(f"/{aid}/photos/1", uid=1))[0] == 200
+        assert [r["id"] for r in (await self.request(uid=1))[1]["queue"]] == [aid, 100, 101]
+        assert sum(s["uploaded"] for s in (await self.request(f"/{aid}"))[1]["shots"]) == 5
+
     async def test_upload_retries_duplicates_and_storage_failure(self):
         aid = await self.start()
         path = f"/{aid}/photos/1"

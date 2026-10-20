@@ -4,7 +4,7 @@ import io
 import json
 from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from PIL import Image
@@ -17,12 +17,14 @@ from app.models import (
     Notification,
     Photo,
     PhotoStorage,
+    PushDelivery,
+    PushSubscription,
     Receipt,
     Setting,
     Shooting,
     User,
 )
-from app.push_notifications import AppPush, eligible
+from app.push_notifications import AppPush, deliver_push, eligible, send_push
 from app.services.booking_reminders import queue_twenty_minute_reminders, scheduled_at
 from app.services.bookings import create_booking_record
 from app.services.sale_workflow import (
@@ -72,8 +74,13 @@ def test_twenty_minute_reminder_is_once_and_invalidated_by_assignment_time_or_ca
                 assert feed['items'][0]['description'] == details
                 sub = SimpleNamespace(active=True, user_id=2)
                 assert await eligible(session, notice, sub)
+                assert await eligible(session, notice, sub, for_delivery=True)
                 monkeypatch.setattr('app.push_notifications.utc_now', lambda: moment + timedelta(minutes=20))
                 assert await eligible(session, notice, sub)  # It stays in the inbox after the start time.
+                assert not await eligible(session, notice, sub, for_delivery=True)
+                feed = json.loads((await AppPush(SimpleNamespace(engine=engine)).status(request)).text)
+                assert feed['items'][0]['description'] == details
+                assert feed['items'][0]['pushState'] == 'EXPIRED'
                 monkeypatch.setattr('app.push_notifications.utc_now', lambda: moment.replace(tzinfo=None))
                 booking.photographer_id = 1
                 assert not await eligible(session, notice, sub)
@@ -87,6 +94,76 @@ def test_twenty_minute_reminder_is_once_and_invalidated_by_assignment_time_or_ca
                 await session.commit()
         finally:
             await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('minutes_late', [0, 5])
+def test_reminder_retry_before_start_then_expires_without_losing_inbox(monkeypatch, minutes_late):
+    monkeypatch.setenv('PHOTO_BOSS_NOTIFICATION_CHANNEL', 'app')
+    for key in ('WEB_PUSH_PUBLIC_KEY', 'WEB_PUSH_PRIVATE_KEY', 'WEB_PUSH_SUBJECT'):
+        monkeypatch.setenv(key, 'test-only')
+    clock = [datetime(2026, 10, 20, 9, 40, tzinfo=UTC).replace(tzinfo=None)]
+    monkeypatch.setattr('app.push_notifications.utc_now', lambda: clock[0])
+    sender = AsyncMock(return_value=503)
+    monkeypatch.setattr('app.push_notifications.send_push', sender)
+
+    async def run():
+        engine, factory = await fixture()
+        try:
+            async with factory() as session:
+                booking = await create_booking_record(session, await session.get(User, 1), booking_data() | {
+                    'shoot_date': '2026-10-20', 'shoot_time': '13:00'})
+                booking.photographer_id, booking.status = 2, 'ASSIGNED'
+                sub = PushSubscription(user_id=2, endpoint_hash='device', subscription='{}',
+                    created_at=clock[0] - timedelta(minutes=1))
+                session.add(sub)
+                assert await queue_twenty_minute_reminders(session, clock[0]) == 1
+                await session.flush()
+                notice = await session.scalar(select(Notification))
+                session.add(PushDelivery(notification_id=notice.id, subscription_id=sub.id,
+                    status='PENDING', next_attempt_at=clock[0]))
+                await session.commit()
+            assert await deliver_push(engine) == 0
+            assert sender.await_count == 1
+            clock[0] += timedelta(seconds=30)
+            assert await deliver_push(engine) == 0
+            assert sender.await_count == 2  # Retry still allowed before the shoot.
+            clock[0] = datetime(2026, 10, 20, 10, minutes_late, tzinfo=UTC).replace(tzinfo=None)
+            assert await deliver_push(engine) == 0
+            assert await deliver_push(engine) == 0
+            assert sender.await_count == 2
+            async with factory() as session:
+                delivery = await session.scalar(select(PushDelivery))
+                assert delivery.status == 'SKIPPED' and delivery.attempts == 2
+                notice = await session.scalar(select(Notification))
+                assert not notice.resolved_at
+            feed = json.loads((await AppPush(SimpleNamespace(engine=engine)).status(Request({'id': 2}, {}))).text)
+            assert len(feed['items']) == 1 and feed['items'][0]['pushState'] == 'EXPIRED'
+            assert '20.10.2026 в 13:00' in feed['items'][0]['description']
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_reminder_provider_ttl_cannot_outlive_start(monkeypatch):
+    import pywebpush
+
+    clock = [datetime(2026, 10, 20, 9, 58, tzinfo=UTC).replace(tzinfo=None)]
+    monkeypatch.setattr('app.push_notifications.utc_now', lambda: clock[0])
+    for key in ('WEB_PUSH_PRIVATE_KEY', 'WEB_PUSH_SUBJECT'):
+        monkeypatch.setenv(key, 'test-only')
+    provider = Mock(return_value=SimpleNamespace(status_code=201))
+    monkeypatch.setattr(pywebpush, 'webpush', provider)
+    payload = {'title': 'Photo Boss · Скоро съёмка', 'expiresAt': '2026-10-20T10:00:00+00:00'}
+
+    async def run():
+        assert await send_push({}, payload) == 201
+        assert provider.call_args.kwargs['ttl'] == 120
+        clock[0] = datetime(2026, 10, 20, 10, tzinfo=UTC).replace(tzinfo=None)
+        assert await send_push({}, payload) is None
+        assert provider.call_count == 1
+        assert await send_push({}, {'title': 'Photo Boss · Новое сообщение'}) == 201
+        assert provider.call_args.kwargs['ttl'] == 3600
     asyncio.run(run())
 
 

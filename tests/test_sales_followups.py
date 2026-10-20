@@ -31,8 +31,8 @@ from app.services.sale_workflow import (
 from app.workflow import Workflow
 
 
-async def prepared():
-    engine, factory = await fixture()
+async def prepared(url='sqlite+aiosqlite:///:memory:'):
+    engine, factory = await fixture(url)
     async with factory() as session:
         manager = await session.get(User, 1)
         booking = await create_booking_record(session, manager, booking_data())
