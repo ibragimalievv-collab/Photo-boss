@@ -178,13 +178,25 @@ function revealBookingForm(form){
  if(!target.disabled)target.focus();
 }
 async function resetCompletedForm(form,{refresh=true}={}){
- const keys=JSON.parse(form.dataset.pendingKeys||'[]'),rows=await outboxRows();
- if(!keys.length||!keys.every(k=>rows.some(r=>r.key===k&&r.status==='synced')))throw new Error('Сначала завершите текущую отправку.');
- const id=form.id;
- clearForm(form);form.reset();form.remove();
- captureForms();if(refresh)await loadWorkflow();
- document.querySelector('#app').innerHTML=workflowView();restoreForms();updateFormProgress();
- return document.querySelector('#'+id);
+ if(form.dataset.resetting==='1')return null;
+ form.dataset.resetting='1';form.setAttribute('aria-busy','true');
+ const picker=form.id==='workflowSale'?document.querySelector('#workflowSalePick'):null;
+ const controls=[...form.elements,...(picker?[picker]:[])].map(el=>[el,el.disabled]);
+ for(const [el] of controls)el.disabled=true;
+ try{
+  const keys=JSON.parse(form.dataset.pendingKeys||'[]'),rows=await outboxRows();
+  if(!keys.length||!keys.every(k=>rows.some(r=>r.key===k&&r.status==='synced')))throw new Error('Сначала завершите текущую отправку.');
+  const id=form.id;
+  if(refresh)await loadWorkflow();
+  if(!form.isConnected)return null;
+  clearForm(form);form.reset();form.remove();
+  captureForms();
+  document.querySelector('#app').innerHTML=workflowView();restoreForms();updateFormProgress();
+  return document.querySelector('#'+id);
+ }finally{
+  for(const [el,disabled] of controls)if(el.isConnected)el.disabled=disabled;
+  if(form.isConnected){delete form.dataset.resetting;form.removeAttribute('aria-busy');}
+ }
 }
 export async function openWorkflowBooking(){
  let form=document.querySelector('#workflowBooking');
@@ -193,6 +205,7 @@ export async function openWorkflowBooking(){
   const keys=JSON.parse(form.dataset.pendingKeys),rows=await outboxRows();
   if(keys.length&&keys.every(k=>rows.some(r=>r.key===k&&r.status==='synced')))form=await resetCompletedForm(form,{refresh:false});
  }
+ if(!form)return;
  revealBookingForm(form);
  if(form.dataset.pendingKeys)throw new Error('Предыдущая запись ещё отправляется. Проверьте её результат и очередь ниже; повторно заполнять её не нужно.');
 }
@@ -224,7 +237,7 @@ if(kind==='sync'){
  return;
 }
 if(button.dataset.workflow==='refresh'){captureForms();await loadWorkflow();document.querySelector('#app').innerHTML=workflowView();restoreForms();updateFormProgress();return;}if(button.dataset.workflow==='retry-storage'){await enqueueOperation('shoot_retry',todayKey(),{shooting:{id:Number(button.dataset.shooting)}});return;}if(button.dataset.workflow==='retry')await retryOperation(button.dataset.key);else await flushOutbox();}
-export function workflowSelect(id){captureForms();selected=Number(id)||null;try{sessionStorage.setItem('pb-workflow-sale:'+data.actorId,String(selected||''));}catch{}document.querySelector('#app').innerHTML=workflowView();restoreForms();updateFormProgress();refreshQuote();}
+export function workflowSelect(id){if(document.querySelector('#workflowSale')?.dataset.resetting==='1')return;captureForms();selected=Number(id)||null;try{sessionStorage.setItem('pb-workflow-sale:'+data.actorId,String(selected||''));}catch{}document.querySelector('#app').innerHTML=workflowView();restoreForms();updateFormProgress();refreshQuote();}
 function refreshConnection(){const el=document.querySelector('#workflowNotice');if(el)el.textContent=connectionNote();}
 window.addEventListener('online',refreshConnection);window.addEventListener('offline',refreshConnection);
 let saleRefreshTimer=null,saleRefreshVersion=0,saleRefreshDue=0,lastSaleRefreshAt=0;

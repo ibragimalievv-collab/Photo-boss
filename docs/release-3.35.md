@@ -8,6 +8,7 @@ Prepared on 2026-10-20. This report distinguishes automated verification from li
 - A reminder created before a shoot could be retried after its start time. Each delivery attempt now checks the 20-minute window. Provider TTL ends at the shoot time, the service worker suppresses expired messages, and foreground toasts skip expired events. The inbox retains the reminder with an explicit expired status.
 - Academy practice access treated every administrator as global. Assignment details, private media and the pending queue now check the administrator's current hotel assignments. An administrator without hotels has no global Academy access. Owner and self access remain available.
 - The Avito HR import ordering error that failed release lint checks is corrected.
+- Browser recovery checks exposed an asynchronous new-operation reset: a user could select a tariff before an older refresh completed, then lose that selection and have native form validation silently block the next submission. The reset transition now locks the relevant controls while data refreshes and preserves the old form if the refresh fails.
 
 ## Local verification
 
@@ -15,6 +16,7 @@ Prepared on 2026-10-20. This report distinguishes automated verification from li
 - All source/test Ruff checks, JavaScript syntax checks and whitespace checks passed.
 - Independent focused review: 46 tests and the notification client check passed.
 - Real Chromium fixture scenario passed: scheduler creates one reminder for the assigned photographer; the app shows its time, hotel, room and delivery status; another user's inbox/read endpoint rejects access; after the start time the inbox keeps the details with an expired status.
+- Sale recovery browser checks exercise a failed refresh, a slow refresh, correction of rejected counts and replacement of a duplicate receipt while retaining operation keys and accepted photos. Browser sale fixtures use a disposable file-backed SQLite database so background-task cancellation cannot erase their in-memory database during teardown.
 - These checks use test fixtures and do not confirm a real user's phone or production cash records.
 
 ## Acceptance still required

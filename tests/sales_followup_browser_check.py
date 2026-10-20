@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import ssl
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -22,8 +23,8 @@ from app.services.receipts import payment_totals, refresh_payment_statuses
 from app.workflow import Workflow
 
 
-async def main():
-    engine, factory, bid = await prepared()
+async def run(url):
+    engine, factory, bid = await prepared(url)
     async with factory() as session:
         original = await purchase(session, bid, 1, 2,
             repeated_hash=hashlib.sha256(Path('app/webapp/assets/academy/child.jpg').read_bytes()).hexdigest())
@@ -122,8 +123,17 @@ async def main():
                 finally:
                     await browser.close()
     finally:
-        await server.close()
-        await engine.dispose()
+        try:
+            await server.close()
+        finally:
+            await engine.dispose()
+
+
+async def main():
+    # Background-task cancellation can replace a SQLite connection at shutdown.
+    # Keep the disposable browser database independent of any one connection.
+    with tempfile.TemporaryDirectory(prefix='photo-boss-followup-') as directory:
+        await run('sqlite+aiosqlite:///' + str(Path(directory) / 'followup.db'))
 
 
 if __name__ == '__main__':
