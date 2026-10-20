@@ -100,7 +100,9 @@ async def main():
                     async with factory() as session:
                         sales = list((await session.scalars(select(Sale).order_by(Sale.id))).all())
                         assert len(sales) == 2
-                        assert (sales[0].id, sales[0].amount, sales[0].sold_photos, sales[0].payment_status) == (original_id, 800, 2, 'PAID')
+                        assert (sales[0].id, sales[0].amount, sales[0].sold_photos, sales[0].payment_status) == (original_id, 800, 2, 'PAID'), [
+                            (sale.id, sale.amount, sale.sold_photos, sale.payment_status) for sale in sales
+                        ]
                         assert (sales[1].amount, sales[1].sold_photos, sales[1].payment_status) == (1200, 3, 'UNPAID')
                         assert tuple(await payment_totals(session, bid)) == (2000,800,1200)
                         assert await session.scalar(select(func.count(Receipt.id))) == 2

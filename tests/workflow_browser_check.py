@@ -280,6 +280,9 @@ async def main():
                         const m=await import('/app/js/workflow.js');await m.loadWorkflow(3);m.workflowSelect(3);
                     }""")
                     repair_form = page.locator('#workflowSale')
+                    tariff = await repair_form.locator('[name=tariffId] option').evaluate_all(
+                        "options=>options.find(option=>option.textContent.includes('400')).value")
+                    await repair_form.locator('[name=tariffId]').select_option(tariff)
                     await repair_form.locator('[name=total]').fill('150')
                     await repair_form.locator('[name=sold]').fill('2')
                     await repair_form.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/evening.jpg')

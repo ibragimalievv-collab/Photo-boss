@@ -130,6 +130,8 @@ async def main():
                         # The server must reject it, and the same form must let
                         # its author attach the actual new receipt in place.
                         await form.get_by_role('button', name='Начать новую операцию').click()
+                        await page.locator('#workflowSalePick').select_option(str(bid))
+                        await expect(form.locator('[name=tariffId] option').filter(has_text='400')).to_have_count(1)
                         tariff = await form.locator('[name=tariffId] option').evaluate_all(
                             "options=>options.find(option=>option.textContent.includes('400')).value")
                         await form.locator('[name=tariffId]').select_option(tariff)
