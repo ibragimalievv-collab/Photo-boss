@@ -472,6 +472,7 @@ def isolated_database():
                 hotel_id=hotel.id,
                 client_id=client.id,
                 room="101",
+                deposit=0,  # Historical fixture without an advance payment.
                 shoot_date=date(2026, 9, 15),
                 shoot_time=time(12),
                 package_id=package.id,

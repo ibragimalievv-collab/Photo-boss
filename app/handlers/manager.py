@@ -2,7 +2,7 @@ from datetime import UTC, date, datetime, time
 
 from aiogram import F, Router
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, ReplyKeyboardRemove
 from sqlalchemy import func, select
 
 from ..access import StaffFilter
@@ -121,7 +121,8 @@ async def booking_room(m, state):
         return await m.answer("Введите корректный номер комнаты.")
     await state.update_data(room=room)
     await state.set_state(BookingFlow.deposit)
-    await m.answer("Введите сумму брони в рублях или 0:")
+    await m.answer("Предоплата обычно 1000 ₽. Выберите 1000 или введите другую сумму; 0 — без предоплаты:",
+                   reply_markup=reply(["1000", "0"]))
 
 
 @r.message(BookingFlow.deposit)
@@ -134,7 +135,7 @@ async def booking_deposit(m, state):
         return await m.answer("Введите корректную сумму брони, например 1000 или 0.")
     await state.update_data(deposit=deposit)
     await state.set_state(BookingFlow.shoot_date)
-    await m.answer("Введите дату съёмки в формате ДД.ММ.ГГГГ:")
+    await m.answer("Введите дату съёмки в формате ДД.ММ.ГГГГ:", reply_markup=ReplyKeyboardRemove())
 
 
 @r.message(BookingFlow.shoot_date)
@@ -160,14 +161,24 @@ async def booking_time(m, state):
         packages = (
             await s.scalars(select(Package).where(Package.active.is_(True)).order_by(Package.name))
         ).all()
+        quote = None
+        if packages:
+            from ..services.pricing import booking_unit_quote
+            data = await state.get_data()
+            try:
+                quote = await booking_unit_quote(s, data['hotel_id'], packages[0].id)
+            except ValueError as exc:
+                return await m.answer(str(exc))
     if not packages:
         await state.clear()
         return await m.answer("Нет активных пакетов. Сначала добавьте пакет.")
+    fixed = quote['source'] == 'hotel_fixed'
     await state.set_state(BookingFlow.package)
     await m.answer(
-        "Выберите пакет:",
+        (f"Цена отеля — {quote['price']} ₽ за кадр. Она сохранится в записи. Выберите вид съёмки:"
+         if fixed else "Выберите вид съёмки. Его цена сохранится в записи:"),
         reply_markup=inline(
-            [[(f"{package.name} — {package.price_per_photo:.0f} ₽/фото", f"booking:package:{package.id}")]
+            [[(package.name if fixed else f"{package.name} — {package.price_per_photo:.0f} ₽/фото", f"booking:package:{package.id}")]
              for package in packages]
         ),
     )

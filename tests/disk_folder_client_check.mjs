@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+const source=fs.readFileSync('app/webapp/js/disk-folder-audit.js','utf8').replace(/^import .*;$/gm,'').replaceAll('export function','function');
+const nodes=new Map(),events={},calls=[];
+const job={id:'00000000-0000-4000-8000-000000000001',status:'COMPLETED',stage:'ANALYSIS',path:'disk:/Hotel',bookingId:7,totalPhotos:2,processed:2,otherFiles:1,files:[{photoId:1,name:'<guest>.jpg',status:'checked'},{photoId:2,name:'broken.jpg',status:'unavailable',error:'Cannot decode'}],aiFrames:[],aiErrors:[],aiConfigured:false,note:'Read only',summary:{listingComplete:true,checked:1,failed:1,uniqueOriginals:1,complete:false,exactCopies:[],similarCandidates:[]}};
+const ctx=vm.createContext({window:{addEventListener(){}},document:{addEventListener:(name,fn)=>{events[name]=fn;},querySelector:id=>{if(!nodes.has(id))nodes.set(id,{innerHTML:'',textContent:'',value:id==='#diskAuditBooking'?'7':''});return nodes.get(id);}},esc:x=>String(x??'').replaceAll('<','&lt;').replaceAll('>','&gt;'),Map,Number,encodeURIComponent,crypto:{randomUUID:()=>job.id},setTimeout:()=>1,clearTimeout(){},sessionStorage:{getItem:()=>null,setItem(){}},api:async(path,options)=>{calls.push({path,options});if(path.startsWith('/storage/disk-folders'))return {path:'disk:/Hotel/Family #1',folders:[],filesHere:2};return job;}});
+vm.runInContext(source,ctx);
+ctx.data={actorId:1,canAuditDisk:false,bookings:[]};assert.equal(vm.runInContext('diskFolderPanel(data)',ctx),'');
+ctx.data.canAuditDisk=true;assert.ok(vm.runInContext('diskFolderPanel(data)',ctx).includes('Проверить папку Яндекс.Диска'));
+ctx.job=job;const report=vm.runInContext('renderDiskAudit(job)',ctx);assert.ok(report.includes('Полная техническая проверка пока не подтверждена'));assert.ok(report.includes('AI сейчас не настроен'));assert.ok(report.includes('broken.jpg'));assert.ok(!report.includes('Техническая проверка всех найденных фотографий завершена.'));
+const open={dataset:{diskOpen:'disk:/Hotel/Family #1'},disabled:false};await events.click({target:{closest:()=>open}});assert.ok(calls[0].path.includes('Family%20%231'));assert.ok(nodes.get('#diskAuditFolders').innerHTML.includes('Проверить эту папку'));
+const scan={dataset:{diskScan:'disk:/Hotel/Family #1'},disabled:false};await events.click({target:{closest:()=>scan}});assert.equal(calls[1].options.method,'POST');assert.equal(calls[1].options.body.bookingId,7);assert.equal(calls[1].options.body.path,'disk:/Hotel/Family #1');assert.ok(nodes.get('#diskAuditResult').innerHTML.includes('Не удалось проверить: 1'));assert.equal(scan.disabled,false);
+console.log('PASS: owner-only folder UI, private folder selection, linked report and incomplete/AI-unavailable states');

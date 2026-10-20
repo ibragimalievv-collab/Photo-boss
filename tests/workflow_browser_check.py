@@ -23,6 +23,7 @@ from app.attendance import install_attendance
 from app.miniapp_api import install_miniapp
 from app.models import (
     Booking,
+    Hotel,
     HotelTariff,
     OperationRequest,
     PayrollEntry,
@@ -55,6 +56,9 @@ async def main():
         session.add_all([User(id=3, tg_id=3, name='Owner'), UserRole(user_id=3, role='OWNER')])
         session.add_all(HotelTariff(hotel_id=1, name=f'{price} ₽ за кадр', kind='UNIT', price=price)
                         for price in (300, 400, 500))
+        await session.flush()
+        hotel = await session.get(Hotel, 1)
+        hotel.fixed_unit_tariff_id = await session.scalar(select(HotelTariff.id).where(HotelTariff.hotel_id == 1, HotelTariff.price == 400))
         await session.commit()
     media = {}
     async def upload(_id, file, **kwargs):

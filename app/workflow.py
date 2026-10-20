@@ -200,6 +200,7 @@ class Workflow:
                     'totalFrames': max([original_count or 0, draft.declared_photo_count or 0 if draft else 0] + [sale.declared_photo_count or 0 for sale in purchases])}
                 rows.append({**history, 'receipts': [receipt_state(receipt) for receipt in receipts], 'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
                     'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': effective_price,
+                    'pricing': snapshot(b.pricing_snapshot),
                     'declaredDeposit': str(money(b.deposit)),
                     'bankPayments': [public_bill(bill) for bill in bank_bills],
                     'saleRecorded': bool(purchases),
@@ -212,10 +213,10 @@ class Workflow:
                         'createdByName': draft_actor.name if draft_actor else 'Сотрудник не указан',
                         'pricing': snapshot(draft.pricing_snapshot),
                         'amount': ((snapshot(draft.pricing_snapshot) or {}).get('amount') or
-                            (str(money(Decimal(effective_price) * draft.sold_photos)) if draft.sold_photos else None)),
+                            (str(money(Decimal(effective_price or '0') * draft.sold_photos)) if draft.sold_photos else None)),
                         'expectedAmount': (str(money(max(Decimal(0), total + Decimal(
                             (snapshot(draft.pricing_snapshot) or {}).get('amount') or
-                            str(money(Decimal(effective_price) * draft.sold_photos))) - paid)))
+                            str(money(Decimal(effective_price or '0') * draft.sold_photos))) - paid)))
                             if draft.sold_photos else None),
                         'receiptStored': bool(draft.receipt_file_id),
                         'receiptImagePath': (f'/sale-drafts/{draft.id}/receipt/image'
@@ -231,10 +232,20 @@ class Workflow:
             hotels = (await session.scalars(hotel_query)).all()
             tariffs = list(await session.scalars(select(HotelTariff).where(
                 HotelTariff.hotel_id.in_([h.id for h in hotels]), HotelTariff.active.is_(True)).order_by(HotelTariff.id)))
-        return web.json_response({'bookings': rows, 'hotels': [{'id': h.id, 'name': h.name} for h in hotels],
+        hotel_rows = []
+        for hotel in hotels:
+            units = [t for t in tariffs if t.hotel_id == hotel.id and t.kind == 'UNIT']
+            fixed = next((t for t in units if t.id == hotel.fixed_unit_tariff_id), None)
+            if fixed is None and len(units) == 1:
+                fixed = units[0]
+            hotel_rows.append({'id': hotel.id, 'name': hotel.name,
+                'fixedUnitTariffId': fixed.id if fixed else None,
+                'unitPrice': str(money(fixed.price)) if fixed else None})
+        return web.json_response({'bookings': rows, 'hotels': hotel_rows,
             'tariffs': [{'id': t.id, 'hotelId': t.hotel_id, 'name': t.name, 'kind': t.kind,
                         'price': str(money(t.price)), 'photoCount': t.photo_count} for t in tariffs],
             'canConfigurePricing': bool({'OWNER', 'ADMIN'} & set(a['roles'])),
+            'canAuditDisk': 'OWNER' in a['roles'],
             'bankConfigured': bank_configured(),
             'packages': [{'id': p.id, 'name': p.name, 'price': prices[p.id]} for p in packages if p.active],
             'canBook': bool({'OWNER', 'ADMIN', 'MANAGER'} & set(a['roles'])),
@@ -327,6 +338,7 @@ class Workflow:
                 actor = await session.get(User, actor_data['id'])
                 roles = set(actor_data['roles'])
                 if kind == 'booking':
+                    data = {'deposit': '1000', **data}
                     fields(data, 'client_name client_phone hotel_id package_id room guest_count deposit shoot_date shoot_time photographer_id')
                     if data['photographer_id'] is not None and type(data['photographer_id']) is not int:
                         raise AccessError('Некорректный фотограф.', 400)
@@ -376,15 +388,20 @@ class Workflow:
             raise AccessError('Нет доступа к этой продаже.', 403)
         if 'price' in data:
             from .services.pricing import unit_price
-            # Explicit tariffs are checked against the booking's hotel; their
-            # price need not equal the hotel's default unit rate. Legacy
-            # clients omit tariffId and keep the default-rate freshness check.
-            explicit_tariff = kind in {'sale_start', 'sale_counts'} and 'tariffId' in data
+            # A hotel's new rate cannot replace the immutable booking rate.
+            # Package purchases remain explicit; counted drafts retain their snapshot.
+            explicit_tariff = kind in {'sale_start', 'sale_counts'} and data.get('tariffId') is not None
             if kind == 'sale_start' and explicit_tariff:
                 from .models import HotelTariff
+                from .services.pricing import snapshot
+                fixed = snapshot(booking.pricing_snapshot) or {}
                 tariff = await session.get(HotelTariff, data['tariffId'])
-                if not tariff or not tariff.active or tariff.hotel_id != booking.hotel_id:
+                is_booking_rate = fixed.get('tariffId') == data['tariffId'] and fixed.get('kind') == 'UNIT'
+                if (not tariff or tariff.hotel_id != booking.hotel_id
+                        or (not tariff.active and not is_booking_rate)):
                     raise AccessError('Тариф недоступен в этом отеле.', 409)
+                if tariff.kind == 'UNIT' and fixed and not is_booking_rate:
+                    raise AccessError('Цена кадра закреплена за записью и не меняется при продаже.', 409)
             # Once counts are accepted, use their immutable tariff snapshot.
             if not isinstance(data['price'], str) or (
                 not draft.pricing_snapshot and not explicit_tariff

@@ -50,6 +50,17 @@ def safe_path(path: str) -> str:
     return path
 
 
+def safe_disk_read_path(path: str) -> str:
+    """Permit private Disk reads without granting any external-folder writes."""
+    if (not isinstance(path, str) or not path.startswith('disk:/') or len(path) > 1000
+            or '\\' in path or any(ord(char) < 32 or ord(char) == 127 for char in path)):
+        raise ValueError('Укажите папку подключённого Яндекс.Диска.')
+    parts = path[len('disk:/'):].split('/')
+    if path != 'disk:/' and any(part in {'', '.', '..'} for part in parts):
+        raise ValueError('Некорректный путь папки Яндекс.Диска.')
+    return path
+
+
 def configured_from_env() -> tuple[str, str]:
     return (
         os.getenv("YANDEX_DISK_TOKEN", "").strip(),
@@ -126,7 +137,15 @@ class YandexDisk:
 
     async def list_directory(self, path: str, *, page_size=200, max_items=10000):
         """Read all pages; unavailable/incomplete is never reported as empty."""
-        path = safe_path(path)
+        return await self._read_directory(safe_path(path), page_size=page_size, max_items=max_items)
+
+    async def disk_metadata(self, path: str):
+        return await self._json('GET', '/resources', params={'path': safe_disk_read_path(path), 'limit': 0})
+
+    async def disk_list_directory(self, path: str, *, page_size=200, max_items=10000):
+        return await self._read_directory(safe_disk_read_path(path), page_size=page_size, max_items=max_items)
+
+    async def _read_directory(self, path, *, page_size, max_items):
         items, names = [], set()
         while True:
             data = await self._json('GET', '/resources', params={
@@ -197,7 +216,12 @@ class YandexDisk:
         validate_saved(metadata, payload)
         return metadata
     async def download_bytes(self, path: str, *, max_bytes=20 * 1024 * 1024):
-        path = safe_path(path)
+        return await self._download_bytes(safe_path(path), max_bytes=max_bytes)
+
+    async def disk_download_bytes(self, path: str, *, max_bytes=20 * 1024 * 1024):
+        return await self._download_bytes(safe_disk_read_path(path), max_bytes=max_bytes)
+
+    async def _download_bytes(self, path, *, max_bytes):
         for attempt in range(2):
             # Fetch a fresh temporary link when Yandex returns a transient 5xx/429.
             # Retrying a read cannot duplicate files or financial operations.

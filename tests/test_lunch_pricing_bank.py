@@ -20,6 +20,7 @@ from app.models import (
     HotelTariff,
     Package,
     Receipt,
+    SaleDraft,
     SaleDraftPhoto,
     ShiftCheckIn,
     User,
@@ -61,13 +62,17 @@ def test_hotel_prices_packages_and_deposit_keep_gross_revenue_and_snapshot():
                     unit = HotelTariff(hotel_id=1, name=f'Кадр {price}', kind='UNIT', price=price)
                     s.add(unit)
                     await s.flush()
-                    quote = await sale_quote(s, b, 17, 150, unit.id)
-                    assert quote['amount'] == f'{17 * price}.00'
-                    assert quote['lines'][0]['quantity'] == 17
+                    if price != 400:
+                        with pytest.raises(ValueError, match='зафиксирована при записи'):
+                            await sale_quote(s, b, 17, 150, unit.id)
+                    else:
+                        quote = await sale_quote(s, b, 17, 150, unit.id)
+                        assert quote['amount'] == '6800.00'
+                        assert quote['lines'][0]['quantity'] == 17
                 invalid_unit = HotelTariff(hotel_id=1, name='Старая цена', kind='UNIT', price=450)
                 s.add(invalid_unit)
                 await s.flush()
-                with pytest.raises(ValueError, match='300, 400 или 500'):
+                with pytest.raises(ValueError, match='зафиксирована при записи'):
                     await sale_quote(s, b, 2, 150, invalid_unit.id)
                 deposit = Receipt(booking_id=b.id, uploaded_by_id=1, purpose='DEPOSIT', file_id='deposit',
                     file_unique_id='deposit', expected_amount=1000, verified_amount=1000, status='APPROVED')
@@ -155,7 +160,7 @@ def test_tariff_editor_checks_current_role_and_hotel_not_request_claim():
     asyncio.run(run())
 
 
-def test_unit_price_seed_is_per_hotel_and_idempotent():
+def test_unit_price_seed_never_invents_an_unconfirmed_hotel_price():
     async def run():
         from app.schema_updates import seed_default_unit_prices
 
@@ -167,52 +172,92 @@ def test_unit_price_seed_is_per_hotel_and_idempotent():
             async with factory() as session:
                 rows = list(await session.scalars(select(HotelTariff).where(
                     HotelTariff.hotel_id == 1, HotelTariff.kind == 'UNIT', HotelTariff.active.is_(True))))
-                assert {float(row.price) for row in rows} >= {300.0, 400.0, 500.0}
-                assert second == 0
-                assert first == 3
+                assert rows == []
+                assert first == second == 0
         finally:
             await engine.dispose()
     asyncio.run(run())
 
 
-def test_legacy_booking_price_survives_seeded_hotel_choices_and_explicit_tariffs():
+def test_booking_price_survives_package_and_available_tariff_changes():
     async def run():
-        from app.schema_updates import seed_default_unit_prices
-
         engine, factory = await fixture()
         try:
             async with factory() as session:
-                session.add(Hotel(id=2, name='Other'))
-                await session.commit()
-            async with engine.begin() as conn:
-                await seed_default_unit_prices(conn)
-            async with factory() as session:
-                booking = await create_booking_record(session, await session.get(User, 1), booking_data())
-                # The seed inserts 500 last; it is a choice, not a new default.
-                assert await unit_price(session, booking) == '400.00'
-                legacy = await sale_quote(session, booking, 10, 150)
-                assert legacy['amount'] == '4000.00' and legacy['tariffId'] is None
-                booking.photographer_id, booking.status = 2, 'READY_FOR_SALE'
                 actor = await session.get(User, 1)
+                booking = await create_booking_record(session, actor, booking_data())
+                session.add_all([Hotel(id=2, name='Other'),
+                    HotelTariff(id=10, hotel_id=1, name='New rate', kind='UNIT', price=500),
+                    HotelTariff(id=11, hotel_id=2, name='Other hotel', kind='UNIT', price=400)])
+                await session.flush()
+                (await session.get(Package, booking.package_id)).price_per_photo = 450
+                assert await unit_price(session, booking) == '400.00'
+                assert (await sale_quote(session, booking, 10, 150))['amount'] == '4000.00'
+                with pytest.raises(ValueError, match='зафиксирована при записи'):
+                    await sale_quote(session, booking, 10, 150, 10)
+                with pytest.raises(ValueError, match='этом отеле'):
+                    await sale_quote(session, booking, 10, 150, 11)
+                # The explicitly configured hotel rate applies only to a new booking.
+                hotel = await session.get(Hotel, 1)
+                hotel.fixed_unit_tariff_id = 10
+                newer = await create_booking_record(session, actor, booking_data())
+                assert await unit_price(session, newer) == '500.00'
+                assert (await sale_quote(session, newer, 10, 150))['amount'] == '5000.00'
+                # Replacing/deactivating the tariff cannot rewrite either agreed price.
+                (await session.get(HotelTariff, 10)).price = 300
+                (await session.get(HotelTariff, 10)).active = False
+                assert (await sale_quote(session, newer, 10, 150, 10))['amount'] == '5000.00'
+                assert (await sale_quote(session, booking, 10, 150))['amount'] == '4000.00'
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_ambiguous_hotel_rates_require_supervisor_configuration_and_keep_history_readable():
+    async def run():
+        engine, factory = await fixture()
+        try:
+            async with factory() as session:
+                actor = await session.get(User, 1)
+                older = await create_booking_record(session, actor, booking_data())
+                older.pricing_snapshot = None  # A pre-migration booking has no agreed-price snapshot.
+                session.add_all([HotelTariff(hotel_id=1, name=str(price), kind='UNIT', price=price)
+                                 for price in (300, 400, 500)])
+                await session.flush()
+                with pytest.raises(ValueError, match='фиксированная цена'):
+                    await create_booking_record(session, actor, booking_data())
+                assert await unit_price(session, older) == '400.00'
+                assert older.pricing_snapshot is None  # Reading never rewrites historical prices.
+                with pytest.raises(ValueError, match='фиксированная цена'):
+                    await sale_quote(session, SimpleNamespace(hotel_id=1, package_id=999), 10, 150)
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_legacy_counted_draft_price_is_recovered_without_using_cancelled_quotes():
+    async def run():
+        engine, factory = await fixture()
+        try:
+            async with factory() as session:
+                actor = await session.get(User, 1)
+                booking = await create_booking_record(session, actor, booking_data())
+                booking.pricing_snapshot = None
+                booking.photographer_id, booking.status = 2, 'READY_FOR_SALE'
+                # A cancelled quote is not an agreed booking price.
+                session.add(SaleDraft(booking_id=booking.id, created_by_id=actor.id, status='CANCELLED',
+                    pricing_snapshot=json.dumps({'kind': 'UNIT', 'hotelId': 1, 'price': '300.00',
+                        'tariffId': None, 'name': 'Cancelled', 'photoCount': None})))
+                await session.flush()
                 draft = await start_sale_draft(session, actor, {'MANAGER'}, booking.id)
                 await capture_draft_receipt(session, actor, draft, 'receipt', 'unique', 'hash', {'status': 'unavailable'})
-                assert await set_sale_counts(session, actor, draft, 150, 10) == 4000
-                chosen = await session.scalar(select(HotelTariff).where(
-                    HotelTariff.hotel_id == 1, HotelTariff.price == 500))
-                explicit = await sale_quote(session, booking, 10, 150, chosen.id)
-                assert explicit['amount'] == '5000.00' and explicit['tariffId'] == chosen.id
-                foreign = await session.scalar(select(HotelTariff).where(HotelTariff.hotel_id == 2))
-                with pytest.raises(ValueError, match='этом отеле'):
-                    await sale_quote(session, booking, 10, 150, foreign.id)
-                chosen.price, chosen.active = 300, False
-                historical = await sale_quote(session, booking, 10, 150, saved=json.dumps(explicit))
-                assert historical['amount'] == '5000.00' and historical['price'] == '500.00'
+                # Simulate a draft counted by a release predating booking snapshots.
+                draft.pricing_snapshot = json.dumps({'kind': 'UNIT', 'hotelId': 1, 'price': '500.00',
+                    'tariffId': None, 'name': 'Agreed legacy quote', 'photoCount': None})
                 (await session.get(Package, booking.package_id)).price_per_photo = 450
-                assert await set_sale_counts(session, actor, draft, 150, 10) == 4000
-                with pytest.raises(ValueError, match='выберите тариф 300, 400 или 500'):
-                    await sale_quote(session, booking, 10, 150)
-                with pytest.raises(ValueError, match='Выберите действующий тариф'):
-                    await sale_quote(session, SimpleNamespace(hotel_id=1, package_id=999), 10, 150)
+                assert await unit_price(session, booking) == '500.00'
+                assert await set_sale_counts(session, actor, draft, 150, 10) == 5000
+                assert (await sale_quote(session, booking, 10, 150))['amount'] == '5000.00'
         finally:
             await engine.dispose()
     asyncio.run(run())

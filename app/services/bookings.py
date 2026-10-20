@@ -1,3 +1,5 @@
+import json
+
 from aiogram.exceptions import TelegramAPIError
 from sqlalchemy import func, select
 
@@ -52,19 +54,20 @@ async def create_booking_record(session, actor, data, photographer_id=None):
         phone = data['client_phone']
         room = data['room'].strip()
         count = data['guest_count']
-        deposit = Decimal(str(data['deposit']))
+        deposit = Decimal(str(data.get('deposit', '1000')))
         day = date.fromisoformat(data['shoot_date'])
         at = time.fromisoformat(data['shoot_time'])
         if (not 2 <= len(name) <= 200 or not 1 <= len(room) <= 100
                 or (phone is not None and (not isinstance(phone, str) or not 5 <= len(phone) <= 80))
                 or type(count) is not int or not 1 <= count <= 100
-                or not deposit.is_finite() or not 0 <= deposit <= 10_000_000 or at.tzinfo is not None):
+                or not deposit.is_finite() or not 0 <= deposit <= 10_000_000
+                or deposit != deposit.quantize(Decimal('0.01')) or at.tzinfo is not None):
             raise ValueError
         if type(data['hotel_id']) is not int or type(data['package_id']) is not int:
             raise ValueError
     except (ValueError, TypeError, KeyError, AttributeError, InvalidOperation) as exc:
         raise ValueError('Проверьте данные гостя, дату, количество гостей и сумму брони.') from exc
-    hotel = await session.get(Hotel, data['hotel_id'])
+    hotel = await session.get(Hotel, data['hotel_id'], with_for_update=True)
     package = await session.get(Package, data['package_id'])
     if hotel is None or not hotel.active or package is None or not package.active:
         raise ValueError('Отель или пакет больше не доступны. Обновите данные.')
@@ -73,12 +76,15 @@ async def create_booking_record(session, actor, data, photographer_id=None):
         if not await session.scalar(select(HotelEmployee.id).where(
                 HotelEmployee.user_id == actor.id, HotelEmployee.hotel_id == hotel.id)):
             raise ValueError('Нет доступа к записи в этом отеле.')
+    from .pricing import booking_unit_quote
+    quote = await booking_unit_quote(session, hotel.id, package.id)
     client = Client(name=name, phone=phone)
     session.add(client)
     await session.flush()
     booking = Booking(hotel_id=hotel.id, client_id=client.id, room=room, guest_count=count,
                       deposit=float(deposit.quantize(Decimal('0.01'))), shoot_date=day, shoot_time=at,
-                      package_id=package.id, manager_id=actor.id, photographer_id=photographer_id,
+                      package_id=package.id, pricing_snapshot=json.dumps(quote, ensure_ascii=False),
+                      manager_id=actor.id, photographer_id=photographer_id,
                       status='PENDING_CONFIRMATION')
     session.add(booking)
     await session.flush()
@@ -117,6 +123,8 @@ async def booking_card(session, booking: Booking):
         .where(Shooting.booking_id == booking.id)
     )
     _, paid, outstanding = await payment_totals(session, booking.id)
+    from .pricing import unit_price
+    agreed_price = await unit_price(session, booking)
     return (
         f"📋 Запись #{booking.id}\n"
         f"Статус: {STATUS_NAMES.get(booking.status, 'Статус обновляется')}\n"
@@ -128,6 +136,7 @@ async def booking_card(session, booking: Booking):
         f"📅 Дата: {booking.shoot_date:%d.%m.%Y}\n"
         f"🕐 Время: {booking.shoot_time:%H:%M}\n"
         f"📦 Пакет: {package.name if package else 'не найден'}\n"
+        f"Цена кадра по записи: {agreed_price or 'требует проверки'} ₽\n"
         f"💳 Бронь: {booking.deposit:.2f} ₽ (заявлено)\n"
         f"💰 Продажа: {sale_total or 0:.2f} ₽\n"
         f"✅ Поступление подтверждено владельцем: {paid:.2f} ₽\n"

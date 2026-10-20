@@ -155,6 +155,8 @@ class Hotel(Base):
     name: Mapped[str] = mapped_column(String(200))
     address: Mapped[str | None] = mapped_column(String(300), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # An explicit choice, never inferred from the newest available tariff.
+    fixed_unit_tariff_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class HotelEmployee(Base):
@@ -215,10 +217,11 @@ class Booking(Base):
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"))
     room: Mapped[str] = mapped_column(String(100))
     guest_count: Mapped[int] = mapped_column(Integer, default=1)
-    deposit: Mapped[float] = mapped_column(Float, default=0)
+    deposit: Mapped[float] = mapped_column(Float, default=1000)
     shoot_date: Mapped[date] = mapped_column(Date)
     shoot_time: Mapped[time] = mapped_column(Time)
     package_id: Mapped[int] = mapped_column(ForeignKey("packages.id"))
+    pricing_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     manager_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     photographer_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id"), nullable=True
