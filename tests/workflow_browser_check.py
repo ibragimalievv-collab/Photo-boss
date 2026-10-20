@@ -23,7 +23,6 @@ from app.attendance import install_attendance
 from app.miniapp_api import install_miniapp
 from app.models import (
     Booking,
-    HotelTariff,
     OperationRequest,
     PayrollEntry,
     Receipt,
@@ -53,8 +52,6 @@ async def main():
         booking.status = 'READY_FOR_SALE'
         (await session.scalar(select(Shooting))).status = 'READY_FOR_SALE'
         session.add_all([User(id=3, tg_id=3, name='Owner'), UserRole(user_id=3, role='OWNER')])
-        session.add_all(HotelTariff(hotel_id=1, name=f'{price} ₽ за кадр', kind='UNIT', price=price)
-                        for price in (300, 400, 500))
         await session.commit()
     media = {}
     async def upload(_id, file, **kwargs):
@@ -152,9 +149,6 @@ async def main():
                     await page.get_by_text('В очереди на этом устройстве — не отправлено', exact=True).wait_for()
                     await page.locator('#workflowSalePick').select_option('1')
                     sale = page.locator('#workflowSale')
-                    tariff = await sale.locator('[name=tariffId] option').evaluate_all(
-                        "options=>options.find(option=>option.textContent.includes('400')).value")
-                    await sale.locator('[name=tariffId]').select_option(tariff)
                     await sale.locator('[name=total]').fill('150')
                     await sale.locator('[name=sold]').fill('1')
                     await sale.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/coast.jpg')
@@ -280,9 +274,6 @@ async def main():
                         const m=await import('/app/js/workflow.js');await m.loadWorkflow(3);m.workflowSelect(3);
                     }""")
                     repair_form = page.locator('#workflowSale')
-                    tariff = await repair_form.locator('[name=tariffId] option').evaluate_all(
-                        "options=>options.find(option=>option.textContent.includes('400')).value")
-                    await repair_form.locator('[name=tariffId]').select_option(tariff)
                     await repair_form.locator('[name=total]').fill('150')
                     await repair_form.locator('[name=sold]').fill('2')
                     await repair_form.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/evening.jpg')

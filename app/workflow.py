@@ -374,17 +374,10 @@ class Workflow:
         booking = await session.get(Booking, draft.booking_id)
         if draft.created_by_id != actor.id or not await can_sell(actor, roles, booking, session=session):
             raise AccessError('Нет доступа к этой продаже.', 403)
-        if 'price' in data and kind != 'sale_start':
+        if 'price' in data:
             from .services.pricing import unit_price
-            # An explicit hotel tariff is checked by sale_quote below. Its price
-            # need not equal the hotel's default unit rate. Legacy clients omit
-            # tariffId and still rely on the default-rate freshness check.
-            explicit_tariff = kind == 'sale_counts' and 'tariffId' in data
             # Once counts are accepted, use their immutable tariff snapshot.
-            if not isinstance(data['price'], str) or (
-                not draft.pricing_snapshot and not explicit_tariff
-                and data['price'] != await unit_price(session, booking)
-            ):
+            if not isinstance(data['price'], str) or (not draft.pricing_snapshot and data['price'] != await unit_price(session, booking)):
                 raise AccessError('Цена пакета изменилась. Обновите данные и проверьте продажу.', 409)
         result = {'draftId': draft.id, 'bookingId': booking.id}
         if kind == 'sale_complete' and draft.status == 'COMPLETED':

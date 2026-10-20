@@ -25,10 +25,10 @@ from app.workflow import Workflow
 async def main():
     engine, factory, bid = await prepared()
     async with factory() as session:
-        session.add_all(HotelTariff(hotel_id=1, name=f'{price} ₽ за кадр', kind='UNIT', price=price)
-                        for price in (300, 400, 500))
         original = await purchase(session, bid, 1, 2,
             repeated_hash=hashlib.sha256(Path('app/webapp/assets/academy/child.jpg').read_bytes()).hexdigest())
+        session.add_all(HotelTariff(hotel_id=1, name=f'{price} ₽ за кадр', kind='UNIT', price=price)
+                        for price in (300, 400, 500))
         original.receipt.status, original.receipt.verified_amount = 'APPROVED', 800
         await refresh_payment_statuses(session, bid)
         (await session.get(Booking, bid)).status = 'COMPLETED'
