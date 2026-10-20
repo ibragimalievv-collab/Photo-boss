@@ -9,8 +9,17 @@ from test_team import Request
 from test_workflow_replay import ACTOR, packet, setup
 from test_workflow_services import booking_data, fixture
 
-from app.models import Hotel, HotelEmployee, Notification, ShiftCheckIn, User, UserRole
+from app.models import (
+    Hotel,
+    HotelEmployee,
+    Notification,
+    ShiftCheckIn,
+    User,
+    UserRole,
+    WorkBreak,
+)
 from app.push_notifications import AppPush
+from app.services.booking_reminders import queue_twenty_minute_reminders
 from app.services.bookings import create_booking_record, notify_manager_ready_for_sale
 
 
@@ -95,6 +104,38 @@ def test_lunch_start_return_notify_once_in_app_and_recheck_current_hotel_scope(m
                 await session.delete(await session.scalar(select(HotelEmployee).where(HotelEmployee.user_id == 4)))
                 await session.commit()
             assert not json.loads((await service.status(Request({'id': 4}, {}))).text)['items']
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_assigned_photographer_gets_twenty_minute_notice_while_on_lunch_without_phone(monkeypatch):
+    monkeypatch.setenv('PHOTO_BOSS_NOTIFICATION_CHANNEL', 'app')
+    moment = datetime(2026, 10, 20, 9, 40, tzinfo=UTC)
+    monkeypatch.setattr('app.push_notifications.utc_now', lambda: moment.replace(tzinfo=None))
+
+    async def run():
+        engine, factory = await fixture()
+        try:
+            async with factory() as session:
+                booking = await create_booking_record(session, await session.get(User, 1),
+                    booking_data() | {'shoot_date': '2026-10-20', 'shoot_time': '13:00',
+                                      'client_name': 'Сигизмунд'})
+                booking.photographer_id, booking.status = 2, 'ASSIGNED'
+                session.add(WorkBreak(user_id=2, hotel_id=1, shift_date=moment.date(),
+                    started_at=datetime(2026, 10, 20, 9, 30, tzinfo=UTC).replace(tzinfo=None)))
+                assert await queue_twenty_minute_reminders(session, moment) == 1
+                assert await queue_twenty_minute_reminders(session, moment) == 0
+                await session.commit()
+            service = AppPush(SimpleNamespace(engine=engine))
+            feed = json.loads((await service.status(Request({'id': 2}, {}))).text)
+            assert feed['activeDevices'] == 0 and len(feed['items']) == 1
+            item = feed['items'][0]
+            assert 'Скоро съёмка' in item['title']
+            assert 'Отель: Hotel' in item['description']
+            assert 'Гость: Сигизмунд' in item['description']
+            assert '20.10.2026 в 13:00' in item['description']
+            assert not json.loads((await service.status(Request({'id': 1}, {}))).text)['items']
         finally:
             await engine.dispose()
     asyncio.run(run())

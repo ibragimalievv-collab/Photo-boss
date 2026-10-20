@@ -20,11 +20,14 @@ export async function syncPushAccount(me){
  if(!sub)sub=await worker.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:bytes(next.publicKey)});if(ticket!==revision){await sub.unsubscribe();return;}if(sub)await api('/push/subscribe',{method:'POST',body:{subscription:sub.toJSON()}});
  }catch{/* No prompt or false success on a failed background refresh. */}
 }
-export async function detachPush(){
- revision++;account=null;state=null;seenNotices=new Set();feedReady=false;if(typeof clearInterval==='function'&&feedTimer)clearInterval(feedTimer);feedTimer=null;refreshNotificationBadge();if(!('serviceWorker' in navigator))return;
+async function unsubscribeDevice(){
+ if(!('serviceWorker' in navigator))return;
  const worker=await navigator.serviceWorker.getRegistration('/app/'),sub=await worker?.pushManager.getSubscription();
  if(!sub)return;
  try{await api('/push/unsubscribe',{method:'POST',body:{endpoint:sub.endpoint}});}finally{await sub.unsubscribe();}
+}
+export async function detachPush(){
+ revision++;account=null;state=null;seenNotices=new Set();feedReady=false;if(typeof clearInterval==='function'&&feedTimer)clearInterval(feedTimer);feedTimer=null;refreshNotificationBadge();await unsubscribeDevice();
 }
 export async function notificationsView(){
  state=await api('/push',{allowSnapshot:false});refreshNotificationBadge();let subscribed=false;
@@ -47,7 +50,7 @@ document.addEventListener('click',async event=>{
    status.textContent='Устройство подписано. Нажмите «Проверить уведомление», затем сверните приложение.';
    document.querySelectorAll('[data-push="test"],[data-push="disable"]').forEach(b=>b.disabled=false);
   }else if(button.dataset.push==='disable'){
-   localStorage.setItem('pb-push-disabled','1');const current=account;await detachPush();await syncPushAccount({user:{id:current}});
+   localStorage.setItem('pb-push-disabled','1');await unsubscribeDevice();
    status.textContent='Уведомления на этом устройстве отключены. История остаётся в Photo Boss.';
   }else{
    await api('/push/test',{method:'POST',body:{}});status.textContent='Проверка поставлена в очередь. Сверните приложение и дождитесь системного уведомления. Это ещё не подтверждение доставки на телефон.';
