@@ -42,16 +42,17 @@ async def queue_assignment(conn, booking_id, photographer_id):
 
 async def assignment_items(conn, user_id, today):
     rows = (await conn.execute(text('''SELECT n.id,b.id AS booking_id,b.shoot_date,
-        b.shoot_time,b.room,h.name AS hotel FROM notifications n
+        b.shoot_time,b.room,h.name AS hotel,c.name AS client FROM notifications n
         JOIN bookings b ON n.event_key LIKE 'booking-assigned:' || CAST(b.id AS VARCHAR) || ':%'
         JOIN hotels h ON h.id=b.hotel_id
+        JOIN clients c ON c.id=b.client_id
         WHERE n.user_id=:uid AND b.photographer_id=:uid AND n.kind=:kind
         AND n.resolved_at IS NULL AND b.shoot_date>=:today
         AND b.status IN ('NEW','PENDING_CONFIRMATION','CONFIRMED','ASSIGNED','RESCHEDULED')
         AND NOT EXISTS (SELECT 1 FROM settings st WHERE st.key='booking:trash:' || CAST(b.id AS VARCHAR))
         ORDER BY b.shoot_date,b.shoot_time,n.id DESC LIMIT 20'''),
         {'uid': user_id, 'kind': KIND, 'today': today})).mappings().all()
-    return [{'id': r['id'], 'bookingId': r['booking_id'], 'hotel': r['hotel'],
+    return [{'id': r['id'], 'bookingId': r['booking_id'], 'hotel': r['hotel'], 'client': r['client'],
              'date': str(r['shoot_date']), 'time': str(r['shoot_time'])[:5], 'room': r['room']} for r in rows]
 
 

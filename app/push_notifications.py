@@ -25,10 +25,11 @@ from .models import (
     UserRole,
     utc_now,
 )
+from .services.booking_notices import booking_description, notice_booking_id
 
 log = logging.getLogger(__name__)
 ROLES = {'OWNER', 'ADMIN', 'PHOTOGRAPHER', 'MANAGER'}
-KINDS = {'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test'}
+KINDS = {'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test', 'lunch_start', 'lunch_end'}
 
 
 def app_channel():
@@ -83,18 +84,34 @@ async def queue_for_telegram_id(engine, tg_id, *, kind='chat', message='Ново
     return True
 
 
+async def scoped_supervisors(session, hotel_id):
+    from .models import HotelEmployee
+    return set(await session.scalars(select(UserRole.user_id).where(
+        (UserRole.role == 'OWNER') | ((UserRole.role == 'ADMIN') & UserRole.user_id.in_(
+            select(HotelEmployee.user_id).where(HotelEmployee.hotel_id == hotel_id))))))
+
+
+async def queue_sale_ready(session, booking):
+    recipients = await scoped_supervisors(session, booking.hotel_id) | {booking.manager_id, booking.photographer_id}
+    description = await booking_description(session, booking)
+    for uid in sorted(value for value in recipients if value is not None):
+        user = await session.get(User, uid)
+        if user and user.active:
+            await queue_notice(session, uid, kind='sale_ready', event_key=f'sale-ready:{booking.id}',
+                url=f'/app/#shootings?booking={booking.id}', message=description,
+                payload={'bookingId': booking.id, 'description': description})
+
+
 async def queue_sale_created(session, sale, booking):
     """Same sale transaction: related staff and scoped supervisors, one event."""
-    from .models import HotelEmployee
-    supervisors = set(await session.scalars(select(UserRole.user_id).where(
-        (UserRole.role == 'OWNER') | ((UserRole.role == 'ADMIN') & UserRole.user_id.in_(
-            select(HotelEmployee.user_id).where(HotelEmployee.hotel_id == booking.hotel_id))))))
+    supervisors = await scoped_supervisors(session, booking.hotel_id)
     recipients = supervisors | {booking.manager_id, sale.credited_user_id}
     for uid in sorted(value for value in recipients if value is not None):
         user = await session.get(User, uid)
         if user and user.active:
             await queue_notice(session, uid, kind='sale_created', event_key=f'sale-created:{sale.id}',
-                url='/app/#finance', message=f'Оформлена продажа №{sale.id}. Подробности в кассе.')
+                url='/app/#finance', message=await booking_description(session, booking),
+                payload={'bookingId': booking.id})
 
 
 def current_utc():
@@ -122,7 +139,7 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
     if notice.kind in {'booking_assignment', 'booking_reminder'}:
         from .models import Booking
         from .services.assignment_notifications import ACTIVE
-        bid = json.loads(notice.payload or '{}').get('bookingId')
+        bid = notice_booking_id(notice)
         booking = await session.get(Booking, bid) if type(bid) is int else None
         trashed = await session.get(Setting, f'booking:trash:{bid}')
         if not (booking and booking.photographer_id == user.id and 'PHOTOGRAPHER' in roles and not trashed):
@@ -134,6 +151,29 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
                     and json.loads(notice.payload or '{}').get('scheduledAt') == moment.isoformat()
                     and (not for_delivery or moment - timedelta(minutes=20) <= current_utc() < moment))
         return booking.status in ACTIVE
+    if notice.kind == 'sale_ready' or (notice.kind == 'reminder' and notice_booking_id(notice)):
+        from .models import Booking, HotelEmployee
+        bid = notice_booking_id(notice)
+        booking = await session.get(Booking, bid) if bid else None
+        if not booking or await session.get(Setting, f'booking:trash:{bid}'):
+            return False
+        if 'OWNER' in roles or user.id in {booking.manager_id, booking.photographer_id}:
+            return True
+        return bool('ADMIN' in roles and await session.scalar(select(HotelEmployee.id).where(
+            HotelEmployee.user_id == user.id, HotelEmployee.hotel_id == booking.hotel_id).limit(1)))
+    if notice.kind in {'lunch_start', 'lunch_end'}:
+        from .models import HotelEmployee, WorkBreak
+        try:
+            break_id = json.loads(notice.payload or '{}').get('workBreakId')
+        except (TypeError, ValueError):
+            return False
+        row = await session.get(WorkBreak, break_id) if type(break_id) is int else None
+        if not row:
+            return False
+        if 'OWNER' in roles or row.user_id == user.id:
+            return True
+        return bool('ADMIN' in roles and await session.scalar(select(HotelEmployee.id).where(
+            HotelEmployee.user_id == user.id, HotelEmployee.hotel_id == row.hotel_id).limit(1)))
     if notice.kind == 'sale_created':
         from .models import Booking, HotelEmployee, Sale
         try:
@@ -163,12 +203,15 @@ def payload_for(notice):
     urls = {'booking_assignment': '/app/#shootings', 'control': '/app/#insights', 'daily_summary': '/app/#insights',
             'sale_ready': '/app/#workflow', 'sale_created': '/app/#finance', 'academy': '/app/#academy'}
     titles = {'booking_assignment': 'Назначена съёмка', 'booking_reminder': 'Скоро съёмка', 'chat': 'Новое сообщение', 'call': 'Входящий звонок',
-              'sale_ready': 'Съёмка готова к продаже', 'sale_created': 'Оформлена продажа', 'academy': 'Готов разбор практики', 'push_test': 'Проверка уведомлений'}
+              'sale_ready': 'Съёмка готова к продаже', 'sale_created': 'Оформлена продажа', 'academy': 'Готов разбор практики', 'push_test': 'Проверка уведомлений',
+              'lunch_start': 'Сотрудник ушёл на обед', 'lunch_end': 'Сотрудник вернулся с обеда'}
+    if notice.kind == 'reminder' and (notice.event_key or '').startswith(('rescheduled:', 'cancelled:')):
+        titles['reminder'] = 'Съёмка перенесена' if notice.event_key.startswith('rescheduled:') else 'Съёмка отменена'
     # No guest names, phone numbers, balances, or chat text on the lock screen.
     url = urls.get(notice.kind, '/app/#home')
-    if notice.kind in {'booking_assignment', 'booking_reminder'}:
+    if notice.kind in {'booking_assignment', 'booking_reminder', 'sale_ready'}:
         url = '/app/#shootings'
-        bid = json.loads(notice.payload or '{}').get('bookingId')
+        bid = notice_booking_id(notice)
         if type(bid) is int:
             url += f'?booking={bid}'
     payload = {'title': 'Photo Boss · ' + titles.get(notice.kind, 'Рабочее уведомление'),
@@ -325,8 +368,15 @@ class AppPush:
                 if not await eligible(session, notice, SimpleNamespace(active=True, user_id=actor.id), include_read=True):
                     continue
                 payload = json.loads(notice.payload or '{}')
+                description = payload.get('description') or notice.text
+                bid = notice_booking_id(notice)
+                if bid and notice.kind in {'booking_assignment', 'booking_reminder', 'sale_ready', 'sale_created', 'reminder'}:
+                    from .models import Booking
+                    booking = await session.get(Booking, bid)
+                    if booking:
+                        description = await booking_description(session, booking)
                 items.append({'id': notice.id, 'title': payload_for(notice)['title'],
-                    'description': payload.get('description') or notice.text,
+                    'description': description,
                     'url': payload_for(notice)['url'], 'read': bool(notice.acknowledged_at),
                     'createdAt': notice.created_at.isoformat()+'Z',
                     'pushState': await push_delivery_state(session, notice, active_devices=active_devices)})

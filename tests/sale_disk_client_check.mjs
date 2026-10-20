@@ -15,4 +15,11 @@ ctx.data={actorId:2,canAuditDisk:false};assert.ok(!vm.runInContext('saleDiskView
 assert.throws(()=>vm.runInContext('selectedDiskPhotos(form)',ctx),/Сначала прикрепите/);
 const workflow=fs.readFileSync('app/webapp/js/workflow.js','utf8');assert.ok(workflow.includes('${saleDiskView(b,data)}'));assert.ok(workflow.includes("add('sale_disk_selected',{draft,...photo})"));
 const sw=fs.readFileSync('app/webapp/sw.js','utf8');assert.ok(sw.includes("'sale-disk'"),'Offline shell must include the new dependency');
+const opens=[];ctx.window.open=(...args)=>{opens.push(args);return null;};
+vm.runInContext('openDeviceDisk()',ctx);
+assert.deepEqual(opens[0],['https://disk.yandex.ru/client/disk','_blank','noopener,noreferrer']);
+ctx.window.Telegram={WebApp:{initData:'fixture-only',openLink:url=>opens.push(['telegram',url])}};
+vm.runInContext('openDeviceDisk()',ctx);assert.deepEqual(opens[1],['telegram','https://disk.yandex.ru/client/disk']);
+ctx.window.Telegram.WebApp.openLink=()=>{throw Error('Unsupported Telegram client');};
+vm.runInContext('openDeviceDisk()',ctx);assert.deepEqual(opens[2],opens[0]);
 console.log('PASS: three photo sources, owner-only private browser, exact selection, account isolation and offline module');

@@ -1,6 +1,7 @@
 """Recorded lunch intervals with server time, hotel scope and audited corrections."""
 import json
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from aiohttp import web
 from sqlalchemy import select
@@ -96,6 +97,19 @@ class WorkBreaks:
             await audit(session, actor, kind, 'work_break', current.id,
                         json.dumps({'hotelId': current.hotel_id, 'start': stamp(current.started_at),
                                     'end': stamp(current.ended_at)}, ensure_ascii=False))
+            from .config import config
+            from .push_notifications import queue_notice, scoped_supervisors
+            hotel = await session.get(Hotel, current.hotel_id)
+            phase = 'lunch_end' if kind == 'break_end' else 'lunch_start'
+            local_time = now.replace(tzinfo=UTC).astimezone(ZoneInfo(config.training_timezone))
+            description = (f'Сотрудник: {actor.name}\nОтель: {hotel.name if hotel else "не указан"}\n'
+                           f'{"Вернулся с обеда" if kind == "break_end" else "Ушёл на обед"}: {local_time:%H:%M}')
+            recipients = await scoped_supervisors(session, current.hotel_id) | {actor.id}
+            for uid in sorted(recipients):
+                recipient = await session.get(User, uid)
+                if recipient and recipient.active:
+                    await queue_notice(session, uid, kind=phase, event_key=f'work-break:{current.id}:{phase}',
+                        message=description, payload={'workBreakId': current.id, 'description': description})
             return {'breakId': current.id, 'startedAt': stamp(current.started_at), 'endedAt': stamp(current.ended_at)}
 
     async def listing(self, request):
