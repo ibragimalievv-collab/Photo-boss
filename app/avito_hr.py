@@ -134,7 +134,7 @@ async def publish(engine, payloads):
     api = API()
     existing = await own_items(api)
     for payload in payloads:
-        if payload.get("billing_type") != "package" or "salary" in payload or "schedule" in payload:
+        if payload.get("billing_type") != "package" or "salary" in payload or payload.get("schedule") not in (None, "shift"):
             raise ValueError("Only approved package placement, without invented salary or schedule")
         code = payload["vacancy_code"]
         role = "PHOTOGRAPHER" if "photographer" in code else "MANAGER"
@@ -146,6 +146,12 @@ async def publish(engine, payloads):
         async with engine.begin() as conn:
             result = await conn.execute(text("INSERT INTO hr_avito_vacancies (code,role,payload_hash,status) VALUES (:code,:role,:hash,'reserved') ON CONFLICT (code) DO NOTHING RETURNING code"), {"code": code, "role": role, "hash": digest})
             reserved = result.scalar()
+            if not reserved:
+                previous = (await conn.execute(text("SELECT publication_id,status,payload_hash,details FROM hr_avito_vacancies WHERE code=:code"), {"code": code})).mappings().one()
+                known_validation_failure = previous["status"] == "error" and not previous["publication_id"] and json.loads(previous["details"]).get("http") == 400
+                if known_validation_failure and previous["payload_hash"] != digest:
+                    # A definitive pre-creation 400 may be corrected; uncertain writes never retry.
+                    reserved = (await conn.execute(text("UPDATE hr_avito_vacancies SET status='reserved',payload_hash=:hash WHERE code=:code AND status='error' AND publication_id IS NULL AND payload_hash=:previous RETURNING code"), {"code": code, "hash": digest, "previous": previous["payload_hash"]})).scalar()
         if not reserved:
             print("AVITO_PUBLICATION", json.dumps({"code": code, "state": "existing_journal_no_resubmit"}))
             continue
@@ -173,13 +179,15 @@ INTRO = ("Здравствуйте! Я автоматический HR-помо�
     "Можно без опыта: обучение с нуля, последовательное сопровождение наставника и еженедельный разбор работы. "
     "Оплата — процент от продаж, выплаты еженедельно; фиксированный доход не гарантируем. "
     "Жильё компенсируется частично, проезд — после приезда и минимум месяца работы. "
-    "График, процент, место и суммы компенсаций согласует владелец до выхода. "
+    "График — 3/1: три рабочих дня, один выходной. Процент, место и суммы компенсаций согласует владелец до выхода. "
     "Расскажите, пожалуйста, об опыте, из какого вы города и когда готовы начать в Анапе. "
     "Паспортные и банковские данные не нужны.")
 
 
 def reply(value, role):
     value = value.lower()
+    if any(w in value for w in ("график", "смен", "выходн", "рабочие дни")):
+        return "График — 3/1: три рабочих дня, один выходной. Точное время смен и место работы владелец согласует с вами до выхода.", False
     if any(w in value for w in ("зарплат", "доход", "процент", "оплат", "выплат")):
         return "Оплата — процент от продаж, выплаты еженедельно. Доход зависит от результатов, фиксированную сумму не гарантируем. Точный процент владелец согласует с вами до выхода.", False
     if any(w in value for w in ("жиль", "прожив", "проезд", "переезд")):
