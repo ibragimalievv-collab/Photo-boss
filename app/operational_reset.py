@@ -35,7 +35,7 @@ OPERATIONAL_NOTIFICATION_KINDS = ('control', 'daily_summary', 'manager_idle', 'm
 OPERATIONAL_SETTING_PREFIXES = (
     'booking:trash:', 'booking-control:advice:', 'gallery:meta:',
     'gallery:project-fav:', 'gallery:photo-fav:', 'gallery:views:',
-    'gallery:downloads:', 'notify:last-critical:',
+    'gallery:downloads:', 'notify:last-critical:', 'shoot-audit:',
 )
 
 

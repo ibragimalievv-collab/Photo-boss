@@ -49,15 +49,30 @@ def test_hotel_prices_packages_and_deposit_keep_gross_revenue_and_snapshot():
                 await s.flush()
                 with pytest.raises(ValueError, match='этом отеле'):
                     await sale_quote(s, b, 10, 150, 2)
-                assert (await sale_quote(s, b, 10, 150, 3))['amount'] == '3200.00'
+                package_quote = await sale_quote(s, b, 10, 150, 3)
+                assert package_quote['amount'] == '3200.00'
+                assert package_quote['lines'] == [{'type': 'PACKAGE', 'name': 'Десять', 'price': '3200.00',
+                                                   'quantity': 10, 'amount': '3200.00'}]
                 with pytest.raises(ValueError, match='10 кадров'):
                     await sale_quote(s, b, 9, 150, 3)
+                for price in (300, 400, 500):
+                    unit = HotelTariff(hotel_id=1, name=f'Кадр {price}', kind='UNIT', price=price)
+                    s.add(unit)
+                    await s.flush()
+                    quote = await sale_quote(s, b, 17, 150, unit.id)
+                    assert quote['amount'] == f'{17 * price}.00'
+                    assert quote['lines'][0]['quantity'] == 17
+                invalid_unit = HotelTariff(hotel_id=1, name='Старая цена', kind='UNIT', price=450)
+                s.add(invalid_unit)
+                await s.flush()
+                with pytest.raises(ValueError, match='300, 400 или 500'):
+                    await sale_quote(s, b, 2, 150, invalid_unit.id)
                 deposit = Receipt(booking_id=b.id, uploaded_by_id=1, purpose='DEPOSIT', file_id='deposit',
                     file_unique_id='deposit', expected_amount=1000, verified_amount=1000, status='APPROVED')
                 s.add(deposit)
                 draft = await start_sale_draft(s, actor, {'MANAGER'}, b.id)
                 await capture_draft_receipt(s, actor, draft, 'receipt', 'unique', 'hash', {'status':'unavailable'})
-                assert await set_sale_counts(s, actor, draft, 150, 10) == 4000
+                assert await set_sale_counts(s, actor, draft, 150, 10, tariff_id=1) == 4000
                 assert draft.expected_amount == 3000
                 (await s.get(HotelTariff, 1)).price = 500
                 deposit.verified_amount = 1500
@@ -116,7 +131,7 @@ def test_tariff_editor_checks_current_role_and_hotel_not_request_claim():
     async def run():
         engine, factory, work = await setup()
         work.api.body = AsyncMock(side_effect=lambda r:r.body)
-        body = {'hotelId':1,'name':'Кадр','kind':'UNIT','price':'450','photoCount':None,'replaces':None}
+        body = {'hotelId':1,'name':'Кадр','kind':'UNIT','price':'400','photoCount':None,'replaces':None}
         try:
             with pytest.raises(AccessError):
                 await HotelPricing(work.api).save(Request({'id':1,'roles':['OWNER']}, body))
@@ -126,10 +141,33 @@ def test_tariff_editor_checks_current_role_and_hotel_not_request_claim():
             with pytest.raises(AccessError):
                 await HotelPricing(work.api).save(Request({'id':1,'roles':['ADMIN']},body|{'hotelId':2}))
             await HotelPricing(work.api).save(Request({'id':1,'roles':['ADMIN']},body))
+            with pytest.raises(AccessError) as err:
+                await HotelPricing(work.api).save(Request({'id':1,'roles':['ADMIN']},body|{'name':'Недопустимая цена','price':'450'}))
+            assert err.value.status == 400
             for invalid in ('NaN', 'Infinity', '-Infinity'):
                 with pytest.raises(AccessError) as err:
                     await HotelPricing(work.api).save(Request({'id':1}, body|{'price':invalid}))
                 assert err.value.status == 400
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_unit_price_seed_is_per_hotel_and_idempotent():
+    async def run():
+        from app.schema_updates import seed_default_unit_prices
+
+        engine, factory = await fixture()
+        try:
+            async with engine.begin() as conn:
+                first = await seed_default_unit_prices(conn)
+                second = await seed_default_unit_prices(conn)
+            async with factory() as session:
+                rows = list(await session.scalars(select(HotelTariff).where(
+                    HotelTariff.hotel_id == 1, HotelTariff.kind == 'UNIT', HotelTariff.active.is_(True))))
+                assert {float(row.price) for row in rows} >= {300.0, 400.0, 500.0}
+                assert second == 0
+                assert first == 3
         finally:
             await engine.dispose()
     asyncio.run(run())

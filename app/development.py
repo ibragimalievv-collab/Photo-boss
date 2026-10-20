@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .config import config
 from .miniapp_security import AccessError
-from .models import Booking, Photo, Sale, ShootDevelopmentReview, Shooting, utc_now
+from .models import Booking, Photo, ShootDevelopmentReview, Shooting, utc_now
 from .operations_guard import operation_lease
 from .people import positive_id
 from .services import development_ai as ai
@@ -28,7 +28,7 @@ class LimitedImage(io.BytesIO):
 
 
 async def queue_reviews(session):
-    shootings=(await session.execute(select(Shooting,Booking).join(Booking,Shooting.booking_id==Booking.id).where(Shooting.full_upload_completed_at.is_not(None),Booking.photographer_id.is_not(None),select(Sale.id).where(Sale.booking_id==Booking.id).exists()))).all()
+    shootings=(await session.execute(select(Shooting,Booking).join(Booking,Shooting.booking_id==Booking.id).where(Shooting.full_upload_completed_at.is_not(None),Booking.photographer_id.is_not(None)))).all()
     count=0
     for shooting,booking in shootings:
         ids=list((await session.scalars(select(Photo.id).where(Photo.shooting_id==shooting.id).order_by(Photo.id))).all())
@@ -107,14 +107,20 @@ class Development:
 
     async def listing(self,request):
         from .services.booking_access import booking_scope_sql
+        from .services.shooting_media_audit import audit_summary
         a=request['miniapp_actor']
         async with self.api.engine.connect() as conn:
             reviews=await self.api.rows(conn,'SELECT r.* FROM shoot_development_reviews r JOIN shootings sh ON sh.id=r.shooting_id JOIN bookings b ON b.id=sh.booking_id WHERE ('+booking_scope_sql(a['id'],a['roles'],photos=True)+') ORDER BY r.id DESC LIMIT 50',uid=a['id'])
             sessions=await self.api.rows(conn,'SELECT * FROM sales_training_sessions WHERE user_id=:uid ORDER BY id DESC LIMIT 30',uid=a['id'])
+            reviews = [dict(review) for review in reviews]
+            for review in reviews:
+                stored = await self.api.rows(conn, 'SELECT value FROM settings WHERE key=:key', key=f'shoot-audit:{review["id"]}')
+                review['fileChecks'] = json.loads(stored[0]['value']) if stored else []
         return web.json_response({'configured':bool(config.openai_api_key),'rules':ai.SALES_RULES,'scenarios':ai.SALES_SCENARIOS,'bookingScenarios':ai.BOOKING_SCENARIOS,
             'reviews':[{'id':r['id'],'shootingId':r['shooting_id'],'photographerId':r['photographer_id'],'status':r['status'],
                 'total':len(json.loads(r['photo_ids'])),'analyzed':sum(len(b['frames']) for b in json.loads(r['analyzed'])),
-                'summaryParts':len(json.loads(r['summary_parts'])),'batches':json.loads(r['analyzed']),'result':parsed(r['result']),'error':r['last_error'],'at':str(r['created_at'])} for r in reviews],
+                'summaryParts':len(json.loads(r['summary_parts'])),'batches':json.loads(r['analyzed']),'result':parsed(r['result']),'error':r['last_error'],'at':str(r['created_at']),
+                'fileChecks': r['fileChecks'], 'fileSummary': audit_summary(r['fileChecks'], len(json.loads(r['photo_ids'])))} for r in reviews],
             'sessions':[{'id':s['id'],'clientType':s['client_type'],'status':s['status'],'revision':s['revision'],'transcript':json.loads(s['transcript']),'evaluation':parsed(s['evaluation'])} for s in sessions]})
 
     async def start(self,request):
@@ -178,6 +184,11 @@ class Development:
             rows=await self.api.rows(conn,'SELECT r.status FROM shoot_development_reviews r JOIN shootings sh ON sh.id=r.shooting_id JOIN bookings b ON b.id=sh.booking_id WHERE r.id=:id AND ('+booking_scope_sql(a['id'],a['roles'],photos=True)+')',id=rid,uid=a['id'])
             if not rows: raise AccessError('Разбор не найден.',404)
             await conn.execute(text("UPDATE shoot_development_reviews SET status='PENDING',attempts=0,claimed_at=NULL WHERE id=:id AND status IN ('FAILED','RETRY')"),{'id':rid})
+            stored = await self.api.rows(conn, 'SELECT value FROM settings WHERE key=:key', key=f'shoot-audit:{rid}')
+            if stored:
+                checked = [f for f in json.loads(stored[0]['value']) if f.get('status') == 'checked']
+                await conn.execute(text('UPDATE settings SET value=:value WHERE key=:key'),
+                    {'value': json.dumps(checked), 'key': f'shoot-audit:{rid}'})
         return web.json_response({'ok':True})
 
 
@@ -187,6 +198,8 @@ async def development_loop(engine,bot):
         try:
             async with operation_lease(engine):
                 async with factory() as session: await queue_reviews(session)
+                from .services.shooting_media_audit import audit_next_files
+                await audit_next_files(factory)
                 await review_one(factory,bot)
         except asyncio.CancelledError: raise
         except AccessError as exc:

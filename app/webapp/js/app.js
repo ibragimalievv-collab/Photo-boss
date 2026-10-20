@@ -48,7 +48,7 @@ function shell(){
  refreshNotificationBadge();
  document.body.classList.toggle('protected',!state.me?.screenCaptureAllowed);try{if(state.route==='home')tg?.BackButton?.hide();else tg?.BackButton?.show();}catch{}
 }
-document.addEventListener('pb-notification',event=>toast(event.detail.title));
+document.addEventListener('pb-notification',event=>toast([event.detail.title,event.detail.description].filter(Boolean).join(' · ')));
 document.addEventListener('pb-notification-open',closeSheet);
 function heading(title,subtitle='',action=''){return `<div class="page-head"><div><div class="eyebrow">${esc(dateLabel(state.me.today,{weekday:'short',day:'numeric',month:'long'}))} · Москва</div><h1>${title}</h1>${subtitle?`<p>${subtitle}</p>`:''}</div>${action}</div>`;}
 function mark(status){const type=['STARTED','COMPLETED','SOLD','PAID'].includes(status)?'success':['READY_FOR_SALE','ASSIGNED','PARTIAL'].includes(status)?'warning':['REJECTED','CANCELLED'].includes(status)?'danger':'';return `<span class="badge ${type}">${esc(STATUS_NAMES[status]||{ON_BREAK:'На обеде',STARTED:'На смене',PLANNED:'По графику',ENDED:'Завершил',MISSING_CHECKOUT:'Нет отметки ухода',PAID:'Оплачено',PARTIAL:'Частично',UNPAID:'Не оплачено'}[status]||status)}</span>`;}

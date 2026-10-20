@@ -223,6 +223,14 @@ class People:
             hotel = (await self.api.rows(conn,
                 "INSERT INTO hotels(name,active) VALUES (:name,TRUE) RETURNING id,name",
                 name=name))[0]
+            for price in (300, 400, 500):
+                await self.api.rows(conn, '''INSERT INTO hotel_tariffs
+                    (hotel_id,name,kind,price,photo_count,active,created_at)
+                    SELECT :hotel,:name,'UNIT',:price,NULL,TRUE,CURRENT_TIMESTAMP
+                    WHERE NOT EXISTS (SELECT 1 FROM hotel_tariffs
+                        WHERE hotel_id=:hotel AND kind='UNIT' AND price=:price AND active=TRUE)
+                    RETURNING id''',
+                    hotel=hotel['id'], name=f'Поштучно — {price} ₽/кадр', price=price)
             await self.api.audit_write(conn, actor, "hotel_created", "hotel", hotel["id"],
                 json.dumps({"source": "miniapp", "before": None,
                             "after": {"id": hotel["id"], "name": name, "active": True}},

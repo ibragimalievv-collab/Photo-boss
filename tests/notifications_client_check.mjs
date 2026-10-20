@@ -6,7 +6,7 @@ let existing=null,unsubscribed=0;
 const sub={endpoint:'https://web.push.apple.com/test-device',toJSON(){return {endpoint:this.endpoint,keys:{p256dh:'test',auth:'test'}};},async unsubscribe(){existing=null;unsubscribed++;}};
 const worker={pushManager:{async getSubscription(){return existing;},async subscribe(opts){assert.equal(opts.userVisibleOnly,true);existing=sub;return sub;}}};
 const ctx=vm.createContext({Uint8Array,JSON,Date,URL,Promise,isSecureContext:true,atob:s=>Buffer.from(s,'base64').toString('binary'),
- api:async(path,opts)=>{requests.push({path,opts});return {configured:true,channel:'app',publicKey:'BABC',items:[]};},esc:x=>String(x),
+ api:async(path,opts)=>{requests.push({path,opts});return {configured:true,channel:'app',publicKey:'BABC',activeDevices:0,items:[{id:7,title:'Скоро съёмка',description:'13:00 · Hotel · номер 100',url:'/app/#shootings?booking=7',read:false,createdAt:'2026-10-20T09:40:00Z',pushState:'NO_DEVICE'}]};},esc:x=>String(x),
  Notification:{permission:'default',async requestPermission(){this.permission='granted';return 'granted';}},
  navigator:{userAgent:'Android',serviceWorker:{register:async()=>worker,ready:Promise.resolve(worker),getRegistration:async()=>worker}},
  window:{PushManager:class{},Notification:class{}},matchMedia:()=>({matches:true}),
@@ -14,7 +14,10 @@ const ctx=vm.createContext({Uint8Array,JSON,Date,URL,Promise,isSecureContext:tru
  document:{addEventListener:(kind,fn)=>handlers[kind]=fn,querySelector:()=>status,querySelectorAll:()=>[]}});
 const src=fs.readFileSync(new URL('../app/webapp/js/notifications.js',import.meta.url),'utf8').replace(/^import .*;$/gm,'').replaceAll('export ','');vm.runInContext(src,ctx);
 await vm.runInContext('syncPushAccount({user:{id:1}})',ctx);
-assert.match(await vm.runInContext('notificationsView()',ctx),/Включить уведомления/);
+const notificationHtml=await vm.runInContext('notificationsView()',ctx);
+assert.match(notificationHtml,/Включить уведомления/);
+assert.match(notificationHtml,/13:00 · Hotel · номер 100/);
+assert.match(notificationHtml,/Нет подключённого устройства/);
 const click=async action=>handlers.click({target:{closest:()=>({dataset:{push:action},disabled:false})}});
 await click('enable');assert(requests.some(r=>r.path==='/push/subscribe'));assert.match(status.textContent,/подписано/);
 await click('test');assert(requests.some(r=>r.path==='/push/test'));assert.match(status.textContent,/ещё не подтверждение/);

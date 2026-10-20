@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.33-hotel-zone-review"
+RELEASE = "miniapp-3.34-reminders-disk-audit"
 
 
 async def health(request):
@@ -134,6 +134,8 @@ async def on_startup(app):
     app["storage_task"] = asyncio.create_task(storage_loop(bot, app["yandex_disk"]))
     from .services.assignment_notifications import assignment_loop
     app['assignment_notification_task'] = asyncio.create_task(assignment_loop(engine, bot))
+    from .services.booking_reminders import booking_reminder_loop
+    app['booking_reminder_task'] = asyncio.create_task(booking_reminder_loop(engine))
     from .push_notifications import log_push_state, push_loop
     await log_push_state(engine)
     app['push_notification_task'] = asyncio.create_task(push_loop(engine))
@@ -151,7 +153,7 @@ async def on_startup(app):
 async def on_cleanup(app):
     clear_ready_file()
     app["ready"] = False
-    for key in ("attendance_fine_task", "push_notification_task", "bank_payment_task", "realtime_probe_task", "operations_task", "storage_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task", "assignment_notification_task"):
+    for key in ("booking_reminder_task", "attendance_fine_task", "push_notification_task", "bank_payment_task", "realtime_probe_task", "operations_task", "storage_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task", "assignment_notification_task"):
         task = app.get(key)
         if task:
             task.cancel()

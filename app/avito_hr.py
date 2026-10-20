@@ -303,7 +303,6 @@ class Worker:
                 async with self.engine.connect() as conn:
                     escalated = await conn.scalar(text("SELECT count(*) FROM hr_avito_escalations WHERE chat_id=:chat AND reason NOT LIKE 'resolved%'"), {"chat": chat})
                     stopped = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE chat_id=:chat AND state='stopped'"), {"chat": chat})
-                    greeted = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE event_key=:key"), {"key": "welcome:" + chat})
                 if stopped:
                     continue
                 messages = await self.api.request("GET", f"/messenger/v3/accounts/{self.uid}/chats/{urllib.parse.quote(chat, safe='')}/messages/?limit=100&offset=0")
@@ -362,7 +361,7 @@ class Worker:
                 await self.cycle()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - keep worker alive and pause on any provider/runtime failure
                 reason = "http_" + str(exc.status) if isinstance(exc, APIError) else type(exc).__name__
                 await self.pause(reason)
                 log.error("Avito HR paused (%s)", reason)
@@ -388,7 +387,7 @@ def install_avito_hr(app, engine):
     async def lifetime(_app):
         try:
             await prepare(engine)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - startup failure must be reported without crashing app startup
             log.error("Avito HR startup failed (%s)", type(exc).__name__)
             yield
             return

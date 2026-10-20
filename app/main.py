@@ -155,6 +155,8 @@ async def main():
         storage_task = asyncio.create_task(storage_loop(bot, storage)) if token else None
         from .services.assignment_notifications import assignment_loop
         assignment_task = asyncio.create_task(assignment_loop(engine, bot))
+        from .services.booking_reminders import booking_reminder_loop
+        reminder_task = asyncio.create_task(booking_reminder_loop(engine))
         from .push_notifications import push_loop
         push_task = asyncio.create_task(push_loop(engine))
         try:
@@ -165,6 +167,9 @@ async def main():
                 bot, allowed_updates=dispatcher.resolve_used_update_types(), close_bot_session=False,
             )
         finally:
+            reminder_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reminder_task
             push_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await push_task
