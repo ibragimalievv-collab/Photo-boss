@@ -40,24 +40,30 @@ class HotelPricing:
             await hotel_access(session, a['id'], roles, body['hotelId'], manage=True)
             # Serialize unit-rate replacement across different supervisors.
             from .models import Hotel
-            await session.get(Hotel, body['hotelId'], with_for_update=True)
+            hotel = await session.get(Hotel, body['hotelId'], with_for_update=True)
             old = await session.get(HotelTariff, body['replaces'], with_for_update=True) if body['replaces'] else None
             if body['replaces'] and (not old or old.hotel_id != body['hotelId'] or not old.active):
                 raise AccessError('Тариф уже изменён. Обновите данные.', 409)
             if body['kind'] == 'UNIT':
-                duplicate = await session.scalar(select(HotelTariff.id).where(
+                # Legacy releases seeded three simultaneous choices. A
+                # supervisor's explicit save replaces that ambiguity with one
+                # fixed rate. Booking and sale snapshots remain untouched.
+                units = await session.scalars(select(HotelTariff).where(
                     HotelTariff.hotel_id == body['hotelId'], HotelTariff.kind == 'UNIT',
-                    HotelTariff.price == price, HotelTariff.active.is_(True),
-                    HotelTariff.id != (old.id if old else 0)).limit(1))
-                if duplicate:
-                    raise AccessError('Такая цена кадра уже настроена для этого отеля.', 409)
+                    HotelTariff.active.is_(True)))
+                for unit in units:
+                    unit.active = False
             if old:
                 old.active = False
             tariff = HotelTariff(hotel_id=body['hotelId'], name=body['name'].strip(),
                 kind=body['kind'], price=price, photo_count=body['photoCount'])
             session.add(tariff)
             await session.flush()
+            if body['kind'] == 'UNIT':
+                hotel.fixed_unit_tariff_id = tariff.id
             await audit(session, actor, 'hotel_tariff_saved', 'hotel_tariff', tariff.id,
                         f'hotel={tariff.hotel_id};replaces={body["replaces"]};price={price};kind={tariff.kind}')
             await session.commit()
-        return web.json_response({'ok': True, 'id': tariff.id})
+        return web.json_response({'ok': True, 'id': tariff.id,
+            'fixedUnitTariffId': hotel.fixed_unit_tariff_id,
+            'unitPrice': str(price) if tariff.kind == 'UNIT' else None})

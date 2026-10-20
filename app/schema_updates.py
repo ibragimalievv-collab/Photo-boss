@@ -1,6 +1,5 @@
 """Additive, repeatable upgrades for databases created before the current release."""
 import json
-from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import MetaData, Table, UniqueConstraint, inspect, text
@@ -17,36 +16,17 @@ async def add_columns(connection, table, columns):
 
 
 async def seed_default_unit_prices(connection):
-    """Make the three approved per-frame choices available at every active hotel."""
-    tables = await connection.run_sync(lambda conn: set(inspect(conn).get_table_names()))
-    if not {'hotels', 'hotel_tariffs'} <= tables:
-        return 0
-    if connection.dialect.name == 'postgresql':
-        await connection.execute(text('LOCK TABLE hotels IN SHARE ROW EXCLUSIVE MODE'))
-    hotels = await connection.execute(text('SELECT id FROM hotels WHERE active=TRUE ORDER BY id'))
-    inserted = 0
-    for row in hotels:
-        inserted += await seed_hotel_unit_prices(connection, row.id)
-    return inserted
+    """Compatibility entry point: hotel prices require an explicit supervisor choice.
+
+    Existing options are retained for history. Creating three alternatives here
+    would leave the fixed hotel price ambiguous on every application restart.
+    """
+    return 0
 
 
 async def seed_hotel_unit_prices(connection, hotel_id):
-    """Add missing standard rates for one newly created active hotel."""
-    now = datetime.now(UTC).replace(tzinfo=None)
-    inserted = 0
-    for amount in (300, 400, 500):
-        exists = await connection.scalar(text('''SELECT id FROM hotel_tariffs
-            WHERE hotel_id=:hotel AND kind='UNIT' AND price=:price AND active=TRUE LIMIT 1'''),
-            {'hotel': hotel_id, 'price': amount})
-        if exists:
-            continue
-        await connection.execute(text('''INSERT INTO hotel_tariffs
-            (hotel_id,name,kind,price,photo_count,active,created_at)
-            VALUES (:hotel,:name,'UNIT',:price,NULL,TRUE,:created)'''),
-            {'hotel': hotel_id, 'name': f'Поштучно — {amount} ₽/кадр',
-             'price': amount, 'created': now})
-        inserted += 1
-    return inserted
+    """Do not invent a fixed price for a newly created hotel."""
+    return 0
 
 
 def _delivery_photo_sets(connection):
@@ -137,6 +117,10 @@ def _delivery_photo_sets(connection):
 
 async def upgrade(connection):
     tables = await connection.run_sync(lambda conn: set(inspect(conn).get_table_names()))
+    if 'hotels' in tables:
+        await add_columns(connection, 'hotels', {'fixed_unit_tariff_id': 'INTEGER'})
+    if 'bookings' in tables:
+        await add_columns(connection, 'bookings', {'pricing_snapshot': 'TEXT'})
     if 'shoot_development_reviews' in tables:
         await add_columns(connection,'shoot_development_reviews',{'summary_parts':"TEXT NOT NULL DEFAULT '[]'"})
     if 'delivery_galleries' in tables:

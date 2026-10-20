@@ -255,9 +255,9 @@ def analysis_text(receipt):
 
 async def expected_amount(session, booking, purpose):
     if purpose == "DEPOSIT":
-        approved = await session.scalar(select(Receipt.id).where(
+        approved = await session.scalar(select(func.coalesce(func.sum(Receipt.verified_amount), 0)).where(
             Receipt.booking_id == booking.id, Receipt.purpose == "DEPOSIT",
             Receipt.status == "APPROVED"
-        ).limit(1))
-        return money(0 if approved else booking.deposit)
+        ))
+        return max(money(booking.deposit) - money(approved), money(0))
     return (await payment_totals(session, booking.id))[2]

@@ -1061,7 +1061,7 @@ class MiniApp:
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg", "assets/academy/exposure.svg", "assets/academy/window-light.svg", "assets/academy/perspective.svg", "assets/academy/group-depth.svg"}
         allowed.add('js/sale-files.js')
-        allowed.update({'js/attendance-fines.js', 'js/hotel-points.js', 'js/storage-audit.js', 'js/notifications.js', 'js/lunch.js', 'js/hotel-pricing.js', 'js/bank-payments.js'})
+        allowed.update({'js/attendance-fines.js', 'js/hotel-points.js', 'js/storage-audit.js', 'js/notifications.js', 'js/lunch.js', 'js/hotel-pricing.js', 'js/bank-payments.js', 'js/disk-folder-audit.js'})
         if name not in allowed:
             raise web.HTTPNotFound()
         path = self.static_dir / name
@@ -1118,5 +1118,7 @@ def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/M
     install_inventory(app, miniapp)
     from .booking_control import install_booking_control
     install_booking_control(app, miniapp)
+    from .disk_folder_audit import install_disk_folder_audits
+    install_disk_folder_audits(app, miniapp)
     return miniapp
 
