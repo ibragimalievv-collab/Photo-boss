@@ -1,5 +1,5 @@
 aiogram==3.31.0
-aiohttp==3.14.3
+aiohttp==3.14.4
 SQLAlchemy==2.0.53
 asyncpg==0.31.0
 python-dotenv==1.2.3
