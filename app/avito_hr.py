@@ -218,7 +218,7 @@ def reply(value, role, history=()):
             answers.append("Точный срок обучения уточню у владельца.")
         else:
             answers.append("Можно без опыта: обучение с нуля и помощь наставника." if role == "PHOTOGRAPHER" else "Можно без опыта: обучаем общению с гостями и записи на фотосъемки.")
-    if has("обязанност", "что делать", "чем заним", "что нужно дел"):
+    if has("обязанност", "что делать", "что надо делать", "чем заним", "что нужно дел"):
         answers.append("Фотограф снимает гостей; работе с камерой и съемке обучаем." if role == "PHOTOGRAPHER" else "Менеджер общается с гостями, рассказывает о фотосъемках и записывает желающих.")
     ready = bool(re.search(r"(?:готов[аы]?|могу|хочу)\s+(?:выйти|начать|приступить)", value))
     unknown = has("договор", "оформлен", "документ", "налог", "штраф", "питан", "форм", "камера своя", "оборудован", "возраст", "гражданств", "виза")
@@ -301,10 +301,10 @@ class Worker:
                 if item_id not in roles or not chat:
                     continue
                 async with self.engine.connect() as conn:
-                    escalated = await conn.scalar(text("SELECT count(*) FROM hr_avito_escalations WHERE chat_id=:chat"), {"chat": chat})
+                    escalated = await conn.scalar(text("SELECT count(*) FROM hr_avito_escalations WHERE chat_id=:chat AND reason NOT LIKE 'resolved%'"), {"chat": chat})
                     stopped = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE chat_id=:chat AND state='stopped'"), {"chat": chat})
                     greeted = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE event_key=:key"), {"key": "welcome:" + chat})
-                if escalated or stopped:
+                if stopped:
                     continue
                 messages = await self.api.request("GET", f"/messenger/v3/accounts/{self.uid}/chats/{urllib.parse.quote(chat, safe='')}/messages/?limit=100&offset=0")
                 messages = messages if isinstance(messages, list) else messages.get("messages", [])
@@ -318,6 +318,19 @@ class Worker:
                 if not incoming:
                     continue
                 newest = max(incoming, key=lambda m: int(m.get("created", 0)))
+                if escalated:
+                    # Recover only a formerly unknown FAQ after a dialogue upgrade.
+                    # Human takeovers and genuinely unknown questions remain owner-held.
+                    async with self.engine.connect() as conn:
+                        reasons = set((await conn.execute(text("SELECT reason FROM hr_avito_escalations WHERE chat_id=:chat AND reason NOT LIKE 'resolved%'"), {"chat": chat})).scalars())
+                        last_response = await conn.scalar(text("SELECT response FROM hr_avito_outbox WHERE chat_id=:chat AND state='sent' ORDER BY created_at DESC LIMIT 1"), {"chat": chat})
+                    old_fallback = "Спасибо! Передам ваш ответ и вопросы владельцу «Фотобосс» для обсуждения следующего шага. Решение о найме и окончательные условия согласует владелец."
+                    answer, needs_owner = reply((newest.get("content") or {}).get("text", ""), roles[item_id], messages)
+                    if reasons == {"owner_review"} and last_response == old_fallback and answer and not needs_owner:
+                        await self.send_once("resolved:" + chat + ":" + str(newest["id"]) + ":" + DIALOGUE_VERSION, chat, answer)
+                        async with self.engine.begin() as conn:
+                            await conn.execute(text("UPDATE hr_avito_escalations SET reason='resolved_dialogue' WHERE chat_id=:chat AND reason='owner_review'"), {"chat": chat})
+                    continue
                 # Process all consecutive inbound texts in the current turn, not only
                 # the last fragment. Existing journal keys protect already answered turns.
                 latest_out = max((int(m.get("created", 0)) for m in messages if m.get("direction") == "out" and m.get("type") == "text"), default=-1)
@@ -361,7 +374,7 @@ class Worker:
         async with self.engine.connect() as conn:
             control = (await conn.execute(text("SELECT paused,reason FROM hr_avito_control WHERE id=1"))).mappings().one()
             count = await conn.scalar(text("SELECT count(*) FROM hr_avito_vacancies WHERE status='activated'"))
-            escalations = await conn.scalar(text("SELECT count(*) FROM hr_avito_escalations"))
+            escalations = await conn.scalar(text("SELECT count(*) FROM hr_avito_escalations WHERE reason NOT LIKE 'resolved%'"))
             sent = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE state='sent'"))
         return web.json_response({"enabled": True, "ready": self.ready, "paused": bool(control["paused"]), "reason": control["reason"], "managedVacancies": count, "lastCheck": self.last_check, "sent": sent, "ownerReview": escalations})
 
