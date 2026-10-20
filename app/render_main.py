@@ -28,11 +28,11 @@ from .services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
 from .services.photo_storage import storage_loop
 from .work_calls import ice_config, install_work_calls
 from .work_chat import cleanup_expired_chat, cleanup_loop, install_work_chat
-from .yandex_disk import install_yandex_disk
+from .yandex_disk import install_yandex_disk, storage_recovery_loop
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.35-pricing-reminder-expiry"
+RELEASE = "miniapp-3.36-storage-recovery"
 
 
 async def health(request):
@@ -60,7 +60,11 @@ async def health(request):
                                           "connected": bool(storage_state.get("connected")),
                                           "writeVerified": bool(storage_state.get("writeVerified")),
                                           "readVerified": bool(storage_state.get("readVerified")),
-                                          "checkedAt": storage_state.get("checkedAt")}},
+                                          "checkedAt": storage_state.get("checkedAt"),
+                                          "fullCheckedAt": storage_state.get("fullCheckedAt"),
+                                          "errorStage": storage_state.get("errorStage"),
+                                          "errorCode": storage_state.get("errorCode"),
+                                          "providerStatus": storage_state.get("providerStatus")}},
                              status=200 if ready else 503, headers={"Cache-Control": "no-store"})
 
 
@@ -118,6 +122,7 @@ async def on_startup(app):
     storage_status = await app["yandex_disk"].verify(write_test=True)
     if not storage_status["connected"] or not storage_status["writeVerified"] or not storage_status["readVerified"]:
         logger.warning("Yandex.Disk storage is degraded; Telegram workflows remain available")
+    app["storage_recovery_task"] = asyncio.create_task(storage_recovery_loop(app["yandex_disk"]))
     deleted = await cleanup_expired_chat(engine, app["yandex_disk"])
     if deleted:
         logger.info("Expired work-chat messages removed on startup: %s", deleted)
@@ -153,7 +158,7 @@ async def on_startup(app):
 async def on_cleanup(app):
     clear_ready_file()
     app["ready"] = False
-    for key in ("booking_reminder_task", "attendance_fine_task", "push_notification_task", "bank_payment_task", "realtime_probe_task", "operations_task", "storage_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task", "assignment_notification_task"):
+    for key in ("booking_reminder_task", "attendance_fine_task", "push_notification_task", "bank_payment_task", "realtime_probe_task", "operations_task", "storage_task", "storage_recovery_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task", "assignment_notification_task"):
         task = app.get(key)
         if task:
             task.cancel()

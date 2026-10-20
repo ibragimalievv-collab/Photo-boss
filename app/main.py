@@ -28,7 +28,7 @@ from .miniapp_security import AccessError
 from .operations_guard import close_operation_leases, operation_lease
 from .services.photo_storage import storage_loop
 from .ui import CompactUiMiddleware, enable_compact_ui
-from .yandex_disk import YandexDisk, configured_from_env
+from .yandex_disk import YandexDisk, configured_from_env, storage_recovery_loop
 
 logger = logging.getLogger(__name__)
 READY_FILE = Path(os.getenv("HEALTHCHECK_FILE", "/tmp/photo-boss.ready"))
@@ -153,6 +153,7 @@ async def main():
         development_task = asyncio.create_task(development_loop(engine,bot))
         operations_task = asyncio.create_task(operations_loop(bot))
         storage_task = asyncio.create_task(storage_loop(bot, storage)) if token else None
+        storage_recovery_task = asyncio.create_task(storage_recovery_loop(storage)) if token else None
         from .services.assignment_notifications import assignment_loop
         assignment_task = asyncio.create_task(assignment_loop(engine, bot))
         from .services.booking_reminders import booking_reminder_loop
@@ -186,6 +187,10 @@ async def main():
                 storage_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await storage_task
+            if storage_recovery_task:
+                storage_recovery_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await storage_recovery_task
             await dispatcher.storage.close()
             await bot.session.close()
     finally:
