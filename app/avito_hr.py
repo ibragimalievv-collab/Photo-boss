@@ -2,6 +2,8 @@
 import asyncio
 import contextlib
 import hashlib
+import http.client
+import socket
 import json
 import logging
 import os
@@ -27,11 +29,30 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def avito_connection(address, timeout=25, source_address=None, **kwargs):
+    # Standard DNS fallback, with a short TCP timeout per address. Keep the
+    # original read/TLS timeout and HTTPS hostname/certificate verification.
+    sock = socket.create_connection(address, timeout=min(timeout, 4), source_address=source_address, **kwargs)
+    sock.settimeout(timeout)
+    return sock
+
+
+class AvitoHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = avito_connection
+
+
+class AvitoHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, request):
+        return self.do_open(AvitoHTTPSConnection, request, context=self._context)
+
+
 class API:
     def __init__(self):
         self.token = None
         self.expiry = 0
-        self.opener = urllib.request.build_opener(NoRedirect())
+        self.opener = urllib.request.build_opener(NoRedirect(), AvitoHTTPSHandler())
 
     def call(self, method, path, body=None):
         if time.time() >= self.expiry:
