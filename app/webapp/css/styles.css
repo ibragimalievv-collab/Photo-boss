@@ -95,3 +95,5 @@
 .academy-lesson-media{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px}.academy-lesson-media figure{margin:0;min-width:0}.academy-lesson-media img{display:block;width:100%;max-height:440px;object-fit:contain;border-radius:12px;background:var(--panel,#191919)}.academy-lesson-media figcaption{font-size:14px;line-height:1.5;margin-top:8px}.academy-mentor-answer{white-space:pre-wrap;line-height:1.65;overflow-wrap:anywhere}.academy-mentor textarea{width:100%;min-height:100px}
 /* Keep notification and account controls reachable on compact phones. Themes are also in the profile. */
 @media(max-width:380px){.topbar [data-action="themes"]{display:none}}
+
+.icon-button[data-action="app-notifications"]{position:relative}.notification-count{position:absolute;top:0;right:0;min-width:16px;padding:1px 3px;border-radius:9px;background:#c84242;color:#fff;font-size:10px;line-height:14px;text-align:center}.notification-count[hidden]{display:none}

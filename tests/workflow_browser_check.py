@@ -370,7 +370,7 @@ async def main():
                         form = panel.locator(f'.attendance-review[data-purpose={purpose}]')
                         await form.locator('..').locator('summary').click()
                         await form.locator('..').get_by_role('button', name='Посмотреть фото').click()
-                        await form.locator('..').get_by_alt_text('Фото офлайн-отметки').wait_for()
+                        await form.locator('..').get_by_alt_text('Фото отметки смены').wait_for()
                         value = await panel.evaluate("async purpose=>{const {api}=await import('/app/js/api.js');return (await api('/attendance/pending')).items.find(r=>r.purpose===purpose).offline_claimed_at.slice(0,16);}", purpose)
                         await form.locator('[name=verifiedAt]').fill(value)
                         await form.locator('[name=note]').fill('Checked photo and shift time')

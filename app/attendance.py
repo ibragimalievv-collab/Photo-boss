@@ -250,18 +250,20 @@ class Attendance:
                     offline_claimed_at=:now,status='PENDING_REVIEW' WHERE id=:id'''),
                     {'file': file_id, 'now': now.replace(tzinfo=None), 'id': row['id']})
                 await self.api.audit_write(conn, actor, 'attendance_review_requested', table, row['id'],
-                    'Фото и координаты сохранены; лицо, форма и присутствие требуют проверки; штраф не начислен.')
+                    'Фото и координаты сохранены; лицо, форма и присутствие требуют проверки; расчёт времени автоматический.')
+                from .attendance_fines import reconcile_day
+                await reconcile_day(self.api, conn, actor['id'], day, now)
             else:
                 await self.confirm(conn, actor, row, body['purpose'], day, now, file_id)
             start, end = await self.records(conn, actor['id'], day)
         return web.json_response(self.result(actor, start, end, self.now()))
 
     async def confirm(self, conn, actor, row, purpose, day, when, file_id):
-        """Caller holds the original attendance row lock; exactly one late fee."""
+        """Caller holds the original attendance row lock; time charges reconcile once."""
         from .services.shifts import LATE_FINE, is_late
         is_start = purpose == 'start'
         table, field, final, at = attendance_fields(purpose)
-        late = bool(is_start and is_late(when))
+        late = bool(is_start and is_late(when) and not review_required())
         fine = LATE_FINE if late else 0
         extra = ',late=:late,fine_amount=:fine' if is_start else ''
         await conn.execute(text(f'UPDATE {table} SET {field}=:file,{at}=:now,status=:status{extra} WHERE id=:id'),
@@ -279,6 +281,9 @@ class Attendance:
                 VALUES (:uid,'Штраф за опоздание',:amount,:period,:note,:now)'''),
                 {'uid': row['user_id'], 'amount': -fine, 'period': day.isoformat(),
                  'note': f'Начало смены после 09:00; shift_check_in={row["id"]}; miniapp', 'now': self.now().replace(tzinfo=None)})
+        if review_required():
+            from .attendance_fines import reconcile_day
+            await reconcile_day(self.api, conn, row['user_id'], day, self.now())
         await self.api.audit_write(conn, actor, 'shift_started' if is_start else 'shift_finished',
             'shift_check_in' if is_start else 'shift_check_out', row['id'],
             f'miniapp; геолокация и фото сохранены; штраф={fine:g}')
@@ -318,9 +323,11 @@ class Attendance:
             {'id': row['id'], 'lat': lat, 'lon': lon, 'file': file_id, 'now': now.replace(tzinfo=None), 'claimed': claimed.replace(tzinfo=None)})
         if review_required():
             await capture_context(self.api, conn, actor['id'], day, data['purpose'], row['id'], lat, lon, accuracy, source='offline')
+            from .attendance_fines import reconcile_day
+            await reconcile_day(self.api, conn, actor['id'], day, now)
         await self.api.audit_write(conn, actor, 'offline_attendance_received', table, row['id'],
             json.dumps({'claimedAt': claimed.isoformat(), 'receivedAt': now.isoformat(), 'accuracy': accuracy,
-                        'note': 'Время устройства и присутствие не подтверждены; штраф не начислен.'}, ensure_ascii=False))
+                        'note': 'Время устройства и присутствие не подтверждены; автоматический расчёт исправляет руководитель при уважительной причине.'}, ensure_ascii=False))
         return {'attendanceStatus': 'PENDING_REVIEW', 'attendanceId': row['id']}
 
     async def pending(self, request):
@@ -433,6 +440,8 @@ def explicit_time(value):
 
 def install_attendance(app, miniapp):
     service = Attendance(miniapp)
+    from .attendance_fines import install_attendance_fines
+    install_attendance_fines(app, miniapp)
     app.router.add_get('/api/miniapp/attendance', service.status)
     app.router.add_post('/api/miniapp/attendance/location', service.location)
     app.router.add_post('/api/miniapp/attendance/photo', service.photo)

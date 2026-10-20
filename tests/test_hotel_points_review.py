@@ -107,7 +107,7 @@ def test_seed_refuses_ambiguous_hotels():
     asyncio.run(run())
 
 
-def test_online_photo_waits_for_review_without_fine_and_scopes_evidence(monkeypatch):
+def test_online_photo_review_and_automatic_time_fine_are_independent(monkeypatch):
     monkeypatch.setenv('PHOTO_BOSS_ATTENDANCE_REQUIRE_REVIEW', '1')
     async def run():
         engine, factory, work = await setup()
@@ -134,9 +134,10 @@ def test_online_photo_waits_for_review_without_fine_and_scopes_evidence(monkeypa
                 'image': 'data:image/jpeg;base64,'+base64.b64encode(jpeg()).decode()}
             saved = json.loads((await attendance.photo(request)).text)
             assert saved['start']['status'] == 'PENDING_REVIEW'
-            assert saved['start']['at'] is None and saved['fine'] == 0
+            assert saved['start']['at'] is None and saved['fine'] == 500
             async with factory() as session:
-                assert await session.scalar(select(func.count(PayrollEntry.id))) == 0
+                assert await session.scalar(select(func.count(PayrollEntry.id))) == 1
+                assert (await session.scalar(select(PayrollEntry))).amount == -500
                 row = await session.scalar(select(ShiftCheckIn))
                 assert row.started_at is None and row.full_body_file_id == 'app:/private/test.jpg'
             # A pending photo cannot be overwritten by retrying a different one.
@@ -158,7 +159,7 @@ def test_online_photo_waits_for_review_without_fine_and_scopes_evidence(monkeypa
             assert json.loads((await attendance.review(review)).text)['alreadyReviewed']
             async with factory() as session:
                 assert (await session.scalar(select(ShiftCheckIn))).status == 'STARTED'
-                assert await session.scalar(select(func.count(PayrollEntry.id))) == 0
+                assert (await session.scalar(select(PayrollEntry))).amount == 0
         finally:
             await engine.dispose()
     asyncio.run(run())

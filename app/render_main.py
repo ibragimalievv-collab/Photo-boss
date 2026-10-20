@@ -121,6 +121,13 @@ async def on_startup(app):
     deleted = await cleanup_expired_chat(engine, app["yandex_disk"])
     if deleted:
         logger.info("Expired work-chat messages removed on startup: %s", deleted)
+    if review_required():
+        from datetime import datetime, timezone
+
+        from .attendance_fines import fine_loop, initialize, worker_api
+        fine_api = worker_api(engine, config.training_timezone)
+        await initialize(fine_api, datetime.now(timezone.utc))
+        app['attendance_fine_task'] = asyncio.create_task(fine_loop(fine_api))
     app["operations_task"] = asyncio.create_task(operations_loop(bot))
     from .bank_payments import payment_loop
     app['bank_payment_task'] = asyncio.create_task(payment_loop(engine))
@@ -144,7 +151,7 @@ async def on_startup(app):
 async def on_cleanup(app):
     clear_ready_file()
     app["ready"] = False
-    for key in ("push_notification_task", "bank_payment_task", "realtime_probe_task", "operations_task", "storage_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task", "assignment_notification_task"):
+    for key in ("attendance_fine_task", "push_notification_task", "bank_payment_task", "realtime_probe_task", "operations_task", "storage_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task", "assignment_notification_task"):
         task = app.get(key)
         if task:
             task.cancel()

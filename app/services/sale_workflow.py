@@ -373,6 +373,8 @@ async def complete_sale(session, actor, draft_id):
         ),
     )
     await refresh_payment_statuses(session, booking.id)
+    from ..push_notifications import queue_sale_created
+    await queue_sale_created(session, sale, booking)
     await session.flush()
     return SimpleNamespace(sale=sale, draft=draft, booking=booking, photographer=photographer,
                            receipt=receipt, count=count, percent=percent,
