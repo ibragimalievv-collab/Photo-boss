@@ -149,6 +149,9 @@ async def main():
                     await page.get_by_text('В очереди на этом устройстве — не отправлено', exact=True).wait_for()
                     await page.locator('#workflowSalePick').select_option('1')
                     sale = page.locator('#workflowSale')
+                    tariff = await sale.locator('[name=tariffId] option').evaluate_all(
+                        "options=>options.find(option=>option.textContent.includes('400')).value")
+                    await sale.locator('[name=tariffId]').select_option(tariff)
                     await sale.locator('[name=total]').fill('150')
                     await sale.locator('[name=sold]').fill('1')
                     await sale.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/coast.jpg')
