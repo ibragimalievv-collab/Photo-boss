@@ -8,8 +8,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import config
-from ..models import Booking, Client, Hotel, Setting, User, UserRole
+from ..models import Booking, Setting, User, UserRole
 from ..operations_guard import operation_lease
+from .booking_notices import booking_description
 
 log = logging.getLogger(__name__)
 PRE_SHOOT = {'NEW', 'PENDING_CONFIRMATION', 'CONFIRMED', 'ASSIGNED',
@@ -50,19 +51,7 @@ async def queue_twenty_minute_reminders(session, now=None):
         if await session.scalar(select(Notification.id).where(
                 Notification.user_id == user.id, Notification.event_key == key)):
             continue
-        hotel = await session.get(Hotel, booking.hotel_id)
-        client = await session.get(Client, booking.client_id)
-        place = hotel.name if hotel else 'Отель не указан'
-        if hotel and hotel.address:
-            place += f' · {hotel.address}'
-        details = '\n'.join((
-            f'Съёмка №{booking.id} · {booking.shoot_date:%d.%m.%Y} в {booking.shoot_time:%H:%M}',
-            f'Место: {place}',
-            f'Номер: {booking.room}',
-            f'Гостей: {booking.guest_count}',
-            f'Клиент: {client.name}' if client and client.name else '',
-        ))
-        details = '\n'.join(line for line in details.splitlines() if line)
+        details = await booking_description(session, booking)
         await queue_notice(session, user.id, kind='booking_reminder', event_key=key,
             url=f'/app/#shootings?booking={booking.id}',
             message=details,

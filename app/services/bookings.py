@@ -164,12 +164,19 @@ async def notify_photographer_assignment(bot, session, booking: Booking):
 
 async def send_manager_ready_message(bot, manager_tg_id, booking_id, *, engine=None):
     """Shared notification for the Telegram bot and the Mini App."""
-    from ..push_notifications import app_channel, queue_for_telegram_id
+    from ..push_notifications import app_channel, queue_sale_ready
     if app_channel():
         if engine is None:
             from ..db import engine
-        return await queue_for_telegram_id(engine, manager_tg_id, kind='sale_ready',
-            message=f'Съёмка №{booking_id} готова к продаже.')
+        from sqlalchemy.ext.asyncio import AsyncSession
+        async with AsyncSession(engine) as session:
+            booking = await session.get(Booking, booking_id)
+            manager = await session.get(User, booking.manager_id) if booking else None
+            if not manager or not manager.active or manager.tg_id != manager_tg_id:
+                return False
+            await queue_sale_ready(session, booking)
+            await session.commit()
+        return True
     try:
         await bot.send_message(
             manager_tg_id,
@@ -187,14 +194,13 @@ async def send_manager_ready_message(bot, manager_tg_id, booking_id, *, engine=N
 
 
 async def notify_manager_ready_for_sale(bot, session, booking: Booking):
+    from ..push_notifications import app_channel, queue_sale_ready
+    if app_channel():
+        await queue_sale_ready(session, booking)
+        return True
     manager = await session.get(User, booking.manager_id)
     if manager is None or not manager.active:
         return False
-    from ..push_notifications import app_channel, queue_notice
-    if app_channel():
-        await queue_notice(session, manager.id, kind='sale_ready', event_key=f'sale-ready:{booking.id}',
-            message=f'Съёмка №{booking.id} готова к продаже.', url='/app/#workflow')
-        return True
     return await send_manager_ready_message(bot, manager.tg_id, booking.id)
 
 

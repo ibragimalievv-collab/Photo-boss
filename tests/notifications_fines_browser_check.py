@@ -45,7 +45,7 @@ async def reminder_browser_flow(browser, client, factory, owner_page, errors):
             assert await queue_twenty_minute_reminders(session, clock[0] + timedelta(seconds=5)) == 0
             notice = await session.scalar(select(Notification).where(Notification.kind == 'booking_reminder'))
             assert notice.user_id == 2
-            notice_id, bid = notice.id, booking.id
+            notice_id = notice.id
             await session.commit()
         # Even the owner cannot read or acknowledge a photographer's private inbox item.
         response = await client.post('/api/miniapp/push/read', json={'id': notice_id},
@@ -79,7 +79,7 @@ async def reminder_browser_flow(browser, client, factory, owner_page, errors):
             await card.wait_for(state='visible')
             await card.scroll_into_view_if_needed()
             details = await card.inner_text()
-            for value in ('Скоро съёмка', f'Съёмка №{bid}', '20.10.2026 в 13:00', 'Hotel', 'reminder-205',
+            for value in ('Скоро съёмка', 'Гость:', '20.10.2026 в 13:00', 'Hotel', 'reminder-205',
                           'Нет подключённого устройства'):
                 assert value in details, details
             await page.screenshot(path='/tmp/photo-boss-final-qa/reminder-inbox-320.png')

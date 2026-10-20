@@ -66,7 +66,7 @@ function bookingCard(x){return `<button class="booking-row" data-booking="${x.id
 function assignmentNoticesView(){
  if(!state.me?.user.roles.includes('PHOTOGRAPHER'))return '';
  const items=state.dashboard?.assignments||[];
- return `<section id="assignmentNotices" class="panel section" aria-live="polite"><h2>Вам назначены съёмки</h2>${items.length?items.map(x=>`<div class="section"><strong>№${x.bookingId} · ${esc(x.hotel)}</strong><p>${esc(dateLabel(x.date))} · ${esc(x.time)} · комната ${esc(x.room)}</p><button class="btn ghost" data-go="shootings?booking=${x.bookingId}">Открыть съёмку</button></div>`).join(''):'<p>Новых назначений нет.</p>'}</section>`;
+ return `<section id="assignmentNotices" class="panel section" aria-live="polite"><h2>Вам назначены съёмки</h2>${items.length?items.map(x=>`<div class="section"><strong>${esc(x.hotel)} · ${esc(x.client||'Гость')}</strong><p>${esc(dateLabel(x.date))} · ${esc(x.time)} · комната ${esc(x.room)}</p><button class="btn ghost" data-go="shootings?booking=${x.bookingId}">Открыть съёмку</button></div>`).join(''):'<p>Новых назначений нет.</p>'}</section>`;
 }
 let assignmentPollBusy=false;
 async function refreshAssignmentNotices(){

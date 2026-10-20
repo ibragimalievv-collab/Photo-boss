@@ -52,6 +52,8 @@ async def main():
                     context=await browser.new_context(ignore_https_errors=True,viewport={'width':390,'height':844})
                     await context.add_init_script('window.Telegram={WebApp:{initData:'+json.dumps(signed(1))+'}}')
                     await context.route('https://telegram.org/**',lambda r:r.fulfill(body='',content_type='text/javascript'))
+                    await context.route('https://disk.yandex.ru/**',lambda r:r.fulfill(
+                        body='<title>Disk window fixture</title><p>Fixture only</p>',content_type='text/html'))
                     for prefix in ('shift','people','work-chat'):
                         await context.route(f'**/{prefix}/**',lambda r:r.fulfill(body='{}',content_type='application/json'))
                     lost=False
@@ -82,9 +84,20 @@ async def main():
                     await form.get_by_role('radio',name='Прикрепить ссылку',exact=True).check()
                     await expect(form.locator('[name=diskSource]')).to_be_visible()
                     assert folder_requests==0,'Link mode must not browse the private Disk'
-                    await form.get_by_role('radio',name='Выбрать на Яндекс.Диске',exact=True).check()
-                    await expect(form.locator('[name=diskSource]')).to_be_hidden()
+                    async with context.expect_page(timeout=5000) as opened:
+                        await form.get_by_role('radio',name='Выбрать на Яндекс.Диске',exact=True).check()
+                    disk_window=await opened.value
+                    await disk_window.wait_for_load_state()
+                    assert disk_window.url=='https://disk.yandex.ru/client/disk'
+                    assert await disk_window.evaluate('window.opener===null')
+                    await disk_window.close()
+                    await expect(form.locator('[name=diskSource]')).to_be_visible()
+                    await expect(form.get_by_role('link',name='Открыть Яндекс.Диск',exact=True)).to_be_visible()
                     await form.get_by_role('button',name='Повторить открытие',exact=True).click(timeout=5000)
+                    await page.reload()
+                    await expect(form.get_by_role('radio',name='Выбрать на Яндекс.Диске',exact=True)).to_be_checked()
+                    await expect(form.get_by_role('button',name='📁 Hotel',exact=True)).to_be_visible()
+                    assert len(context.pages)==1,'Form recovery must not open a new Disk window'
                     await form.get_by_role('button',name='📁 Hotel',exact=True).click(timeout=5000)
                     async with factory() as session:
                         assert await session.get(Setting,BINDING+str(bid)) is None,'Browsing must not bind a folder'
@@ -113,7 +126,9 @@ async def main():
                     await form.get_by_role('radio',name='Загрузить с устройства',exact=True).check()
                     release.set()
                     await expect(form.locator('[data-disk-source]')).to_be_hidden()
-                    await form.get_by_role('radio',name='Выбрать на Яндекс.Диске',exact=True).check()
+                    async with context.expect_page(timeout=5000) as opened:
+                        await form.get_by_role('radio',name='Выбрать на Яндекс.Диске',exact=True).check()
+                    await (await opened.value).close()
                     await expect(form.locator('[data-disk-photo="disk:/Hotel/a.jpg"]')).to_be_checked()
                     await expect(form.locator('[data-sale-disk-folders]')).to_be_empty()
                     await expect(form.locator('[data-sale-disk-selection]')).to_contain_text('Выбрано на Диске: 2')
@@ -131,7 +146,7 @@ async def main():
                     disk.delete.assert_not_awaited()
                     output=Path('/tmp/photo-boss-calls-qa');output.mkdir(exist_ok=True,parents=True)
                     await page.screenshot(path=str(output/'disk-sale-three-sources.png'),full_page=True)
-                    print('PASS: Disk opens on first selection without binding; link input stays separate; listing retries retain selected photos; stale response after mode switch ignored; owner resumes same draft; one sale and commission after lost response')
+                    print('PASS: real external Disk window on user selection, no opener, no popup on recovery; in-app folders and retries retain selected photos; stale response ignored; one sale and commission after lost response')
                 except Exception as exc:
                     print('ORIGINAL ERROR:',str(exc))
                     print('BROWSER DIAGNOSTICS:', await page.locator('body').inner_text(), 'JS ERRORS:', errors)

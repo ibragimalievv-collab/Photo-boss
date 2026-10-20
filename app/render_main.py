@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk, storage_recovery_loop
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.39-disk-picker"
+RELEASE = "miniapp-3.40-device-disk-app-notices"
 
 
 async def health(request):

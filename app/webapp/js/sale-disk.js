@@ -1,5 +1,6 @@
 import {api} from './api.js';
 import {esc} from './domain.js';
+const DEVICE_DISK_URL='https://disk.yandex.ru/client/disk';
 let actor=null,version=0;
 const selections=new Map();
 function state(panel){const key=Number(panel.dataset.booking);if(!selections.has(key))selections.set(key,{paths:new Set(),revision:null});return selections.get(key);}
@@ -11,7 +12,7 @@ export function saleDiskView(booking,data){
   showSource(panel);
   const ticket=++version;void openSource(panel,ticket).catch(error=>failure(panel,error,ticket));
  },0);
- return `<section data-sale-disk data-booking="${booking.id}" data-owner="${data.canAuditDisk?'1':'0'}"><fieldset><legend>Откуда добавить выбранные фотографии</legend><label><input type="radio" name="photoSource" value="device" checked> Загрузить с устройства</label><label><input type="radio" name="photoSource" value="link"> Прикрепить ссылку</label><label><input type="radio" name="photoSource" value="disk"> Выбрать на Яндекс.Диске</label></fieldset><div data-disk-source hidden><div data-disk-link hidden><label class="field">Ссылка Яндекс.Диска или путь папки<input class="input" name="diskSource" maxlength="1500" placeholder="https://disk.yandex.ru/d/… или disk:/Съёмки/…"></label><button type="button" class="btn ghost" data-sale-disk-action="connect">Прикрепить ссылку / папку</button></div>${data.canAuditDisk?'<button type="button" class="btn ghost" data-sale-disk-action="browse" data-disk-root data-path="disk:/">Выбрать папку рабочего Диска</button>':''}<button type="button" class="btn ghost" data-sale-disk-action="linked">Открыть привязанную папку</button><p>Выберите папку и отметьте купленные фотографии. Закрытую папку рабочего Диска привязывает владелец. Сотрудник видит только папку своей продажи.</p><div data-sale-disk-folders></div><div data-sale-disk-files></div><p data-sale-disk-selection></p><p data-sale-disk-message role="status"></p><button type="button" class="btn ghost" data-sale-disk-action="retry" hidden>Повторить открытие</button></div></section>`;
+ return `<section data-sale-disk data-booking="${booking.id}" data-owner="${data.canAuditDisk?'1':'0'}"><fieldset><legend>Откуда добавить выбранные фотографии</legend><label><input type="radio" name="photoSource" value="device" checked> Загрузить с устройства</label><label><input type="radio" name="photoSource" value="link"> Прикрепить ссылку</label><label><input type="radio" name="photoSource" value="disk"> Выбрать на Яндекс.Диске</label></fieldset><p>При выборе Яндекс.Диска откроется отдельное окно Диска на вашем устройстве.</p><div data-disk-source hidden><div data-disk-external hidden><a class="btn primary" href="${DEVICE_DISK_URL}" target="_blank" rel="noopener noreferrer" data-open-device-disk>Открыть Яндекс.Диск</a><p>Если отдельное окно не открылось, нажмите «Открыть Яндекс.Диск». В Диске выберите нужные фотографии или папку → «Поделиться» → «Скопировать ссылку». Вернитесь в Photo Boss и вставьте ссылку ниже. Используется аккаунт Яндекса на вашем устройстве.</p><p>Можно также выбрать фотографии из подключённой папки прямо здесь. Черновик продажи сохраняется в этом окне.</p></div><div data-disk-link hidden><label class="field">Ссылка Яндекс.Диска или путь папки<input class="input" name="diskSource" maxlength="1500" placeholder="https://disk.yandex.ru/d/… или disk:/Съёмки/…"></label><button type="button" class="btn ghost" data-sale-disk-action="connect">Прикрепить ссылку / папку</button></div>${data.canAuditDisk?'<button type="button" class="btn ghost" data-sale-disk-action="browse" data-disk-root data-path="disk:/">Выбрать папку рабочего Диска</button>':''}<button type="button" class="btn ghost" data-sale-disk-action="linked">Открыть привязанную папку</button><p>Выберите папку и отметьте купленные фотографии. Закрытую папку рабочего Диска привязывает владелец. Сотрудник видит только папку своей продажи.</p><div data-sale-disk-folders></div><div data-sale-disk-files></div><p data-sale-disk-selection></p><p data-sale-disk-message role="status"></p><button type="button" class="btn ghost" data-sale-disk-action="retry" hidden>Повторить открытие</button></div></section>`;
 }
 export function selectedDiskPhotos(form){
  if((form.elements.photoSource?.value||'device')==='device')return [];
@@ -21,10 +22,16 @@ export function selectedDiskPhotos(form){
 }
 function note(panel,text){const el=panel.querySelector('[data-sale-disk-message]');if(el)el.textContent=text;}
 function active(panel,ticket){return panel.isConnected&&ticket===version;}
+function openDeviceDisk(){
+ const tg=window.Telegram?.WebApp;
+ if(tg?.initData&&typeof tg.openLink==='function')try{tg.openLink(DEVICE_DISK_URL);return;}catch{}
+ try{window.open(DEVICE_DISK_URL,'_blank','noopener,noreferrer');}catch{/* The visible link remains available. */}
+}
 function showSource(panel){
  const form=panel.closest('form'),mode=form.elements.photoSource?.value||'device';
  panel.querySelector('[data-disk-source]').hidden=mode==='device';
- panel.querySelector('[data-disk-link]').hidden=mode!=='link';
+ panel.querySelector('[data-disk-link]').hidden=mode==='device';
+ panel.querySelector('[data-disk-external]').hidden=mode!=='disk';
  const root=panel.querySelector('[data-disk-root]');if(root)root.hidden=mode!=='disk';
  const upload=form.querySelector('input[name=selected]');if(upload)upload.closest('label').hidden=mode!=='device';
 }
@@ -65,7 +72,7 @@ async function linked(panel,ticket){
   else note(panel,'Владелец ещё не выбрал папку этой съёмки. Можно прикрепить доступную ссылку в пункте «Прикрепить ссылку».');
   return;
  }
- panel.querySelector('[name=diskSource]').value=result.source;
+ const source=panel.querySelector('[name=diskSource]');if(!source.value)source.value=result.source;
  panel.querySelector('[data-sale-disk-folders]').innerHTML='';
  await files(panel,null,ticket);
 }
@@ -82,10 +89,14 @@ document.addEventListener('change',async event=>{
  const panel=event.target.closest?.('[data-sale-disk]');if(!panel)return;
  if(event.target.matches('[data-disk-photo]')){const s=state(panel),path=event.target.dataset.diskPhoto;if(event.target.checked)s.paths.add(path);else s.paths.delete(path);selection(panel);return;}
  if(event.target.name!=='photoSource')return;
+ // Open before any await, only for an actual user choice, never on form recovery.
+ if(event.target.value==='disk'&&event.isTrusted)openDeviceDisk();
  const ticket=++version;showSource(panel);
  if(event.target.value!=='device')try{await openSource(panel,ticket);}catch(error){failure(panel,error,ticket);}
 });
 document.addEventListener('click',async event=>{
+ const external=event.target.closest?.('[data-open-device-disk]'),tg=window.Telegram?.WebApp;
+ if(external&&event.isTrusted&&tg?.initData&&typeof tg.openLink==='function'&&!event.ctrlKey&&!event.metaKey&&!event.shiftKey){try{tg.openLink(DEVICE_DISK_URL);event.preventDefault();}catch{}return;}
  const button=event.target.closest?.('[data-sale-disk-action]'),panel=button?.closest('[data-sale-disk]');if(!panel)return;
  const ticket=++version;button.disabled=true;
  try{
@@ -97,7 +108,7 @@ document.addEventListener('click',async event=>{
    const source=action==='bind'?path:panel.querySelector('[name=diskSource]').value;
    loading(panel,action,source);
    await api(`/bookings/${panel.dataset.booking}/disk-folder`,{method:'POST',body:{source}});
-   if(active(panel,ticket)){panel.querySelector('[data-sale-disk-folders]').innerHTML='';await linked(panel,ticket);}
+   if(active(panel,ticket)){if(action==='bind')panel.querySelector('[name=diskSource]').value=source;panel.querySelector('[data-sale-disk-folders]').innerHTML='';await linked(panel,ticket);}
   }
  }catch(error){failure(panel,error,ticket);}finally{if(button.isConnected)button.disabled=false;}
 });
