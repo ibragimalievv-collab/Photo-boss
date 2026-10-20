@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+const code=fs.readFileSync('app/webapp/js/sale-disk.js','utf8').replace(/^import .*;$/gm,'').replaceAll('export function','function');
+const ctx=vm.createContext({document:{addEventListener(){}},window:{addEventListener(){}},setTimeout:()=>0,Map,Set,Number,encodeURIComponent,esc:x=>String(x).replaceAll('<','&lt;'),api:async()=>{throw Error('Unexpected API call');}});
+vm.runInContext(code,ctx);ctx.data={actorId:1,canAuditDisk:true};ctx.booking={id:7};
+const html=vm.runInContext('saleDiskView(booking,data)',ctx);
+for(const label of ['Загрузить с устройства','Прикрепить ссылку','Выбрать на Яндекс.Диске','Выбрать папку рабочего Диска'])assert.ok(html.includes(label),label);
+ctx.panel={dataset:{booking:'7'}};ctx.form={elements:{photoSource:{value:'device'}},querySelector:()=>ctx.panel};
+assert.equal(vm.runInContext('selectedDiskPhotos(form).length',ctx),0);
+ctx.form.elements.photoSource.value='disk';assert.throws(()=>vm.runInContext('selectedDiskPhotos(form)',ctx),/Сначала прикрепите/);
+vm.runInContext("state(panel).revision='binding-1';state(panel).paths.add('disk:/Hotel/a.jpg');state(panel).paths.add('disk:/Hotel/a.jpg');state(panel).paths.add('disk:/Hotel/family/b.jpg')",ctx);
+const selected=vm.runInContext('selectedDiskPhotos(form)',ctx);assert.equal(selected.length,2);assert.equal(selected[0].revision,'binding-1');assert.equal(selected[1].path,'disk:/Hotel/family/b.jpg');
+ctx.data={actorId:2,canAuditDisk:false};assert.ok(!vm.runInContext('saleDiskView(booking,data)',ctx).includes('Выбрать папку рабочего Диска'));
+assert.throws(()=>vm.runInContext('selectedDiskPhotos(form)',ctx),/Сначала прикрепите/);
+const workflow=fs.readFileSync('app/webapp/js/workflow.js','utf8');assert.ok(workflow.includes('${saleDiskView(b,data)}'));assert.ok(workflow.includes("add('sale_disk_selected',{draft,...photo})"));
+const sw=fs.readFileSync('app/webapp/sw.js','utf8');assert.ok(sw.includes("'sale-disk'"),'Offline shell must include the new dependency');
+console.log('PASS: three photo sources, owner-only private browser, exact selection, account isolation and offline module');

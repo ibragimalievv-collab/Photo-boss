@@ -45,6 +45,11 @@ async def save_private_media(actor_id, raw):
 
 
 async def load_private_media(bot, file_id, *, max_bytes=20 * 1024 * 1024, timeout=40):
+    from ..disk_sale_media import FILE_PREFIX, load_reference
+    if isinstance(file_id, str) and file_id.startswith(FILE_PREFIX):
+        from ..db import Session
+        async with Session() as session:
+            return await load_reference(session, file_id, max_bytes=max_bytes)
     path = disk_reference(file_id)
     if path:
         return await configured_storage().download_bytes(path, max_bytes=max_bytes)
@@ -62,7 +67,8 @@ async def load_private_media(bot, file_id, *, max_bytes=20 * 1024 * 1024, timeou
 
 async def telegram_media_input(bot, file_id):
     """Resolve private web media only after a Telegram handler's role/scope check."""
-    if not disk_reference(file_id):
+    from ..disk_sale_media import FILE_PREFIX
+    if not disk_reference(file_id) and not (isinstance(file_id, str) and file_id.startswith(FILE_PREFIX)):
         return file_id
     from aiogram.types import BufferedInputFile
 

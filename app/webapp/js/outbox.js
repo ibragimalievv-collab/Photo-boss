@@ -46,7 +46,7 @@ export function saleQueueRepairable(rows){
   rows.some(row=>row.kind==='sale_start'&&row.result?.draftId)&&rows.every(row=>row===complete||row.status==='synced')&&
   (!complete.resumeByKey||rows.some(row=>row.key===complete.resumeByKey&&row.status==='synced')));
 }
-export async function repairSaleQueue(keys,{draftId,total,sold,price},files=[]){
+export async function repairSaleQueue(keys,{draftId,total,sold,price},files=[],diskPhotos=[]){
  if(running||queueRepairing)throw new Error('Дождитесь завершения текущей отправки, затем исправьте продажу.');
  queueRepairing=true;let committed=false;
  try{
@@ -56,7 +56,7 @@ export async function repairSaleQueue(keys,{draftId,total,sold,price},files=[]){
   throw new Error('Исправление недоступно: сначала дождитесь результата всех фото и чека.');
  const rejected=rejectedSaleCounts(rows);
  if(rejected){
-  if(files.length||sold!==rejected.data.sold)throw new Error('Исправьте только общее количество кадров. Выбранные фото и проданное количество уже сохранены в очереди.');
+  if(files.length||diskPhotos.length||sold!==rejected.data.sold)throw new Error('Исправьте только общее количество кадров. Выбранные фото и проданное количество уже сохранены в очереди.');
   rejected.data={...rejected.data,total,price};rejected.status='local';rejected.error='';rejected.errorStatus=0;rejected.retryAt=0;
   if(actor!==userId||running)throw new Error('Состояние отправки изменилось. Откройте исправление продажи ещё раз.');
   if(!await update(rejected))throw new Error('Рабочие данные обнулены. Обновите приложение перед продолжением.');
@@ -64,7 +64,8 @@ export async function repairSaleQueue(keys,{draftId,total,sold,price},files=[]){
  }
  if(complete.resumeByKey&&!all.some(row=>row.key===complete.resumeByKey&&row.status==='synced'))throw new Error('Предыдущее исправление ещё отправляется.');
  for(const file of files)if(!file||!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>20*1024*1024)throw new Error('Нужен JPEG, PNG или WebP до 20 МБ.');
- const at=Date.now(),draft={id:draftId},items=[{kind:'sale_counts',data:{draft,total,sold,price}},...files.map(blob=>({kind:'sale_selected',data:{draft},blob}))];
+ for(const photo of diskPhotos)if(!photo||typeof photo.path!=='string'||typeof photo.revision!=='string')throw new Error('Выберите фотографии из привязанной папки.');
+ const at=Date.now(),draft={id:draftId},items=[{kind:'sale_counts',data:{draft,total,sold,price}},...files.map(blob=>({kind:'sale_selected',data:{draft},blob})),...diskPhotos.map(photo=>({kind:'sale_disk_selected',data:{draft,...photo}}))];
  const added=items.map((item,order)=>({...item,key:crypto.randomUUID(),userId:actor,generation:operationsGeneration,salesGeneration,date:complete.date,blob:item.blob||null,filename:item.blob?.name||'',status:'local',createdAt:at,order}));
  const last=added[added.length-1];last.resumeCompleteKey=complete.key;
  // Only local recovery metadata changes. The original completion key and its

@@ -255,6 +255,11 @@ async def complete_sale(session, actor, draft_id):
         raise ValueError(f'Загружено {count} выбранных кадров, а продано указано {draft.sold_photos}. Исправьте количество кадров в этой продаже.')
     if not draft.sold_photos or count != draft.sold_photos:
         raise ValueError(f"Сначала загрузите все выбранные фотографии: {count}/{draft.sold_photos or 0}.")
+    from ..disk_sale_media import FILE_PREFIX, verify_reference
+    external = list(await session.scalars(select(SaleDraftPhoto.storage_path).where(
+        SaleDraftPhoto.draft_id == draft.id, SaleDraftPhoto.storage_path.like(FILE_PREFIX + '%'))))
+    for file_id in external:
+        await verify_reference(session, file_id)
     already_sold = await session.scalar(select(func.coalesce(func.sum(Sale.sold_photos), 0)).where(Sale.booking_id == booking.id))
     if not draft.declared_photo_count or already_sold + draft.sold_photos > draft.declared_photo_count:
         raise ValueError("Количество проданных кадров изменилось. Проверьте продажу.")

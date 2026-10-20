@@ -92,7 +92,7 @@ async def main():
                         async with factory() as session:
                             (await session.get(Shooting, sid)).full_upload_completed_at = utc_now()
                             await session.commit()
-                        await form.locator('button').first.click()
+                        await form.locator('button[type=submit],button:not([type])').first.click()
                         repair = form.locator('[data-workflow="repair-sale"]')
                         try:
                             await expect(repair).to_be_visible(timeout=20000)

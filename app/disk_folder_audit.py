@@ -65,10 +65,11 @@ def public_job(job):
     summary['listingComplete'] = job['stage'] != 'LISTING'
     summary['complete'] = job['status'] == 'COMPLETED' and summary['checked'] == len(files)
     names = {i + 1: row['name'] for i, row in enumerate(files)}
+    paths = {i + 1: row['path'] for i, row in enumerate(files)}
     return {key: job.get(key) for key in ('id', 'path', 'bookingId', 'status', 'stage', 'createdAt', 'updatedAt', 'error', 'otherFiles')} | {
         'totalPhotos': len(files), 'processed': job['offset'], 'summary': summary,
-        'files': [row | {'name': names.get(row['photoId'], 'Фото')} for row in job['results']],
-        'aiFrames': [frame | {'name': names.get(frame['photo_id'], 'Фото')} for frame in job['aiFrames']],
+        'files': [row | {'name': names.get(row['photoId'], 'Фото'), 'path': paths.get(row['photoId'])} for row in job['results']],
+        'aiFrames': [frame | {'name': names.get(frame['photo_id'], 'Фото'), 'path': paths.get(frame['photo_id'])} for frame in job['aiFrames']],
         'aiErrors': job['aiErrors'], 'aiConfigured': bool(config.openai_api_key),
         'note': 'Проверка читает файлы с Диска. Не загружает копии, не удаляет исходники и не меняет продажи. Похожие кадры и AI-оценки требуют проверки человеком.'}
 
