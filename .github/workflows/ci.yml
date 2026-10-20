@@ -163,6 +163,7 @@ jobs:
           python tests/account_schedule_browser_check.py
           python tests/workflow_browser_check.py
           python tests/photo_storage_browser_check.py
+          python tests/disk_sale_browser_check.py
       - name: Save browser evidence
         if: always()
         uses: actions/upload-artifact@v4
