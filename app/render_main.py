@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.32-sales-fines-disk-audit"
+RELEASE = "miniapp-3.33-hotel-zone-review"
 
 
 async def health(request):
@@ -83,6 +83,9 @@ async def on_startup(app):
         from .storage_inventory import log_sales_storage_audit
         await log_sales_storage_audit(engine, app['yandex_disk'])
     await startup_sales_reset(engine, os.getenv(SALES_RESET_ENV, ''), config.admin_ids)
+    from .hotel_points import REVIEW_ENV, SEED_ENV, review_required, startup_hotel_point
+    await startup_hotel_point(engine, os.getenv(SEED_ENV, ''), config.admin_ids)
+    logger.info('Attendance protection: manual_review=%s flag=%s', review_required(), REVIEW_ENV)
     bot = app["bot"]
     me = await bot.me()
     expected = os.getenv("EXPECTED_BOT_ID", "").strip()
@@ -118,6 +121,13 @@ async def on_startup(app):
     deleted = await cleanup_expired_chat(engine, app["yandex_disk"])
     if deleted:
         logger.info("Expired work-chat messages removed on startup: %s", deleted)
+    if review_required():
+        from datetime import datetime, timezone
+
+        from .attendance_fines import fine_loop, initialize, worker_api
+        fine_api = worker_api(engine, config.training_timezone)
+        await initialize(fine_api, datetime.now(timezone.utc))
+        app['attendance_fine_task'] = asyncio.create_task(fine_loop(fine_api))
     app["operations_task"] = asyncio.create_task(operations_loop(bot))
     from .bank_payments import payment_loop
     app['bank_payment_task'] = asyncio.create_task(payment_loop(engine))
@@ -141,7 +151,7 @@ async def on_startup(app):
 async def on_cleanup(app):
     clear_ready_file()
     app["ready"] = False
-    for key in ("push_notification_task", "bank_payment_task", "realtime_probe_task", "operations_task", "storage_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task", "assignment_notification_task"):
+    for key in ("attendance_fine_task", "push_notification_task", "bank_payment_task", "realtime_probe_task", "operations_task", "storage_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task", "assignment_notification_task"):
         task = app.get(key)
         if task:
             task.cancel()

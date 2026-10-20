@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from datetime import timedelta
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -27,7 +28,7 @@ from .models import (
 
 log = logging.getLogger(__name__)
 ROLES = {'OWNER', 'ADMIN', 'PHOTOGRAPHER', 'MANAGER'}
-KINDS = {'booking_assignment', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'academy', 'reminder', 'push_test'}
+KINDS = {'booking_assignment', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test'}
 
 
 def app_channel():
@@ -82,8 +83,22 @@ async def queue_for_telegram_id(engine, tg_id, *, kind='chat', message='Ново
     return True
 
 
-async def eligible(session, notice, sub):
-    if not sub.active or sub.user_id != notice.user_id or notice.resolved_at or notice.acknowledged_at:
+async def queue_sale_created(session, sale, booking):
+    """Same sale transaction: related staff and scoped supervisors, one event."""
+    from .models import HotelEmployee
+    supervisors = set(await session.scalars(select(UserRole.user_id).where(
+        (UserRole.role == 'OWNER') | ((UserRole.role == 'ADMIN') & UserRole.user_id.in_(
+            select(HotelEmployee.user_id).where(HotelEmployee.hotel_id == booking.hotel_id))))))
+    recipients = supervisors | {booking.manager_id, sale.credited_user_id}
+    for uid in sorted(value for value in recipients if value is not None):
+        user = await session.get(User, uid)
+        if user and user.active:
+            await queue_notice(session, uid, kind='sale_created', event_key=f'sale-created:{sale.id}',
+                url='/app/#finance', message=f'Оформлена продажа №{sale.id}. Подробности в кассе.')
+
+
+async def eligible(session, notice, sub, *, include_read=False):
+    if not sub.active or sub.user_id != notice.user_id or notice.resolved_at or (notice.acknowledged_at and not include_read):
         return False
     user = await session.get(User, notice.user_id)
     roles = set(await session.scalars(select(UserRole.role).where(UserRole.user_id == notice.user_id)))
@@ -97,6 +112,20 @@ async def eligible(session, notice, sub):
         trashed = await session.get(Setting, f'booking:trash:{bid}')
         return bool(booking and booking.photographer_id == user.id and 'PHOTOGRAPHER' in roles
                     and booking.status in ACTIVE and not trashed)
+    if notice.kind == 'sale_created':
+        from .models import Booking, HotelEmployee, Sale
+        try:
+            sale_id = int(notice.event_key.rsplit(':', 1)[1])
+        except (ValueError, AttributeError):
+            return False
+        sale = await session.get(Sale, sale_id)
+        booking = await session.get(Booking, sale.booking_id) if sale else None
+        if not booking:
+            return False
+        if 'OWNER' in roles or user.id in {booking.manager_id, sale.credited_user_id}:
+            return True
+        return bool('ADMIN' in roles and await session.scalar(select(HotelEmployee.id).where(
+            HotelEmployee.user_id == user.id, HotelEmployee.hotel_id == booking.hotel_id).limit(1)))
     if notice.kind in {'daily_summary', 'control'}:
         if 'OWNER' not in roles:
             return False
@@ -110,9 +139,9 @@ async def eligible(session, notice, sub):
 
 def payload_for(notice):
     urls = {'booking_assignment': '/app/#shootings', 'control': '/app/#insights', 'daily_summary': '/app/#insights',
-            'sale_ready': '/app/#workflow', 'academy': '/app/#academy'}
+            'sale_ready': '/app/#workflow', 'sale_created': '/app/#finance', 'academy': '/app/#academy'}
     titles = {'booking_assignment': 'Назначена съёмка', 'chat': 'Новое сообщение', 'call': 'Входящий звонок',
-              'sale_ready': 'Съёмка готова к продаже', 'academy': 'Готов разбор практики', 'push_test': 'Проверка уведомлений'}
+              'sale_ready': 'Съёмка готова к продаже', 'sale_created': 'Оформлена продажа', 'academy': 'Готов разбор практики', 'push_test': 'Проверка уведомлений'}
     # No guest names, phone numbers, balances, or chat text on the lock screen.
     url = urls.get(notice.kind, '/app/#home')
     if notice.kind == 'booking_assignment':
@@ -230,7 +259,8 @@ class AppPush:
             return web.json_response({'configured': configured(), 'channel': 'app' if app_channel() else 'telegram',
                 'publicKey': os.getenv('WEB_PUSH_PUBLIC_KEY') if configured() else None,
                 'items': [{'id': n.id, 'title': payload_for(n)['title'], 'url': payload_for(n)['url'],
-                    'read': bool(n.acknowledged_at), 'createdAt': n.created_at.isoformat()+'Z'} for n in rows]})
+                    'read': bool(n.acknowledged_at), 'createdAt': n.created_at.isoformat()+'Z'} for n in rows
+                    if await eligible(session, n, SimpleNamespace(active=True, user_id=actor.id), include_read=True)]}, headers={'Cache-Control':'no-store'})
 
     async def subscribe(self, request):
         if not configured():
@@ -248,6 +278,21 @@ class AppPush:
                 row.user_id, row.subscription, row.active, row.updated_at = actor.id, json.dumps(value), True, utc_now()
             else:
                 session.add(PushSubscription(user_id=actor.id, endpoint_hash=digest, subscription=json.dumps(value)))
+            await session.commit()
+        return web.json_response({'ok': True})
+
+    async def read(self, request):
+        from .people import positive_id
+        body = await self.api.body(request)
+        if set(body) != {'id'}:
+            raise AccessError('Укажите уведомление.', 400)
+        nid = positive_id(body['id'])
+        async with AsyncSession(self.api.engine) as session:
+            actor = await self.actor(session, request)
+            notice = await session.get(Notification, nid, with_for_update=True)
+            if not notice or notice.user_id != actor.id or notice.kind not in KINDS:
+                raise AccessError('Уведомление не найдено.', 404)
+            notice.acknowledged_at = notice.acknowledged_at or utc_now()
             await session.commit()
         return web.json_response({'ok': True})
 
@@ -283,3 +328,4 @@ def install_push(app, api):
     app.router.add_post('/api/miniapp/push/subscribe', service.subscribe)
     app.router.add_post('/api/miniapp/push/unsubscribe', service.unsubscribe)
     app.router.add_post('/api/miniapp/push/test', service.test)
+    app.router.add_post('/api/miniapp/push/read', service.read)

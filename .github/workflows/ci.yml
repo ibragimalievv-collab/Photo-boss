@@ -147,6 +147,9 @@ jobs:
           python tests/voice_training_layout_browser_check.py
       - name: Verify new mobile screens and offline replay
         run: python tests/update_browser_check.py
+
+      - name: Verify sale notifications and attendance exceptions
+        run: python tests/notifications_fines_browser_check.py
       - name: Verify cold offline start and replay of sales with photos
         env:
           WORKFLOW_TEST_CERT: /tmp/photo-boss-test-cert.pem

@@ -1,6 +1,9 @@
 import {api} from './api.js';
 import {esc} from './domain.js';
-let state=null,account=null,revision=0;
+let state=null,account=null,revision=0,feedTimer=null,feedReady=false;
+let seenNotices=new Set();
+export function refreshNotificationBadge(){const button=document.querySelector('[data-action="app-notifications"]');if(!button?.querySelector)return;const count=(state?.items||[]).filter(n=>!n.read).length;button.setAttribute('aria-label',count?`Уведомления: ${count} новых`:'Уведомления');let badge=button.querySelector('[data-notice-count]');if(!badge){badge=document.createElement('span');badge.dataset.noticeCount='1';badge.className='notification-count';button.append(badge);}badge.hidden=!count;badge.textContent=String(count);}
+async function refreshNoticeFeed(){const ticket=revision;if(account===null||document.hidden)return;try{const next=await api('/push',{allowSnapshot:false});if(ticket!==revision)return;state=next;refreshNotificationBadge();for(const notice of next.items||[])if(!notice.read&&!seenNotices.has(notice.id)&&feedReady)document.dispatchEvent(new CustomEvent('pb-notification',{detail:notice}));seenNotices=new Set((next.items||[]).map(n=>n.id));feedReady=true;}catch{/* Retry on the next foreground refresh. */}}
 const supported=()=>isSecureContext&&'serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window;
 const installed=()=>matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;
 const ios=()=>/iPhone|iPad|iPod/.test(navigator.userAgent);
@@ -8,7 +11,7 @@ const disabled=()=>localStorage.getItem('pb-push-disabled')==='1';
 function bytes(key){const raw=atob(key.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-key.length%4)%4));return Uint8Array.from(raw,c=>c.charCodeAt(0));}
 async function registration(){return navigator.serviceWorker.register('/app/sw.js',{scope:'/app/'}).then(()=>navigator.serviceWorker.ready);}
 export async function syncPushAccount(me){
- const ticket=++revision;account=me.user.id;
+ const previous=account,ticket=++revision;account=me.user.id;if(previous!==account){state=null;feedReady=false;seenNotices=new Set();}if(typeof clearInterval==='function'&&feedTimer)clearInterval(feedTimer);if(typeof setInterval==='function'){refreshNoticeFeed();feedTimer=setInterval(refreshNoticeFeed,15000);}
  if(!supported()||Notification.permission!=='granted'||disabled())return;
  try{const next=await api('/push',{allowSnapshot:false});if(ticket!==revision||!next.configured)return;state=next;
  const worker=await registration(),sub=await worker.pushManager.getSubscription();
@@ -17,18 +20,19 @@ export async function syncPushAccount(me){
  }catch{/* No prompt or false success on a failed background refresh. */}
 }
 export async function detachPush(){
- revision++;account=null;if(!('serviceWorker' in navigator))return;
+ revision++;account=null;state=null;seenNotices=new Set();feedReady=false;if(typeof clearInterval==='function'&&feedTimer)clearInterval(feedTimer);feedTimer=null;refreshNotificationBadge();if(!('serviceWorker' in navigator))return;
  const worker=await navigator.serviceWorker.getRegistration('/app/'),sub=await worker?.pushManager.getSubscription();
  if(!sub)return;
  try{await api('/push/unsubscribe',{method:'POST',body:{endpoint:sub.endpoint}});}finally{await sub.unsubscribe();}
 }
 export async function notificationsView(){
- state=await api('/push',{allowSnapshot:false});let subscribed=false;
+ state=await api('/push',{allowSnapshot:false});refreshNotificationBadge();let subscribed=false;
  if(supported()){const worker=await navigator.serviceWorker.getRegistration('/app/');subscribed=!!await worker?.pushManager.getSubscription();}
  const hint=ios()&&!installed()?'На iPhone: откройте Photo Boss в Safari → Поделиться → На экран «Домой». Затем запустите с иконки и включите уведомления.':!supported()?'В этом браузере системные уведомления недоступны. Откройте установленное приложение или поддерживаемый браузер.':Notification.permission==='denied'?'Доступ запрещён в настройках браузера или телефона. Разрешите уведомления Photo Boss в настройках и откройте приложение снова.':subscribed?'Это устройство подписано на уведомления.':'Разрешите уведомления для этого устройства. Разрешение спрашивается один раз.';
- return `<section id="appNotifications" class="section"><p>Рабочие события сохраняются в Photo Boss. ${state.channel==='app'?'Telegram для этих уведомлений отключён.':'Переключение доставки в приложение ещё не активировано на сервере.'}</p><p>${esc(hint)}</p><p>${state.configured?'Сервер push-уведомлений настроен.':'Системные push ещё настраиваются; список событий доступен ниже.'}</p><div class="row wrap"><button class="btn primary" data-push="enable" ${!supported()||!state.configured||(ios()&&!installed())?'disabled':''}>Включить уведомления</button><button class="btn ghost" data-push="test" ${!subscribed?'disabled':''}>Проверить уведомление</button><button class="btn ghost" data-push="disable" ${!subscribed?'disabled':''}>Отключить на этом устройстве</button></div><p id="pushStatus" role="status"></p><h3>Мои уведомления</h3>${state.items.map(n=>`<a class="panel section" style="display:block" href="${esc(n.url)}">${esc(n.title)}<br><small>${esc(new Date(n.createdAt).toLocaleString('ru-RU'))}</small></a>`).join('')||'<p>Новых событий пока нет.</p>'}</section>`;
+ return `<section id="appNotifications" class="section"><p>Рабочие события сохраняются в Photo Boss. ${state.channel==='app'?'Telegram для этих уведомлений отключён.':'Переключение доставки в приложение ещё не активировано на сервере.'}</p><p>${esc(hint)}</p><p>${state.configured?'Сервер push-уведомлений настроен.':'Системные push ещё настраиваются; список событий доступен ниже.'}</p><div class="row wrap"><button class="btn primary" data-push="enable" ${!supported()||!state.configured||(ios()&&!installed())?'disabled':''}>Включить уведомления</button><button class="btn ghost" data-push="test" ${!subscribed?'disabled':''}>Проверить уведомление</button><button class="btn ghost" data-push="disable" ${!subscribed?'disabled':''}>Отключить на этом устройстве</button></div><p id="pushStatus" role="status"></p><h3>Мои уведомления</h3>${state.items.map(n=>`<a class="panel section" style="display:block" data-notice-read="${n.id}" href="${esc(n.url)}">${esc(n.title)}<br><small>${esc(new Date(n.createdAt).toLocaleString('ru-RU'))}</small></a>`).join('')||'<p>Новых событий пока нет.</p>'}</section>`;
 }
 document.addEventListener('click',async event=>{
+ const link=event.target.closest('[data-notice-read]');if(link?.dataset.noticeRead){const id=Number(link.dataset.noticeRead);try{await api('/push/read',{method:'POST',body:{id}});for(const row of state?.items||[])if(row.id===id)row.read=true;refreshNotificationBadge();document.dispatchEvent(new Event('pb-notification-open'));}catch{}return;}
  const button=event.target.closest('[data-push]');if(!button)return;button.disabled=true;
  const status=document.querySelector('#pushStatus'),ticket=revision;
  try{
@@ -49,3 +53,5 @@ document.addEventListener('click',async event=>{
   }
  }catch(error){if(status)status.textContent=error.message;}finally{button.disabled=false;}
 });
+
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshNoticeFeed();});

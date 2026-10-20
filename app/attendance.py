@@ -1,7 +1,7 @@
 """Authenticated self-service shift check-in/out; same ledger as the Telegram bot.
 
-GPS is a reported device location, NOT proof of presence at a hotel. No geofence
-is claimed. No location is requested automatically or tracked in the background.
+GPS is reported device evidence, NOT proof of presence. Protected mode requires
+human review of location and photo, without automatic GPS/photo penalties.
 """
 from __future__ import annotations
 
@@ -11,11 +11,13 @@ import binascii
 import json
 import math
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 
 from aiohttp import web
 from sqlalchemy import text
 
+from .hotel_points import capture_context, context_key, read_json, review_required
 from .miniapp_security import AccessError, utc_bounds
 
 WORK_ROLES = frozenset({'PHOTOGRAPHER', 'MANAGER'})
@@ -50,7 +52,15 @@ def photo_bytes(body):
         raise AccessError('Фотография слишком большая. Сделайте снимок заново.', 413)
     if len(raw) < 100 or not raw.startswith(b'\xff\xd8\xff') or not raw.endswith(b'\xff\xd9'):
         raise AccessError('Некорректная фотография JPEG.', 400)
-    # Telegram also validates/decompresses the image before returning a file_id.
+    if review_required():
+        from PIL import Image, UnidentifiedImageError
+        try:
+            with Image.open(BytesIO(raw)) as image:
+                if image.format != 'JPEG' or min(image.size) < 96 or image.width * image.height > 4_000_000:
+                    raise ValueError
+                image.load()
+        except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
+            raise AccessError('Фотография повреждена или слишком мала. Сделайте новый снимок.', 400) from exc
     return raw
 
 
@@ -123,7 +133,10 @@ class Attendance:
         result = []
         for table in ('shift_check_ins', 'shift_check_outs'):
             rows = await self.api.rows(conn, f'SELECT * FROM {table} WHERE user_id=:uid AND shift_date=:day' + suffix, uid=uid, day=day)
-            result.append(dict(rows[0]) if rows else None)
+            row = dict(rows[0]) if rows else None
+            if row and review_required():
+                row['geofence'] = await read_json(self.api, conn, context_key('start' if table == 'shift_check_ins' else 'end', row['id']))
+            result.append(row)
         return result
 
     def result(self, actor, start, end, now):
@@ -135,6 +148,7 @@ class Attendance:
             return {'status': row['status'], 'locationSaved': row.get('latitude') is not None,
                     'locationFresh': fresh, 'photoSaved': bool(row.get(photo_key)),
                     'claimedAt': str(row['offline_claimed_at']) if row.get('offline_claimed_at') else None,
+                    'geofence': row.get('geofence'),
                     'at': utc(row[at_key]).astimezone(self.api.tz).isoformat() if row.get(at_key) else None}
         return {'date': now.astimezone(self.api.tz).date().isoformat(), 'timezone': str(self.api.tz),
                 'eligible': bool(WORK_ROLES & set(actor['roles'])),
@@ -142,8 +156,10 @@ class Attendance:
                 'end': part(end, 'workplace_file_id', 'ended_at'),
                 'late': bool(start and start.get('late')),
                 'fine': float(start.get('fine_amount') or 0) if start else 0,
-                'geoPolicy': 'coordinates_only',
-                'geoNotice': 'Координаты сохраняются. Проверка расстояния до отеля пока не настроена.',
+                'reviewRequired': review_required(),
+                'geoPolicy': 'geofence_review' if review_required() else 'coordinates_only',
+                'geoNotice': ('Расстояние проверяется по зоне назначенного отеля. Фото, форму и присутствие подтверждает руководитель; GPS может быть подменён.'
+                              if review_required() else 'Координаты сохраняются. Проверка расстояния до отеля пока не настроена.'),
                 'startTime': '09:00', 'lateFine': 500}
 
     async def status(self, request):
@@ -180,9 +196,11 @@ class Attendance:
             await conn.execute(text(f'''UPDATE {table} SET latitude=:lat,longitude=:lon,
                 location_received_at=:now,offline_claimed_at=NULL,status='AWAITING_PHOTO' WHERE id=:id'''),
                 {'lat': lat, 'lon': lon, 'now': now.replace(tzinfo=None), 'id': row['id']})
+            if review_required():
+                await capture_context(self.api, conn, actor['id'], day, body['purpose'], row['id'], lat, lon, accuracy)
             await self.api.audit_write(conn, actor, 'shift_location_received' if body['purpose']=='start' else 'shift_end_location_received',
                 'shift_check_in' if body['purpose']=='start' else 'shift_check_out', row['id'],
-                f"miniapp; точность устройства: {accuracy if accuracy is not None else 'неизвестна'} м; расстояние до отеля не проверялось")
+                f"miniapp; точность устройства: {accuracy if accuracy is not None else 'неизвестна'} м; политика={'geofence_review' if review_required() else 'coordinates_only'}")
             start, end = await self.records(conn, actor['id'], day)
         return web.json_response(self.result(actor, start, end, self.now()))
 
@@ -226,16 +244,26 @@ class Attendance:
             file_id = await self.send_photo(actor, raw, body['purpose'])
             if self.now().astimezone(self.api.tz).date() != day:
                 raise AccessError('Рабочая дата изменилась. Обновите экран.', 409)
-            await self.confirm(conn, actor, row, body['purpose'], day, now, file_id)
+            if review_required():
+                table, field, _, _ = attendance_fields(body['purpose'])
+                await conn.execute(text(f'''UPDATE {table} SET {field}=:file,
+                    offline_claimed_at=:now,status='PENDING_REVIEW' WHERE id=:id'''),
+                    {'file': file_id, 'now': now.replace(tzinfo=None), 'id': row['id']})
+                await self.api.audit_write(conn, actor, 'attendance_review_requested', table, row['id'],
+                    'Фото и координаты сохранены; лицо, форма и присутствие требуют проверки; расчёт времени автоматический.')
+                from .attendance_fines import reconcile_day
+                await reconcile_day(self.api, conn, actor['id'], day, now)
+            else:
+                await self.confirm(conn, actor, row, body['purpose'], day, now, file_id)
             start, end = await self.records(conn, actor['id'], day)
         return web.json_response(self.result(actor, start, end, self.now()))
 
     async def confirm(self, conn, actor, row, purpose, day, when, file_id):
-        """Caller holds the original attendance row lock; exactly one late fee."""
+        """Caller holds the original attendance row lock; time charges reconcile once."""
         from .services.shifts import LATE_FINE, is_late
         is_start = purpose == 'start'
         table, field, final, at = attendance_fields(purpose)
-        late = bool(is_start and is_late(when))
+        late = bool(is_start and is_late(when) and not review_required())
         fine = LATE_FINE if late else 0
         extra = ',late=:late,fine_amount=:fine' if is_start else ''
         await conn.execute(text(f'UPDATE {table} SET {field}=:file,{at}=:now,status=:status{extra} WHERE id=:id'),
@@ -253,6 +281,9 @@ class Attendance:
                 VALUES (:uid,'Штраф за опоздание',:amount,:period,:note,:now)'''),
                 {'uid': row['user_id'], 'amount': -fine, 'period': day.isoformat(),
                  'note': f'Начало смены после 09:00; shift_check_in={row["id"]}; miniapp', 'now': self.now().replace(tzinfo=None)})
+        if review_required():
+            from .attendance_fines import reconcile_day
+            await reconcile_day(self.api, conn, row['user_id'], day, self.now())
         await self.api.audit_write(conn, actor, 'shift_started' if is_start else 'shift_finished',
             'shift_check_in' if is_start else 'shift_check_out', row['id'],
             f'miniapp; геолокация и фото сохранены; штраф={fine:g}')
@@ -290,9 +321,13 @@ class Attendance:
         await conn.execute(text(f'''UPDATE {table} SET latitude=:lat,longitude=:lon,{field}=:file,
             location_received_at=:now,offline_claimed_at=:claimed,status='PENDING_REVIEW' WHERE id=:id'''),
             {'id': row['id'], 'lat': lat, 'lon': lon, 'file': file_id, 'now': now.replace(tzinfo=None), 'claimed': claimed.replace(tzinfo=None)})
+        if review_required():
+            await capture_context(self.api, conn, actor['id'], day, data['purpose'], row['id'], lat, lon, accuracy, source='offline')
+            from .attendance_fines import reconcile_day
+            await reconcile_day(self.api, conn, actor['id'], day, now)
         await self.api.audit_write(conn, actor, 'offline_attendance_received', table, row['id'],
             json.dumps({'claimedAt': claimed.isoformat(), 'receivedAt': now.isoformat(), 'accuracy': accuracy,
-                        'note': 'Время устройства и присутствие не подтверждены; штраф не начислен.'}, ensure_ascii=False))
+                        'note': 'Время устройства и присутствие не подтверждены; автоматический расчёт исправляет руководитель при уважительной причине.'}, ensure_ascii=False))
         return {'attendanceStatus': 'PENDING_REVIEW', 'attendanceId': row['id']}
 
     async def pending(self, request):
@@ -322,7 +357,8 @@ class Attendance:
                         if scopes[key]:
                             items.append(dict(r) | {'purpose': purpose, 'shift_date': str(r['shift_date']),
                                 'offline_claimed_at': utc(r['offline_claimed_at']).isoformat(),
-                                'location_received_at': utc(r['location_received_at']).isoformat()})
+                                'location_received_at': utc(r['location_received_at']).isoformat(),
+                                'geofence': await read_json(self.api, conn, context_key(purpose, r['id']))})
                             visible += 1
                             if visible == 200:
                                 break
@@ -356,6 +392,8 @@ class Attendance:
         if set(body) != {'userId', 'date', 'purpose', 'approved', 'verifiedAt', 'note'} or type(body['approved']) is not bool or not isinstance(body['note'], str) or not 3 <= len(body['note'].strip()) <= 1000:
             raise AccessError('Укажите решение и основание проверки.', 400)
         uid = positive_id(body['userId'])
+        if uid == actor['id']:
+            raise AccessError('Свою отметку нельзя подтвердить самостоятельно. Нужен другой руководитель.', 403)
         day = self.api.day(body['date'])
         table, field, final, at = attendance_fields(body['purpose'])
         when = explicit_time(body['verifiedAt']) if body['approved'] else None
@@ -367,7 +405,7 @@ class Attendance:
             start, end = await self.records(conn, uid, day, lock=True)
             row = start if body['purpose'] == 'start' else end
             if not row or not row['offline_claimed_at']:
-                raise AccessError('Офлайн-отметка не найдена.', 404)
+                raise AccessError('Отметка для проверки не найдена.', 404)
             if (row['status'] == final and when and utc(row[at]) == when) or (row['status'] == 'REJECTED' and not when):
                 return web.json_response({'ok': True, 'alreadyReviewed': True})
             if row['status'] != 'PENDING_REVIEW':
@@ -402,6 +440,8 @@ def explicit_time(value):
 
 def install_attendance(app, miniapp):
     service = Attendance(miniapp)
+    from .attendance_fines import install_attendance_fines
+    install_attendance_fines(app, miniapp)
     app.router.add_get('/api/miniapp/attendance', service.status)
     app.router.add_post('/api/miniapp/attendance/location', service.location)
     app.router.add_post('/api/miniapp/attendance/photo', service.photo)

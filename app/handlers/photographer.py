@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 
 from ..access import StaffFilter
 from ..db import Session
+from ..hotel_points import review_required
 from ..keyboards import inline, reply, request_location
 from ..models import (
     Booking,
@@ -158,6 +159,9 @@ async def begin_shift(c: CallbackQuery, state, current_roles):
 
 @r.message(ShiftFlow.location, F.location)
 async def save_shift_location(m, state):
+    if review_required():
+        await state.clear()
+        return await m.answer('Отмечайте приход в Photo Boss → «Моя смена»: там сохраняются фото и проверка зоны отеля.')
     now = datetime.now(UTC).replace(tzinfo=None)
     async with Session() as s:
         u = await get_user(s, m.from_user.id)
@@ -189,6 +193,9 @@ async def require_shift_location(m):
 
 @r.message(ShiftFlow.photo, F.photo)
 async def save_shift_photo(m, state, current_roles):
+    if review_required():
+        await state.clear()
+        return await m.answer('Для защищённой отметки откройте Photo Boss → «Моя смена». Фото, координаты и время проверяет руководитель.')
     now_local = shift_now()
     now_utc = now_local.astimezone(UTC).replace(tzinfo=None)
     late = is_late(now_local)
@@ -291,6 +298,9 @@ async def end_shift(c: CallbackQuery, state, current_roles):
 
 @r.message(ShiftFlow.end_location, F.location)
 async def save_end_location(m, state):
+    if review_required():
+        await state.clear()
+        return await m.answer('Отмечайте уход в Photo Boss → «Моя смена»: там сохраняются фото и проверка зоны отеля.')
     now = datetime.now(UTC).replace(tzinfo=None)
     async with Session() as s:
         u = await get_user(s, m.from_user.id)
@@ -322,6 +332,9 @@ async def require_end_location(m):
 
 @r.message(ShiftFlow.workplace_photo, F.photo)
 async def save_workplace_photo(m, state, current_roles):
+    if review_required():
+        await state.clear()
+        return await m.answer('Для защищённой отметки ухода откройте Photo Boss → «Моя смена».')
     now_local = shift_now()
     now_utc = now_local.astimezone(UTC).replace(tzinfo=None)
     async with Session() as s:
