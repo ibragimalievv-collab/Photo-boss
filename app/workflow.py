@@ -67,7 +67,7 @@ from .yandex_disk import (
 )
 
 KINDS = frozenset({'booking', 'sale_start', 'sale_counts', 'sale_complete', 'sale_receipt',
-                   'sale_selected', 'booking_receipt', 'shoot_photo', 'shoot_complete', 'shoot_retry', 'photo_edit', 'delivery_photo', 'delivery_handoff'})
+                   'sale_selected', 'sale_disk_selected', 'booking_receipt', 'shoot_photo', 'shoot_complete', 'shoot_retry', 'photo_edit', 'delivery_photo', 'delivery_handoff'})
 MEDIA_KINDS = frozenset({'sale_receipt', 'sale_selected', 'booking_receipt', 'shoot_photo', 'delivery_photo'})
 
 
@@ -366,6 +366,9 @@ class Workflow:
         except ValueError as exc:
             raise AccessError(str(exc), 409) from exc
         except YandexDiskError as exc:
+            if kind == 'sale_disk_selected':
+                from .disk_folder_audit import provider_error
+                raise AccessError(provider_error(exc), exc.http_status if exc.http_status in {401, 403, 404} else 503) from exc
             raise AccessError('Яндекс.Диск временно недоступен. Вложение сохранено локально.', 503) from exc
 
     async def sale(self, session, actor, roles, kind, data, raw):
@@ -375,7 +378,7 @@ class Workflow:
             draft = await start_sale_draft(session, actor, roles, bid)
         else:
             expected = {'sale_counts': 'draft total sold price', 'sale_complete': 'draft price',
-                        'sale_receipt': 'draft', 'sale_selected': 'draft'}[kind]
+                        'sale_receipt': 'draft', 'sale_selected': 'draft', 'sale_disk_selected': 'draft revision path'}[kind]
             fields(data, expected + (' tariffId' if kind == 'sale_counts' and 'tariffId' in data else ''))
             did = await target(session, actor, data['draft'], 'draftId')
             preview = await session.get(SaleDraft, did)
@@ -423,6 +426,9 @@ class Workflow:
         elif kind == 'sale_counts':
             amount = await set_sale_counts(session, actor, draft, data['total'], data['sold'], tariff_id=data.get('tariffId'))
             result['amount'] = str(amount)
+        elif kind == 'sale_disk_selected':
+            from .disk_sale_media import select_photo
+            result |= await select_photo(session, actor, booking, draft, data)
         elif kind == 'sale_selected':
             digest = hashlib.sha256(raw).hexdigest()
             duplicate = await session.scalar(select(SaleDraftPhoto).where(SaleDraftPhoto.draft_id == draft.id, SaleDraftPhoto.sha256 == digest))

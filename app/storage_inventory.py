@@ -31,7 +31,7 @@ from .yandex_disk import ROOT, YandexDiskError
 logger = logging.getLogger(__name__)
 
 
-async def selected_folder_audit(storage, draft_id, rows, sold):
+async def selected_folder_audit(storage, draft_id, rows, sold, *, engine=None):
     """Compare the actual private folder, including files absent from the DB."""
     try:
         items = await storage.list_directory(ROOT + f'/sales/draft-{draft_id}/selected')
@@ -46,6 +46,21 @@ async def selected_folder_audit(storage, draft_id, rows, sold):
         if match and item.get('sha256') == match[1] and type(item.get('size')) is int and item['size'] > 0:
             valid_files += 1
             verified[match[1]] = item
+    from .disk_sale_media import FILE_PREFIX, verify_reference
+    external = [p for p in rows if getattr(p, 'storage_path', '').startswith(FILE_PREFIX)]
+    if external and engine is None:
+        return {'status': 'unavailable', 'diskFiles': None, 'missingSelected': None}
+    try:
+        if external:
+            async with AsyncSession(engine) as session:
+                for photo in external:
+                    async with asyncio.timeout(12):
+                        item = await verify_reference(session, photo.storage_path)
+                    verified[photo.sha256] = item
+                    valid_files += 1
+                    files.append(item)
+    except (YandexDiskError, ValueError, TimeoutError):
+        return {'status': 'unavailable', 'diskFiles': None, 'missingSelected': None}
     confirmed = sum(bool(p.sha256 in verified and verified[p.sha256]['size'] == p.byte_size) for p in rows)
     known = {p.sha256 for p in rows}
     return {'status': 'checked', 'diskFiles': len(files), 'verifiedUniqueFiles': len(verified),
@@ -105,7 +120,7 @@ async def sales_storage_audit(engine, storage):
     async def inspect(draft):
         async with semaphore:
             folder = await selected_folder_audit(storage, draft.id,
-                [p for p in selected if p.draft_id == draft.id], draft.sold_photos)
+                [p for p in selected if p.draft_id == draft.id], draft.sold_photos, engine=engine)
             full = await full_folder_audit(storage, draft.booking_id, shoots.get(draft.booking_id),
                 draft.declared_photo_count, [did for bid, did in all_drafts if bid == draft.booking_id])
             return {'bookingId': draft.booking_id, 'draftId': draft.id, 'draftStatus': draft.status,
@@ -157,7 +172,12 @@ async def recent_inventory(engine, storage, *, limit=12):
         async with semaphore:
             try:
                 async with asyncio.timeout(12):
-                    data = await storage.metadata(path)
+                    from .disk_sale_media import FILE_PREFIX, verify_reference
+                    if path.startswith(FILE_PREFIX):
+                        async with AsyncSession(engine) as session:
+                            data = await verify_reference(session, path)
+                    else:
+                        data = await storage.metadata(path)
                 if data.get('type') != 'file' or data.get('size') != item['bytes']:
                     item['diskStatus'] = 'mismatch'
                 elif digest and data.get('sha256'):

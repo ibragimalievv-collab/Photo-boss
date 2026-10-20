@@ -5,7 +5,7 @@ const source=fs.readFileSync(new URL('../app/webapp/js/workflow.js',import.meta.
 const outboxSource=fs.readFileSync(new URL('../app/webapp/js/outbox.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,'').replaceAll('export ','');
 const outboxContext=vm.createContext({window:{addEventListener(){}},document:{addEventListener(){}}});
 vm.runInContext(outboxSource,outboxContext);
-const ctx=vm.createContext({diskFolderPanel:()=>'',pricingView:()=>'',tariffOptions:()=>'',bankPanel:()=>'',updatePricePreview(){},window:{addEventListener(){}},document:{addEventListener(){}},navigator:{onLine:true},Set,Date,Intl,Number,JSON,
+const ctx=vm.createContext({saleDiskView:()=>'',diskFolderPanel:()=>'',pricingView:()=>'',tariffOptions:()=>'',bankPanel:()=>'',updatePricePreview(){},window:{addEventListener(){}},document:{addEventListener(){}},navigator:{onLine:true},Set,Date,Intl,Number,JSON,
  canReplaceOperationFile:vm.runInContext('canReplaceOperationFile',outboxContext),
  esc:x=>String(x??'').replaceAll('&','&amp;').replaceAll('<','&lt;'),todayKey:()=> '2026-10-16'});
 vm.runInContext(source,ctx);

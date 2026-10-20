@@ -100,7 +100,7 @@ class YandexDisk:
 
     @property
     def headers(self):
-        return {"Authorization": f"OAuth {self.token}", "Accept": "application/json"}
+        return {"Accept": "application/json", **({"Authorization": f"OAuth {self.token}"} if self.token else {})}
 
     async def _json(self, method: str, endpoint: str, *, params=None, ok=(200,)):
         timeout = aiohttp.ClientTimeout(total=20)
@@ -145,17 +145,30 @@ class YandexDisk:
     async def disk_list_directory(self, path: str, *, page_size=200, max_items=10000):
         return await self._read_directory(safe_disk_read_path(path), page_size=page_size, max_items=max_items)
 
-    async def _read_directory(self, path, *, page_size, max_items):
-        items, names = [], set()
+    async def public_metadata(self, key, path='/'):
+        return await self._json('GET', '/public/resources', params={'public_key': key, 'path': path, 'limit': 0})
+
+    async def public_list_directory(self, key, path='/', *, page_size=200, max_items=10000):
+        return await self._read_directory(path, page_size=page_size, max_items=max_items,
+                                          endpoint='/public/resources', extra={'public_key': key})
+
+    async def public_download_bytes(self, key, path='/', *, max_bytes=20 * 1024 * 1024):
+        return await self._download_bytes(path, max_bytes=max_bytes, endpoint='/public/resources/download', extra={'public_key': key})
+
+    async def _read_directory(self, path, *, page_size, max_items, endpoint='/resources', extra=None):
+        items, names, expected_total = [], set(), None
         while True:
-            data = await self._json('GET', '/resources', params={
-                'path': path, 'limit': page_size, 'offset': len(items), 'sort': 'name'})
+            data = await self._json('GET', endpoint, params={
+                **(extra or {}), 'path': path, 'limit': page_size, 'offset': len(items), 'sort': 'name'})
             embedded = data.get('_embedded')
             if data.get('type') != 'dir' or not isinstance(embedded, dict):
                 raise YandexDiskError('Не удалось прочитать список файлов папки.')
             page, total = embedded.get('items'), embedded.get('total')
             if not isinstance(page, list) or type(total) is not int or total < 0:
                 raise YandexDiskError('Неполный ответ списка файлов Яндекс.Диска.')
+            if expected_total is not None and total != expected_total:
+                raise YandexDiskError('Список файлов изменился во время проверки. Повторите сверку.')
+            expected_total = total
             for item in page:
                 name = item.get('name') if isinstance(item, dict) else None
                 if not isinstance(name, str) or name in names or '/' in name or name in {'.', '..'}:
@@ -221,12 +234,12 @@ class YandexDisk:
     async def disk_download_bytes(self, path: str, *, max_bytes=20 * 1024 * 1024):
         return await self._download_bytes(safe_disk_read_path(path), max_bytes=max_bytes)
 
-    async def _download_bytes(self, path, *, max_bytes):
+    async def _download_bytes(self, path, *, max_bytes, endpoint='/resources/download', extra=None):
         for attempt in range(2):
             # Fetch a fresh temporary link when Yandex returns a transient 5xx/429.
             # Retrying a read cannot duplicate files or financial operations.
             try:
-                data = await self._json("GET", "/resources/download", params={"path": path})
+                data = await self._json("GET", endpoint, params={**(extra or {}), "path": path})
             except YandexDiskError as exc:
                 if attempt == 0 and (exc.code in {"api_timeout", "api_network"}
                                      or exc.http_status in {429, 500, 502, 503, 504}):

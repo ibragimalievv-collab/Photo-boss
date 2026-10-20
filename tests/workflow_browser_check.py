@@ -152,7 +152,7 @@ async def main():
                     await form.locator('[name=client_name]').fill('Offline Guest')
                     await form.locator('[name=room]').fill('200')
                     await form.locator('[name=shoot_time]').fill('14:00')
-                    await form.locator('button').click()
+                    await form.locator('button[type=submit],button:not([type])').click()
                     await page.get_by_text('В очереди на этом устройстве — не отправлено', exact=True).wait_for()
                     await page.locator('#workflowSalePick').select_option('1')
                     sale = page.locator('#workflowSale')
@@ -163,7 +163,7 @@ async def main():
                     await sale.locator('[name=sold]').fill('1')
                     await sale.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/coast.jpg')
                     await sale.locator('[name=selected]').set_input_files('app/webapp/assets/academy/family.jpg')
-                    await sale.locator('button').click()
+                    await sale.locator('button[type=submit],button:not([type])').click()
                     try:
                         await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length===6;}")
                     except Exception:
@@ -307,7 +307,7 @@ async def main():
                     await repair_form.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/evening.jpg')
                     await repair_form.locator('[name=selected]').set_input_files([
                         'app/webapp/assets/academy/couple.jpg', 'app/webapp/assets/academy/couple.jpg'])
-                    await repair_form.locator('button').first.click()
+                    await repair_form.locator('button[type=submit],button:not([type])').first.click()
                     await page.get_by_text('Выбрано файлов: 2, разных фотографий: 1.', exact=False).wait_for()
                     assert not await repair_form.get_attribute('data-pending-keys')
                     # Simulate an existing queue from an older client that did
@@ -344,7 +344,7 @@ async def main():
                     await wait_async(page, "()=>!document.querySelector('#workflowSale [name=sold]').disabled")
                     assert await page.locator('#workflowSale [name=sold]').is_enabled()
                     await page.locator('#workflowSale [name=sold]').fill('1')
-                    await page.locator('#workflowSale button').first.click()
+                    await page.locator('#workflowSale button[type=submit],#workflowSale button:not([type])').first.click()
                     await wait_async(page, """async()=>{
                         const {outboxRows}=await import('/app/js/outbox.js'),rows=await outboxRows();
                         const keys=JSON.parse(document.querySelector('#workflowSale').dataset.pendingKeys);
@@ -403,7 +403,7 @@ async def main():
                         value = await panel.evaluate("async purpose=>{const {api}=await import('/app/js/api.js');return (await api('/attendance/pending')).items.find(r=>r.purpose===purpose).offline_claimed_at.slice(0,16);}", purpose)
                         await form.locator('[name=verifiedAt]').fill(value)
                         await form.locator('[name=note]').fill('Checked photo and shift time')
-                        await form.locator('button').click()
+                        await form.locator('button[type=submit],button:not([type])').click()
                         await form.wait_for(state='detached')
                     await panel.get_by_text('Нет отметок, ожидающих проверки.').wait_for()
                     async with factory() as session:

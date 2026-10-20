@@ -83,6 +83,8 @@ jobs:
           node tests/install_client_check.mjs
           node tests/notifications_client_check.mjs
           node tests/disk_folder_client_check.mjs
+          node tests/disk_folder_recovery_check.mjs
+          node tests/sale_disk_client_check.mjs
           node tests/hotel_fixed_price_client_check.mjs
           node tests/account_cache_check.mjs
           node tests/voice_training_client_check.mjs

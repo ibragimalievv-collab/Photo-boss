@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 def operation_diagnostic(body, *, result=None, error=None):
     """Log only known operation fields; never file bytes, names or request keys."""
-    kinds = {'sale_start', 'sale_receipt', 'sale_counts', 'sale_selected', 'sale_complete',
+    kinds = {'sale_start', 'sale_receipt', 'sale_counts', 'sale_selected', 'sale_disk_selected', 'sale_complete',
              'shoot_photo', 'shoot_complete', 'shoot_retry', 'booking_receipt'}
     if not isinstance(body, dict) or not isinstance(body.get('kind'), str) or body['kind'] not in kinds:
         return
