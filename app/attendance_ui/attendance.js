@@ -79,12 +79,12 @@ function install() {
  const link=document.createElement('link');link.rel='stylesheet';link.href='/shift/attendance.css';document.head.append(link);
  const tg=window.Telegram?.WebApp;
  const dialog=document.createElement('dialog');dialog.id='attendanceDialog';dialog.className='att-dialog';dialog.setAttribute('aria-label','Моя смена');document.body.append(dialog);
- let data=null, failure='', busy=false, photo=null, purpose='start', generation=0, loading=false;
+ let data=null, failure='', busy=false, photo=null, purpose='start', generation=0, loading=false, refreshAgain=false;
  let point=null,pointAt=0,photoAt=null;
  const localDay=value=>new Intl.DateTimeFormat('en-CA',{timeZone:data?.timezone||'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit'}).format(value);
  let cameraStream=null, cameraActive=false, cameraMode='environment';
  const clock=value=>value?new Intl.DateTimeFormat('ru-RU',{timeZone:data.timezone,hour:'2-digit',minute:'2-digit'}).format(new Date(value)):'—';
- const labels={CONTROL:'Контроль смен',NOT_STARTED:'Смена не начата',START_PHOTO:'Начало ещё не подтверждено',STARTED:'Вы на смене',END_PHOTO:'Завершение ещё не подтверждено',FINISHED:'Смена завершена',REVIEW:'Ожидает проверки руководителем',REVIEW_START:'Начало ожидает проверки'};
+ const labels={CONTROL:'Контроль смен',NOT_STARTED:'Смена не начата',START_PHOTO:'Начало ещё не подтверждено',STARTED:'Вы на смене',END_PHOTO:'Завершение ещё не подтверждено',FINISHED:'Смена завершена',REVIEW:'Ожидает проверки руководителем',REVIEW_START:'На смене · начало на проверке'};
  const button=(label,action,kind='primary',disabled=false)=>`<button type="button" class="btn ${kind}" data-att="${action}" ${busy||disabled?'disabled':''}>${label}</button>`;
  function releaseCamera(){
   if(cameraStream){for(const track of cameraStream.getTracks?.()||[])track.stop();}
@@ -120,7 +120,7 @@ function install() {
  }
  function updateCard(){root.querySelector('#attendanceCard')?.remove();card();}
  function message(text){const el=dialog.querySelector('#attError');if(el){el.textContent=text;el.hidden=false;}}
- async function refresh(){if(loading)return;loading=true;const version=generation;try{
+ async function refresh(){if(loading){refreshAgain=true;return;}loading=true;const version=generation;try{
   const latest=await api('/attendance');if(version!==generation)return;data=latest;const today=localDay(new Date());
   if(data.date!==today&&data._offline)data={...data,date:today,start:null,end:null};
   const rows=await outboxRows();if(version!==generation)return;
@@ -129,7 +129,7 @@ function install() {
    if(!['STARTED','FINISHED'].includes(data[part]?.status)&&(row.status!=='synced'||!data[part]&&data._offline))data[part]={status:row.result?.attendanceStatus||'PENDING_REVIEW',claimedAt:row.data.claimedAt};
   }
   failure='';
- }catch(e){failure=e.message;}finally{loading=false;updateCard();}}
+ }catch(e){failure=e.message;}finally{loading=false;updateCard();draw();if(refreshAgain){refreshAgain=false;await refresh();}}}
  async function queueOffline(){
   if(!point||Date.now()-pointAt>300000||!photoAt)throw new Error('Получите свежую геолокацию и сделайте фото повторно.');
   const version=generation;
@@ -152,8 +152,8 @@ function install() {
   const record=purpose==='start'?data?.start:data?.end;
   const geo=record?.geofence||(p==='REVIEW_START'?data?.start?.geofence:null);
   const geoText=geo?`${geo.hotelName||'Отель не определён'}${Number.isFinite(geo.distanceM)?` · расстояние ${Math.round(geo.distanceM)} м, радиус ${geo.radiusM} м`:''}${geo.accuracyM!=null?` · погрешность ${Math.round(geo.accuracyM)} м`:''}. ${geo.notice}`:'';
-  const fresh=!!point&&Date.now()-pointAt<=300000||!!record?.locationFresh&&!data?._offline;
-  dialog.innerHTML=`<div class="att-dialog-head"><div><div class="eyebrow">PHOTO BOSS · МОЯ СМЕНА</div><h2>${data?labels[p]:'Статус смены'}</h2></div>${button('Закрыть','close','ghost')}</div><div id="attError" class="att-error" role="alert" ${failure?'':'hidden'}>${esc(failure)}</div>${!data?button('Обновить статус','reload'):p==='CONTROL'?`<p>Ваш аккаунт управляет работой команды. Личное начало смены доступно аккаунтам с ролью фотографа или менеджера записи.</p>${button('Открыть график сотрудников','schedule')}`:p==='FINISHED'?`<div class="att-done">✓ Начало: ${clock(data.start.at)}<br>✓ Завершение: ${clock(data.end.at)}<br>Геолокации и фотографии сохранены.</div>${button('Открыть краткий отчёт','report')}${button('Обновить','reload','ghost')}`:p==='REVIEW'?`<p>Фото, координаты и время отправлены на проверку. Синхронизация ещё не подтверждает присутствие. Штрафы по времени рассчитываются автоматически; уважительную причину можно учесть при проверке.</p>${button('Проверить синхронизацию','queue','secondary')}${button('Обновить','reload','ghost')}`:`${p==='REVIEW_START'?'<p class="notice">Начало сохранено для проверки. Можно сохранить окончание смены; руководитель проверит обе отметки.</p>':''}<p>${purpose==='start'?'Чтобы начать смену, отправьте геолокацию и свежее фото в полный рост.':'Чтобы завершить смену, отправьте геолокацию и фото рабочего места.'}</p><div class="att-steps"><div><span class="att-step">1</span><div><strong>Геолокация</strong><p>${fresh?'✓ Координаты сохранены.':record?.locationSaved?'Координаты устарели. Получите их повторно.':'Местоположение запрашивается только по нажатию.'}</p>${button(fresh?'Получить заново':'Проверить геолокацию','location','secondary')} ${button('Настройки доступа','settings','ghost')}</div></div><div><span class="att-step">2</span><div><strong>${purpose==='start'?'Фото в полный рост':'Фото рабочего места'}</strong><p>Фото делается только сейчас через камеру. Выбор из галереи отключён.</p>${button(photo?'Переснять':'Сделать фото','camera','secondary',!fresh)}${photo?`<img class="att-preview" alt="Сделанная фотография" src="${photo}">`:''}</div></div></div><p class="att-notice">${esc(geoText)} ${esc(data.geoNotice)} Фото берётся из живого видеопотока камеры непосредственно перед подтверждением.</p>${data.reviewRequired?'<p class="att-notice">Фото, форму и присутствие проверяет руководитель. Штраф по времени рассчитывается автоматически, с возможностью исправления причины и суммы руководителем.</p>':purpose==='start'?`<p class="att-notice">Правило действующего бота: начало после ${esc(data.startTime)} — штраф ${data.lateFine} ₽. Подтверждение создаёт настоящую отметку, не учебную.</p>`:''}<button type="button" class="btn primary full-width" data-att="confirm" ${!photo||!fresh||busy?'disabled':''}>${busy?'Сохраняем…':data.reviewRequired?'Отправить на проверку':purpose==='start'?'Подтвердить начало смены':'Подтвердить завершение смены'}</button><p class="att-caption">При отсутствии связи отметка сохраняется на устройстве, затем отправляется руководителю для проверки. Время телефона само по себе не подтверждает присутствие.</p>`}`;
+  const fresh=!!point&&Date.now()-pointAt<=300000||!!record?.locationFresh&&!data?._offline&&Date.now()-new Date(record.locationReceivedAt).getTime()<=300000;
+  dialog.innerHTML=`<div class="att-dialog-head"><div><div class="eyebrow">PHOTO BOSS · МОЯ СМЕНА</div><h2>${data?labels[p]:'Статус смены'}</h2></div>${button('Закрыть','close','ghost')}</div><div id="attError" class="att-error" role="alert" ${failure?'':'hidden'}>${esc(failure)}</div>${!data?button('Обновить статус','reload'):p==='CONTROL'?`<p>Ваш аккаунт управляет работой команды. Личное начало смены доступно аккаунтам с ролью фотографа или менеджера записи.</p>${button('Открыть график сотрудников','schedule')}`:p==='FINISHED'?`<div class="att-done">✓ Начало: ${clock(data.start.at)}<br>✓ Завершение: ${clock(data.end.at)}<br>Геолокации и фотографии сохранены.</div>${button('Открыть краткий отчёт','report')}${button('Обновить','reload','ghost')}`:p==='REVIEW'?`<p>Фото, координаты и время отправлены на проверку. Синхронизация ещё не подтверждает присутствие. Штрафы по времени рассчитываются автоматически; уважительную причину можно учесть при проверке.</p>${button('Проверить синхронизацию','queue','secondary')}${button('Обновить','reload','ghost')}`:`${['STARTED','REVIEW_START'].includes(p)?button('Обед / вернулся с обеда','lunch','secondary'):''}${p==='REVIEW_START'?'<p class="notice">Начало смены записано, фото и присутствие ещё проверяет руководитель. Обед и возвращение доступны в разделе «Обед». Можно сохранить окончание смены.</p>':''}<p>${purpose==='start'?'Чтобы начать смену, отправьте геолокацию и свежее фото в полный рост.':'Чтобы завершить смену, отправьте геолокацию и фото рабочего места.'}</p><div class="att-steps"><div><span class="att-step">1</span><div><strong>Геолокация</strong><p>${fresh?'✓ Координаты сохранены.':record?.locationSaved?'Координаты устарели. Получите их повторно.':'Местоположение запрашивается только по нажатию.'}</p>${button(fresh?'Получить заново':'Проверить геолокацию','location','secondary')} ${button('Настройки доступа','settings','ghost')}</div></div><div><span class="att-step">2</span><div><strong>${purpose==='start'?'Фото в полный рост':'Фото рабочего места'}</strong><p>Фото делается только сейчас через камеру. Выбор из галереи отключён.</p>${button(photo?'Переснять':'Сделать фото','camera','secondary',!fresh)}${photo?`<img class="att-preview" alt="Сделанная фотография" src="${photo}">`:''}</div></div></div><p class="att-notice">${esc(geoText)} ${esc(data.geoNotice)} Фото берётся из живого видеопотока камеры непосредственно перед подтверждением.</p>${data.reviewRequired?'<p class="att-notice">Фото, форму и присутствие проверяет руководитель. Штраф по времени рассчитывается автоматически, с возможностью исправления причины и суммы руководителем.</p>':purpose==='start'?`<p class="att-notice">Правило действующего бота: начало после ${esc(data.startTime)} — штраф ${data.lateFine} ₽. Подтверждение создаёт настоящую отметку, не учебную.</p>`:''}<button type="button" class="btn primary full-width" data-att="confirm" ${!photo||!fresh||busy?'disabled':''}>${busy?'Сохраняем…':data.reviewRequired?'Отправить на проверку':purpose==='start'?'Подтвердить начало смены':'Подтвердить завершение смены'}</button><p class="att-caption">При отсутствии связи отметка сохраняется на устройстве, затем отправляется руководителю для проверки. Время телефона само по себе не подтверждает присутствие.</p>`}`;
  }
  async function open(){generation++;stopCamera();photo=null;point=null;photoAt=null;if(!dialog.open)dialog.showModal();draw();await refresh();draw();}
  function close(){if(busy)return;generation++;stopCamera();photo=null;dialog.close();}
@@ -166,7 +166,7 @@ function install() {
   if(act==='open')return open();
   if(act==='reload'){await refresh();draw();return;}
   if(act==='schedule'){close();location.hash='schedule';return;}
-  if(act==='report'){close();location.hash='workday';return;}
+  if(act==='report'||act==='lunch'){close();location.hash='workday';return;}
   if(act==='queue'){close();location.hash='workflow';return;}
   if(act==='settings'){try{if(tg?.LocationManager?.openSettings)tg.LocationManager.openSettings();else message('Разрешите местоположение и камеру в настройках разрешений Telegram.');}catch{message('Откройте настройки разрешений Telegram на телефоне.');}return;}
   if(act==='camera'){
@@ -192,14 +192,14 @@ function install() {
    if(act==='location'){
     const captured=await getLocation(tg);if(version!==generation)return;
     const claimedDate=localDay(new Date());
-    if(navigator.onLine&&data.start?.status!=='PENDING_REVIEW'){
+    if(navigator.onLine){
      try{const saved=await api('/attendance/location',{method:'POST',body:{purpose,date:claimedDate,...captured}});if(version!==generation)return;data=saved;}
      catch(e){if(e.status&&e.status<500)throw e;}
     }
     point=captured;pointAt=Date.now();data.date=claimedDate;photo=null;photoAt=null;
    }else if(act==='confirm'){
     if(!photo)throw new Error('Сначала сделайте фотографию камерой.');
-    if(!navigator.onLine||data.start?.status==='PENDING_REVIEW')await queueOffline();
+    if(!navigator.onLine)await queueOffline();
     else try{const saved=await api('/attendance/photo',{method:'POST',body:{purpose,date:data.date,image:photo}});if(version!==generation)return;data=saved;photo=null;point=null;}
     catch(e){if(e.status&&e.status<500)throw e;await queueOffline();}
     if(version!==generation)return;

@@ -26,3 +26,6 @@ assert.match(progress,/повторных копий: 1/);assert.match(progress,
 const legacyProgress=vm.runInContext(`saleTransferProgress([{kind:'sale_selected',status:'synced',result:{photoId:7}},{kind:'sale_selected',status:'synced',result:{photoId:7,duplicate:true}}])`,c);
 assert.match(legacyProgress,/В этой отправке подтверждено разных кадров: 1/,'older successful operations without progress fields still distinguish duplicate copies');
 console.log('PASS: sale fields do not reset, receipt/photos are queued once, repeat uses the same operations');
+
+assert.equal(vm.runInContext("bookingAccepted([{kind:'booking',status:'synced',result:{bookingId:8}},{kind:'booking_receipt',status:'error'}])",c),true,'A pending receipt must not block the next saved booking');
+assert.equal(vm.runInContext("bookingAccepted([{kind:'booking',status:'local'}])",c),false,'Do not clear a booking before server acceptance');

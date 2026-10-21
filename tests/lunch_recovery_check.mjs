@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+const original=fs.readFileSync('app/webapp/js/lunch.js','utf8');
+const source=original.replace(/^import .*;\n/gm,'').replaceAll('export ','');
+let reads=0;
+const c=vm.createContext({Date,Number,Promise,Error,setTimeout,document:{addEventListener(){},querySelector(){return null;}},window:{addEventListener(){}},outboxRows:async()=>[{key:'pending',status:++reads<3?'syncing':'synced'}]});
+vm.runInContext(source,c);
+const saved=await vm.runInContext("waitForLunch('pending')",c);
+assert.equal(saved.status,'synced');assert.equal(reads,3,'Wait for the worker already running in the background');
+c.outboxRows=async()=>[{key:'bad',status:'error',error:'Rejected mark'}];
+await assert.rejects(vm.runInContext("waitForLunch('bad')",c),/Rejected mark/);
+console.log('PASS: lunch waits for background confirmation and reports actual rejection');

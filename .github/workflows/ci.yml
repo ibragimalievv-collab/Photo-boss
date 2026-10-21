@@ -80,6 +80,7 @@ jobs:
           node --check app/work_chat_ui/camera.js
           node --check app/webapp/js/practice.js
           for file in app/webapp/js/*.js; do node --check "$file"; done
+          node tests/lunch_recovery_check.mjs
           node tests/install_client_check.mjs
           node tests/notifications_client_check.mjs
           node tests/disk_folder_client_check.mjs
