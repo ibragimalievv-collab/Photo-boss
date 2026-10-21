@@ -20,7 +20,13 @@ from uuid import uuid4
 from aiohttp import web
 from sqlalchemy import text
 
-from .hotel_points import capture_context, context_key, read_json, review_required
+from .hotel_points import (
+    capture_context,
+    context_key,
+    read_json,
+    review_required,
+    save_json,
+)
 from .miniapp_security import AccessError, utc_bounds
 
 WORK_ROLES = frozenset({'PHOTOGRAPHER', 'MANAGER'})
@@ -32,6 +38,11 @@ LOCATION_TTL = 300
 def gps_required():
     """Only an explicit owner-configured 0 temporarily disables GPS checks."""
     return os.getenv('PHOTO_BOSS_ATTENDANCE_GPS_REQUIRED', '1').strip() != '0'
+
+
+def geofence_required():
+    """GPS remains required unless its separate policy is explicitly changed."""
+    return os.getenv('PHOTO_BOSS_ATTENDANCE_GEOFENCE_REQUIRED', '1').strip() != '0'
 
 
 def start_recorded(row):
@@ -68,7 +79,7 @@ def photo_bytes(body):
         raise AccessError('Фотография слишком большая. Сделайте снимок заново.', 413)
     if len(raw) < 100 or not raw.startswith(b'\xff\xd8\xff') or not raw.endswith(b'\xff\xd9'):
         raise AccessError('Некорректная фотография JPEG.', 400)
-    if review_required() or not gps_required():
+    if review_required() or not gps_required() or not geofence_required():
         from PIL import Image, UnidentifiedImageError
         try:
             with Image.open(BytesIO(raw)) as image:
@@ -168,16 +179,21 @@ class Attendance:
                     'geofence': row.get('geofence'),
                     'evidenceSource': (row.get('geofence') or {}).get('source'),
                     'at': utc(row[at_key]).astimezone(self.api.tz).isoformat() if row.get(at_key) else None}
+        geo_notice = ('GPS временно отключён по решению владельца. Местоположение не проверяется; для отметки нужно свежее фото камеры.'
+            if not gps_required() else
+            'Для смены обязательны свежая геолокация и фото камеры. Координаты сохраняются; расстояние до отеля пока не проверяется — точки отелей будут настроены позже.'
+            if not geofence_required() else
+            'При свежих координатах внутри зоны одного отеля и сохранённом фото смена подтверждается автоматически. При неточных координатах, вне зоны или без настроенной зоны нужна проверка руководителя. Личность и форму автоматически не проверяем.'
+            if review_required() else 'Координаты сохраняются. Проверка расстояния до отеля пока не настроена.')
         return {'date': now.astimezone(self.api.tz).date().isoformat(), 'timezone': str(self.api.tz),
                 'eligible': bool(WORK_ROLES & set(actor['roles'])),
                 'start': part(start, 'full_body_file_id', 'started_at'),
                 'end': part(end, 'workplace_file_id', 'ended_at'),
                 'late': bool(start and start.get('late')),
                 'fine': float(start.get('fine_amount') or 0) if start else 0,
-                'reviewRequired': review_required(), 'gpsRequired': gps_required(),
-                'geoPolicy': 'temporarily_disabled' if not gps_required() else 'geofence_review' if review_required() else 'coordinates_only',
-                'geoNotice': ('GPS временно отключён по решению владельца. Местоположение не проверяется; для отметки нужно свежее фото камеры.' if not gps_required() else 'При свежих координатах внутри зоны одного отеля и сохранённом фото смена подтверждается автоматически. При неточных координатах, вне зоны или без настроенной зоны нужна проверка руководителя. Личность и форму автоматически не проверяем.'
-                              if review_required() else 'Координаты сохраняются. Проверка расстояния до отеля пока не настроена.'),
+                'reviewRequired': review_required(), 'gpsRequired': gps_required(), 'geofenceRequired': geofence_required(),
+                'geoPolicy': 'temporarily_disabled' if not gps_required() else 'gps_only' if not geofence_required() else 'geofence_review' if review_required() else 'coordinates_only',
+                'geoNotice': geo_notice,
                 'startTime': '09:00', 'lateFine': 500}
 
     async def status(self, request):
@@ -191,34 +207,63 @@ class Attendance:
         lat, lon, accuracy = coordinates(body)
         now = self.now()
         day = now.astimezone(self.api.tz).date()
-        table = 'shift_check_ins' if body['purpose'] == 'start' else 'shift_check_outs'
+        purpose = body['purpose']
+        table, field, _final, _at = attendance_fields(purpose)
         async with self.api.engine.begin() as conn:
             actor = await self.locked_actor(conn, request)
             start, end = await self.records(conn, actor['id'], day, lock=True)
-            if body['purpose'] == 'end' and not start_recorded(start):
+            if purpose == 'end' and not start_recorded(start):
                 raise AccessError('Сначала подтвердите начало смены.', 409)
-            row = start if body['purpose'] == 'start' else end
-            if row and row['status'] in ('STARTED', 'FINISHED', 'PENDING_REVIEW'):
+            row = start if purpose == 'start' else end
+            if row and row['status'] in ('STARTED', 'FINISHED'):
                 raise AccessError('Эта отметка уже подтверждена. Обновите экран.', 409)
+            previous = (row or {}).get('geofence') or {}
+            recovering = bool(row and row['status'] == 'PENDING_REVIEW')
+            if recovering and (geofence_required() or previous.get('source') == 'offline'):
+                raise AccessError('Отметка ожидает проверки руководителя. Повторная геолокация её не подтверждает.', 409)
             if row is None:
-                extra_columns, extra_values = (',late,fine_amount', ',FALSE,0') if body['purpose'] == 'start' else ('', '')
+                extra, values = (',late,fine_amount', ',FALSE,0') if purpose == 'start' else ('', '')
                 await conn.execute(text(f'''INSERT INTO {table}
-                    (user_id,shift_date,status,initiated_at{extra_columns})
-                    VALUES (:uid,:day,'AWAITING_LOCATION',:now{extra_values})
+                    (user_id,shift_date,status,initiated_at{extra})
+                    VALUES (:uid,:day,'AWAITING_LOCATION',:now{values})
                     ON CONFLICT (user_id,shift_date) DO NOTHING'''),
                     {'uid': actor['id'], 'day': day, 'now': now.replace(tzinfo=None)})
                 start, end = await self.records(conn, actor['id'], day, lock=True)
-                row = start if body['purpose'] == 'start' else end
+                row = start if purpose == 'start' else end
                 if row['status'] in ('STARTED', 'FINISHED', 'PENDING_REVIEW'):
                     raise AccessError('Эта отметка уже подтверждена. Обновите экран.', 409)
+            recovery = previous.get('recovery') if recovering else None
+            if recovering and not isinstance(recovery, dict):
+                original = None
+                complete = bool(row.get(field) and row.get('offline_claimed_at')
+                    and row.get('latitude') is not None and row.get('longitude') is not None
+                    and row.get('location_received_at'))
+                if complete and previous.get('source') == 'online':
+                    original = utc(row['offline_claimed_at'])
+                    if original > now or original.astimezone(self.api.tz).date() != day:
+                        original = None
+                recovery = {'trustedOnlineReceivedAt': original.isoformat() if original else None,
+                    'previousSource': previous.get('source'), 'freshLocationReceivedAt': now.isoformat()}
+            if recovering:
+                await self.api.audit_write(conn, actor, 'attendance_location_resubmitted', table, row['id'],
+                    json.dumps({'previousPhoto': row.get(field), 'previousLatitude': row.get('latitude'),
+                        'previousLongitude': row.get('longitude'), 'previousClaimedAt': str(row.get('offline_claimed_at')),
+                        'previousContext': previous, 'freshLocationReceivedAt': now.isoformat()}, ensure_ascii=False))
+            claim = (recovery.get('trustedOnlineReceivedAt') or now.isoformat()) if recovering else None
             await conn.execute(text(f'''UPDATE {table} SET latitude=:lat,longitude=:lon,
-                location_received_at=:now,offline_claimed_at=NULL,status='AWAITING_PHOTO' WHERE id=:id'''),
-                {'lat': lat, 'lon': lon, 'now': now.replace(tzinfo=None), 'id': row['id']})
-            if review_required():
-                await capture_context(self.api, conn, actor['id'], day, body['purpose'], row['id'], lat, lon, accuracy)
-            await self.api.audit_write(conn, actor, 'shift_location_received' if body['purpose']=='start' else 'shift_end_location_received',
-                'shift_check_in' if body['purpose']=='start' else 'shift_check_out', row['id'],
-                f"miniapp; точность устройства: {accuracy if accuracy is not None else 'неизвестна'} м; политика={'geofence_review' if review_required() else 'coordinates_only'}")
+                location_received_at=:now,offline_claimed_at=:claimed,status=:status WHERE id=:id'''),
+                {'lat': lat, 'lon': lon, 'now': now.replace(tzinfo=None), 'id': row['id'],
+                 'claimed': utc(claim).replace(tzinfo=None) if claim else None,
+                 'status': 'PENDING_REVIEW' if recovering else 'AWAITING_PHOTO'})
+            if review_required() or not geofence_required():
+                context = await capture_context(self.api, conn, actor['id'], day, purpose,
+                    row['id'], lat, lon, accuracy, geofence_disabled=not geofence_required())
+                if recovery:
+                    context['recovery'] = recovery | {'freshLocationReceivedAt': now.isoformat()}
+                    await save_json(conn, context_key(purpose, row['id']), context)
+            await self.api.audit_write(conn, actor, 'shift_location_received' if purpose == 'start' else 'shift_end_location_received',
+                'shift_check_in' if purpose == 'start' else 'shift_check_out', row['id'],
+                f"miniapp; точность устройства: {accuracy if accuracy is not None else 'неизвестна'} м; политика={'gps_only' if not geofence_required() else 'geofence_review' if review_required() else 'coordinates_only'}")
             start, end = await self.records(conn, actor['id'], day)
         return web.json_response(self.result(actor, start, end, self.now()))
 
@@ -246,51 +291,77 @@ class Attendance:
         day = now.astimezone(self.api.tz).date()
         if not gps_required():
             return await self.photo_without_gps(request, body, raw, now, day)
-        is_start = body['purpose'] == 'start'
-        final = 'STARTED' if is_start else 'FINISHED'
+        purpose, is_start = body['purpose'], body['purpose'] == 'start'
+        table, field, final, _at = attendance_fields(purpose)
         async with self.api.engine.begin() as conn:
             actor = await self.locked_actor(conn, request)
             start, end = await self.records(conn, actor['id'], day, lock=True)
             row = start if is_start else end
             if not is_start and not start_recorded(start):
                 raise AccessError('Сначала подтвердите начало смены.', 409)
-            if row and row['status'] in (final, 'PENDING_REVIEW'):
+            previous_context = (row or {}).get('geofence') or {}
+            recovery = previous_context.get('recovery')
+            renewed = bool(row and row['status'] == 'PENDING_REVIEW' and not geofence_required()
+                and previous_context.get('source') == 'online' and isinstance(recovery, dict))
+            if row and (row['status'] == final or (row['status'] == 'PENDING_REVIEW' and not renewed)):
                 return web.json_response(self.result(actor, start, end, now))
-            if not row or row['status'] != 'AWAITING_PHOTO' or row.get('latitude') is None or not row.get('location_received_at'):
+            if (not row or (row['status'] != 'AWAITING_PHOTO' and not renewed)
+                    or row.get('latitude') is None or row.get('longitude') is None
+                    or not row.get('location_received_at')):
                 raise AccessError('Сначала отправьте геолокацию.', 409)
             if not 0 <= (now - utc(row['location_received_at'])).total_seconds() <= LOCATION_TTL:
                 raise AccessError('Геолокация устарела. Получите её повторно.', 409)
-            # The database row lock serializes Mini App and existing bot confirmations.
-            file_id = await self.send_photo(actor, raw, body['purpose'])
+            when = now
+            if renewed and recovery.get('trustedOnlineReceivedAt'):
+                original = utc(recovery['trustedOnlineReceivedAt'])
+                if original <= now and original.astimezone(self.api.tz).date() == day:
+                    when = original
+            if not is_start and start.get('started_at') and when < utc(start['started_at']):
+                raise AccessError('Сохранённое завершение раньше начала смены. Время должен проверить руководитель.', 409)
+            # User and attendance locks serialize retries in the Mini App/bot.
+            # Every recovery requires both a NEW GPS request and a NEW upload;
+            # merely switching policy or reading status never approves evidence.
+            file_id = await self.send_photo(actor, raw, purpose)
             if self.now().astimezone(self.api.tz).date() != day:
                 raise AccessError('Рабочая дата изменилась. Обновите экран.', 409)
-            if review_required():
-                table, field, _, _ = attendance_fields(body['purpose'])
-                # Keep submitted evidence for leadership inspection even when
-                # the technical checks allow immediate confirmation.
+            if review_required() or not geofence_required():
+                if renewed:
+                    await self.api.audit_write(conn, actor, 'attendance_photo_resubmitted', table, row['id'],
+                        json.dumps({'previousPhoto': row.get(field),
+                            'previousClaimedAt': str(row.get('offline_claimed_at')),
+                            'previousContext': previous_context, 'photoReceivedAt': now.isoformat(),
+                            'recordedAt': when.isoformat(), 'gpsRequired': True,
+                            'geofenceRequired': False}, ensure_ascii=False))
+                    await conn.execute(text('''UPDATE notifications SET resolved_at=:now
+                        WHERE kind='attendance' AND event_key LIKE :prefix AND resolved_at IS NULL'''),
+                        {'now': now.replace(tzinfo=None), 'prefix': f'attendance:{purpose}:{row["id"]}:%'})
                 await conn.execute(text(f'''UPDATE {table} SET {field}=:file,
-                    offline_claimed_at=:now,status='PENDING_REVIEW' WHERE id=:id'''),
-                    {'file': file_id, 'now': now.replace(tzinfo=None), 'id': row['id']})
-                # The hotel plan/zone may have changed while the camera or Disk
-                # upload was open. Re-check current reference data before auto approval.
-                previous_context = row.get('geofence') or {}
-                context = await capture_context(self.api, conn, actor['id'], day, body['purpose'],
-                    row['id'], row['latitude'], row['longitude'], previous_context.get('accuracyM'))
-                automatic = (context.get('state') == 'inside' and context.get('source') == 'online'
-                             and 0 <= (self.now()-utc(row['location_received_at'])).total_seconds() <= LOCATION_TTL
-                             and (is_start or start['status'] == 'STARTED'))
+                    offline_claimed_at=:when,status='PENDING_REVIEW' WHERE id=:id'''),
+                    {'file': file_id, 'when': when.replace(tzinfo=None), 'id': row['id']})
+                context = await capture_context(self.api, conn, actor['id'], day, purpose,
+                    row['id'], row['latitude'], row['longitude'], previous_context.get('accuracyM'),
+                    geofence_disabled=not geofence_required())
+                if recovery:
+                    context['recovery'] = recovery
+                    await save_json(conn, context_key(purpose, row['id']), context)
+                automatic = (context.get('state') in ({'inside'} if geofence_required() else {'gps_only'})
+                    and context.get('source') == 'online'
+                    and 0 <= (self.now()-utc(row['location_received_at'])).total_seconds() <= LOCATION_TTL
+                    and (is_start or start['status'] == 'STARTED'))
                 if automatic:
-                    await self.confirm(conn, actor, row, body['purpose'], day, now, file_id)
+                    await self.confirm(conn, actor, row, purpose, day, when, file_id)
+                    description = ('Свежие координаты сохранены; JPEG проверен и сохранён. Расстояние до отеля пока не проверялось; точки будут настроены позже.'
+                        if not geofence_required() else 'Свежие координаты в зоне назначенного отеля; JPEG проверен и сохранён.')
                     await self.api.audit_write(conn, actor, 'attendance_auto_confirmed', table, row['id'],
-                        'Свежие координаты в зоне назначенного отеля; JPEG проверен и сохранён. Личность и форма автоматически не проверялись.')
+                        description + ' Личность и форма автоматически не проверялись.')
                 else:
                     await self.api.audit_write(conn, actor, 'attendance_review_requested', table, row['id'],
                         'Фото и координаты сохранены; нужна проверка руководителя. Расчёт времени автоматический.')
                     from .attendance_fines import reconcile_day
                     await reconcile_day(self.api, conn, actor['id'], day, now)
             else:
-                await self.confirm(conn, actor, row, body['purpose'], day, now, file_id)
-            await self.notify_submission(conn, actor, body['purpose'], row['id'], day)
+                await self.confirm(conn, actor, row, purpose, day, when, file_id)
+            await self.notify_submission(conn, actor, purpose, row['id'], day, renewed=renewed)
             start, end = await self.records(conn, actor['id'], day)
         return web.json_response(self.result(actor, start, end, self.now()))
 
@@ -391,7 +462,9 @@ class Attendance:
             local = utc(recorded).astimezone(self.api.tz) if recorded else None
             time_label = f'{day:%d.%m.%Y} {local:%H:%M}' if local else f'{day:%d.%m.%Y}; время не сохранено'
             automatic_notice = ('Подтверждено автоматически по свежему фото; GPS временно отключён, местоположение не проверялось'
-                if context.get('gpsRequired') is False else 'Подтверждено автоматически по фото и координатам')
+                if context.get('gpsRequired') is False else
+                'Подтверждено автоматически по свежим координатам и фото; расстояние до отеля пока не проверялось'
+                if context.get('geofenceRequired') is False else 'Подтверждено автоматически по фото и координатам')
             description = (f'Сотрудник: {user.name}\n'
                            f'{"Начало" if purpose == "start" else "Завершение"} смены: {time_label}\n'
                            f'Отель: {context.get("hotelName", "нужна проверка привязки")}\n'
@@ -407,6 +480,8 @@ class Attendance:
                     f'Проверил: {reviewer.name}\nОснование: {decision["note"]}')
                 if context.get('gpsRequired') is False:
                     description += '\nGPS при получении отметки был временно отключён; местоположение автоматически не проверялось.'
+                elif context.get('geofenceRequired') is False:
+                    description += '\nКоординаты при получении отметки сохранены; расстояние до отеля тогда не проверялось.'
             for uid in sorted(recipients):
                 recipient = await session.get(User, uid)
                 if recipient and recipient.active:
@@ -425,7 +500,8 @@ class Attendance:
         table, field, final, at = attendance_fields(purpose)
         correcting = row['status'] == final
         gps_waived = not gps_required() or (row.get('geofence') or {}).get('gpsRequired') is False
-        modern_policy = review_required() or gps_waived
+        zone_waived = not geofence_required() or (row.get('geofence') or {}).get('geofenceRequired') is False
+        modern_policy = review_required() or gps_waived or zone_waived
         late = bool(is_start and is_late(when) and not modern_policy)
         fine = LATE_FINE if late else 0
         extra = ',late=:late,fine_amount=:fine' if is_start else ''
@@ -450,7 +526,9 @@ class Attendance:
         await self.api.audit_write(conn, actor, 'shift_started' if is_start else 'shift_finished',
             'shift_check_in' if is_start else 'shift_check_out', row['id'],
             ('miniapp; фото сохранено; при получении отметки GPS не требовался, местоположение не проверялось; начисления рассчитаны по сохранённому времени'
-             if gps_waived else f'miniapp; геолокация и фото сохранены; штраф={fine:g}'))
+             if gps_waived else
+             'miniapp; геолокация и фото сохранены; при получении отметки расстояние до отеля не проверялось; начисления рассчитаны по сохранённому времени'
+             if zone_waived else f'miniapp; геолокация и фото сохранены; штраф={fine:g}'))
 
     async def offline(self, conn, actor, day, data, raw):
         if not WORK_ROLES & set(actor['roles']):
@@ -487,9 +565,9 @@ class Attendance:
         await conn.execute(text(f'''UPDATE {table} SET latitude=:lat,longitude=:lon,{field}=:file,
             location_received_at=:now,offline_claimed_at=:claimed,status='PENDING_REVIEW' WHERE id=:id'''),
             {'id': row['id'], 'lat': lat, 'lon': lon, 'file': file_id, 'now': None if without_gps else now.replace(tzinfo=None), 'claimed': claimed.replace(tzinfo=None)})
-        if review_required() or not gps_required():
+        if review_required() or not gps_required() or not geofence_required():
             await capture_context(self.api, conn, actor['id'], day, data['purpose'], row['id'], lat, lon, accuracy,
-                source='offline', gps_disabled=not gps_required())
+                source='offline', gps_disabled=not gps_required(), geofence_disabled=not geofence_required())
             from .attendance_fines import reconcile_day
             await reconcile_day(self.api, conn, actor['id'], day, now)
         await self.api.audit_write(conn, actor, 'offline_attendance_received', table, row['id'],

@@ -88,7 +88,7 @@ async def save_json(conn, key, value):
         {'key': key, 'value': json.dumps(value, ensure_ascii=False)})
 
 
-async def capture_context(api, conn, user_id, day, purpose, row_id, latitude, longitude, accuracy, *, source='online', gps_disabled=False):
+async def capture_context(api, conn, user_id, day, purpose, row_id, latitude, longitude, accuracy, *, source='online', gps_disabled=False, geofence_disabled=False):
     lo, hi = utc_bounds(day, day, api.tz)
     hotels = await api.rows(conn, '''SELECT DISTINCT h.id,h.name FROM shifts s JOIN hotels h ON h.id=s.hotel_id
         WHERE s.user_id=:uid AND s.status<>'CANCELLED' AND s.start_at<:hi AND s.end_at>:lo AND h.active=TRUE''',
@@ -111,13 +111,16 @@ async def capture_context(api, conn, user_id, day, purpose, row_id, latitude, lo
                 point = point_payload(point)
             except AccessError:
                 point = None
-        if point and not gps_disabled:
+        if point and not gps_disabled and not geofence_disabled:
             value.update(classify(point, latitude, longitude, accuracy), address=point['address'])
     elif len(hotels) > 1:
         value.update(state='ambiguous', notice='На этот день доступно несколько отелей. Проверяет руководитель.')
     if gps_disabled:
-        value.update(state='temporarily_disabled', gpsRequired=False,
+        value.update(state='temporarily_disabled', gpsRequired=False, geofenceRequired=False,
             notice='GPS временно отключён по решению владельца. Местоположение не проверялось.')
+    elif geofence_disabled:
+        value.update(state='gps_only', gpsRequired=True, geofenceRequired=False,
+            notice='Координаты устройства сохранены. Расстояние до отеля пока не проверяется; точки отелей будут настроены позже.')
     await save_json(conn, context_key(purpose, row_id), value)
     return value
 
@@ -190,8 +193,8 @@ class HotelPoints:
             for hotel in hotels:
                 point = await read_json(self.api, conn, point_key(hotel['id']))
                 items.append(dict(hotel) | {'point': point, 'revision': revision(point)})
-        from .attendance import gps_required
-        return web.json_response({'items': items, 'reviewRequired': review_required(), 'gpsRequired': gps_required()}, headers={'Cache-Control': 'no-store'})
+        from .attendance import geofence_required, gps_required
+        return web.json_response({'items': items, 'reviewRequired': review_required(), 'gpsRequired': gps_required(), 'geofenceRequired': geofence_required()}, headers={'Cache-Control': 'no-store'})
 
     async def save(self, request):
         from .people import positive_id

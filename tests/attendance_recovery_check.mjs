@@ -197,4 +197,60 @@ const network=()=>Object.assign(new Error('Сеть недоступна'),{stat
  assert.match(f.c.attendanceTest.state().failure,/свежее фото/);
 }
 
-console.log('PASS: strict GPS transport recovery, photo-only policy, explicit pending retake, offline evidence and camera cleanup');
+{
+ const policy={gpsRequired:true,geofenceRequired:false,geoPolicy:'gps_only'};
+ const f=fixture(async(path,options)=>{
+  if(path==='/attendance/location')return {...base(),...policy,start:{status:'AWAITING_PHOTO',locationFresh:true,locationSaved:true,locationReceivedAt:new Date().toISOString()}};
+  assert.equal(path,'/attendance/photo');assert.equal(options.body.purpose,'start');
+  return {...base(),...policy,start:{status:'STARTED',at:new Date().toISOString(),locationSaved:true}};
+ });
+ f.c.attendanceTest.configure(policy);
+ assert.match(f.c.attendanceTest.state().html,/Геолокация обязательна/);
+ assert.match(f.c.attendanceTest.state().html,/Проверка расстояния до отеля временно отключена/);
+ assert.doesNotMatch(f.c.attendanceTest.state().html,/Геолокация временно отключена/);
+ assert.match(f.c.attendanceTest.state().html,/data-att="camera" disabled/);
+ await f.click('location');
+ assert.match(f.c.attendanceTest.state().html,/Координаты сохранены на сервере/);
+ assert.doesNotMatch(f.c.attendanceTest.state().html,/data-att="camera" disabled/);
+ f.c.attendanceTest.takePhoto();
+ assert.match(f.c.attendanceTest.state().html,/Подтвердить начало смены/);
+ assert.doesNotMatch(f.c.attendanceTest.state().html,/Сохранить для проверки|Внутри настроенной зоны отеля/);
+ await Promise.all([f.click('confirm'),f.click('confirm')]);
+ assert.deepEqual(f.calls,['/attendance/location','/attendance/photo']);
+ assert.equal(f.sent[0].latitude,44.9);assert.equal(f.sent[0].longitude,37.3);
+ assert.equal(f.c.attendanceTest.state().data.start.status,'STARTED');
+}
+
+{
+ const policy={gpsRequired:true,geofenceRequired:false,geoPolicy:'gps_only'};
+ const pending={status:'PENDING_REVIEW',photoSaved:true,locationSaved:true,claimedAt:new Date().toISOString(),evidenceSource:'online',locationFresh:true,locationReceivedAt:new Date().toISOString()};
+ const f=fixture(async(path,options)=>{
+  if(path==='/attendance/location')return {...base(),...policy,start:pending};
+  assert.equal(path,'/attendance/photo');assert.equal(options.body.purpose,'start');
+  return {...base(),...policy,start:{status:'STARTED',at:new Date().toISOString(),locationSaved:true}};
+ });
+ f.c.attendanceTest.configure({...policy,start:pending});
+ assert.match(f.c.attendanceTest.state().html,/Повторно подтвердить начало/);
+ await f.click('retake-start');
+ assert.equal(f.c.attendanceTest.state().purpose,'start');
+ assert.match(f.c.attendanceTest.state().html,/data-att="camera" disabled/,'A previous fresh server coordinate must not bypass a newly requested GPS confirmation');
+ await f.click('location');
+ assert.equal(f.c.attendanceTest.state().purpose,'start','A pending location response must preserve the chosen start-recovery purpose');
+ assert.doesNotMatch(f.c.attendanceTest.state().html,/data-att="camera" disabled/);
+ f.c.attendanceTest.takePhoto();await f.click('confirm');
+ assert.deepEqual(f.calls,['/attendance/location','/attendance/photo']);
+ assert.equal(f.c.attendanceTest.state().data.start.status,'STARTED');
+}
+
+{
+ const f=fixture();f.c.navigator.onLine=false;
+ f.c.attendanceTest.configure({gpsRequired:true,geofenceRequired:false});
+ f.c.attendanceTest.takePhoto();await f.click('confirm');
+ assert.equal(f.queued.length,0,'GPS-only policy still requires actual fresh coordinates in offline evidence');
+ await f.click('location');f.c.attendanceTest.takePhoto();await f.click('confirm');
+ assert.equal(f.queued.length,1);assert.equal(f.queued[0][2].latitude,44.9);
+ assert.equal(f.queued[0][2].longitude,37.3);
+ assert.match(f.c.attendanceTest.state().html,/Начало ожидает синхронизации/);
+}
+
+console.log('PASS: mandatory GPS with deferred hotel zones, strict mode, photo-only policy, pending recovery, offline evidence and camera cleanup');

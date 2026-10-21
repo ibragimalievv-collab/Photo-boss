@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import ssl
+import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,8 +36,12 @@ async def main():
             return await original_rows(conn, sql.replace(' FOR UPDATE', ''), **params)
 
         api.rows = rows
+        cert, key = Path(directory) / 'test-cert.pem', Path(directory) / 'test-key.pem'
+        await asyncio.to_thread(subprocess.run, ['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                                '-keyout', str(key), '-out', str(cert), '-days', '1', '-subj', '/CN=localhost',
+                                '-addext', 'subjectAltName=IP:127.0.0.1'], check=True, capture_output=True)
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        tls.load_cert_chain(os.environ['WORKFLOW_TEST_CERT'], os.environ['WORKFLOW_TEST_KEY'])
+        tls.load_cert_chain(cert, key)
         server = TestServer(app)
         await server.start_server(ssl=tls)
         errors = []
