@@ -83,7 +83,16 @@ class API:
             raise APIError(error.code, detail) from None
 
     async def request(self, method, path, body=None):
-        return await asyncio.to_thread(self.call, method, path, body)
+        # Only reads may retry. POSTs (including messages) remain one attempt.
+        attempts = 3 if method == 'GET' else 1
+        for attempt in range(attempts):
+            try:
+                return await asyncio.to_thread(self.call, method, path, body)
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                log.warning("Avito transport failure method=%s endpoint=%s attempt=%s kind=%s", method, path.split('?')[0].split('/accounts/')[0], attempt + 1, type(exc).__name__)
+                if attempt + 1 == attempts:
+                    raise
+                await asyncio.sleep(2 * (attempt + 1))
 
 
 DDL = [
