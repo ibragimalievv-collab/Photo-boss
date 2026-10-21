@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -27,6 +28,30 @@ class APIError(Exception):
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
+
+
+def transport_diagnostics(error):
+    """Return classifications only: exception messages can contain credentials."""
+    reason = error
+    seen = set()
+    while isinstance(reason, urllib.error.URLError) and id(reason) not in seen:
+        seen.add(id(reason))
+        nested = reason.reason
+        if nested is reason:
+            break
+        reason = nested
+    number = getattr(reason, 'errno', None)
+    number = number if type(number) is int else None
+    if isinstance(reason, socket.gaierror):
+        stage = 'dns'
+    elif isinstance(reason, ssl.SSLError):
+        stage = 'tls'
+    elif isinstance(reason, TimeoutError):
+        # A socket timeout alone cannot distinguish connection from read/TLS.
+        stage = 'timeout'
+    else:
+        stage = 'transport'
+    return {'stage': stage, 'reason_type': type(reason).__name__, 'errno': number}
 
 
 def avito_connection(address, timeout=25, source_address=None, **kwargs):
@@ -90,6 +115,10 @@ class API:
                 return await asyncio.to_thread(self.call, method, path, body)
             except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
                 log.warning("Avito transport failure method=%s endpoint=%s attempt=%s kind=%s", method, path.split('?')[0].split('/accounts/')[0], attempt + 1, type(exc).__name__)
+                if method == 'GET':
+                    diagnostic = transport_diagnostics(exc)
+                    log.warning('Avito read transport diagnostic stage=%s reason_type=%s errno=%s',
+                                diagnostic['stage'], diagnostic['reason_type'], diagnostic['errno'])
                 if attempt + 1 == attempts:
                     raise
                 await asyncio.sleep(2 * (attempt + 1))

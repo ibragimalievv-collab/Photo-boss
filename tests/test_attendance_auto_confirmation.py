@@ -105,7 +105,9 @@ def test_outside_or_imprecise_photo_remains_for_leadership_review(monkeypatch, l
             assert state['start']['status'] == 'PENDING_REVIEW'
             assert state['start']['at'] is None
             async with factory() as session:
-                assert await session.scalar(select(func.count(Notification.id))) == 3
+                for kind in ('attendance', 'attendance_fine'):
+                    notices = list(await session.scalars(select(Notification).where(Notification.kind == kind)))
+                    assert len(notices) == 3 and {row.user_id for row in notices} == {1,3,4}
         finally:
             await engine.dispose()
     asyncio.run(run())

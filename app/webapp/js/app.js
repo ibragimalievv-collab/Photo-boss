@@ -49,7 +49,10 @@ function shell(){
  document.body.classList.toggle('protected',!state.me?.screenCaptureAllowed);try{if(state.route==='home')tg?.BackButton?.hide();else tg?.BackButton?.show();}catch{}
 }
 document.addEventListener('pb-notification',event=>toast([event.detail.title,event.detail.description].filter(Boolean).join(' · ')));
-document.addEventListener('pb-notification-open',closeSheet);
+document.addEventListener('pb-notification-open',event=>{
+ const raw=event.detail?.url;if(typeof raw!=='string'){closeSheet();return;}
+ try{const url=new URL(raw,location.origin);if(url.origin===location.origin&&url.pathname==='/app/')go(url.hash.slice(1)||'home');}catch{}
+});
 function heading(title,subtitle='',action=''){return `<div class="page-head"><div><div class="eyebrow">${esc(dateLabel(state.me.today,{weekday:'short',day:'numeric',month:'long'}))} · Москва</div><h1>${title}</h1>${subtitle?`<p>${subtitle}</p>`:''}</div>${action}</div>`;}
 function mark(status){const type=['STARTED','COMPLETED','SOLD','PAID'].includes(status)?'success':['READY_FOR_SALE','ASSIGNED','PARTIAL'].includes(status)?'warning':['REJECTED','CANCELLED'].includes(status)?'danger':'';return `<span class="badge ${type}">${esc(STATUS_NAMES[status]||{ON_BREAK:'На обеде',STARTED:'На смене',PLANNED:'По графику',ENDED:'Завершил',MISSING_CHECKOUT:'Нет отметки ухода',PAID:'Оплачено',PARTIAL:'Частично',UNPAID:'Не оплачено'}[status]||status)}</span>`;}
 function watermark(){return `<div class="watermark">${esc(state.me.user.name)} · ID ${esc(state.me.user.telegramId)} · ${new Intl.DateTimeFormat('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'}).format(new Date())}</div>`;}
@@ -166,6 +169,11 @@ async function loadRoute(route=state.route){
   if(route==='audit'){const d=await request('/audit');if(ticket!==state.requestId)return;state.audit=d;}
   if(ticket!==state.requestId)return;render();
   if(assignmentBooking>0){if(state.bookings.some(b=>b.id===assignmentBooking))showBooking(assignmentBooking);else toast('Съёмка недоступна: назначение могло измениться.');}
+  const attendanceFine=new URLSearchParams(query).get('attendanceFine');
+  if(route==='more'&&attendanceFine&&state.me.user.roles.some(role=>['OWNER','ADMIN'].includes(role))){
+   const content=await attendanceFinesView(attendanceFine);
+   if(ticket===state.requestId)showSheet('Штрафы и исключения',content);
+  }
  }catch(e){if(ticket!==state.requestId)return;showError(e);}
 }
 function showError(error){

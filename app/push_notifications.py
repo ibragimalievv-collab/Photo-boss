@@ -5,9 +5,9 @@ import hashlib
 import json
 import logging
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 from aiohttp import web
@@ -29,7 +29,7 @@ from .services.booking_notices import booking_description, notice_booking_id
 
 log = logging.getLogger(__name__)
 ROLES = {'OWNER', 'ADMIN', 'PHOTOGRAPHER', 'MANAGER'}
-KINDS = {'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test', 'lunch_start', 'lunch_end', 'attendance', 'sale_discount'}
+KINDS = {'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test', 'lunch_start', 'lunch_end', 'attendance', 'attendance_fine', 'sale_discount'}
 
 
 def app_channel():
@@ -129,6 +129,27 @@ def reminder_deadline(notice):
         return None
 
 
+async def attendance_recipient(session, user, roles, target_user_id, day):
+    from zoneinfo import ZoneInfo
+
+    from .config import config
+    from .miniapp_security import utc_bounds
+    from .models import HotelEmployee, Shift
+
+    if 'OWNER' in roles or target_user_id == user.id:
+        return True
+    if 'ADMIN' not in roles:
+        return False
+    lo, hi = utc_bounds(day, day, ZoneInfo(config.training_timezone))
+    hotels = set(await session.scalars(select(Shift.hotel_id).where(
+        Shift.user_id == target_user_id, Shift.status != 'CANCELLED',
+        Shift.start_at < hi, Shift.end_at > lo)))
+    allowed = set(await session.scalars(select(HotelEmployee.hotel_id).where(
+        HotelEmployee.user_id == user.id)))
+    # Same rule as attendance review: every planned hotel must be in scope.
+    return bool(hotels) and hotels <= allowed
+
+
 async def eligible(session, notice, sub, *, include_read=False, for_delivery=False):
     if not sub.active or sub.user_id != notice.user_id or notice.resolved_at or (notice.acknowledged_at and not include_read):
         return False
@@ -175,11 +196,7 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
         return bool('ADMIN' in roles and await session.scalar(select(HotelEmployee.id).where(
             HotelEmployee.user_id == user.id, HotelEmployee.hotel_id == row.hotel_id).limit(1)))
     if notice.kind == 'attendance':
-        from zoneinfo import ZoneInfo
-
-        from .config import config
-        from .miniapp_security import utc_bounds
-        from .models import HotelEmployee, Shift, ShiftCheckIn, ShiftCheckOut
+        from .models import ShiftCheckIn, ShiftCheckOut
         try:
             data = json.loads(notice.payload or '{}')
             purpose, attendance_id = data.get('purpose'), data.get('attendanceId')
@@ -192,18 +209,32 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
                 return False
         except (TypeError, ValueError):
             return False
-        if 'OWNER' in roles or row.user_id == user.id:
-            return True
-        if 'ADMIN' not in roles:
+        return await attendance_recipient(session, user, roles, row.user_id, row.shift_date)
+    if notice.kind == 'attendance_fine':
+        from zoneinfo import ZoneInfo
+
+        from .attendance_fines import LABELS, fine_key
+        from .config import config
+        try:
+            data = json.loads(notice.payload or '{}')
+            uid, day = data['userId'], date.fromisoformat(data['date'])
+            kind = data['fineKind']
+            key = fine_key(uid, day, kind)
+            if type(uid) is not int or kind not in LABELS or data.get('fineKey') != key:
+                return False
+            record = await session.get(Setting, key)
+            charge = json.loads(record.value) if record else None
+            if (not charge or charge.get('userId') != uid or charge.get('date') != str(day)
+                    or charge.get('kind') != kind or (for_delivery and
+                        (data.get('noticeRevision') != charge.get('noticeRevision')
+                         or data.get('observedAt') != charge.get('observedAt')))):
+                return False
+        except (KeyError, TypeError, ValueError):
             return False
-        lo, hi = utc_bounds(row.shift_date, row.shift_date, ZoneInfo(config.training_timezone))
-        hotels = set(await session.scalars(select(Shift.hotel_id).where(
-            Shift.user_id == row.user_id, Shift.status != 'CANCELLED',
-            Shift.start_at < hi, Shift.end_at > lo)))
-        allowed = set(await session.scalars(select(HotelEmployee.hotel_id).where(
-            HotelEmployee.user_id == user.id)))
-        # Keep the same rule as attendance review: all planned hotels must be in scope.
-        return bool(hotels) and hotels <= allowed
+        if (for_delivery and not data.get('changed')
+                and day < current_utc().astimezone(ZoneInfo(config.training_timezone)).date()):
+            return False  # Retained historical plans must not produce fresh phone alerts.
+        return await attendance_recipient(session, user, roles, uid, day)
     if notice.kind == 'sale_discount':
         from .models import Booking, SaleDiscountApproval
         from .services.booking_access import can_access_booking
@@ -249,11 +280,12 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
 def payload_for(notice):
     urls = {'booking_assignment': '/app/#shootings', 'control': '/app/#insights', 'daily_summary': '/app/#insights',
             'sale_ready': '/app/#workflow', 'sale_created': '/app/#finance', 'academy': '/app/#academy',
-            'attendance': '/app/#workday', 'sale_discount': '/app/#workflow'}
+            'attendance': '/app/#workday', 'attendance_fine': '/app/#finance', 'sale_discount': '/app/#workflow'}
     titles = {'booking_assignment': 'Назначена съёмка', 'booking_reminder': 'Скоро съёмка', 'chat': 'Новое сообщение', 'call': 'Входящий звонок',
               'sale_ready': 'Съёмка готова к продаже', 'sale_created': 'Оформлена продажа', 'academy': 'Готов разбор практики', 'push_test': 'Проверка уведомлений',
               'lunch_start': 'Сотрудник ушёл на обед', 'lunch_end': 'Сотрудник вернулся с обеда',
-              'attendance': 'Отметка смены', 'sale_discount': 'Согласование скидки 50%'}
+              'attendance': 'Отметка смены', 'attendance_fine': 'Контроль времени смены',
+              'sale_discount': 'Согласование скидки 50%'}
     try:
         details = json.loads(notice.payload or '{}')
     except (TypeError, ValueError):
@@ -261,6 +293,10 @@ def payload_for(notice):
     if notice.kind == 'attendance':
         titles['attendance'] = ('Отметка начала смены' if details.get('purpose') == 'start'
                                 else 'Отметка завершения смены')
+    if notice.kind == 'attendance_fine':
+        titles['attendance_fine'] = ('Начисление за смену изменено' if details.get('changed') else
+            'Нет отметки прихода' if details.get('fineKind') == 'late' and not details.get('observedAt') else
+            'Опоздание: проверьте отметку' if details.get('fineKind') == 'late' else 'Контроль времени смены')
     if notice.kind == 'reminder' and (notice.event_key or '').startswith(('rescheduled:', 'cancelled:')):
         titles['reminder'] = 'Съёмка перенесена' if notice.event_key.startswith('rescheduled:') else 'Съёмка отменена'
     # No guest names, phone numbers, rooms, balances, or chat text on the lock screen.
@@ -274,6 +310,8 @@ def payload_for(notice):
         bid = notice_booking_id(notice)
         if type(bid) is int:
             url += f'?booking={bid}'
+    if notice.kind == 'attendance_fine' and details.get('canReview') and isinstance(details.get('fineKey'), str):
+        url = '/app/#more?attendanceFine=' + quote(details['fineKey'], safe='')
     payload = {'title': 'Photo Boss · ' + titles.get(notice.kind, 'Рабочее уведомление'),
             'body': 'Откройте Photo Boss, чтобы посмотреть подробности.', 'url': url, 'tag': f'pb-notice-{notice.id}'}
     if notice.kind == 'booking_reminder' and isinstance(details.get('pushSummary'), str):
@@ -444,6 +482,7 @@ class AppPush:
                     if booking:
                         description = await booking_description(session, booking)
                 items.append({'id': notice.id, 'title': payload_for(notice)['title'],
+                    'kind': notice.kind,
                     'description': description,
                     'url': payload_for(notice)['url'], 'read': bool(notice.acknowledged_at),
                     'createdAt': notice.created_at.isoformat()+'Z',
