@@ -26,6 +26,14 @@ MAX_PHOTO = 650_000
 LOCATION_TTL = 300
 
 
+def start_recorded(row):
+    """Allow work after submitted evidence without claiming human approval."""
+    return bool(row and (row['status'] == 'STARTED' or (
+        row['status'] == 'PENDING_REVIEW' and row.get('full_body_file_id')
+        and row.get('latitude') is not None and row.get('longitude') is not None
+        and row.get('offline_claimed_at'))))
+
+
 def coordinates(body):
     if set(body) != {'purpose', 'date', 'latitude', 'longitude', 'accuracy'}:
         raise AccessError('Некорректные поля геолокации.', 400)
@@ -147,6 +155,7 @@ class Attendance:
             fresh = received is not None and 0 <= (now - utc(received)).total_seconds() <= LOCATION_TTL
             return {'status': row['status'], 'locationSaved': row.get('latitude') is not None,
                     'locationFresh': fresh, 'photoSaved': bool(row.get(photo_key)),
+                    'locationReceivedAt': utc(received).isoformat() if received else None,
                     'claimedAt': str(row['offline_claimed_at']) if row.get('offline_claimed_at') else None,
                     'geofence': row.get('geofence'),
                     'at': utc(row[at_key]).astimezone(self.api.tz).isoformat() if row.get(at_key) else None}
@@ -177,7 +186,7 @@ class Attendance:
         async with self.api.engine.begin() as conn:
             actor = await self.locked_actor(conn, request)
             start, end = await self.records(conn, actor['id'], day, lock=True)
-            if body['purpose'] == 'end' and (not start or start['status'] != 'STARTED'):
+            if body['purpose'] == 'end' and not start_recorded(start):
                 raise AccessError('Сначала подтвердите начало смены.', 409)
             row = start if body['purpose'] == 'start' else end
             if row and row['status'] in ('STARTED', 'FINISHED', 'PENDING_REVIEW'):
@@ -232,9 +241,9 @@ class Attendance:
             actor = await self.locked_actor(conn, request)
             start, end = await self.records(conn, actor['id'], day, lock=True)
             row = start if is_start else end
-            if not is_start and (not start or start['status'] != 'STARTED'):
+            if not is_start and not start_recorded(start):
                 raise AccessError('Сначала подтвердите начало смены.', 409)
-            if row and row['status'] == final:
+            if row and row['status'] in (final, 'PENDING_REVIEW'):
                 return web.json_response(self.result(actor, start, end, now))
             if not row or row['status'] != 'AWAITING_PHOTO' or row.get('latitude') is None or not row.get('location_received_at'):
                 raise AccessError('Сначала отправьте геолокацию.', 409)

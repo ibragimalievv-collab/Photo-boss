@@ -140,9 +140,10 @@ def test_online_photo_review_and_automatic_time_fine_are_independent(monkeypatch
                 assert (await session.scalar(select(PayrollEntry))).amount == -500
                 row = await session.scalar(select(ShiftCheckIn))
                 assert row.started_at is None and row.full_body_file_id == 'app:/private/test.jpg'
-            # A pending photo cannot be overwritten by retrying a different one.
-            with pytest.raises(AccessError):
-                await attendance.photo(request)
+            # Retrying returns the saved state without uploading or replacing evidence.
+            repeated = json.loads((await attendance.photo(request)).text)
+            assert repeated['start']['status'] == 'PENDING_REVIEW'
+            assert attendance.send_photo.await_count == 1
             attendance.payload.return_value = {'purpose': 'start', 'date': '2026-09-22',
                 'latitude': POINT['latitude'], 'longitude': POINT['longitude'], 'accuracy': 10}
             with pytest.raises(AccessError):

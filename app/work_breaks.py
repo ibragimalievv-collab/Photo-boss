@@ -66,12 +66,12 @@ class WorkBreaks:
         async with AsyncSession(bind=conn, expire_on_commit=False) as session:
             actor, roles = await self.actor(session, actor_data['id'])
             check = await session.scalar(select(ShiftCheckIn).where(
-                ShiftCheckIn.user_id == actor.id, ShiftCheckIn.shift_date == day,
-                ShiftCheckIn.status == 'STARTED', ShiftCheckIn.started_at.is_not(None)))
+                ShiftCheckIn.user_id == actor.id, ShiftCheckIn.shift_date == day))
+            from .attendance import start_recorded
             ended = await session.scalar(select(ShiftCheckOut.id).where(
                 ShiftCheckOut.user_id == actor.id, ShiftCheckOut.shift_date == day,
-                ShiftCheckOut.ended_at.is_not(None)))
-            if kind != 'break_end' and (not check or ended):
+                ShiftCheckOut.status.in_(['FINISHED', 'PENDING_REVIEW'])))
+            if kind != 'break_end' and (not start_recorded(check.__dict__ if check else None) or ended):
                 raise AccessError('Сначала начните смену; завершённую смену менять нельзя.', 409)
             now = utc_now()
             current = await session.scalar(select(WorkBreak).where(
@@ -140,8 +140,16 @@ class WorkBreaks:
             if 'OWNER' not in roles:
                 employee_query = employee_query.where(User.id.in_(select(HotelEmployee.user_id).where(HotelEmployee.hotel_id.in_(allowed))))
             employees = list(await session.scalars(employee_query)) if editor else []
+            from .attendance import start_recorded
+            check = await session.scalar(select(ShiftCheckIn).where(
+                ShiftCheckIn.user_id == actor.id, ShiftCheckIn.shift_date == day))
+            ended = await session.scalar(select(ShiftCheckOut.id).where(
+                ShiftCheckOut.user_id == actor.id, ShiftCheckOut.shift_date == day,
+                ShiftCheckOut.status.in_(['FINISHED', 'PENDING_REVIEW'])))
+            can_start = start_recorded(check.__dict__ if check else None) and not ended
         return web.json_response({'date': str(day), 'timezone': str(self.api.tz), 'actorId': actor.id,
-            'canEdit': editor, 'items': result,
+            'canEdit': editor, 'canStart': bool(can_start),
+            'startPendingReview': bool(check and check.status == 'PENDING_REVIEW'), 'items': result,
             'hotels': [{'id': h.id, 'name': h.name} for h in hotels if 'OWNER' in roles or h.id in (allowed | planned if not editor else allowed)],
             'employees': [{'id': u.id, 'name': u.name} for u in employees]})
 

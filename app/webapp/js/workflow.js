@@ -188,7 +188,8 @@ async function resetCompletedForm(form,{refresh=true}={}){
  for(const [el] of controls)el.disabled=true;
  try{
   const keys=JSON.parse(form.dataset.pendingKeys||'[]'),rows=await outboxRows();
-  if(!keys.length||!keys.every(k=>rows.some(r=>r.key===k&&r.status==='synced')))throw new Error('Сначала завершите текущую отправку.');
+  const savedBooking=form.id==='workflowBooking'&&bookingAccepted(keys.map(k=>rows.find(r=>r.key===k)));
+  if(!keys.length||(!savedBooking&&!keys.every(k=>rows.some(r=>r.key===k&&r.status==='synced'))))throw new Error('Сначала завершите текущую отправку.');
   const id=form.id;
   if(refresh)await loadWorkflow();
   if(!form.isConnected)return null;
@@ -206,7 +207,7 @@ export async function openWorkflowBooking(){
  if(!form)throw new Error('Создание записи недоступно. Проверьте рабочую роль и доступ к отелю.');
  if(form.dataset.pendingKeys){
   const keys=JSON.parse(form.dataset.pendingKeys),rows=await outboxRows();
-  if(keys.length&&keys.every(k=>rows.some(r=>r.key===k&&r.status==='synced')))form=await resetCompletedForm(form,{refresh:false});
+  if(keys.length&&(bookingAccepted(keys.map(k=>rows.find(r=>r.key===k)))||keys.every(k=>rows.some(r=>r.key===k&&r.status==='synced'))))form=await resetCompletedForm(form,{refresh:false});
  }
  if(!form)return;
  revealBookingForm(form);
@@ -272,16 +273,18 @@ window.addEventListener('pb-outbox',async()=>{refreshConnection();const el=docum
  if(accepted.length)scheduleSaleRefresh(accepted.some(row=>row.kind==='sale_complete'));
 }});
 
+export function bookingAccepted(rows){return Boolean(rows[0]?.kind==='booking'&&rows[0]?.status==='synced'&&Number.isSafeInteger(rows[0]?.result?.bookingId)&&rows[0].result.bookingId>0);}
 function updateFormProgress(){
  for(const form of document.querySelectorAll('#workflowBooking,#workflowSale,#workflowShoot')){
   if(!form.dataset.pendingKeys)continue;
   let keys;try{keys=JSON.parse(form.dataset.pendingKeys);}catch{continue;}
   const rows=keys.map(key=>queue.find(row=>row.key===key)),done=rows.filter(r=>r?.status==='synced').length;
-  const last=rows.find(row=>row?.kind==='sale_complete')||rows[rows.length-1],finished=done===keys.length&&keys.length>0;
+  const last=rows.find(row=>row?.kind==='sale_complete')||rows[rows.length-1],allFinished=done===keys.length&&keys.length>0,finished=allFinished||(form.id==='workflowBooking'&&bookingAccepted(rows));
   let note=form.querySelector('[data-operation-progress]');if(!note){note=document.createElement('div');note.dataset.operationProgress='';note.setAttribute('role','status');form.append(note);}
   const failed=rows.find(r=>r?.error);
   const repairable=form.id==='workflowSale'&&saleQueueRepairable(rows),repairing=repairable&&form.dataset.repairing==='1',rejected=repairable&&rejectedSaleCounts(rows);
   note.textContent=repairing?(rejected?'Общее количество сверено с завершённой полной съёмкой. Сохраните исправление: прежний чек, проданное количество и выбранные файлы остаются в очереди и продолжат отправку.':'Исправьте фактическое количество проданных кадров или добавьте недостающие новые фотографии. Принятые чек и фото сохранятся. Повторные фотографии не увеличивают количество.'):finished?(form.id==='workflowBooking'&&rows[0]?.result?.bookingId?`Запись №${rows[0].result.bookingId} сохранена сервером.`:last?.result?.saleId?`Продажа №${last.result.saleId} сохранена сервером: ${last.result.soldPhotos??form.elements.sold?.value??'—'} фото на ${roubles(last.result.amount)}. Подтверждение оплаты показывается отдельно.`:'Операции приняты сервером. Для оригиналов отдельно проверьте статус на Яндекс.Диске.'):`В очереди сохранены все данные. Сервер принял ${done} из ${keys.length}. ${failed?.error||'Отправка продолжается.'} Повторное заполнение не требуется.`;
+  if(finished&&!allFinished&&form.id==='workflowBooking')note.textContent+=' Чек предоплаты ещё не принят. Он остаётся в очереди ниже; можно создать следующую запись.';
   if(form.id==='workflowSale'){
    let progress=form.querySelector('[data-sale-photo-progress]');
    if(!progress){progress=document.createElement('p');progress.dataset.salePhotoProgress='';progress.setAttribute('role','status');form.append(progress);}
