@@ -137,7 +137,8 @@ class BankPayments:
         return_url = os.getenv('SBER_RETURN_URL', '')
         if not return_url.startswith('https://'):
             raise AccessError('Владелец должен настроить адрес возврата СберБизнес.', 503)
-        if (set(body) != {'bookingId', 'total', 'sold', 'tariffId', 'amount', 'requestKey', 'purpose'}
+        optional = {'discountId', 'albumId', 'albumQuantity'}
+        if (set(body) - optional != {'bookingId', 'total', 'sold', 'tariffId', 'amount', 'requestKey', 'purpose'}
                 or type(body['bookingId']) is not int or type(body['total']) is not int or type(body['sold']) is not int
                 or body['purpose'] not in {'PURCHASE', 'DEPOSIT', 'BALANCE'}
                 or (body['purpose'] == 'PURCHASE' and not 0 < body['sold'] <= body['total'] <= 10000)
@@ -163,7 +164,15 @@ class BankPayments:
                 previous, paid, _ = await payment_totals(session, booking.id)
                 if body['purpose'] == 'PURCHASE':
                     await validate_remaining_photos(session, booking, body['total'], body['sold'])
-                    quote = await sale_quote(session, booking, body['sold'], body['total'], body['tariffId'])
+                    from .services.sale_workflow import active_draft
+                    draft = await active_draft(session, booking.id)
+                    frozen = draft.pricing_snapshot if draft else None
+                    if frozen and (draft.sold_photos != body['sold'] or draft.declared_photo_count != body['total']):
+                        raise ValueError('Количество кадров не совпадает с сохранённым расчётом продажи.')
+                    quote = await sale_quote(session, booking, body['sold'], body['total'], body['tariffId'],
+                        saved=frozen,
+                        discount_id=body.get('discountId'), album_id=body.get('albumId'),
+                        album_quantity=body.get('albumQuantity'))
                     due = max(money(previous) + money(quote['amount']) - money(paid), money(0))
                 elif body['purpose'] == 'DEPOSIT':
                     deposits = await session.scalar(select(func.coalesce(func.sum(Receipt.verified_amount), 0)).where(

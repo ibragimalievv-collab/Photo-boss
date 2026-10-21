@@ -23,6 +23,8 @@ notice.pushState='EXPIRED';
 const expiredHtml=await vm.runInContext('notificationsView()',ctx);
 assert.match(expiredHtml,/13:00 · Hotel · номер 100/);
 assert.match(expiredHtml,/Время напоминания истекло; новые push не отправляются/);
+notice.pushState='HISTORY_ONLY';
+assert.match(await vm.runInContext('notificationsView()',ctx),/Устройство подключено позже события/);
 await vm.runInContext('refreshNoticeFeed()',ctx);
 for(const pushState of ['EXPIRED','SKIPPED']){notice.id++;notice.pushState=pushState;await vm.runInContext('refreshNoticeFeed()',ctx);}
 assert.equal(foreground.length,0,'Returning to the app must not show stale reminder popups');

@@ -157,7 +157,7 @@ async function loadRoute(route=state.route){
   if(route==='control')await loadShootControl();
   if(route==='galleries')await loadGalleries();
   if(route==='contacts')await loadDeliveryContacts();
-  if(route==='workflow')await loadWorkflow();
+  if(route==='workflow')await loadWorkflow(Number(new URLSearchParams(query).get('booking'))||null);
   if(route==='development')await loadDevelopment();
   if(route==='workday')await loadWorkday();
   if(route==='team')await loadTeam();

@@ -69,7 +69,7 @@ def operational_mutation(request):
     path = path[len(PREFIX):]
     return bool(
         path.startswith(("/attendance/", "/bookings/", "/sales/", "/photos/",
-                         "/receipts/", "/sale-drafts/", "/payroll/", "/operations/", "/work-breaks", "/hotel-tariffs", "/bank-payments"))
+                         "/receipts/", "/sale-drafts/", "/sale-discounts", "/payroll/", "/operations/", "/work-breaks", "/hotel-tariffs", "/bank-payments"))
         or re.match(r"^/(?:delivery|galleries)/[0-9]+(?:/|$)", path)
         or path == "/events/scan"
         or re.fullmatch(r"/events/[0-9]+/acknowledge", path)

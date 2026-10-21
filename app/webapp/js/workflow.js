@@ -11,6 +11,28 @@ let data=null,queue=[],selected=null,folderBusy=false;
 const roubles=value=>new Intl.NumberFormat('ru-RU',{style:'currency',currency:'RUB',maximumFractionDigits:2}).format(Number(value||0));
 const frameTotal=b=>b.fullUploaded?(b.uploadedOriginals??b.totalFrames):(b.draft?.total||b.totalFrames||'');
 const saleable=b=>Boolean(b.draft)||b.status==='READY_FOR_SALE'||(['SOLD','COMPLETED'].includes(b.status)&&b.sales?.length);
+function mountDiscountPanel(){
+ document.querySelector('#saleDiscountPanel')?.remove();
+ const b=data?.bookings.find(row=>row.id===selected),form=document.querySelector('#workflowSale');
+ if(!b||!form||b.sales?.length)return;
+ const approvals=b.discountApprovals||[],fixed=b.draft?.pricing;
+ const panel=document.createElement('section');panel.id='saleDiscountPanel';panel.className='notice';
+ panel.innerHTML=`<h3>Вся съёмка со скидкой 50%</h3><p>Скидку подтверждает владелец или администратор отеля. Она действует только на все кадры съёмки; альбом оплачивается отдельно. Сначала укажите фактическое общее число кадров в форме продажи.</p><button type="button" class="btn ghost" data-sale-discount-request ${fixed?'disabled':''}>Запросить скидку 50% на всю съёмку</button>${approvals.map(row=>`<p>Запрос №${row.id}: ${row.total} кадров × ${esc(row.unitPrice)} ₽ × 50% = ${esc(row.amount)} ₽ · ${esc(({PENDING:'Ожидает подтверждения',APPROVED:'Подтверждён',REJECTED:'Отказано'})[row.status]||row.status)} ${data.canApproveDiscount&&row.status==='PENDING'?`<button type="button" class="btn" data-sale-discount-decision="${row.id}" data-decision="APPROVED">Подтвердить</button><button type="button" class="btn ghost" data-sale-discount-decision="${row.id}" data-decision="REJECTED">Отказать</button>`:''}</p>`).join('')}<label class="field">Скидка для этой продажи<select class="input" form="workflowSale" name="discountId" ${fixed?'disabled':''}><option value="">Без скидки</option>${approvals.filter(row=>row.status==='APPROVED').map(row=>`<option value="${row.id}" ${fixed?.discountId===row.id?'selected':''}>Согласована 50% · все ${row.total} кадров · ${esc(row.amount)} ₽</option>`).join('')}</select></label><p role="status"></p>`;
+ form.before(panel);
+}
+document.addEventListener('click',async event=>{
+ const button=event.target.closest('[data-sale-discount-request],[data-sale-discount-decision]');if(!button)return;
+ const panel=button.closest('#saleDiscountPanel'),form=document.querySelector('#workflowSale'),b=data?.bookings.find(row=>row.id===selected);
+ button.disabled=true;
+ try{
+  if(button.hasAttribute('data-sale-discount-request')){
+   const total=Number(form?.elements.total.value);if(!Number.isInteger(total)||total<1||total>10000)throw Error('Укажите общее число кадров съёмки.');
+   await api('/sale-discounts',{method:'POST',body:{bookingId:b.id,total}});
+  }else await api(`/sale-discounts/${button.dataset.saleDiscountDecision}/decision`,{method:'POST',body:{decision:button.dataset.decision}});
+  captureForms();await loadWorkflow(selected);workflowSelect(selected);
+ }catch(error){if(panel?.isConnected)panel.querySelector('[role=status]').textContent=error.message;}
+ finally{button.disabled=false;}
+});
 const labels={local:'В очереди на этом устройстве — не отправлено',syncing:'Передаётся на сервер',synced:'Сервер принял',error:'Ошибка отправки'};
 const kinds={booking:'Бронь',booking_receipt:'Чек брони',sale_start:'Черновик продажи',sale_receipt:'Чек продажи',sale_counts:'Количество кадров',sale_selected:'Выбранный кадр',sale_disk_selected:'Кадр с Яндекс.Диска',sale_complete:'Оформление продажи',shoot_photo:'Кадр полной съёмки',shoot_complete:'Завершение загрузки',checklist:'Контрольный пункт',shift_report:'Замечание',attendance:'Отметка смены'};
 export async function loadWorkflow(bookingId=null){
@@ -26,8 +48,8 @@ export async function loadWorkflow(bookingId=null){
 function salesHistory(b){
  const rows=b.sales||[],receipts=b.receipts||[],draft=draftReceiptView(b.draft);if(!rows.length&&!receipts.length)return draft;
  return `<section class="notice" data-sales-history><h3>История покупок · ${esc(b.client||'Гость')}</h3>
- ${rows.map((sale,i)=>`<p>№${sale.id} · ${i?'Допродажа':'Первая покупка'} · ${esc(new Date(sale.at).toLocaleString('ru-RU'))} · ${sale.photos} фото${(sale.lines||[]).map(line=>` · ${line.type==='PACKAGE'?`пакет «${esc(line.name)}»`: `поштучно ${esc(line.price)} ₽ × ${line.quantity}`} = ${esc(roubles(line.amount))}`).join('')} · <strong>${esc(roubles(sale.amount))}</strong> · ${esc(({PAID:'Оплачено',PARTIAL:'Частично оплачено',UNPAID:'Ожидает оплаты'})[sale.paymentStatus]||sale.paymentStatus)}</p>`).join('')}
- <p><strong>Всего куплено: ${b.soldTotal} фото на ${esc(roubles(b.salesAmount))}.</strong><br>Подтверждено поступлений: ${esc(roubles(b.paidAmount))}. Остаток к оплате: ${esc(roubles(b.dueAmount))}.</p>
+ ${rows.map((sale,i)=>`<p>№${sale.id} · ${i?'Допродажа':'Первая покупка'} · ${esc(new Date(sale.at).toLocaleString('ru-RU'))} · ${sale.photos} фото${(sale.lines||[]).map(line=>` · ${line.type==='PACKAGE'?`пакет «${esc(line.name)}»`:line.type==='ALBUM'?`альбом «${esc(line.name)}» · ${line.quantity} шт. × ${esc(line.price)} ₽`:line.type==='DISCOUNT'?esc(line.name):`поштучно ${esc(line.price)} ₽ × ${line.quantity}`} = ${esc(roubles(line.amount))}`).join('')} · <strong>${esc(roubles(sale.amount))}</strong> · ${esc(({PAID:'Оплачено',PARTIAL:'Частично оплачено',UNPAID:'Ожидает оплаты'})[sale.paymentStatus]||sale.paymentStatus)}</p>`).join('')}
+ <p><strong>Всего куплено: ${b.soldTotal} фото на ${esc(roubles(b.salesAmount))}.</strong><br>Подтверждено поступлений: ${esc(roubles(b.paidAmount))}. Остаток к оплате: ${esc(roubles(b.dueAmount))}.</p>${Number(b.creditAmount)>0?`<p>Неиспользованный остаток оплаты / к возврату после сверки: ${esc(roubles(b.creditAmount))}. Автоматического возврата нет; требуется решение руководителя.</p>`:''}
  <p>Предыдущие продажи и чеки не перезаписываются. Ниже укажите только дополнительные фотографии и новый чек.</p>
  ${receipts.map(receipt=>`<article data-receipt-status="${receipt.id}"><strong>Чек №${receipt.id}: ${receipt.source==='sber'?'поступление подтверждено банком':receipt.stored?'файл принят сервером':'файл ещё не принят'}</strong>${receipt.imagePath?`<button class="btn ghost" data-workflow="receipt-view" data-receipt-path="${esc(receipt.imagePath)}">Посмотреть фото чека</button>`:''}<p>${esc(receiptAnalysisLabel(receipt.analysisStatus))}${receipt.extractedAmount!=null?` · на чеке: ${esc(roubles(receipt.extractedAmount))}`:''}${receipt.expectedAmount!=null?` · ожидается: ${esc(roubles(receipt.expectedAmount))}`:''}</p>${(receipt.warnings||[]).map(w=>`<p>${esc(w)}</p>`).join('')}<p>${esc(({PENDING:'Оплата пока не подтверждена: владелец должен сверить поступление с банковской выпиской.',APPROVED:receipt.source==='sber'?'Поступление подтверждено СберБизнес.':'Поступление подтверждено владельцем.',REJECTED:'Чек отклонён владельцем.'})[receipt.status]||'Подтверждение оплаты отсутствует.')}</p></article>`).join('')}${draft}</section>`;
 }
@@ -161,7 +183,7 @@ export async function workflowSubmit(form){
   if(startTariff>0)startData.tariffId=startTariff;
   const draft=add('sale_start',startData);
   if(!d||d.status==='AWAITING_RECEIPT'){const receipt=imageFiles(form,'receipt',8*1024*1024)[0];if(receipt)add('sale_receipt',{draft},receipt);else if(!data.bankConfigured&&Number(b.paidAmount||0)<=0)throw new Error('Прикрепите чек продажи или дождитесь подтверждения банка.');}
-  if(!d||d.status!=='AWAITING_SELECTED'||total!==Number(d.total)||sold!==Number(d.sold))add('sale_counts',{draft,total,sold,price:b.price,tariffId:d?.pricing?.tariffId||Number(f.get('tariffId'))||null});
+  if(!d||d.status!=='AWAITING_SELECTED'||total!==Number(d.total)||sold!==Number(d.sold))add('sale_counts',{draft,total,sold,price:b.price,tariffId:d?.pricing?.tariffId||Number(f.get('tariffId'))||null,discountId:d?.pricing?.discountId||Number(f.get('discountId'))||null,albumId:Number(f.get('albumId'))||null,albumQuantity:f.get('albumId')?Number(f.get('albumQuantity')||1):null});
   for(const photo of photos)add('sale_selected',{draft},photo);
   for(const photo of diskPhotos)add('sale_disk_selected',{draft,...photo});
   add('sale_complete',{draft,price:b.price});
@@ -242,7 +264,7 @@ if(kind==='sync'){
  return;
 }
 if(button.dataset.workflow==='refresh'){captureForms();await loadWorkflow();document.querySelector('#app').innerHTML=workflowView();restoreForms();updateFormProgress();return;}if(button.dataset.workflow==='retry-storage'){await enqueueOperation('shoot_retry',todayKey(),{shooting:{id:Number(button.dataset.shooting)}});return;}if(button.dataset.workflow==='retry')await retryOperation(button.dataset.key);else await flushOutbox();}
-export function workflowSelect(id){if(document.querySelector('#workflowSale')?.dataset.resetting==='1')return;captureForms();selected=Number(id)||null;try{sessionStorage.setItem('pb-workflow-sale:'+data.actorId,String(selected||''));}catch{}document.querySelector('#app').innerHTML=workflowView();restoreForms();updateFormProgress();refreshQuote();}
+export function workflowSelect(id){if(document.querySelector('#workflowSale')?.dataset.resetting==='1')return;captureForms();selected=Number(id)||null;try{sessionStorage.setItem('pb-workflow-sale:'+data.actorId,String(selected||''));}catch{}document.querySelector('#app').innerHTML=workflowView();mountDiscountPanel();restoreForms();updateFormProgress();refreshQuote();}
 function refreshConnection(){const el=document.querySelector('#workflowNotice');if(el)el.textContent=connectionNote();}
 window.addEventListener('online',refreshConnection);window.addEventListener('offline',refreshConnection);
 let saleRefreshTimer=null,saleRefreshVersion=0,saleRefreshDue=0,lastSaleRefreshAt=0;
@@ -319,8 +341,8 @@ document.addEventListener('submit',async event=>{
 
 function refreshQuote(){const form=document.querySelector('#workflowSale'),b=data?.bookings.find(b=>b.id===selected);updatePricePreview(form,b,data?.tariffs);}
 document.addEventListener('input',event=>{if(event.target.closest('#workflowSale'))refreshQuote();});
-document.addEventListener('change',event=>{if(event.target.closest('#workflowSale'))refreshQuote();});
-window.addEventListener('pb-workflow-mounted',refreshQuote);
+document.addEventListener('change',event=>{if(event.target.closest('#workflowSale')||event.target.name==='discountId')refreshQuote();});
+window.addEventListener('pb-workflow-mounted',()=>{mountDiscountPanel();refreshQuote();});
 
 window.addEventListener('pb-bank-paid',async()=>{await loadWorkflow(selected);refreshQuote();});
 

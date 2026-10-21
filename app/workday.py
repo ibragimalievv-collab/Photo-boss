@@ -268,6 +268,9 @@ def install_workday(app,api):
     from .bank_payments import install_bank_payments
     install_bank_payments(app, api)
     app.router.add_post('/api/miniapp/hotel-tariffs', HotelPricing(api).save)
+    from .services.sale_discounts import SaleDiscounts
+    app.router.add_post('/api/miniapp/sale-discounts', SaleDiscounts(api).request)
+    app.router.add_post('/api/miniapp/sale-discounts/{id}/decision', SaleDiscounts(api).decide)
     from .cash_control import install_cash_control
     install_cash_control(app,api)
     from .photo_edits import PhotoFiles

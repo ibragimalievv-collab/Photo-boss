@@ -27,11 +27,14 @@ DELETE_TABLES = (
     'guest_feedback', 'bank_reconciliations', 'delivery_booking_responses',
     'delivery_reminders', 'delivery_claims', 'delivery_photos', 'delivery_galleries',
     'photo_edits', 'photo_storage', 'shoot_development_reviews', 'photos',
-    'sale_draft_photos', 'sales', 'receipts', 'sale_drafts', 'booking_reminders',
+    'sale_draft_photos', 'sales', 'receipts', 'sale_drafts', 'sale_discount_approvals', 'booking_reminders',
     'repeat_sale_leads', 'shootings', 'bookings', 'shift_check_ins',
     'shift_check_outs', 'work_checklist_completions',
 )
-OPERATIONAL_NOTIFICATION_KINDS = ('control', 'daily_summary', 'manager_idle', 'manager_advice')
+OPERATIONAL_NOTIFICATION_KINDS = (
+    'control', 'daily_summary', 'manager_idle', 'manager_advice',
+    'sale_discount', 'attendance',
+)
 OPERATIONAL_SETTING_PREFIXES = (
     'booking:trash:', 'booking-control:advice:', 'gallery:meta:',
     'gallery:project-fav:', 'gallery:photo-fav:', 'gallery:views:',
@@ -424,7 +427,11 @@ async def restore(engine, request_id, owner_id):
                     raise ResetError('An Academy review changed; restoration refused')
                 await conn.execute(academy.update().where(_ident(academy, archived)).values(photo_id=archived['photo_id']))
             verified = await _snapshot(conn, tables)
-            if verified['deleted'] != document['deleted'] or verified['detached_academy_reviews'] != document['detached_academy_reviews']:
+            # A reviewed dependency added after an old archive may be empty.
+            # Keep comparing every archived block and any newly present row.
+            verified_deleted = {name: block for name, block in verified['deleted'].items()
+                                if name in document['deleted'] or block['rows']}
+            if verified_deleted != document['deleted'] or verified['detached_academy_reviews'] != document['detached_academy_reviews']:
                 raise ResetError('Restored values do not match the verified archive; transaction rolled back')
             generation, now = str(uuid4()), datetime.now(UTC).replace(tzinfo=None)
             # A fresh generation blocks packets queued during the cleared epoch;

@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .miniapp_security import AccessError
-from .models import HotelTariff, User
+from .models import HotelAlbumTariff, HotelTariff, User
 from .services.core import audit, roles_of
 from .services.pricing import UNIT_PRICES
 from .services.receipts import money
@@ -28,10 +28,10 @@ class HotelPricing:
         if not price.is_finite():
             raise AccessError('Укажите конечную положительную цену.', 400)
         if (type(body['hotelId']) is not int or not isinstance(body['name'], str) or not 2 <= len(body['name'].strip()) <= 150
-                or not isinstance(body['kind'], str) or body['kind'] not in {'UNIT', 'PACKAGE'} or not 0 < price <= 10000000
+                or not isinstance(body['kind'], str) or body['kind'] not in {'UNIT', 'PACKAGE', 'ALBUM'} or not 0 < price <= 10000000
                 or (body['kind'] == 'UNIT' and price not in UNIT_PRICES)
                 or (body['photoCount'] is not None and (type(body['photoCount']) is not int or not 1 <= body['photoCount'] <= 10000))
-                or (body['kind'] == 'UNIT' and body['photoCount'] is not None)
+                or (body['kind'] in {'UNIT', 'ALBUM'} and body['photoCount'] is not None)
                 or (body['replaces'] is not None and type(body['replaces']) is not int)):
             raise AccessError('Проверьте название, тип, цену и число кадров тарифа.', 400)
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
@@ -41,7 +41,8 @@ class HotelPricing:
             # Serialize unit-rate replacement across different supervisors.
             from .models import Hotel
             hotel = await session.get(Hotel, body['hotelId'], with_for_update=True)
-            old = await session.get(HotelTariff, body['replaces'], with_for_update=True) if body['replaces'] else None
+            model = HotelAlbumTariff if body['kind'] == 'ALBUM' else HotelTariff
+            old = await session.get(model, body['replaces'], with_for_update=True) if body['replaces'] else None
             if body['replaces'] and (not old or old.hotel_id != body['hotelId'] or not old.active):
                 raise AccessError('Тариф уже изменён. Обновите данные.', 409)
             if body['kind'] == 'UNIT':
@@ -55,15 +56,18 @@ class HotelPricing:
                     unit.active = False
             if old:
                 old.active = False
-            tariff = HotelTariff(hotel_id=body['hotelId'], name=body['name'].strip(),
-                kind=body['kind'], price=price, photo_count=body['photoCount'])
+            values = {'hotel_id': body['hotelId'], 'name': body['name'].strip(), 'price': price}
+            if body['kind'] != 'ALBUM':
+                values.update(kind=body['kind'], photo_count=body['photoCount'])
+            tariff = model(**values)
             session.add(tariff)
             await session.flush()
             if body['kind'] == 'UNIT':
                 hotel.fixed_unit_tariff_id = tariff.id
-            await audit(session, actor, 'hotel_tariff_saved', 'hotel_tariff', tariff.id,
-                        f'hotel={tariff.hotel_id};replaces={body["replaces"]};price={price};kind={tariff.kind}')
+            await audit(session, actor, 'hotel_tariff_saved',
+                        'hotel_album_tariff' if body['kind'] == 'ALBUM' else 'hotel_tariff', tariff.id,
+                        f'hotel={tariff.hotel_id};replaces={body["replaces"]};price={price};kind={body["kind"]}')
             await session.commit()
         return web.json_response({'ok': True, 'id': tariff.id,
             'fixedUnitTariffId': hotel.fixed_unit_tariff_id,
-            'unitPrice': str(price) if tariff.kind == 'UNIT' else None})
+            'unitPrice': str(price) if body['kind'] == 'UNIT' else None})

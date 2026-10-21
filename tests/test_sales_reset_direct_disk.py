@@ -36,7 +36,8 @@ def test_scoped_reset_archives_sales_and_fines_but_preserves_media_attendance_an
                 await conn.execute(text('UPDATE shift_check_ins SET fine_amount=500,late=true'))
                 kept = {}
                 for name in ['shift_check_outs', 'work_breaks', 'delivery_photos', 'sale_draft_photos',
-                             'photos', 'photo_storage', 'bank_payments', 'bank_reconciliations', 'shifts', 'work_chat_messages']:
+                             'photos', 'photo_storage', 'bank_payments', 'bank_reconciliations', 'shifts', 'work_chat_messages',
+                             'sale_discount_approvals', 'hotel_tariffs', 'hotel_album_tariffs']:
                     kept[name] = (await conn.execute(text(f'SELECT * FROM {name}'))).all()
             result = await reset_sales_fines(engine, 'sales-fines-test-0001', {8000000001})
             assert result['row_counts']['sales'] == 1

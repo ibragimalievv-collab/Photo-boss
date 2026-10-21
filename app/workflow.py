@@ -18,6 +18,7 @@ from .models import (
     Booking,
     Client,
     Hotel,
+    HotelAlbumTariff,
     HotelTariff,
     OperationRequest,
     Package,
@@ -26,6 +27,7 @@ from .models import (
     PhotoStorage,
     Receipt,
     Sale,
+    SaleDiscountApproval,
     SaleDraft,
     SaleDraftPhoto,
     Shooting,
@@ -190,6 +192,9 @@ class Workflow:
                 total, paid, due = await payment_totals(session, b.id)
                 original_count = await session.scalar(select(func.count(Photo.id)).where(Photo.shooting_id == shoot.id)) if shoot else 0
                 draft_actor = await session.get(User, draft.created_by_id) if draft else None
+                from .services.sale_discounts import public_approval
+                discounts = list(await session.scalars(select(SaleDiscountApproval).where(
+                    SaleDiscountApproval.booking_id == b.id).order_by(SaleDiscountApproval.id.desc())))
                 history = {'client': customer.name if customer else '', 'phone': customer.phone if customer else None,
                            'hotel': hotel.name if hotel else 'Отель не указан', 'sales': [
                     {'id': sale.id, 'at': sale.created_at.isoformat() + 'Z', 'photos': sale.sold_photos,
@@ -197,10 +202,12 @@ class Workflow:
                      'lines': (snapshot(sale.pricing_snapshot) or {}).get('lines', [])}
                     for sale in purchases], 'soldTotal': sum(sale.sold_photos for sale in purchases),
                     'salesAmount': str(total), 'paidAmount': str(paid), 'dueAmount': str(due),
+                    'creditAmount': str(money(max(Decimal(0), paid - total))),
                     'totalFrames': max([original_count or 0, draft.declared_photo_count or 0 if draft else 0] + [sale.declared_photo_count or 0 for sale in purchases])}
                 rows.append({**history, 'receipts': [receipt_state(receipt) for receipt in receipts], 'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
                     'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': effective_price,
                     'pricing': snapshot(b.pricing_snapshot),
+                    'discountApprovals': [public_approval(discount) for discount in discounts],
                     'declaredDeposit': str(money(b.deposit)),
                     'bankPayments': [public_bill(bill) for bill in bank_bills],
                     'saleRecorded': bool(purchases),
@@ -232,19 +239,35 @@ class Workflow:
             hotels = (await session.scalars(hotel_query)).all()
             tariffs = list(await session.scalars(select(HotelTariff).where(
                 HotelTariff.hotel_id.in_([h.id for h in hotels]), HotelTariff.active.is_(True)).order_by(HotelTariff.id)))
-        hotel_rows = []
-        for hotel in hotels:
-            units = [t for t in tariffs if t.hotel_id == hotel.id and t.kind == 'UNIT']
-            fixed = next((t for t in units if t.id == hotel.fixed_unit_tariff_id), None)
-            if fixed is None and len(units) == 1:
-                fixed = units[0]
-            hotel_rows.append({'id': hotel.id, 'name': hotel.name,
-                'fixedUnitTariffId': fixed.id if fixed else None,
-                'unitPrice': str(money(fixed.price)) if fixed else None})
+            albums = list(await session.scalars(select(HotelAlbumTariff).where(
+                HotelAlbumTariff.hotel_id.in_([h.id for h in hotels]), HotelAlbumTariff.active.is_(True))
+                .order_by(HotelAlbumTariff.id)))
+            hotel_rows = []
+            for hotel in hotels:
+                units = [t for t in tariffs if t.hotel_id == hotel.id and t.kind == 'UNIT']
+                fixed = next((t for t in units if t.id == hotel.fixed_unit_tariff_id), None)
+                if fixed is None and len(units) == 1:
+                    fixed = units[0]
+                display_price = str(money(fixed.price)) if fixed else None
+                # Mirror server booking readiness for the historical seeded
+                # trio. Only a unique existing active package price is shown;
+                # distinct package choices must remain an explicit selection.
+                active_packages = [package for package in packages if package.active]
+                if display_price is None and len({money(package.price_per_photo) for package in active_packages}) == 1:
+                    from .services.pricing import booking_unit_quote
+                    try:
+                        display_price = (await booking_unit_quote(session, hotel.id, active_packages[0].id))['price']
+                    except ValueError:
+                        pass
+                hotel_rows.append({'id': hotel.id, 'name': hotel.name,
+                    'fixedUnitTariffId': fixed.id if fixed else None, 'unitPrice': display_price})
         return web.json_response({'bookings': rows, 'hotels': hotel_rows,
             'tariffs': [{'id': t.id, 'hotelId': t.hotel_id, 'name': t.name, 'kind': t.kind,
                         'price': str(money(t.price)), 'photoCount': t.photo_count} for t in tariffs],
             'canConfigurePricing': bool({'OWNER', 'ADMIN'} & set(a['roles'])),
+            'albums': [{'id': album.id, 'hotelId': album.hotel_id, 'name': album.name,
+                        'price': str(money(album.price))} for album in albums],
+            'canApproveDiscount': bool({'OWNER', 'ADMIN'} & set(a['roles'])),
             'canAuditDisk': 'OWNER' in a['roles'],
             'bankConfigured': bank_configured(),
             'packages': [{'id': p.id, 'name': p.name, 'price': prices[p.id]} for p in packages if p.active],
@@ -379,7 +402,8 @@ class Workflow:
         else:
             expected = {'sale_counts': 'draft total sold price', 'sale_complete': 'draft price',
                         'sale_receipt': 'draft', 'sale_selected': 'draft', 'sale_disk_selected': 'draft revision path'}[kind]
-            fields(data, expected + (' tariffId' if kind == 'sale_counts' and 'tariffId' in data else ''))
+            optional = ('tariffId', 'discountId', 'albumId', 'albumQuantity') if kind == 'sale_counts' else ()
+            fields(data, expected + ''.join(' ' + key for key in optional if key in data))
             did = await target(session, actor, data['draft'], 'draftId')
             preview = await session.get(SaleDraft, did)
             if preview is None:
@@ -424,7 +448,9 @@ class Workflow:
             await capture_draft_receipt(session, actor, draft, file_id, unique_id,
                 hashlib.sha256(raw).hexdigest(), await extract_receipt(raw))
         elif kind == 'sale_counts':
-            amount = await set_sale_counts(session, actor, draft, data['total'], data['sold'], tariff_id=data.get('tariffId'))
+            amount = await set_sale_counts(session, actor, draft, data['total'], data['sold'],
+                tariff_id=data.get('tariffId'), discount_id=data.get('discountId'),
+                album_id=data.get('albumId'), album_quantity=data.get('albumQuantity'))
             result['amount'] = str(amount)
         elif kind == 'sale_disk_selected':
             from .disk_sale_media import select_photo

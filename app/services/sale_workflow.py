@@ -203,7 +203,8 @@ async def validate_remaining_photos(session, booking, total, sold):
         raise ValueError(f'Уже продано: {previous}. Новая покупка превышает оставшееся количество кадров.')
 
 
-async def set_sale_counts(session, actor, draft, total, sold, *, tariff_id=None):
+async def set_sale_counts(session, actor, draft, total, sold, *, tariff_id=None, discount_id=None,
+                          album_id=None, album_quantity=None):
     if draft.created_by_id != actor.id or draft.status not in {'AWAITING_RECEIPT', 'AWAITING_COUNTS', 'AWAITING_SELECTED'}:
         raise ValueError('Черновик продажи уже закрыт.')
     if type(total) is not int or type(sold) is not int or not 0 < sold <= total <= 10000:
@@ -216,7 +217,8 @@ async def set_sale_counts(session, actor, draft, total, sold, *, tariff_id=None)
     booking = await session.get(Booking, draft.booking_id)
     await validate_remaining_photos(session, booking, total, sold)
     from .pricing import sale_quote
-    quote = await sale_quote(session, booking, sold, total, tariff_id, draft.pricing_snapshot)
+    quote = await sale_quote(session, booking, sold, total, tariff_id, draft.pricing_snapshot,
+                             discount_id=discount_id, album_id=album_id, album_quantity=album_quantity)
     amount = money(quote['amount'])
     draft.pricing_snapshot = json.dumps(quote, ensure_ascii=False)
     before, paid, _ = await payment_totals(session, booking.id)

@@ -29,7 +29,7 @@ from .services.booking_notices import booking_description, notice_booking_id
 
 log = logging.getLogger(__name__)
 ROLES = {'OWNER', 'ADMIN', 'PHOTOGRAPHER', 'MANAGER'}
-KINDS = {'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test', 'lunch_start', 'lunch_end'}
+KINDS = {'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test', 'lunch_start', 'lunch_end', 'attendance', 'sale_discount'}
 
 
 def app_channel():
@@ -174,6 +174,53 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
             return True
         return bool('ADMIN' in roles and await session.scalar(select(HotelEmployee.id).where(
             HotelEmployee.user_id == user.id, HotelEmployee.hotel_id == row.hotel_id).limit(1)))
+    if notice.kind == 'attendance':
+        from zoneinfo import ZoneInfo
+
+        from .config import config
+        from .miniapp_security import utc_bounds
+        from .models import HotelEmployee, Shift, ShiftCheckIn, ShiftCheckOut
+        try:
+            data = json.loads(notice.payload or '{}')
+            purpose, attendance_id = data.get('purpose'), data.get('attendanceId')
+            model = {'start': ShiftCheckIn, 'end': ShiftCheckOut}.get(purpose)
+            if model is None or type(attendance_id) is not int:
+                return False
+            row = await session.get(model, attendance_id)
+            if (not row or data.get('userId') != row.user_id
+                    or data.get('date') != row.shift_date.isoformat()):
+                return False
+        except (TypeError, ValueError):
+            return False
+        if 'OWNER' in roles or row.user_id == user.id:
+            return True
+        if 'ADMIN' not in roles:
+            return False
+        lo, hi = utc_bounds(row.shift_date, row.shift_date, ZoneInfo(config.training_timezone))
+        hotels = set(await session.scalars(select(Shift.hotel_id).where(
+            Shift.user_id == row.user_id, Shift.status != 'CANCELLED',
+            Shift.start_at < hi, Shift.end_at > lo)))
+        allowed = set(await session.scalars(select(HotelEmployee.hotel_id).where(
+            HotelEmployee.user_id == user.id)))
+        # Keep the same rule as attendance review: all planned hotels must be in scope.
+        return bool(hotels) and hotels <= allowed
+    if notice.kind == 'sale_discount':
+        from .models import Booking, SaleDiscountApproval
+        from .services.booking_access import can_access_booking
+        try:
+            data = json.loads(notice.payload or '{}')
+            discount_id, bid = data.get('discountId'), data.get('bookingId')
+        except (TypeError, ValueError):
+            return False
+        if type(discount_id) is not int or type(bid) is not int:
+            return False
+        approval = await session.get(SaleDiscountApproval, discount_id)
+        booking = await session.get(Booking, bid)
+        if (not approval or approval.booking_id != bid or not booking
+                or await session.get(Setting, f'booking:trash:{bid}')
+                or not await can_access_booking(session, user.id, roles, booking)):
+            return False
+        return bool(roles & {'OWNER', 'ADMIN'} or approval.requested_by_id == user.id)
     if notice.kind == 'sale_created':
         from .models import Booking, HotelEmployee, Sale
         try:
@@ -201,21 +248,36 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
 
 def payload_for(notice):
     urls = {'booking_assignment': '/app/#shootings', 'control': '/app/#insights', 'daily_summary': '/app/#insights',
-            'sale_ready': '/app/#workflow', 'sale_created': '/app/#finance', 'academy': '/app/#academy'}
+            'sale_ready': '/app/#workflow', 'sale_created': '/app/#finance', 'academy': '/app/#academy',
+            'attendance': '/app/#workday', 'sale_discount': '/app/#workflow'}
     titles = {'booking_assignment': 'Назначена съёмка', 'booking_reminder': 'Скоро съёмка', 'chat': 'Новое сообщение', 'call': 'Входящий звонок',
               'sale_ready': 'Съёмка готова к продаже', 'sale_created': 'Оформлена продажа', 'academy': 'Готов разбор практики', 'push_test': 'Проверка уведомлений',
-              'lunch_start': 'Сотрудник ушёл на обед', 'lunch_end': 'Сотрудник вернулся с обеда'}
+              'lunch_start': 'Сотрудник ушёл на обед', 'lunch_end': 'Сотрудник вернулся с обеда',
+              'attendance': 'Отметка смены', 'sale_discount': 'Согласование скидки 50%'}
+    try:
+        details = json.loads(notice.payload or '{}')
+    except (TypeError, ValueError):
+        details = {}
+    if notice.kind == 'attendance':
+        titles['attendance'] = ('Отметка начала смены' if details.get('purpose') == 'start'
+                                else 'Отметка завершения смены')
     if notice.kind == 'reminder' and (notice.event_key or '').startswith(('rescheduled:', 'cancelled:')):
         titles['reminder'] = 'Съёмка перенесена' if notice.event_key.startswith('rescheduled:') else 'Съёмка отменена'
-    # No guest names, phone numbers, balances, or chat text on the lock screen.
+    # No guest names, phone numbers, rooms, balances, or chat text on the lock screen.
     url = urls.get(notice.kind, '/app/#home')
     if notice.kind in {'booking_assignment', 'booking_reminder', 'sale_ready'}:
         url = '/app/#shootings'
         bid = notice_booking_id(notice)
         if type(bid) is int:
             url += f'?booking={bid}'
+    if notice.kind == 'sale_discount':
+        bid = notice_booking_id(notice)
+        if type(bid) is int:
+            url += f'?booking={bid}'
     payload = {'title': 'Photo Boss · ' + titles.get(notice.kind, 'Рабочее уведомление'),
             'body': 'Откройте Photo Boss, чтобы посмотреть подробности.', 'url': url, 'tag': f'pb-notice-{notice.id}'}
+    if notice.kind == 'booking_reminder' and isinstance(details.get('pushSummary'), str):
+        payload['body'] = details['pushSummary'][:180] + '. Откройте съёмку в Photo Boss.'
     deadline = reminder_deadline(notice)
     if deadline:
         payload['expiresAt'] = deadline.isoformat()
@@ -332,7 +394,13 @@ async def push_delivery_state(session, notice, *, active_devices):
     rows = list(await session.scalars(select(PushDelivery).where(
         PushDelivery.notification_id == notice.id)))
     states = {row.status for row in rows}
-    if 'PENDING' in states or not rows:
+    if not rows:
+        subscribed_before = await session.scalar(select(PushSubscription.id).where(
+            PushSubscription.user_id == notice.user_id, PushSubscription.active.is_(True),
+            PushSubscription.created_at <= notice.created_at).limit(1))
+        # New installations do not receive historical alerts; do not promise a retry.
+        return 'PENDING' if subscribed_before else 'HISTORY_ONLY'
+    if 'PENDING' in states:
         return 'PENDING'
     if 'ACCEPTED' in states and (states & {'FAILED', 'EXPIRED'}):
         return 'PARTIAL'
