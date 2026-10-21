@@ -11,6 +11,7 @@ from test_workflow_replay import ACTOR, packet
 
 from app.miniapp_security import AccessError
 from app.models import Notification, PayrollEntry, Shift, ShiftCheckIn, ShiftCheckOut
+from app.push_notifications import payload_for
 
 OWNER = {'id': 3, 'roles': ['OWNER']}
 
@@ -42,6 +43,10 @@ def test_approval_and_each_correction_notify_worker_and_scoped_leaders_once(monk
             assert len(notices) == 3
             assert all('подтверждена руководителем' in row.text for row in notices)
             assert all(json.loads(row.payload)['status'] == 'STARTED' for row in notices)
+            for row in notices:
+                expected = '/app/#workday' if row.user_id == 1 else '/app/#attendance'
+                assert json.loads(row.payload)['url'] == expected
+                assert payload_for(row)['url'] == expected
             correction = decision(verified_at='2026-09-22T08:55:00+03:00',
                 expectedAt='2026-09-22T06:10:00+00:00')
             await service.review(correction)

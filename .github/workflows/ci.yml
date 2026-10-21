@@ -83,6 +83,8 @@ jobs:
           node tests/lunch_recovery_check.mjs
           node tests/attendance_reset_check.mjs
           node tests/attendance_recovery_check.mjs
+          node tests/attendance_review_route_check.mjs
+          node tests/bank_payments_client_check.mjs
           node tests/outbox_recovery_check.mjs
           node tests/workflow_form_recovery_check.mjs
           node tests/install_client_check.mjs
@@ -141,6 +143,12 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements-dev.txt playwright==1.51.0
       - run: python -m playwright install chromium
+      - name: Verify correction of a rejected mobile booking
+        run: python tests/booking_recovery_browser_check.py
+      - name: Verify camera-only attendance in temporary no-GPS mode
+        run: python tests/attendance_no_gps_browser_check.py
+      - name: Verify mandatory GPS attendance with hotel zones deferred
+        run: python tests/attendance_gps_only_browser_check.py
       - name: Verify camera grant reuse, controls and permission denial
         env:
           CALLS_QA_CONTROLS_ONLY: '1'
@@ -161,12 +169,6 @@ jobs:
         run: python tests/notifications_fines_browser_check.py
       - name: Verify mobile discount approval, album and deposit calculation
         run: python tests/pricing_approval_browser_check.py
-      - name: Verify correction of a rejected mobile booking
-        run: python tests/booking_recovery_browser_check.py
-      - name: Verify camera-only attendance in temporary no-GPS mode
-        run: python tests/attendance_no_gps_browser_check.py
-      - name: Verify mandatory GPS attendance with hotel zones deferred
-        run: python tests/attendance_gps_only_browser_check.py
       - name: Verify cold offline start and replay of sales with photos
         env:
           WORKFLOW_TEST_CERT: /tmp/photo-boss-test-cert.pem

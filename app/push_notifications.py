@@ -352,6 +352,8 @@ def payload_for(notice):
         bid = notice_booking_id(notice)
         if type(bid) is int:
             url += f'?booking={bid}'
+    if notice.kind == 'attendance' and details.get('canReview'):
+        url = '/app/#attendance'
     if notice.kind == 'attendance_fine' and details.get('canReview') and isinstance(details.get('fineKey'), str):
         url = '/app/#more?attendanceFine=' + quote(details['fineKey'], safe='')
     payload = {'title': 'Photo Boss · ' + titles.get(notice.kind, 'Рабочее уведомление'),

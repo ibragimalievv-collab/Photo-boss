@@ -21,6 +21,7 @@ from playwright.async_api import async_playwright, expect
 from sqlalchemy import func, select
 from test_miniapp_release import TOKEN, signed
 from test_workflow_services import fixture
+from work_calls_browser_check import wait_async
 
 from app.attendance import Attendance, install_attendance
 from app.hotel_points import context_key
@@ -129,7 +130,7 @@ async def main(*, gps_only=False):
 
                         page.on('request', observe)
                         await page.goto(str(server.make_url('/app/#home')))
-                        await page.locator('#attendanceCard button').click()
+                        await page.locator('#attendanceCard [data-att=open]').click()
                         dialog = page.locator('#attendanceDialog')
                         if gps_only:
                             await expect(dialog).to_contain_text('Геолокация обязательна')
@@ -148,7 +149,7 @@ async def main(*, gps_only=False):
                                 await expect(dialog).to_contain_text('Координаты сохранены на сервере')
                             await expect(dialog.locator('[data-att=camera]')).to_be_enabled()
                             await dialog.locator('[data-att=camera]').click()
-                            await page.wait_for_function('document.querySelector("#attCameraVideo")?.videoWidth>=96')
+                            await wait_async(page, '()=>document.querySelector("#attCameraVideo")?.videoWidth>=96')
                             await dialog.locator('[data-att=snap]').click()
                             await expect(dialog.locator('[data-att=confirm]')).to_be_enabled()
                             async with page.expect_response(lambda response: response.url.endswith('/attendance/photo')
@@ -206,7 +207,7 @@ async def main(*, gps_only=False):
                             assert {json.loads(row.payload)['status'] for row in notices} == {'STARTED', 'FINISHED'}
                         gps_count = await page.evaluate('window.fixtureGpsRequests')
                         await page.goto(str(server.make_url('/app/#home')))
-                        await page.locator('#attendanceCard button').click()
+                        await page.locator('#attendanceCard [data-att=open]').click()
                         await expect(dialog).to_contain_text('Смена завершена')
                         await expect(dialog).to_contain_text('Геолокации и фотографии сохранены' if gps_only else 'Фотографии и время сохранены')
                         assert len(location_requests) == (2 if gps_only else 0)

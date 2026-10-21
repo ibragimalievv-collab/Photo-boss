@@ -53,12 +53,14 @@ async def health(request):
     storage_state = storage.public_status() if storage is not None else {"configured": False, "connected": False, "writeVerified": False}
     calls_state = ice_config(0)
     from .attendance import geofence_required, gps_required
+    from .bank_payments import configured as bank_configured
     from .push_notifications import app_channel
     from .push_notifications import configured as push_configured
     return web.json_response({"service": "photo-boss", "status": "ok" if ready else "not_ready",
                               "release": RELEASE, "commit": os.getenv("RENDER_GIT_COMMIT", "")[:12] or None, "app": "/app/",
                               "notifications": {"channel": "app" if app_channel() else "telegram", "pushConfigured": push_configured()},
                               "attendance": {"gpsRequired": gps_required(), "geofenceRequired": geofence_required()},
+                              "payments": {"configured": bank_configured()},
                               "calls": {"enabled": "work_calls" in request.app,
                                         "maxParticipants": calls_state["maxParticipants"],
                                         "relayConfigured": calls_state["relayConfigured"]},

@@ -253,4 +253,23 @@ const network=()=>Object.assign(new Error('Сеть недоступна'),{stat
  assert.match(f.c.attendanceTest.state().html,/Начало ожидает синхронизации/);
 }
 
-console.log('PASS: mandatory GPS with deferred hotel zones, strict mode, photo-only policy, pending recovery, offline evidence and camera cleanup');
+{
+ const f=fixture();f.c.attendanceTest.configure({canReview:true,eligible:true});
+ assert.match(f.c.attendanceTest.state().html,/data-att="review"/,'A leader with a worker role needs access to team review too');
+ await f.click('review');assert.equal(f.c.location.hash,'attendance');
+ assert.equal(f.c.attendanceTest.state().open,false);
+}
+
+{
+ const f=fixture();f.c.attendanceTest.configure({canReview:true,eligible:false});
+ assert.match(f.c.attendanceTest.state().html,/Открыть контроль смен/);
+ await f.click('review');assert.equal(f.c.location.hash,'attendance');
+}
+
+{
+ const f=fixture();f.c.attendanceTest.configure({canReview:false});
+ assert.doesNotMatch(f.c.attendanceTest.state().html,/data-att="review"/);
+ await f.click('review');assert.equal(f.c.location.hash,'');
+}
+
+console.log('PASS: mandatory GPS with deferred hotel zones, strict mode, pending recovery, offline evidence, camera cleanup and leadership access');

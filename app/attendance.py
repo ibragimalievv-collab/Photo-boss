@@ -187,6 +187,7 @@ class Attendance:
             if review_required() else 'Координаты сохраняются. Проверка расстояния до отеля пока не настроена.')
         return {'date': now.astimezone(self.api.tz).date().isoformat(), 'timezone': str(self.api.tz),
                 'eligible': bool(WORK_ROLES & set(actor['roles'])),
+                'canReview': bool({'OWNER', 'ADMIN'} & set(actor['roles'])),
                 'start': part(start, 'full_body_file_id', 'started_at'),
                 'end': part(end, 'workplace_file_id', 'ended_at'),
                 'late': bool(start and start.get('late')),
@@ -486,10 +487,10 @@ class Attendance:
                 recipient = await session.get(User, uid)
                 if recipient and recipient.active:
                     await queue_notice(session, uid, kind='attendance', event_key=f'attendance:{purpose}:{row_id}:{event}',
-                        url='/app/#workday', message=description,
+                        url='/app/#attendance' if uid != worker_id else '/app/#workday', message=description,
                         payload={'attendanceId': row_id, 'purpose': purpose, 'userId': worker_id,
                                  'date': str(day), 'hotelId': context.get('hotelId'), 'status': row.status,
-                                 'reviewed': decision is not None,
+                                 'reviewed': decision is not None, 'canReview': uid != worker_id,
                                  'description': description})
             await session.flush()
 
@@ -619,6 +620,7 @@ class Attendance:
                         if len(rows) < 200:
                             break
         return web.json_response({'items': sorted(items, key=lambda r: (r['status'] != 'PENDING_REVIEW', r['shift_date'], r['id'])),
+            'actorId': actor['id'], 'gpsRequired': gps_required(), 'geofenceRequired': geofence_required(),
             'scopeNotice': '' if 'OWNER' in actor['roles'] else
                 'Показаны отметки со сменами только в назначенных вам отелях. Без плана или с другими отелями проверяет владелец.'})
 
