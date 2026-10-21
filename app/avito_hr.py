@@ -232,8 +232,8 @@ def reply(value, role, history=()):
         answers.append("График — 3/1: три рабочих дня, один выходной.")
     if has("час", "во сколько", "длительность смен", "начало смен", "конец смен"):
         answers.append("Точные часы смен уточню у владельца.")
-    if has("где", "адрес", "отель", "место работ", "каком город"):
-        answers.append("Работа в Анапе; конкретное место согласуем с владельцем до выхода.")
+    if has("где", "адрес", "отел", "место работ", "каком город", "витязево", "анап"):
+        answers.append("Работа есть в Анапе и Витязево; конкретное место согласуем с владельцем до выхода.")
     if has("обуч", "опыт", "наставник", "науч", "нович"):
         if has("сколько", "долго", "срок"):
             answers.append("Точный срок обучения уточню у владельца.")
@@ -280,6 +280,7 @@ class Worker:
         self.engine, self.api = engine, API()
         self.ready = False
         self.last_check = None
+        self.last_probe = None
 
     async def pause(self, reason):
         async with self.engine.begin() as conn:
@@ -298,9 +299,20 @@ class Worker:
 
     async def cycle(self):
         async with self.engine.connect() as conn:
-            paused = await conn.scalar(text("SELECT paused FROM hr_avito_control WHERE id=1"))
-        if paused:
-            return
+            control = (await conn.execute(text("SELECT paused,reason FROM hr_avito_control WHERE id=1"))).mappings().one()
+            uncertain = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE state='uncertain'"))
+        if control['paused']:
+            if control['reason'] not in {'URLError', 'TimeoutError', 'ConnectionError'} or uncertain:
+                return
+            # Probe only: never replay a possibly delivered send. Credentials stay
+            # server-side, and a failed probe leaves the durable pause untouched.
+            self.last_probe = int(time.time())
+            account = await self.api.request("GET", "/core/v1/accounts/self")
+            if not account.get('id'):
+                raise ValueError("Invalid recovery account")
+            async with self.engine.begin() as conn:
+                await conn.execute(text("UPDATE hr_avito_control SET paused=0,reason='' WHERE id=1 AND reason=:reason"), {'reason': control['reason']})
+            log.info("Avito HR connection recovered after account probe")
         await refresh_publications(self.engine, self.api)
         async with self.engine.connect() as conn:
             rows = (await conn.execute(text("SELECT item_id,role FROM hr_avito_vacancies WHERE item_id IS NOT NULL AND status='activated'"))).mappings().all()
@@ -396,7 +408,7 @@ class Worker:
             count = await conn.scalar(text("SELECT count(*) FROM hr_avito_vacancies WHERE status='activated'"))
             escalations = await conn.scalar(text("SELECT count(*) FROM hr_avito_escalations WHERE reason NOT LIKE 'resolved%'"))
             sent = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE state='sent'"))
-        return web.json_response({"enabled": True, "ready": self.ready, "paused": bool(control["paused"]), "reason": control["reason"], "managedVacancies": count, "lastCheck": self.last_check, "sent": sent, "ownerReview": escalations})
+        return web.json_response({"enabled": True, "ready": self.ready, "paused": bool(control["paused"]), "reason": control["reason"], "managedVacancies": count, "lastCheck": self.last_check, "lastProbe": self.last_probe, "sent": sent, "ownerReview": escalations})
 
 
 def install_avito_hr(app, engine):
