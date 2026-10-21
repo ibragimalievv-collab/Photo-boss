@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk, storage_recovery_loop
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.42-attendance-hotel-prices"
+RELEASE = "miniapp-3.43-shift-sales-recovery"
 
 
 async def app_redirect(request):
@@ -52,11 +52,13 @@ async def health(request):
     storage = request.app.get("yandex_disk")
     storage_state = storage.public_status() if storage is not None else {"configured": False, "connected": False, "writeVerified": False}
     calls_state = ice_config(0)
+    from .attendance import gps_required
     from .push_notifications import app_channel
     from .push_notifications import configured as push_configured
     return web.json_response({"service": "photo-boss", "status": "ok" if ready else "not_ready",
                               "release": RELEASE, "commit": os.getenv("RENDER_GIT_COMMIT", "")[:12] or None, "app": "/app/",
                               "notifications": {"channel": "app" if app_channel() else "telegram", "pushConfigured": push_configured()},
+                              "attendance": {"gpsRequired": gps_required()},
                               "calls": {"enabled": "work_calls" in request.app,
                                         "maxParticipants": calls_state["maxParticipants"],
                                         "relayConfigured": calls_state["relayConfigured"]},

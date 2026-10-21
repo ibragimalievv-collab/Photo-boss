@@ -62,6 +62,33 @@ def test_booking_replay_is_atomic_and_rechecks_actor():
     asyncio.run(run())
 
 
+def test_rejected_booking_can_be_corrected_with_same_key_without_orphans():
+    """A definitive validation rejection is absent from the replay ledger."""
+    from app.models import Client
+
+    async def run():
+        engine, factory, work = await setup()
+        try:
+            rejected = packet('correctable-booking', 'booking',
+                booking_data() | {'client_phone': '123', 'photographer_id': None})
+            with pytest.raises(AccessError, match='Проверьте данные гостя') as error:
+                await work.execute(ACTOR, rejected)
+            assert error.value.status == 409
+            async with factory() as session:
+                for model in (Client, Booking, Shooting, OperationRequest):
+                    assert await session.scalar(select(func.count(model.id))) == 0
+            corrected = rejected | {'data': rejected['data'] | {'client_phone': '+79991234567'}}
+            result = json.loads((await work.execute(ACTOR, corrected)).text)
+            assert result['bookingId'] > 0
+            assert json.loads((await work.execute(ACTOR, corrected)).text) == result
+            async with factory() as session:
+                for model in (Client, Booking, Shooting, OperationRequest):
+                    assert await session.scalar(select(func.count(model.id))) == 1
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
 def test_sale_with_media_replays_once_and_rejects_changed_price(monkeypatch):
     uploaded = []
     async def telegram(self, actor, raw, **kwargs):

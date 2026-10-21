@@ -3,7 +3,7 @@ import {esc} from './domain.js';
 
 export async function hotelPointsView(){
  const data=await api('/hotel-points',{allowSnapshot:false});
- return `<p>Начальная зона — круг вокруг метки. Радиус нужно сверить с фактической территорией отеля. GPS может быть подменён и не подтверждает человека или форму.</p><p>${data.reviewRequired?'Приход и уход подтверждает руководитель после проверки фото и обстоятельств.':'Ручная проверка прихода ещё не включена.'}</p>${data.items.map(h=>{
+ return `<p>Начальная зона — круг вокруг метки. Радиус нужно сверить с фактической территорией отеля. GPS может быть подменён и не подтверждает человека или форму.</p><p>${data.gpsRequired===false?'GPS временно отключён по решению владельца. Онлайн-отметки подтверждаются по свежему фото; местоположение не проверяется. Зоны можно подготовить для последующего включения GPS.':data.reviewRequired?'Свежие координаты внутри настроенной зоны и сохранённое фото позволяют подтвердить отметку автоматически. Без зоны, при неточных координатах или офлайн-отметке нужна проверка руководителя.':'Координаты сохраняются без автоматической проверки расстояния до отеля.'}</p>${data.items.map(h=>{
   const p=h.point;
   const field=(name,label,type,value,extra='')=>`<label class="field">${label}<input class="input" name="${name}" type="${type}" value="${esc(value??'')}" ${extra} required></label>`;
   const url=p?`https://yandex.ru/maps/?ll=${p.longitude}%2C${p.latitude}&z=17&pt=${p.longitude}%2C${p.latitude}%2Cpm2rdm`:'';

@@ -5,7 +5,7 @@ import {pricingView,tariffOptions,updatePricePreview,bookingPriceNote} from './h
 import {captureForm,captureForms,restoreForms,clearForm} from './form-state.js';
 import {api} from './api.js';
 import {esc,todayKey} from './domain.js';
-import {enqueueBatch,outboxRows,retryOperation,flushOutbox,syncOutboxNow,enqueueOperation,enqueueFilesOneByOne,replaceOperationFile,canReplaceOperationFile,saleQueueRepairable,repairSaleQueue,rejectedSaleCounts} from './outbox.js';
+import {enqueueBatch,outboxRows,retryOperation,flushOutbox,syncOutboxNow,enqueueOperation,enqueueFilesOneByOne,replaceOperationFile,canReplaceOperationFile,saleQueueRepairable,repairSaleQueue,rejectedSaleCounts,rejectedBooking,repairBookingQueue} from './outbox.js';
 import {checkSaleFiles} from './sale-files.js';
 let data=null,queue=[],selected=null,folderBusy=false;
 const roubles=value=>new Intl.NumberFormat('ru-RU',{style:'currency',currency:'RUB',maximumFractionDigits:2}).format(Number(value||0));
@@ -127,7 +127,7 @@ export function workflowView(){
  <section class="panel section"><h2>Файлы на Яндекс.Диске</h2><button class="btn ghost" data-workflow="refresh">Обновить состояние файлов</button>${data.bookings.filter(b=>b.shootingId).map(b=>`<details data-storage-shooting="${b.shootingId}"><summary>${esc(bookingTitle(b))} · сохранено ${(b.files||[]).filter(f=>f.status==='STORED').length} из ${(b.files||[]).length}</summary>${(b.files||[]).map(f=>`<p>Кадр №${f.id}: ${esc(({STORED:'Сохранено на Диске',PENDING:'Ожидает сохранения',UPLOADING:'Сохраняется',FAILED:'Ошибка сохранения'})[f.status])} ${esc(f.error||'')}</p>`).join('')}${editView(b)}${b.canUpload?`<button class="btn ghost" data-workflow="retry-storage" data-shooting="${b.shootingId}">Восстановить сохранение на Диске</button>`:''}</details>`).join('')||'<p>Съёмок пока нет.</p>'}</section>
  <section class="section"><h2>Синхронизация</h2><button class="btn ghost" data-workflow="sync">Синхронизировать сейчас</button><div id="workflowSyncNote" class="notice" role="status">Отправка запускается автоматически при наличии сети. Нажмите кнопку для ручной проверки.</div><div id="workflowQueue">${queueView()}</div></section>`;
 }
-function imageFiles(form,name,maximum=20*1024*1024){const list=[...form.elements[name].files];for(const f of list)if(!['image/jpeg','image/png','image/webp'].includes(f.type)||!f.size||f.size>maximum)throw new Error(`Изображения JPEG, PNG или WebP, не больше ${maximum/1024/1024} МБ.`);return list;}
+function imageFiles(form,name,maximum=20*1024*1024){const list=[...form.elements[name].files];for(const f of list)if(!(['image/jpeg','image/png','image/webp'].includes(f.type)||(!f.type&&/\.(jpe?g|png|webp)$/i.test(f.name)))||!f.size||f.size>maximum)throw new Error(`Изображения JPEG, PNG или WebP, не больше ${maximum/1024/1024} МБ.`);return list;}
 export async function workflowFolderChange(input){
  if(folderBusy)throw new Error('Другая папка уже загружается.');
  const form=document.querySelector('#workflowShoot');
@@ -153,6 +153,10 @@ export async function workflowSubmit(form){
   const keys=JSON.parse(form.dataset.pendingKeys),rows=(await outboxRows()).filter(r=>keys.includes(r.key));
   if(rows.length!==keys.length)throw new Error('Часть очереди не найдена. Не создавайте повторную продажу; проверьте журнал синхронизации.');
   if(rows.every(r=>r.status==='synced'))throw new Error('Эта операция уже сохранена. Для новой используйте кнопку под результатом.');
+  if(form.id==='workflowBooking'&&form.dataset.repairingBooking==='1'){
+   await repairBookingQueue(keys,bookingFormData(form));delete form.dataset.repairingBooking;captureForm(form);
+   queue=await outboxRows();updateFormProgress();return;
+  }
   if(form.id==='workflowSale'&&form.dataset.repairing==='1'){
    const b=data.bookings.find(b=>b.id===selected),d=b?.draft,total=Number(form.elements.total.value),sold=Number(form.elements.sold.value),photos=imageFiles(form,'selected');
    const rejected=rejectedSaleCounts(rows),diskPhotos=!rejected&&(form.elements.photoSource?.value||'device')!=='device'?selectedDiskPhotos(form):[];
@@ -170,8 +174,8 @@ export async function workflowSubmit(form){
  const f=new FormData(form),date=todayKey(),items=[],add=(kind,data,blob=null)=>{const row={key:crypto.randomUUID(),kind,date,data,blob};items.push(row);return {key:row.key};};
  if(form.classList.contains('photo-edit')){add('photo_edit',{shooting:Number(form.dataset.shooting),photo:Number(form.dataset.photo),action:'MANUAL',edit:null,parameters:Object.fromEntries(['exposure','contrast','color','red','blue'].map(k=>[k,Number(f.get(k))]))});
  }else if(form.id==='workflowBooking'){
-  const receipt=imageFiles(form,'receipt',8*1024*1024)[0],deposit=f.get('deposit');
-  const booking=add('booking',{client_name:f.get('client_name'),client_phone:f.get('client_phone')||null,hotel_id:Number(f.get('hotel_id')),package_id:Number(f.get('package_id')),room:f.get('room'),guest_count:Number(f.get('guest_count')),deposit,shoot_date:f.get('shoot_date'),shoot_time:f.get('shoot_time'),photographer_id:null});
+  const receipt=imageFiles(form,'receipt',8*1024*1024)[0];
+  const booking=add('booking',bookingFormData(form));
   if(receipt)add('booking_receipt',{booking,purpose:'DEPOSIT'},receipt);
  }else if(form.id==='workflowSale'){
   const b=data.bookings.find(b=>b.id===selected);if(!b)throw new Error('Выберите съёмку.');const d=b.draft,total=Number(f.get('total')),sold=Number(f.get('sold'));
@@ -195,6 +199,10 @@ export async function workflowSubmit(form){
  await enqueueBatch(items);
  form.dataset.pendingKeys=JSON.stringify(items.map(row=>row.key));captureForm(form);
  queue=await outboxRows();const list=document.querySelector('#workflowQueue');if(list)list.innerHTML=queueView();updateFormProgress();
+}
+function bookingFormData(form){
+ const f=new FormData(form);
+ return {client_name:f.get('client_name'),client_phone:f.get('client_phone')?.trim()||null,hotel_id:Number(f.get('hotel_id')),package_id:Number(f.get('package_id')),room:f.get('room'),guest_count:Number(f.get('guest_count')),deposit:f.get('deposit'),shoot_date:f.get('shoot_date'),shoot_time:f.get('shoot_time'),photographer_id:null};
 }
 function revealBookingForm(form){
  form.closest('details').open=true;
@@ -230,16 +238,23 @@ export async function openWorkflowBooking(){
  if(form.dataset.pendingKeys){
   const keys=JSON.parse(form.dataset.pendingKeys),rows=await outboxRows();
   if(keys.length&&(bookingAccepted(keys.map(k=>rows.find(r=>r.key===k)))||keys.every(k=>rows.some(r=>r.key===k&&r.status==='synced'))))form=await resetCompletedForm(form,{refresh:false});
+  else if(rejectedBooking(keys.map(k=>rows.find(r=>r.key===k)))){form.dataset.repairingBooking='1';queue=rows;updateFormProgress();}
  }
  if(!form)return;
  revealBookingForm(form);
- if(form.dataset.pendingKeys)throw new Error('Предыдущая запись ещё отправляется. Проверьте её результат и очередь ниже; повторно заполнять её не нужно.');
+ if(form.dataset.pendingKeys&&form.dataset.repairingBooking!=='1')throw new Error('Предыдущая запись ещё отправляется. Проверьте её результат и очередь ниже; повторно заполнять её не нужно.');
 }
 export async function workflowClick(button){
  const kind=button.dataset.workflow;
  if(kind==='takeover-sale'){await api(`/bookings/${Number(button.dataset.booking)}/sale-takeover`,{method:'POST',body:{}});captureForms();await loadWorkflow(Number(button.dataset.booking));document.querySelector('#app').innerHTML=workflowView();restoreForms();updateFormProgress();refreshQuote();return;}
  if(kind==='receipt-view'){await viewReceipt(button.dataset.receiptPath);return;}
  if(kind==='sale-history'){await loadWorkflow(Number(button.dataset.booking));workflowSelect(button.dataset.booking);document.querySelector('#workflowSale')?.scrollIntoView({block:'center'});return;}
+ if(kind==='repair-booking'){
+  const form=button.closest('form');if(form?.id!=='workflowBooking')return;
+  queue=await outboxRows();const keys=JSON.parse(form.dataset.pendingKeys||'[]');
+  if(!rejectedBooking(keys.map(key=>queue.find(row=>row.key===key))))throw new Error('Исправление недоступно: сначала проверьте результат прежней отправки.');
+  form.dataset.repairingBooking='1';updateFormProgress();revealBookingForm(form);return;
+ }
  if(kind==='repair-sale'){
   const form=button.closest('form');if(form?.id!=='workflowSale')return;
   await loadWorkflow(selected);const b=data.bookings.find(b=>b.id===selected),d=b?.draft,keys=JSON.parse(form.dataset.pendingKeys||'[]'),rows=keys.map(key=>queue.find(row=>row.key===key));
@@ -305,7 +320,8 @@ function updateFormProgress(){
   let note=form.querySelector('[data-operation-progress]');if(!note){note=document.createElement('div');note.dataset.operationProgress='';note.setAttribute('role','status');form.append(note);}
   const failed=rows.find(r=>r?.error);
   const repairable=form.id==='workflowSale'&&saleQueueRepairable(rows),repairing=repairable&&form.dataset.repairing==='1',rejected=repairable&&rejectedSaleCounts(rows);
-  note.textContent=repairing?(rejected?'Общее количество сверено с завершённой полной съёмкой. Сохраните исправление: прежний чек, проданное количество и выбранные файлы остаются в очереди и продолжат отправку.':'Исправьте фактическое количество проданных кадров или добавьте недостающие новые фотографии. Принятые чек и фото сохранятся. Повторные фотографии не увеличивают количество.'):finished?(form.id==='workflowBooking'&&rows[0]?.result?.bookingId?`Запись №${rows[0].result.bookingId} сохранена сервером.`:last?.result?.saleId?`Продажа №${last.result.saleId} сохранена сервером: ${last.result.soldPhotos??form.elements.sold?.value??'—'} фото на ${roubles(last.result.amount)}. Подтверждение оплаты показывается отдельно.`:'Операции приняты сервером. Для оригиналов отдельно проверьте статус на Яндекс.Диске.'):`В очереди сохранены все данные. Сервер принял ${done} из ${keys.length}. ${failed?.error||'Отправка продолжается.'} Повторное заполнение не требуется.`;
+  const bookingRepairable=form.id==='workflowBooking'&&rejectedBooking(rows),bookingRepairing=bookingRepairable&&form.dataset.repairingBooking==='1';
+  note.textContent=bookingRepairing?`Запись не была создана: ${bookingRepairable.error} Исправьте поля и сохраните повторно. Прежний чек остаётся в очереди.`:bookingRepairable?`Запись не была создана: ${bookingRepairable.error} Нажмите «Исправить запись», чтобы изменить данные этой же отправки.`:repairing?(rejected?'Общее количество сверено с завершённой полной съёмкой. Сохраните исправление: прежний чек, проданное количество и выбранные файлы остаются в очереди и продолжат отправку.':'Исправьте фактическое количество проданных кадров или добавьте недостающие новые фотографии. Принятые чек и фото сохранятся. Повторные фотографии не увеличивают количество.'):finished?(form.id==='workflowBooking'&&rows[0]?.result?.bookingId?`Запись №${rows[0].result.bookingId} сохранена сервером.`:last?.result?.saleId?`Продажа №${last.result.saleId} сохранена сервером: ${last.result.soldPhotos??form.elements.sold?.value??'—'} фото на ${roubles(last.result.amount)}. Подтверждение оплаты показывается отдельно.`:'Операции приняты сервером. Для оригиналов отдельно проверьте статус на Яндекс.Диске.'):`В очереди сохранены все данные. Сервер принял ${done} из ${keys.length}. ${failed?.error||'Отправка продолжается.'} Повторное заполнение не требуется.`;
   if(finished&&!allFinished&&form.id==='workflowBooking')note.textContent+=' Чек предоплаты ещё не принят. Он остаётся в очереди ниже; можно создать следующую запись.';
   if(form.id==='workflowSale'){
    let progress=form.querySelector('[data-sale-photo-progress]');
@@ -313,10 +329,14 @@ function updateFormProgress(){
    progress.textContent=saleTransferProgress(rows);
   }
   for(const el of [...form.elements])if(!['button','submit'].includes(el.type))el.disabled=true;
+  if(bookingRepairing)for(const el of [...form.elements])if(el.name&&el.type!=='file')el.disabled=false;
   if(repairing)for(const name of rejected?['total']:['total','sold','selected'])form.elements[name].disabled=false;
   if(repairing&&!rejected)for(const el of form.querySelectorAll('[data-sale-disk] input,[data-sale-disk] button,[data-sale-disk] fieldset'))el.disabled=false;
   const button=form.querySelector('button[type="submit"],button:not([type])');
-  if(button){button.disabled=finished;button.textContent=repairing?(rejected?'Сохранить общее количество и продолжить':'Сохранить исправление и завершить'):finished?'Сохранено':failed?'Повторить отправку сохранённых данных':'Проверить отправку';}
+  if(button){button.disabled=finished;button.textContent=bookingRepairing?'Сохранить исправленную запись':repairing?(rejected?'Сохранить общее количество и продолжить':'Сохранить исправление и завершить'):finished?'Сохранено':failed?'Повторить отправку сохранённых данных':'Проверить отправку';}
+  let bookingRepair=form.querySelector('[data-workflow="repair-booking"]');
+  if(bookingRepairable&&!bookingRepair){bookingRepair=document.createElement('button');bookingRepair.type='button';bookingRepair.className='btn ghost';bookingRepair.dataset.workflow='repair-booking';bookingRepair.textContent='Исправить запись';form.append(bookingRepair);}
+  if(bookingRepair)bookingRepair.hidden=!bookingRepairable||bookingRepairing;
   let repair=form.querySelector('[data-workflow="repair-sale"]');
   if(repairable&&!repair){repair=document.createElement('button');repair.type='button';repair.className='btn ghost';repair.dataset.workflow='repair-sale';repair.textContent='Исправить количество / добавить недостающие фото';form.append(repair);}
   if(repair)repair.textContent=rejected?'Сверить общее количество и продолжить отправку':'Исправить количество / добавить недостающие фото';

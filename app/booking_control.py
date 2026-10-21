@@ -206,20 +206,26 @@ def telegram_text(message):
     return message.encode('utf-16-le')[:budget].decode('utf-16-le', errors='ignore') + suffix
 
 
-async def remind(session, bot, user, kind, prefix, message, now, interval):
+async def remind(session, bot, user, kind, prefix, message, now, interval, *, payload=None):
     # Operations may run in both the bot and web processes. Serialize delivery
     # for each recipient before reading the deduplication row.
     await session.get(User, user.id, with_for_update=True)
     previous = await session.scalar(select(Notification).where(
         Notification.user_id == user.id, Notification.kind == kind,
         Notification.event_key.startswith(prefix)).order_by(Notification.id.desc()).limit(1).with_for_update())
+    from .push_notifications import app_channel
+    in_app = app_channel()
     last_delivery = previous.created_at if previous else None
     if previous and previous.payload:
         try:
-            last_delivery = datetime.fromisoformat(json.loads(previous.payload)['deliveredAt'])
+            metadata = json.loads(previous.payload)
+            last_delivery = datetime.fromisoformat(metadata['queuedAt' if in_app else 'deliveredAt'])
         except (ValueError, KeyError, TypeError):
             pass
-    if previous and (not previous.sent or now - utc(last_delivery) < timedelta(minutes=interval)):
+    reuse = previous and (
+        previous.resolved_at is None and now - utc(last_delivery) < timedelta(minutes=interval)
+        if in_app else not previous.sent or now - utc(last_delivery) < timedelta(minutes=interval))
+    if reuse:
         notification = previous
         notification.text = message
         notification.resolved_at = None
@@ -230,6 +236,13 @@ async def remind(session, bot, user, kind, prefix, message, now, interval):
             {'uid': user.id, 'message': message, 'now': now.replace(tzinfo=None), 'key': key, 'kind': kind})
         notification = await session.scalar(select(Notification).where(
             Notification.user_id == user.id, Notification.event_key == key).with_for_update())
+    if in_app:
+        # Queueing an app event is not Telegram delivery or proof of phone display.
+        # Keep its original queue time while refreshing current scoped details;
+        # a new event is created only after the configured reminder interval.
+        notification.payload = json.dumps({'url': '/app/#home', 'description': message,
+            **(payload or {}), 'queuedAt': utc(last_delivery).isoformat() if reuse else now.isoformat()}, ensure_ascii=False)
+        return notification.id, 0 if reuse else 1
     delivered = 0
     if notification and not notification.sent:
         try:
@@ -277,7 +290,8 @@ async def activity_tick(session, bot, now):
                    'Если нужна помощь или переход в другой отель — свяжитесь с администратором. '
                    'Если запись уже сделана офлайн, синхронизируйте приложение.')
         nid, delivered = await remind(session, bot, item['user'], 'manager_idle',
-            f"manager-idle:{item['shift'].id}:{item['lastBookingId']}:", message, now, settings['idleMinutes'])
+            f"manager-idle:{item['shift'].id}:{item['lastBookingId']}:", message, now, settings['idleMinutes'],
+            payload={'hotelIds': [item['hotelId']], 'shiftId': item['shift'].id, 'managerId': item['user'].id})
         current_ids.add(nid)
         sent += delivered
     admins = list(await session.scalars(select(User).join(UserRole, UserRole.user_id == User.id)
@@ -290,7 +304,8 @@ async def activity_tick(session, bot, now):
         if idle:
             advice = await advisor(session, user.id, scoped, now)
             nid, delivered = await remind(session, bot, user, 'manager_advice', 'manager-advice:',
-                supervisor_message(scoped, advice, idle), now, settings['idleMinutes'])
+                supervisor_message(scoped, advice, idle), now, settings['idleMinutes'],
+                payload={'hotelIds': sorted(h['id'] for h in scoped['hotels'])})
             current_ids.add(nid)
             sent += delivered
     # New bookings, ended shifts and a resolved team situation close old alerts.

@@ -5,8 +5,8 @@ import vm from 'node:vm';
 const original=fs.readFileSync(new URL('../app/attendance_ui/attendance.js',import.meta.url),'utf8');
 const source=original.replace(/^import .*;\n/gm,'').replaceAll('export ','').replace('refresh();card();',`
  globalThis.attendanceTest={refresh,openCamera,
-  prime(){generation=7;data={eligible:true};photo='old-photo';point={latitude:1};pointAt=123;photoAt='old-time';busy=true;cameraActive=true;dialog.open=true;cameraStream={getTracks:()=>[{stop(){globalThis.cameraStops++;}}]};},
-  state(){return {generation,data,photo,point,pointAt,photoAt,busy,cameraActive,cameraStream,open:dialog.open};}
+  prime(){generation=7;data={eligible:true};photo='old-photo';point={latitude:1};pointAt=123;pointSaved=true;photoAt='old-time';busy=true;cameraActive=true;dialog.open=true;cameraStream={getTracks:()=>[{stop(){globalThis.cameraStops++;}}]};},
+  state(){return {generation,data,photo,point,pointAt,pointSaved,photoAt,busy,cameraActive,cameraStream,open:dialog.open};}
  };
 `);
 
@@ -32,6 +32,7 @@ function fixture(){
  let state=c.attendanceTest.state();
  assert.equal(state.generation,8);assert.equal(state.data,null);assert.equal(state.photo,null);
  assert.equal(state.point,null);assert.equal(state.pointAt,0);assert.equal(state.photoAt,null);
+ assert.equal(state.pointSaved,false);
  assert.equal(state.busy,false);assert.equal(state.cameraActive,false);assert.equal(state.cameraStream,null);
  assert.equal(state.open,false);assert.equal(c.cameraStops,1);
  requests.shift()({eligible:true,start:{status:'STARTED'},end:{status:'FINISHED'}});

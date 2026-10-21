@@ -29,7 +29,7 @@ from .services.booking_notices import booking_description, notice_booking_id
 
 log = logging.getLogger(__name__)
 ROLES = {'OWNER', 'ADMIN', 'PHOTOGRAPHER', 'MANAGER'}
-KINDS = {'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test', 'lunch_start', 'lunch_end', 'attendance', 'attendance_fine', 'sale_discount'}
+KINDS = {'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test', 'lunch_start', 'lunch_end', 'attendance', 'attendance_fine', 'sale_discount', 'manager_idle', 'manager_advice'}
 
 
 def app_channel():
@@ -157,6 +157,46 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
     roles = set(await session.scalars(select(UserRole.role).where(UserRole.user_id == notice.user_id)))
     if not user or not user.active or not roles & ROLES:
         return False
+    if notice.kind in {'manager_idle', 'manager_advice'}:
+        from .booking_control import preferences
+        from .models import HotelEmployee, Shift, ShiftCheckIn, ShiftCheckOut
+        if not (await preferences(session))['enabled']:
+            return False
+        try:
+            details = json.loads(notice.payload or '{}')
+            hotels = details['hotelIds']
+            if (not isinstance(hotels, list) or not hotels
+                    or any(type(hid) is not int or hid <= 0 for hid in hotels)):
+                return False
+        except (KeyError, TypeError, ValueError):
+            return False
+        if notice.kind == 'manager_advice':
+            if 'OWNER' in roles:
+                return True
+            allowed = set(await session.scalars(select(HotelEmployee.hotel_id).where(
+                HotelEmployee.user_id == user.id)))
+            # A previous message can contain several hotels and staff names.
+            # Losing any scope hides the entire old message rather than leaking it.
+            return bool('ADMIN' in roles and set(hotels) <= allowed)
+        if ('MANAGER' not in roles or details.get('managerId') != user.id
+                or type(details.get('shiftId')) is not int or len(hotels) != 1):
+            return False
+        shift = await session.get(Shift, details['shiftId'])
+        now = current_utc().replace(tzinfo=None)
+        if (not shift or shift.user_id != user.id or shift.hotel_id != hotels[0]
+                or shift.status == 'CANCELLED' or not shift.start_at <= now < shift.end_at):
+            return False
+        from zoneinfo import ZoneInfo
+
+        from .config import config
+        day = current_utc().astimezone(ZoneInfo(config.training_timezone)).date()
+        started = await session.scalar(select(ShiftCheckIn.id).where(
+            ShiftCheckIn.user_id == user.id, ShiftCheckIn.shift_date == day,
+            ShiftCheckIn.status == 'STARTED'))
+        ended = await session.scalar(select(ShiftCheckOut.id).where(
+            ShiftCheckOut.user_id == user.id, ShiftCheckOut.shift_date == day,
+            ShiftCheckOut.status == 'FINISHED'))
+        return bool(started and not ended)
     if notice.kind in {'booking_assignment', 'booking_reminder'}:
         from .models import Booking
         from .services.assignment_notifications import ACTIVE
@@ -280,12 +320,14 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
 def payload_for(notice):
     urls = {'booking_assignment': '/app/#shootings', 'control': '/app/#insights', 'daily_summary': '/app/#insights',
             'sale_ready': '/app/#workflow', 'sale_created': '/app/#finance', 'academy': '/app/#academy',
-            'attendance': '/app/#workday', 'attendance_fine': '/app/#finance', 'sale_discount': '/app/#workflow'}
+            'attendance': '/app/#workday', 'attendance_fine': '/app/#finance', 'sale_discount': '/app/#workflow',
+            'manager_idle': '/app/#home', 'manager_advice': '/app/#home'}
     titles = {'booking_assignment': 'Назначена съёмка', 'booking_reminder': 'Скоро съёмка', 'chat': 'Новое сообщение', 'call': 'Входящий звонок',
               'sale_ready': 'Съёмка готова к продаже', 'sale_created': 'Оформлена продажа', 'academy': 'Готов разбор практики', 'push_test': 'Проверка уведомлений',
               'lunch_start': 'Сотрудник ушёл на обед', 'lunch_end': 'Сотрудник вернулся с обеда',
               'attendance': 'Отметка смены', 'attendance_fine': 'Контроль времени смены',
-              'sale_discount': 'Согласование скидки 50%'}
+              'sale_discount': 'Согласование скидки 50%', 'manager_idle': 'Пора пригласить гостей на съёмку',
+              'manager_advice': 'Проверьте записи и команду отелей'}
     try:
         details = json.loads(notice.payload or '{}')
     except (TypeError, ValueError):
