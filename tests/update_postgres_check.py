@@ -239,6 +239,28 @@ async def main():
         assert (await reset_sales_fines(engine, 'ci-scoped-sales-reset-332', set()))['replayed']
         print('PostgreSQL scoped sales/fines reset: archived, originals and shifts preserved, restart safe: PASS')
 
+        from app.services.bookings import create_booking_record
+        from app.work_history_reset import reset_old_work
+        work_reset = await reset_old_work(engine, {owner_tg})
+        assert not work_reset['replayed']
+        async with engine.connect() as conn:
+            for name in ('bookings', 'shootings', 'sales', 'photos', 'sale_drafts'):
+                assert await conn.scalar(text(f'SELECT count(*) FROM {name}')) == 0
+            assert await conn.scalar(text('SELECT count(*) FROM shifts')) == before_shifts
+            assert await conn.scalar(text('SELECT count(*) FROM shift_check_ins')) > 0
+        async with factory() as session:
+            owner = await session.get(User, 1)
+            fresh = await create_booking_record(session, owner, {
+                'client_name': 'New test guest', 'client_phone': None, 'room': 'New',
+                'hotel_id': 1, 'package_id': 1, 'guest_count': 1, 'deposit': '0',
+                'shoot_date': '2026-10-21', 'shoot_time': '15:00'})
+            fresh_id = fresh.id
+            await session.commit()
+        assert (await reset_old_work(engine, set()))['replayed']
+        async with engine.connect() as conn:
+            assert await conn.scalar(text('SELECT count(*) FROM bookings WHERE id=:id'), {'id': fresh_id}) == 1
+        print('PostgreSQL complete work reset: archived, shifts retained, fresh booking works, restart safe: PASS')
+
 
 
     finally:
