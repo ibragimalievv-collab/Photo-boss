@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import config
-from ..models import Booking, Setting, User, UserRole
+from ..models import Booking, Hotel, Setting, User, UserRole
 from ..operations_guard import operation_lease
 from .booking_notices import booking_description
 
@@ -52,10 +52,15 @@ async def queue_twenty_minute_reminders(session, now=None):
                 Notification.user_id == user.id, Notification.event_key == key)):
             continue
         details = await booking_description(session, booking)
+        hotel = await session.get(Hotel, booking.hotel_id)
+        # The lock screen needs the appointment, but not the guest's room or contacts.
+        summary = (f'{booking.shoot_date:%d.%m} в {booking.shoot_time:%H:%M} · '
+                   f'{hotel.name if hotel else "отель не указан"}')
         await queue_notice(session, user.id, kind='booking_reminder', event_key=key,
             url=f'/app/#shootings?booking={booking.id}',
             message=details,
-            payload={'bookingId': booking.id, 'scheduledAt': stamp, 'description': details})
+            payload={'bookingId': booking.id, 'scheduledAt': stamp, 'description': details,
+                     'pushSummary': summary})
         queued += 1
     return queued
 

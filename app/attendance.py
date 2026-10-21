@@ -1,7 +1,8 @@
 """Authenticated self-service shift check-in/out; same ledger as the Telegram bot.
 
-GPS is reported device evidence, NOT proof of presence. Protected mode requires
-human review of location and photo, without automatic GPS/photo penalties.
+GPS is reported device evidence, NOT proof of presence. Fresh online evidence
+inside one configured hotel zone can record a shift automatically; ambiguous
+location and offline evidence remain available for human review.
 """
 from __future__ import annotations
 
@@ -167,7 +168,7 @@ class Attendance:
                 'fine': float(start.get('fine_amount') or 0) if start else 0,
                 'reviewRequired': review_required(),
                 'geoPolicy': 'geofence_review' if review_required() else 'coordinates_only',
-                'geoNotice': ('Расстояние проверяется по зоне назначенного отеля. Фото, форму и присутствие подтверждает руководитель; GPS может быть подменён.'
+                'geoNotice': ('При свежих координатах внутри зоны одного отеля и сохранённом фото смена подтверждается автоматически. При неточных координатах, вне зоны или без настроенной зоны нужна проверка руководителя. Личность и форму автоматически не проверяем.'
                               if review_required() else 'Координаты сохраняются. Проверка расстояния до отеля пока не настроена.'),
                 'startTime': '09:00', 'lateFine': 500}
 
@@ -255,23 +256,74 @@ class Attendance:
                 raise AccessError('Рабочая дата изменилась. Обновите экран.', 409)
             if review_required():
                 table, field, _, _ = attendance_fields(body['purpose'])
+                # Keep submitted evidence for leadership inspection even when
+                # the technical checks allow immediate confirmation.
                 await conn.execute(text(f'''UPDATE {table} SET {field}=:file,
                     offline_claimed_at=:now,status='PENDING_REVIEW' WHERE id=:id'''),
                     {'file': file_id, 'now': now.replace(tzinfo=None), 'id': row['id']})
-                await self.api.audit_write(conn, actor, 'attendance_review_requested', table, row['id'],
-                    'Фото и координаты сохранены; лицо, форма и присутствие требуют проверки; расчёт времени автоматический.')
-                from .attendance_fines import reconcile_day
-                await reconcile_day(self.api, conn, actor['id'], day, now)
+                # The hotel plan/zone may have changed while the camera or Disk
+                # upload was open. Re-check current reference data before auto approval.
+                previous_context = row.get('geofence') or {}
+                context = await capture_context(self.api, conn, actor['id'], day, body['purpose'],
+                    row['id'], row['latitude'], row['longitude'], previous_context.get('accuracyM'))
+                automatic = (context.get('state') == 'inside' and context.get('source') == 'online'
+                             and 0 <= (self.now()-utc(row['location_received_at'])).total_seconds() <= LOCATION_TTL
+                             and (is_start or start['status'] == 'STARTED'))
+                if automatic:
+                    await self.confirm(conn, actor, row, body['purpose'], day, now, file_id)
+                    await self.api.audit_write(conn, actor, 'attendance_auto_confirmed', table, row['id'],
+                        'Свежие координаты в зоне назначенного отеля; JPEG проверен и сохранён. Личность и форма автоматически не проверялись.')
+                else:
+                    await self.api.audit_write(conn, actor, 'attendance_review_requested', table, row['id'],
+                        'Фото и координаты сохранены; нужна проверка руководителя. Расчёт времени автоматический.')
+                    from .attendance_fines import reconcile_day
+                    await reconcile_day(self.api, conn, actor['id'], day, now)
             else:
                 await self.confirm(conn, actor, row, body['purpose'], day, now, file_id)
+            await self.notify_submission(conn, actor, body['purpose'], row['id'], day)
             start, end = await self.records(conn, actor['id'], day)
         return web.json_response(self.result(actor, start, end, self.now()))
+
+    async def notify_submission(self, conn, actor, purpose, row_id, day):
+        """Persist the worker and scoped leadership notice in the same transaction."""
+        from sqlalchemy import select
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        from .models import ShiftCheckIn, ShiftCheckOut, User, UserRole
+        from .push_notifications import queue_notice
+        model = ShiftCheckIn if purpose == 'start' else ShiftCheckOut
+        async with AsyncSession(bind=conn, expire_on_commit=False) as session:
+            row = await session.get(model, row_id)
+            user = await session.get(User, actor['id'])
+            context = await read_json(self.api, conn, context_key(purpose, row_id)) or {}
+            recipients = {actor['id']}
+            candidates = set(await session.scalars(select(UserRole.user_id).where(UserRole.role.in_(['OWNER', 'ADMIN']))))
+            for uid in candidates:
+                roles = set(await session.scalars(select(UserRole.role).where(UserRole.user_id == uid)))
+                if await self.day_in_scope(conn, {'id': uid, 'roles': roles}, actor['id'], day):
+                    recipients.add(uid)
+            when = row.started_at if purpose == 'start' else row.ended_at
+            local = utc(when or row.offline_claimed_at).astimezone(self.api.tz)
+            description = (f'Сотрудник: {user.name}\n'
+                           f'{"Начало" if purpose == "start" else "Завершение"} смены: {day:%d.%m.%Y} {local:%H:%M}\n'
+                           f'Отель: {context.get("hotelName", "нужна проверка привязки")}\n'
+                           f'{"Подтверждено автоматически по фото и координатам" if row.status in {"STARTED", "FINISHED"} else "Нужна проверка руководителя"}.')
+            for uid in sorted(recipients):
+                recipient = await session.get(User, uid)
+                if recipient and recipient.active:
+                    await queue_notice(session, uid, kind='attendance', event_key=f'attendance:{purpose}:{row_id}:submitted',
+                        url='/app/#workday', message=description,
+                        payload={'attendanceId': row_id, 'purpose': purpose, 'userId': actor['id'],
+                                 'date': str(day), 'hotelId': context.get('hotelId'), 'status': row.status,
+                                 'description': description})
+            await session.flush()
 
     async def confirm(self, conn, actor, row, purpose, day, when, file_id):
         """Caller holds the original attendance row lock; time charges reconcile once."""
         from .services.shifts import LATE_FINE, is_late
         is_start = purpose == 'start'
         table, field, final, at = attendance_fields(purpose)
+        correcting = row['status'] == final
         late = bool(is_start and is_late(when) and not review_required())
         fine = LATE_FINE if late else 0
         extra = ',late=:late,fine_amount=:fine' if is_start else ''
@@ -285,12 +337,12 @@ class Attendance:
             async with AsyncSession(bind=conn, expire_on_commit=False) as session:
                 await close_breaks(session, row['user_id'], day, when.replace(tzinfo=None), await session.get(User, actor['id']))
                 await session.flush()
-        if late:
+        if late and not correcting:
             await conn.execute(text('''INSERT INTO payroll_entries (user_id,kind,amount,period,note,created_at)
                 VALUES (:uid,'Штраф за опоздание',:amount,:period,:note,:now)'''),
                 {'uid': row['user_id'], 'amount': -fine, 'period': day.isoformat(),
                  'note': f'Начало смены после 09:00; shift_check_in={row["id"]}; miniapp', 'now': self.now().replace(tzinfo=None)})
-        if review_required():
+        if review_required() or correcting:
             from .attendance_fines import reconcile_day
             await reconcile_day(self.api, conn, row['user_id'], day, self.now())
         await self.api.audit_write(conn, actor, 'shift_started' if is_start else 'shift_finished',
@@ -337,56 +389,65 @@ class Attendance:
         await self.api.audit_write(conn, actor, 'offline_attendance_received', table, row['id'],
             json.dumps({'claimedAt': claimed.isoformat(), 'receivedAt': now.isoformat(), 'accuracy': accuracy,
                         'note': 'Время устройства и присутствие не подтверждены; автоматический расчёт исправляет руководитель при уважительной причине.'}, ensure_ascii=False))
+        await self.notify_submission(conn, actor, data['purpose'], row['id'], day)
         return {'attendanceStatus': 'PENDING_REVIEW', 'attendanceId': row['id']}
 
     async def pending(self, request):
-        from .people import check_editor
+        from .people import People, check_editor
         check_editor(request['miniapp_actor']['roles'])
         actor, items = request['miniapp_actor'], []
         async with self.api.engine.connect() as conn:
+            actor = actor | {'roles': await People(self.api).current_editor(conn, actor['id'])}
             scopes = {}
             for purpose in ('start', 'end'):
-                table, _, _, _ = attendance_fields(purpose)
+                table, _, final, at = attendance_fields(purpose)
                 # Filter before the visible-page limit. Foreign hotels must not
                 # fill the first page and hide an administrator's own requests.
-                cursor, visible = None, 0
-                while visible < 200:
-                    where = '' if cursor is None else 'AND (s.shift_date>:cursor_day OR (s.shift_date=:cursor_day AND s.id>:cursor_id))'
-                    rows = await self.api.rows(conn, f'''SELECT s.id,s.user_id,u.name,s.shift_date,s.offline_claimed_at,s.location_received_at,s.latitude,s.longitude
-                        FROM {table} s JOIN users u ON u.id=s.user_id WHERE s.status='PENDING_REVIEW'
-                        {where} ORDER BY s.shift_date,s.id LIMIT 200''',
-                        **({'cursor_day': cursor[0], 'cursor_id': cursor[1]} if cursor else {}))
-                    if not rows:
-                        break
-                    for r in rows:
-                        day = datetime.fromisoformat(str(r['shift_date'])).date()
-                        key = r['user_id'], day
-                        if key not in scopes:
-                            scopes[key] = await self.day_in_scope(conn, actor, key[0], day)
-                        if scopes[key]:
-                            items.append(dict(r) | {'purpose': purpose, 'shift_date': str(r['shift_date']),
-                                'offline_claimed_at': utc(r['offline_claimed_at']).isoformat(),
-                                'location_received_at': utc(r['location_received_at']).isoformat(),
-                                'geofence': await read_json(self.api, conn, context_key(purpose, r['id']))})
-                            visible += 1
-                            if visible == 200:
-                                break
-                    cursor = rows[-1]['shift_date'], rows[-1]['id']
-                    if len(rows) < 200:
-                        break
-        return web.json_response({'items': items,
+                visible = 0
+                # Pending evidence always takes precedence over recent history.
+                for status in ('PENDING_REVIEW', final):
+                    cursor = None
+                    while visible < 200:
+                        where = '' if cursor is None else 'AND (s.shift_date>:cursor_day OR (s.shift_date=:cursor_day AND s.id>:cursor_id))'
+                        history = '' if status == 'PENDING_REVIEW' else 'AND s.shift_date>=:since AND s.offline_claimed_at IS NOT NULL'
+                        rows = await self.api.rows(conn, f'''SELECT s.id,s.user_id,u.name,s.shift_date,s.status,s.{at} AS confirmed_at,s.offline_claimed_at,s.location_received_at,s.latitude,s.longitude
+                            FROM {table} s JOIN users u ON u.id=s.user_id WHERE s.status=:status
+                            {history} {where} ORDER BY s.shift_date,s.id LIMIT 200''',
+                            status=status, since=self.now().astimezone(self.api.tz).date()-timedelta(days=7),
+                            **({'cursor_day': cursor[0], 'cursor_id': cursor[1]} if cursor else {}))
+                        if not rows:
+                            break
+                        for r in rows:
+                            day = datetime.fromisoformat(str(r['shift_date'])).date()
+                            key = r['user_id'], day
+                            if key not in scopes:
+                                scopes[key] = await self.day_in_scope(conn, actor, key[0], day)
+                            if scopes[key]:
+                                items.append(dict(r) | {'purpose': purpose, 'shift_date': str(r['shift_date']),
+                                    'offline_claimed_at': utc(r['offline_claimed_at']).isoformat(),
+                                    'location_received_at': utc(r['location_received_at']).isoformat(),
+                                    'confirmedAt': utc(r['confirmed_at']).isoformat() if r['confirmed_at'] else None,
+                                    'geofence': await read_json(self.api, conn, context_key(purpose, r['id']))})
+                                visible += 1
+                                if visible == 200:
+                                    break
+                        cursor = rows[-1]['shift_date'], rows[-1]['id']
+                        if len(rows) < 200:
+                            break
+        return web.json_response({'items': sorted(items, key=lambda r: (r['status'] != 'PENDING_REVIEW', r['shift_date'], r['id'])),
             'scopeNotice': '' if 'OWNER' in actor['roles'] else
                 'Показаны отметки со сменами только в назначенных вам отелях. Без плана или с другими отелями проверяет владелец.'})
 
     async def evidence(self, request):
-        from .people import check_editor, positive_id
+        from .people import People, check_editor, positive_id
         from .services.media_files import load_private_media
         check_editor(request['miniapp_actor']['roles'])
         table, field, _, _ = attendance_fields(request.match_info['purpose'])
         async with self.api.engine.connect() as conn:
+            actor = request['miniapp_actor'] | {'roles': await People(self.api).current_editor(conn, request['miniapp_actor']['id'])}
             rows = await self.api.rows(conn, f'SELECT user_id,shift_date,{field} AS photo FROM {table} WHERE id=:id AND offline_claimed_at IS NOT NULL', id=positive_id(request.match_info['id']))
             if rows:
-                await self.require_day_scope(conn, request['miniapp_actor'], rows[0]['user_id'],
+                await self.require_day_scope(conn, actor, rows[0]['user_id'],
                     datetime.fromisoformat(str(rows[0]['shift_date'])).date())
         if not rows or not rows[0]['photo']:
             raise AccessError('Фото не найдено.', 404)
@@ -398,7 +459,8 @@ class Attendance:
         actor = request['miniapp_actor']
         check_editor(actor['roles'])
         body = await self.api.body(request)
-        if set(body) != {'userId', 'date', 'purpose', 'approved', 'verifiedAt', 'note'} or type(body['approved']) is not bool or not isinstance(body['note'], str) or not 3 <= len(body['note'].strip()) <= 1000:
+        fields = {'userId', 'date', 'purpose', 'approved', 'verifiedAt', 'note'}
+        if set(body) not in (fields, fields | {'expectedAt'}) or type(body['approved']) is not bool or not isinstance(body['note'], str) or not 3 <= len(body['note'].strip()) <= 1000:
             raise AccessError('Укажите решение и основание проверки.', 400)
         uid = positive_id(body['userId'])
         if uid == actor['id']:
@@ -417,16 +479,22 @@ class Attendance:
                 raise AccessError('Отметка для проверки не найдена.', 404)
             if (row['status'] == final and when and utc(row[at]) == when) or (row['status'] == 'REJECTED' and not when):
                 return web.json_response({'ok': True, 'alreadyReviewed': True})
-            if row['status'] != 'PENDING_REVIEW':
+            correcting = row['status'] == final and when is not None
+            if correcting and body.get('expectedAt') != utc(row[at]).isoformat():
+                raise AccessError('Время уже изменено. Обновите список отметок.', 409)
+            if row['status'] != 'PENDING_REVIEW' and not correcting:
                 raise AccessError('Отметка уже рассмотрена. Обновите список.', 409)
             if when:
                 if body['purpose'] == 'end' and (not start or start['status'] != 'STARTED' or when < utc(start['started_at'])):
                     raise AccessError('Сначала подтвердите начало; завершение должно быть позже него.', 409)
+                if body['purpose'] == 'start' and end and end['status'] == 'FINISHED' and when > utc(end['ended_at']):
+                    raise AccessError('Начало смены не может быть позже её завершения.', 409)
                 await self.confirm(conn, actor, row, body['purpose'], day, when, row[field])
             else:
                 await conn.execute(text(f"UPDATE {table} SET status='REJECTED' WHERE id=:id"), {'id': row['id']})
             await self.api.audit_write(conn, actor, 'offline_attendance_reviewed', table, row['id'],
-                json.dumps({'before': 'PENDING_REVIEW', 'after': final if when else 'REJECTED',
+                json.dumps({'before': row['status'], 'previousAt': utc(row[at]).isoformat() if row.get(at) else None,
+                            'after': final if when else 'REJECTED',
                             'verifiedAt': when.isoformat() if when else None, 'note': body['note'].strip()}, ensure_ascii=False))
         return web.json_response({'ok': True})
 

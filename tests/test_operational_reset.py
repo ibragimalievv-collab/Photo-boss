@@ -44,6 +44,8 @@ async def fixture():
         await put('hotel_employees', hotel_id=1, user_id=2)
         await put('clients', id=1, name='Guest', phone='+79991234567')
         await put('packages', id=1, name='Photo', price_per_photo=400)
+        await put('hotel_tariffs', id=1, hotel_id=1, name='Фото', kind='UNIT', price=Decimal('400.00'))
+        await put('hotel_album_tariffs', id=1, hotel_id=1, name='Маленький альбом', price=Decimal('10000.00'))
         await put('bookings', id=10, hotel_id=1, client_id=1, room='22', guest_count=3,
                   shoot_date=date(2026, 10, 16), shoot_time=time(12, 13, 14, 500),
                   package_id=1, manager_id=1, photographer_id=2, status='COMPLETED')
@@ -57,6 +59,9 @@ async def fixture():
                   fingerprint='e' * 64, photo_ids='[12]')
         await put('sale_drafts', id=13, booking_id=10, created_by_id=2, status='COMPLETED',
                   expected_amount=Decimal('800.25'), sold_photos=2)
+        await put('sale_discount_approvals', id=27, booking_id=10, requested_by_id=2,
+                  total_photos=150, unit_price=Decimal('400.00'), status='APPROVED',
+                  reviewed_by_id=1, reviewed_at=datetime(2026, 10, 16, 10, 15, tzinfo=UTC).replace(tzinfo=None))
         await put('sale_draft_photos', draft_id=13, telegram_file_id='selected',
                   telegram_unique_id='selected-unique', storage_path='/selected/13/a.jpg',
                   sha256='a' * 64, byte_size=123)
@@ -107,6 +112,11 @@ async def fixture():
         await put('cash_movements', category='PAYROLL', amount=Decimal('100.25'),
                   paid_on=date(2026, 10, 16), employee_id=2, note='Paid', created_by_id=1)
         await put('notifications', user_id=1, text='Old sale', kind='control', event_key='sale:15:payment')
+        await put('notifications', user_id=1, text='Old discount', kind='sale_discount',
+                  event_key='sale-discount:27:requested', payload='{"bookingId":10,"discountId":27}')
+        await put('notifications', user_id=1, text='Old shift', kind='attendance',
+                  event_key='attendance:start:1:submitted',
+                  payload='{"attendanceId":1,"purpose":"start","userId":2,"date":"2026-10-16"}')
         await put('notifications', user_id=2, text='Academy retained', kind='academy', event_key='academy:1')
         await put('settings', key='PHOTO_PRICE', value='400')
         await put('settings', key='YANDEX_DISK_TOKEN', value='test-secret-preserved')
@@ -143,6 +153,7 @@ def test_atomic_reset_complete_archive_typed_restore_and_preserved_domains():
             report = await preview(engine)
             assert all(report['row_counts'][name] > 0 for name in DELETE_TABLES)
             assert report['row_counts']['payroll_entries'] == 3
+            assert report['row_counts']['sale_discount_approvals'] == 1
             async with engine.connect() as conn:
                 assert await count(conn, 'operational_reset_archives') == 0
             result = await reset(engine, 'reset-request-0001', 1,
@@ -151,12 +162,15 @@ def test_atomic_reset_complete_archive_typed_restore_and_preserved_domains():
             assert result['preserved_manifest']['shifts']['count'] == 1
             assert result['preserved_manifest']['users']['count'] == 2
             assert result['preserved_manifest']['payroll_entries']['count'] == 2
+            assert result['preserved_manifest']['hotel_album_tariffs']['count'] == 1
+            assert result['preserved_manifest']['hotel_tariffs']['count'] == 1
             assert (await preview(engine))['total_deleted_rows'] == 0
             assert await inspect_archive(engine, 'reset-request-0001') == {k: v for k, v in result.items() if k != 'replayed'}
             async with engine.connect() as conn:
                 for name in DELETE_TABLES:
                     assert await count(conn, name) == 0
                 for name in ('users', 'user_roles', 'hotel_employees', 'clients', 'packages',
+                             'hotel_tariffs', 'hotel_album_tariffs',
                              'shifts', 'compensation', 'cash_movements', 'operation_requests',
                              'delivery_contacts', 'delivery_campaigns', 'delivery_campaign_recipients',
                              'training_assignments', 'training_submissions', 'academy_lesson_progress',
@@ -170,6 +184,10 @@ def test_atomic_reset_complete_archive_typed_restore_and_preserved_domains():
                 archive = (await conn.execute(select(OperationalResetArchive.__table__))).mappings().one()
                 assert hashlib.sha256(archive['payload'].encode()).hexdigest() == archive['payload_sha256']
                 assert json.loads(archive['row_counts']) == report['row_counts']
+                discount = json.loads(archive['payload'])['deleted']['sale_discount_approvals']
+                assert len(discount['rows']) == 1
+                assert discount['rows'][0][discount['columns'].index('status')] == ['str', 'APPROVED']
+                assert await conn.scalar(text('SELECT price FROM hotel_album_tariffs WHERE id=1')) == 10000
                 assert not (await conn.exec_driver_sql('PRAGMA foreign_key_check')).all()
             restored = await restore(engine, 'reset-request-0001', 1)
             assert not restored['replayed'] and restored['generation'] != result['generation']
@@ -182,6 +200,13 @@ def test_atomic_reset_complete_archive_typed_restore_and_preserved_domains():
                 booking = (await conn.execute(select(Booking.__table__))).mappings().one()
                 assert booking['shoot_date'] == date(2026, 10, 16)
                 assert booking['shoot_time'] == time(12, 13, 14, 500)
+                discount = (await conn.execute(select(Base.metadata.tables['sale_discount_approvals']))).mappings().one()
+                assert discount['id'] == 27 and discount['booking_id'] == 10
+                assert discount['requested_by_id'] == 2 and discount['reviewed_by_id'] == 1
+                assert discount['status'] == 'APPROVED' and discount['total_photos'] == 150
+                assert discount['unit_price'] == Decimal('400.00')
+                assert discount['reviewed_at'] == datetime(2026, 10, 16, 10, 15, tzinfo=UTC).replace(tzinfo=None)
+                assert await conn.scalar(text('SELECT price FROM hotel_album_tariffs WHERE id=1')) == 10000
                 assert not (await conn.exec_driver_sql('PRAGMA foreign_key_check')).all()
                 assert await count(conn, 'audit_logs') == 3
         finally:
@@ -205,6 +230,31 @@ def test_reset_retry_never_erases_new_work_and_restore_refuses_new_work():
                 assert await count(conn, 'bookings') == 1
                 assert await count(conn, 'operational_reset_archives') == 1
                 assert await count(conn, 'operational_reset_restores') == 0
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_legacy_archive_restores_after_new_empty_discount_dependency_is_added(monkeypatch):
+    async def run():
+        engine = await fixture()
+        try:
+            # Reproduce an archive made before discount approvals existed.
+            async with engine.begin() as conn:
+                await conn.execute(text('DROP TABLE sale_discount_approvals'))
+            with monkeypatch.context() as context:
+                context.setattr('app.operational_reset.DELETE_TABLES', tuple(
+                    name for name in DELETE_TABLES if name != 'sale_discount_approvals'))
+                await reset(engine, 'reset-request-0001', 1)
+            async with engine.begin() as conn:
+                await conn.run_sync(lambda sync: Base.metadata.tables['sale_discount_approvals'].create(sync))
+            result = await restore(engine, 'reset-request-0001', 1)
+            assert not result['replayed']
+            async with engine.connect() as conn:
+                assert await count(conn, 'bookings') == 1
+                assert await count(conn, 'sale_discount_approvals') == 0
+                assert await conn.scalar(text('SELECT price FROM hotel_album_tariffs WHERE id=1')) == 10000
+                assert not (await conn.exec_driver_sql('PRAGMA foreign_key_check')).all()
         finally:
             await engine.dispose()
     asyncio.run(run())

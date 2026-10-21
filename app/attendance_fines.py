@@ -57,6 +57,71 @@ async def rules(api, conn):
     return await read_json(api, conn, RULES_KEY) or dict(DEFAULT_RULES)
 
 
+async def notify_charge(api, conn, key, old, value):
+    """Queue one durable notice for each effective financial change, atomically."""
+    if old is not None and Decimal(str(old.get('amount', 0))) == Decimal(str(value['amount'])):
+        return
+    from urllib.parse import quote
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from .attendance import Attendance
+    from .models import User, UserRole
+    from .push_notifications import queue_notice
+
+    uid, day = value['userId'], datetime.fromisoformat(value['date']).date()
+    if old is None and day < utc(value['updatedAt']).astimezone(api.tz).date():
+        return  # Initial background reconciliation is not a fresh attendance alert.
+    number = int((old or {}).get('noticeRevision', 0)) + 1
+    value['noticeRevision'] = number
+    lo, hi = utc_bounds(day, day, api.tz)
+    hotels = await api.rows(conn, '''SELECT DISTINCT h.name FROM shifts s JOIN hotels h ON h.id=s.hotel_id
+        WHERE s.user_id=:uid AND s.status<>'CANCELLED' AND s.start_at<:hi AND s.end_at>:lo
+        ORDER BY h.name''', uid=uid, lo=lo, hi=hi)
+    label = ('Нет отметки прихода по графику' if value['kind'] == 'late' and not value['observedAt']
+             else LABELS[value['kind']] if value['kind'] != 'late' else 'Опоздание')
+    local_time = lambda raw: utc(raw).astimezone(api.tz).strftime('%d.%m.%Y %H:%M') if raw else 'Нет отметки; требуется проверка'
+    async with AsyncSession(bind=conn, expire_on_commit=False) as session:
+        worker = await session.get(User, uid)
+        if worker is None:
+            return
+        description = (f'{"Начисление изменено" if old is not None else label}.\n'
+                       f'Сотрудник: {worker.name}\nДата смены: {day:%d.%m.%Y}\n'
+                       f'Отель: {", ".join(row["name"] for row in hotels) or "нет плана смены"}\n'
+                       f'По графику: {local_time(value["expectedAt"])}\n'
+                       f'Отметка: {local_time(value["observedAt"])}\n'
+                       f'Начисление: {Decimal(str(value["amount"])):.2f} ₽')
+        if old is not None:
+            description += f' (ранее {Decimal(str(old.get("amount", 0))):.2f} ₽)'
+        if value.get('override'):
+            description += f'\nПричина изменения: {value["override"]["reason"]}'
+        elif not value.get('observedAt'):
+            description += '\nОтсутствие отметки не доказывает отсутствие сотрудника. Руководитель может проверить и исправить начисление.'
+        if not value['ruleConfigured']:
+            description += '\nСумма правила не задана; денежное удержание не назначено.'
+        recipients = {uid}
+        candidates = set(await session.scalars(select(UserRole.user_id).where(UserRole.role.in_(['OWNER', 'ADMIN']))))
+        roles_by_user = {}
+        for candidate in candidates:
+            roles_by_user[candidate] = set(await session.scalars(select(UserRole.role).where(UserRole.user_id == candidate)))
+            if await Attendance(api).day_in_scope(conn, {'id': candidate, 'roles': roles_by_user[candidate]}, uid, day):
+                recipients.add(candidate)
+        for recipient_id in sorted(recipients):
+            recipient = await session.get(User, recipient_id)
+            if not recipient or not recipient.active:
+                continue
+            review = recipient_id != uid and bool(roles_by_user.get(recipient_id, set()) & {'OWNER', 'ADMIN'})
+            url = f'/app/#more?attendanceFine={quote(key, safe="")}' if review else '/app/#finance'
+            await queue_notice(session, recipient_id, kind='attendance_fine',
+                event_key=f'attendance-fine:{day}:{uid}:{value["kind"]}:{number}', url=url,
+                message=description, payload={'fineKey': key, 'userId': uid, 'date': str(day),
+                    'fineKind': value['kind'], 'noticeRevision': number,
+                    'changed': old is not None, 'observedAt': value['observedAt'],
+                    'canReview': review, 'description': description})
+        await session.flush()
+
+
 async def record_charge(api, conn, uid, day, kind, detected, when, expected, now, *, rule):
     key = fine_key(uid, day, kind)
     old = await read_json(api, conn, key)
@@ -67,6 +132,8 @@ async def record_charge(api, conn, uid, day, kind, detected, when, expected, now
     value = {'userId': uid, 'date': str(day), 'kind': kind, 'label': LABELS[kind],
              'detected': detected, 'ruleAmount': rule, 'ruleConfigured': rule is not None, 'calculatedAmount': calculated,
              'expectedAt': expected.isoformat(), 'observedAt': when.isoformat() if when else None}
+    if old and 'noticeRevision' in old:
+        value['noticeRevision'] = old['noticeRevision']
     override = old.get('override') if old else None
     effective = override['amount'] if override else calculated
     value.update(amount=effective, override=override, payrollId=old.get('payrollId') if old else None)
@@ -91,6 +158,7 @@ async def record_charge(api, conn, uid, day, kind, detected, when, expected, now
             now=now.replace(tzinfo=None)))[0]
         value['payrollId'] = row['id']
     value['updatedAt'] = now.isoformat()
+    await notify_charge(api, conn, key, old, value)
     await save_json(conn, key, value)
     await api.audit_write(conn, {'id': uid}, 'attendance_fine_calculated', 'attendance', uid,
                           json.dumps({'date': str(day), 'kind': kind, 'before': old, 'after': value}, ensure_ascii=False))
@@ -228,6 +296,7 @@ class AttendanceFines:
                     VALUES (:uid,:kind,:amount,:period,:note,:now) RETURNING id''', uid=uid, kind=PAYROLL_KINDS[body['kind']],
                     amount=-effective,period=str(day),note=key,now=now.replace(tzinfo=None)))[0]
                 new['payrollId'] = payroll['id']
+            await notify_charge(self.api, conn, key, old, new)
             await save_json(conn, key, new)
             if body['kind'] == 'late':
                 await conn.execute(text('UPDATE shift_check_ins SET fine_amount=:amount WHERE user_id=:uid AND shift_date=:day'),

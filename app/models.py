@@ -181,6 +181,18 @@ class HotelTariff(Base):
                      CheckConstraint('photo_count IS NULL OR photo_count > 0'))
 
 
+class HotelAlbumTariff(Base):
+    """Printed albums are products, never photo packages or frame counts."""
+    __tablename__ = 'hotel_album_tariffs'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    hotel_id: Mapped[int] = mapped_column(ForeignKey('hotels.id'), index=True)
+    name: Mapped[str] = mapped_column(String(150))
+    price: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    __table_args__ = (CheckConstraint('price > 0'),)
+
+
 class WorkBreak(Base):
     __tablename__ = 'work_breaks'
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -288,6 +300,26 @@ class PhotoStorage(Base):
         CheckConstraint("source_kind IN ('PHOTO', 'DOCUMENT')"),
         CheckConstraint("status IN ('PENDING', 'UPLOADING', 'STORED', 'FAILED')"),
         CheckConstraint("attempts >= 0"),
+    )
+
+
+class SaleDiscountApproval(Base):
+    """A supervisor's decision for one whole-shoot quote, not a mutable price."""
+    __tablename__ = 'sale_discount_approvals'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    booking_id: Mapped[int] = mapped_column(ForeignKey('bookings.id', ondelete='CASCADE'), index=True)
+    requested_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    total_photos: Mapped[int] = mapped_column(Integer)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    status: Mapped[str] = mapped_column(String(20), default='PENDING')
+    reviewed_by_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (
+        UniqueConstraint('booking_id', 'total_photos', 'unit_price', name='uq_discount_booking_quote'),
+        CheckConstraint("status IN ('PENDING','APPROVED','REJECTED')"),
+        CheckConstraint('total_photos > 0 AND total_photos <= 10000'),
+        CheckConstraint('unit_price > 0'),
     )
 
 

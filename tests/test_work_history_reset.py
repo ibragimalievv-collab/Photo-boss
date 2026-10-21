@@ -20,22 +20,28 @@ def test_reset_archives_all_work_preserves_attendance_and_new_work_afterwards():
                     SELECT 100,hotel_id,client_id,room,guest_count,deposit,shoot_date,shoot_time,
                     package_id,manager_id,'NEW',CURRENT_TIMESTAMP FROM bookings WHERE id=10'''))
                 kept = {name: (await conn.execute(text(f'SELECT * FROM {name}'))).all()
-                        for name in ('users', 'user_roles', 'hotels', 'packages', 'cash_movements',
+                        for name in ('users', 'user_roles', 'hotels', 'packages', 'hotel_tariffs',
+                            'hotel_album_tariffs', 'cash_movements',
                             'shift_check_ins', 'shift_check_outs', 'work_breaks', 'shifts',
                             'training_assignments', 'training_submissions', 'work_chat_messages', 'operation_requests')}
             result = await reset_old_work(engine, {8000000001})
             assert result['bookings'] == 2 and result['shootings'] == result['sales'] == 1
+            assert result['sale_discount_approvals'] == 1
             assert not result['replayed']
             async with engine.connect() as conn:
                 for name, rows in kept.items():
                     assert (await conn.execute(text(f'SELECT * FROM {name}'))).all() == rows
                 assert list(await conn.scalars(text('SELECT id FROM bookings'))) == []
-                for name in ('shootings', 'sales', 'sale_drafts', 'photos', 'receipts', 'sale_draft_photos'):
+                for name in ('shootings', 'sales', 'sale_drafts', 'photos', 'receipts', 'sale_draft_photos',
+                             'sale_discount_approvals'):
                     assert await conn.scalar(text(f'SELECT count(*) FROM {name}')) == 0
                 assert await conn.scalar(text('SELECT recommendation FROM academy_reviews WHERE id=25')) == 'Keep this feedback'
                 assert await conn.scalar(text('SELECT photo_id FROM academy_reviews WHERE id=25')) is None
                 saved = json.loads(await conn.scalar(text('SELECT payload FROM operational_reset_archives WHERE request_id=:id'), {'id': REQUEST_ID}))
                 assert saved['deleted']['photos']['rows'] and saved['deleted']['sales']['rows']
+                assert saved['deleted']['sale_discount_approvals']['rows']
+                assert await conn.scalar(text("SELECT count(*) FROM notifications WHERE kind='attendance'")) == 1
+                assert await conn.scalar(text("SELECT count(*) FROM notifications WHERE kind='sale_discount'")) == 0
                 assert await conn.scalar(text("SELECT value FROM settings WHERE key='operations:generation'"))
                 assert not (await conn.exec_driver_sql('PRAGMA foreign_key_check')).all()
             async with engine.begin() as conn:

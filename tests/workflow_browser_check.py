@@ -404,8 +404,11 @@ async def main():
                         await form.locator('[name=verifiedAt]').fill(value)
                         await form.locator('[name=note]').fill('Checked photo and shift time')
                         await form.locator('button[type=submit],button:not([type])').click()
-                        await form.wait_for(state='detached')
-                    await panel.get_by_text('Нет отметок, ожидающих проверки.').wait_for()
+                        # Confirmed entries now remain in the seven-day review
+                        # history and expose a revision for later time correction.
+                        await panel.locator(f'.attendance-review[data-purpose={purpose}][data-expected-at]').wait_for(state='attached')
+                    assert await panel.locator('.attendance-review:not([data-expected-at])').count() == 0
+                    assert await panel.locator('.attendance-review[data-expected-at]').count() == 2
                     async with factory() as session:
                         assert (await session.scalar(select(ShiftCheckIn))).status == 'STARTED'
                         assert (await session.scalar(select(ShiftCheckOut))).status == 'FINISHED'

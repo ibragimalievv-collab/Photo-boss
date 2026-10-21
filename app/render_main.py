@@ -32,7 +32,12 @@ from .yandex_disk import install_yandex_disk, storage_recovery_loop
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.41-shift-lunch-pending-sales"
+RELEASE = "miniapp-3.42-attendance-hotel-prices"
+
+
+async def app_redirect(request):
+    # A copied link without the trailing slash must open the same application.
+    raise web.HTTPPermanentRedirect(location=request.rel_url.with_path('/app/', keep_query=True))
 
 
 async def health(request):
@@ -94,6 +99,8 @@ async def on_startup(app):
     )
     if os.getenv('RENDER_SERVICE_ID') == PRODUCTION_SERVICE:
         await reset_old_work(engine, config.admin_ids)
+        from .hotel_price_defaults import apply_owner_hotel_prices
+        await apply_owner_hotel_prices(engine, config.admin_ids)
         await log_booking_readiness(engine)
     from .hotel_points import REVIEW_ENV, SEED_ENV, review_required, startup_hotel_point
     await startup_hotel_point(engine, os.getenv(SEED_ENV, ''), config.admin_ids)
@@ -189,6 +196,7 @@ def main():
     app["bot"], app["dispatcher"] = bot, dispatcher
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
+    app.router.add_get("/app", app_redirect)
     miniapp = install_miniapp(app, engine=engine, bot=bot, lessons=ACADEMY_LESSONS,
                               blocks=ACADEMY_BLOCKS, tz_name=config.training_timezone)
     from .browser_login import install_browser_login

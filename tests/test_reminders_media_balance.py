@@ -24,7 +24,13 @@ from app.models import (
     Shooting,
     User,
 )
-from app.push_notifications import AppPush, deliver_push, eligible, send_push
+from app.push_notifications import (
+    AppPush,
+    deliver_push,
+    eligible,
+    payload_for,
+    send_push,
+)
 from app.services.booking_reminders import queue_twenty_minute_reminders, scheduled_at
 from app.services.bookings import create_booking_record
 from app.services.sale_workflow import (
@@ -66,6 +72,10 @@ def test_twenty_minute_reminder_is_once_and_invalidated_by_assignment_time_or_ca
                 details = json.loads(notice.payload)['description']
                 assert '20.10.2026 в 13:00' in details
                 assert 'Hotel' in details and booking.room in details
+                phone = payload_for(notice)
+                assert '20.10 в 13:00' in phone['body'] and 'Hotel' in phone['body']
+                assert 'Guest' not in phone['body'] and 'Комната' not in phone['body']
+                assert phone['url'] == f'/app/#shootings?booking={booking.id}'
                 await session.commit()
                 request = Request({'id': 2}, {})
                 feed = json.loads((await AppPush(SimpleNamespace(engine=engine)).status(request)).text)

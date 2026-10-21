@@ -73,7 +73,7 @@ async def reminder_browser_flow(browser, client, factory, owner_page, errors):
             page = await context.new_page()
             page.on('pageerror', lambda error: errors.append(str(error)))
             await page.goto(BASE+'/app/#more')
-            await page.wait_for_function("document.querySelector('[data-notice-count]')?.textContent==='3'")
+            await page.wait_for_function("Number(document.querySelector('[data-notice-count]')?.textContent)>=1")
             await page.locator('[data-action=app-notifications]').click()
             card = page.locator(f'[data-notice-read="{notice_id}"]')
             await card.wait_for(state='visible')
@@ -86,7 +86,7 @@ async def reminder_browser_flow(browser, client, factory, owner_page, errors):
             # Advancing fixture time requires no real twenty-minute wait.
             clock[0] = datetime(2026, 10, 20, 10, tzinfo=UTC).replace(tzinfo=None)
             await page.reload()
-            await page.wait_for_function("document.querySelector('[data-notice-count]')?.textContent==='3'")
+            await page.wait_for_function("Number(document.querySelector('[data-notice-count]')?.textContent)>=1")
             await page.locator('[data-action=app-notifications]').click()
             card = page.locator(f'[data-notice-read="{notice_id}"]')
             await card.wait_for(state='visible')

@@ -79,7 +79,9 @@ def test_realtime_start_owns_session_has_rules_and_never_returns_server_key(monk
             assert 'private-test-key' not in json.dumps(result)
             settings = realtime.create_call.await_args.args[1]
             assert settings['tools'] == [] and settings['max_output_tokens'] == 700
-            assert '400 ₽' in settings['instructions'] and 'скидкой до 50%' in settings['instructions']
+            assert all(price in settings['instructions'] for price in ('300 ₽', '400 ₽', '500 ₽'))
+            assert 'после подтверждения владельцем или администратором' in settings['instructions']
+            assert 'сами скидку не утверждают' in settings['instructions']
             assert settings['audio']['input']['turn_detection']['interrupt_response'] is True
             assert settings['audio']['input']['transcription']['language'] == 'ru'
             with pytest.raises(AccessError) as opened:
