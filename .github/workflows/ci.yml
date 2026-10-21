@@ -81,6 +81,12 @@ jobs:
           node --check app/webapp/js/practice.js
           for file in app/webapp/js/*.js; do node --check "$file"; done
           node tests/lunch_recovery_check.mjs
+          node tests/attendance_reset_check.mjs
+          node tests/attendance_recovery_check.mjs
+          node tests/attendance_review_route_check.mjs
+          node tests/bank_payments_client_check.mjs
+          node tests/outbox_recovery_check.mjs
+          node tests/workflow_form_recovery_check.mjs
           node tests/install_client_check.mjs
           node tests/notifications_client_check.mjs
           node tests/disk_folder_client_check.mjs
@@ -137,6 +143,12 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements-dev.txt playwright==1.51.0
       - run: python -m playwright install chromium
+      - name: Verify correction of a rejected mobile booking
+        run: python tests/booking_recovery_browser_check.py
+      - name: Verify camera-only attendance in temporary no-GPS mode
+        run: python tests/attendance_no_gps_browser_check.py
+      - name: Verify mandatory GPS attendance with hotel zones deferred
+        run: python tests/attendance_gps_only_browser_check.py
       - name: Verify camera grant reuse, controls and permission denial
         env:
           CALLS_QA_CONTROLS_ONLY: '1'

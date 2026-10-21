@@ -18,7 +18,17 @@ from app.disk_sale_media import (
     select_photo,
 )
 from app.miniapp_security import AccessError
-from app.models import Booking, Sale, SaleDraft, SaleDraftPhoto, Setting, User, UserRole
+from app.models import (
+    Booking,
+    PayrollEntry,
+    Receipt,
+    Sale,
+    SaleDraft,
+    SaleDraftPhoto,
+    Setting,
+    User,
+    UserRole,
+)
 from app.services.bookings import create_booking_record
 from app.services.sale_workflow import (
     capture_draft_receipt,
@@ -132,6 +142,49 @@ def test_read_only_selection_completes_one_sale_and_rejects_duplicate_frames(mon
             disk.upload_bytes.assert_not_awaited()
             disk.delete.assert_not_awaited()
         finally: await engine.dispose()
+    asyncio.run(run())
+
+
+def test_workflow_disk_last_photo_finishes_sale_without_browser_completion(monkeypatch):
+    """Closing after the last Disk frame cannot leave a fully uploaded draft."""
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
+    from sqlalchemy import text
+    from test_workflow_replay import packet
+
+    from app.workday import Workday
+
+    async def run():
+        engine, factory, _, _, source, disk, did = await prepared(monkeypatch)
+        try:
+            async def rows(conn, sql, **params):
+                return list((await conn.execute(text(sql.replace(' FOR UPDATE', '')), params)).mappings())
+
+            work = Workday(SimpleNamespace(engine=engine, rows=rows, day=date.fromisoformat,
+                today=lambda: date(2026, 9, 22), tz=ZoneInfo('Europe/Moscow')))
+            actor = {'id': 1, 'roles': ['OWNER']}
+            first = packet('disk-first-frame', 'sale_disk_selected', {'draft': {'id': did},
+                'revision': source['revision'], 'path': 'disk:/Hotel/a.jpg'})
+            last = packet('disk-last-frame', 'sale_disk_selected', {'draft': {'id': did},
+                'revision': source['revision'], 'path': 'disk:/Hotel/Family/b.jpg'})
+            assert json.loads((await work.execute(actor, first)).text)['draftStatus'] == 'AWAITING_SELECTED'
+            finished = json.loads((await work.execute(actor, last)).text)
+            assert finished['draftStatus'] == 'COMPLETED'
+            assert finished['selectedPhotos'] == 2 and finished['amount'] == '800.00'
+            assert json.loads((await work.execute(actor, last)).text) == finished
+            completion = packet('disk-browser-final-command', 'sale_complete',
+                {'draft': {'id': did}, 'price': '400.00'})
+            assert json.loads((await work.execute(actor, completion)).text)['saleId'] == finished['saleId']
+            async with factory() as session:
+                assert await session.scalar(select(func.count(Sale.id))) == 1
+                assert await session.scalar(select(func.count(Receipt.id))) == 1
+                assert await session.scalar(select(func.count(PayrollEntry.id))) == 1
+                assert await session.scalar(select(func.count(SaleDraftPhoto.id))) == 2
+            disk.upload_bytes.assert_not_awaited()
+            disk.delete.assert_not_awaited()
+        finally:
+            await engine.dispose()
     asyncio.run(run())
 
 

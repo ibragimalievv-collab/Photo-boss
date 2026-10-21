@@ -20,7 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .miniapp_security import AccessError
-from .models import BankPayment, Booking, Hotel, Receipt, User, utc_now
+from .models import BankPayment, Booking, Hotel, Receipt, Sale, SaleDraft, User, utc_now
 from .services.booking_access import can_access_booking
 from .services.core import audit, roles_of
 from .services.pricing import sale_quote
@@ -137,10 +137,12 @@ class BankPayments:
         return_url = os.getenv('SBER_RETURN_URL', '')
         if not return_url.startswith('https://'):
             raise AccessError('Владелец должен настроить адрес возврата СберБизнес.', 503)
-        optional = {'discountId', 'albumId', 'albumQuantity'}
+        optional = {'discountId', 'albumId', 'albumQuantity', 'sourceDraftId'}
         if (set(body) - optional != {'bookingId', 'total', 'sold', 'tariffId', 'amount', 'requestKey', 'purpose'}
                 or type(body['bookingId']) is not int or type(body['total']) is not int or type(body['sold']) is not int
                 or body['purpose'] not in {'PURCHASE', 'DEPOSIT', 'BALANCE'}
+                or (body.get('sourceDraftId') is not None and
+                    (type(body['sourceDraftId']) is not int or body['sourceDraftId'] <= 0))
                 or (body['purpose'] == 'PURCHASE' and not 0 < body['sold'] <= body['total'] <= 10000)
                 or not isinstance(body['requestKey'], str) or not 16 <= len(body['requestKey']) <= 80):
             raise AccessError('Выберите съёмку, тариф и количество кадров.', 400)
@@ -163,17 +165,32 @@ class BankPayments:
                 from .services.sale_workflow import validate_remaining_photos
                 previous, paid, _ = await payment_totals(session, booking.id)
                 if body['purpose'] == 'PURCHASE':
-                    await validate_remaining_photos(session, booking, body['total'], body['sold'])
                     from .services.sale_workflow import active_draft
-                    draft = await active_draft(session, booking.id)
+                    source_id = body.get('sourceDraftId')
+                    draft = await session.get(SaleDraft, source_id) if source_id else await active_draft(session, booking.id)
+                    if source_id and (not draft or draft.booking_id != booking.id or draft.status == 'CANCELLED'):
+                        raise ValueError('Черновик счёта недоступен в этой съёмке. Обновите продажу.')
                     frozen = draft.pricing_snapshot if draft else None
                     if frozen and (draft.sold_photos != body['sold'] or draft.declared_photo_count != body['total']):
                         raise ValueError('Количество кадров не совпадает с сохранённым расчётом продажи.')
-                    quote = await sale_quote(session, booking, body['sold'], body['total'], body['tariffId'],
-                        saved=frozen,
-                        discount_id=body.get('discountId'), album_id=body.get('albumId'),
-                        album_quantity=body.get('albumQuantity'))
-                    due = max(money(previous) + money(quote['amount']) - money(paid), money(0))
+                    if draft and draft.status == 'COMPLETED':
+                        if not await session.scalar(select(Sale.id).where(Sale.source_draft_id == draft.id,
+                                                                         Sale.booking_id == booking.id)):
+                            raise ValueError('Не найдена оформленная продажа для этого счёта.')
+                        # The last confirmed original can finish the sale while
+                        # the bank request is in flight. Invoice its balance,
+                        # never add the same displayed purchase a second time.
+                        due = max(money(previous) - money(paid), money(0))
+                        quote = {'kind': 'BALANCE', 'amount': str(due), 'sourceDraftId': draft.id}
+                    else:
+                        if previous > 0 and not draft:
+                            raise ValueError('Для оплаты оформленной продажи выберите остаток. Для новой покупки сначала откройте её черновик.')
+                        await validate_remaining_photos(session, booking, body['total'], body['sold'])
+                        quote = await sale_quote(session, booking, body['sold'], body['total'], body['tariffId'],
+                            saved=frozen,
+                            discount_id=body.get('discountId'), album_id=body.get('albumId'),
+                            album_quantity=body.get('albumQuantity'))
+                        due = max(money(previous) + money(quote['amount']) - money(paid), money(0))
                 elif body['purpose'] == 'DEPOSIT':
                     deposits = await session.scalar(select(func.coalesce(func.sum(Receipt.verified_amount), 0)).where(
                         Receipt.booking_id == booking.id, Receipt.purpose == 'DEPOSIT', Receipt.status == 'APPROVED'))

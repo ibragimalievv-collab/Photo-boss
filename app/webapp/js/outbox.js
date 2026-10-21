@@ -19,6 +19,43 @@ const legacyMediaError=row=>row.status==='error'&&row.errorStatus===400&&row.leg
 // Called only after /me has confirmed the active account. A previous 401 is not
 // a permanent rejection of the saved file; retry it after this new login only.
 const renewedAuth=row=>row.status==='error'&&row.errorStatus===401&&(row.authEpoch||0)<authEpoch;
+const BOOKING_VALIDATION_ERRORS=new Set([
+ 'Проверьте данные гостя, дату, количество гостей и сумму брони.',
+ 'Отель или пакет больше не доступны. Обновите данные.',
+ 'Нет доступа к записи в этом отеле.',
+ 'В отеле не настроена фиксированная цена кадра. Попросите владельца или администратора выбрать цену в тарифах отеля.',
+]);
+export function rejectedBooking(rows){
+ const row=rows[0];
+ // These domain validations roll back before the idempotency ledger is written.
+ // Never alter an acknowledged, uncertain, auth/reset or unknown rejection.
+ return Boolean(rows.length&&rows.every(Boolean)&&row.kind==='booking'&&row.status==='error'&&
+  row.errorStatus===409&&!row.result&&BOOKING_VALIDATION_ERRORS.has(row.error)&&
+  rows.slice(1).every(item=>item.kind==='booking_receipt'&&item.data?.booking?.key===row.key&&
+   item.status==='local'&&!item.result&&(!item.errorStatus||item.errorStatus===424)))?row:null;
+}
+export async function repairBookingQueue(keys,data){
+ if(running||queueRepairing)throw new Error('Дождитесь завершения текущей отправки, затем исправьте запись.');
+ queueRepairing=true;let committed=false;
+ try{
+  const actor=userId,all=await outboxRows(),rows=keys.map(key=>all.find(row=>row.key===key)),rejected=rejectedBooking(rows);
+  if(!actor||!rejected||(rejected.generation||'')!==operationsGeneration||
+   (rejected.salesGeneration||'')!==salesGeneration)throw new Error('Исправление записи недоступно. Обновите приложение и проверьте результат прежней отправки.');
+  const saved=await localAction('operations','readonly',store=>store.get(rejected.key));
+  if(!saved||saved.userId!==actor||!rejectedBooking([saved,...rows.slice(1)]))throw new Error('Состояние записи изменилось. Откройте исправление ещё раз.');
+  saved.data=data;saved.status='local';saved.error='';saved.errorStatus=0;saved.retryAt=0;
+  const updates=[saved];
+  for(const item of rows.slice(1)){
+   const receipt=await localAction('operations','readonly',store=>store.get(item.key));
+   if(!receipt||receipt.userId!==actor||receipt.status!=='local'||receipt.result||
+    (receipt.errorStatus&&receipt.errorStatus!==424))throw new Error('Состояние чека изменилось. Откройте исправление ещё раз.');
+   receipt.error='';receipt.errorStatus=0;receipt.retryAt=0;updates.push(receipt);
+  }
+  if(actor!==userId||running)throw new Error('Аккаунт или состояние отправки изменились. Откройте исправление ещё раз.');
+  if(!await writeOperations(updates))throw new Error('Рабочие данные обнулены. Обновите приложение перед продолжением.');
+  committed=true;changed();
+ }finally{queueRepairing=false;if(committed||rerunRequested)void flushOutbox();}
+}
 // A sale's receipt, counts, selected photos and completion share one draft key.
 // Their server-side stages must stay ordered while unrelated files keep moving.
 const saleChain=row=>row.kind==='sale_start'?row.key:row.kind?.startsWith('sale_')?(row.data?.draft?.key||(row.data?.draft?.id?'draft:'+row.data.draft.id:null)):null;

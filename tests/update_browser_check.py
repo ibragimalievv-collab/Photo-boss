@@ -141,7 +141,7 @@ async def run(database_url):
                 await page.locator('[data-action="new-sale"]').click()
                 await page.locator('#workflowSalePick').wait_for(state='visible')
                 await page.goto(BASE+'/app/')
-                await page.locator('#attendanceCard button').click()
+                await page.locator('#attendanceCard [data-att=open]').click()
                 await page.locator('#attendanceDialog').wait_for(state='visible')
                 await page.locator('[data-att=close]').click()
                 await page.locator('[data-open-people]').click()

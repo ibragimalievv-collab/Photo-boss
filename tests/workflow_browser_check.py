@@ -179,7 +179,7 @@ async def main():
                     await page.evaluate("async()=>{const m=await import('/app/js/workflow.js');await m.workflowSubmit(document.querySelector('#workflowSale'));}")
                     assert await page.evaluate("async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length;}") == 6
 
-                    await page.locator('#attendanceCard button').click()
+                    await page.locator('#attendanceCard [data-att=open]').click()
                     dialog = page.locator('#attendanceDialog')
                     for _ in range(2):
                         await dialog.locator('[data-att=location]').click()
@@ -388,13 +388,20 @@ async def main():
                     await photo_page.reload()
                     await photo_page.locator('#sheet[open]').wait_for()
                     assert 'notify-room' in await photo_page.locator('#sheetContent').inner_text()
+                    assert await photo_page.locator('[data-go=attendance]').count() == 0
                     await photographer.close()
+                    async with factory() as session:
+                        session.add(UserRole(user_id=3, role='PHOTOGRAPHER'))
+                        await session.commit()
                     owner = await browser.new_context(ignore_https_errors=True, viewport={'width': 390, 'height': 844}, is_mobile=True)
                     await owner.add_init_script('window.Telegram={WebApp:{initData:'+json.dumps(signed(3))+',ready(){},expand(){},setHeaderColor(){},setBackgroundColor(){},onEvent(){},BackButton:{show(){},hide(){},onClick(){}}}};')
                     await owner.route('https://telegram.org/**', lambda r: r.fulfill(status=200, content_type='text/javascript', body=''))
                     panel = await owner.new_page()
                     panel.on('pageerror', lambda e: errors.append(str(e)))
-                    await panel.goto(str(server.make_url('/app/#team')))
+                    await panel.goto(str(server.make_url('/app/#home')))
+                    await panel.locator('#app [data-go=attendance]').click()
+                    await panel.locator('h1').filter(has_text='Контроль смен').wait_for()
+                    assert panel.url.endswith('#attendance')
                     for purpose in ('start', 'end'):
                         form = panel.locator(f'.attendance-review[data-purpose={purpose}]')
                         await form.locator('..').locator('summary').click()
