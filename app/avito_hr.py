@@ -235,7 +235,7 @@ async def publish(engine, payloads):
 
 
 INTRO = "Здравствуйте! Я автоматический HR-помощник «Фотобосс»."
-DIALOGUE_VERSION = "short-context-v1"
+DIALOGUE_VERSION = "short-context-v2"
 
 
 def reply(value, role, history=()):
@@ -277,7 +277,7 @@ def reply(value, role, history=()):
             answers.append("Точный срок обучения уточню у владельца.")
         else:
             answers.append("Можно без опыта: обучение с нуля и помощь наставника." if role == "PHOTOGRAPHER" else "Можно без опыта: обучаем общению с гостями и записи на фотосъемки.")
-    if has("обязанност", "что делать", "что надо делать", "чем заним", "что нужно дел"):
+    if has("обязанност", "что делать", "что надо делать", "чем заним", "что нужно дел") or (has("как это происходит") and any("Менеджер общается" in old or "Фотограф снимает" in old for old in outbound)):
         answers.append("Фотограф снимает гостей; работе с камерой и съемке обучаем." if role == "PHOTOGRAPHER" else "Менеджер общается с гостями, рассказывает о фотосъемках и записывает желающих.")
     ready = bool(re.search(r"(?:готов[аы]?|могу|хочу)\s+(?:выйти|начать|приступить)", value))
     unknown = has("договор", "оформлен", "документ", "налог", "штраф", "питан", "форм", "камера своя", "оборудован", "возраст", "гражданств", "виза")
@@ -299,8 +299,10 @@ def reply(value, role, history=()):
         if question and not any(question in old for old in outbound):
             answers.append(question)
         return prefix + " ".join(dict.fromkeys(answers)), needs_owner
-    clean = re.sub(r"[^а-яa-z ]", "", value).strip()
-    if clean in {"здравствуйте", "здравствуй", "добрый день", "добрый вечер", "привет", "интересует вакансия", "актуально", "вакансия актуальна"}:
+    clean = re.sub(r"[^а-яa-z ]", "", re.sub(r"\\s+", " ", value)).strip()
+    if any(w in clean for w in ("заинтересовала", "интересует вакансия")):
+        clean = "интересует вакансия"
+    if clean in {"здравствуйте", "здравствуй", "добрый день", "добрый вечер", "привет", "интересует вакансия", "заинтересовала ваша вакансия", "менеджер", "фотограф", "актуально", "вакансия актуальна"}:
         if first:
             title = "фотографом" if role == "PHOTOGRAPHER" else "менеджером по записи"
             return prefix + f"Вас интересует работа {title}?", False
@@ -380,34 +382,33 @@ class Worker:
                 messages = messages if isinstance(messages, list) else messages.get("messages", [])
                 async with self.engine.connect() as conn:
                     sent_ids = set((await conn.execute(text("SELECT message_id FROM hr_avito_outbox WHERE chat_id=:chat AND state='sent'"), {"chat": chat})).scalars())
-                if any(m.get("direction") == "out" and m.get("type") == "text" and str(m.get("id")) not in sent_ids for m in messages):
-                    async with self.engine.begin() as conn:
-                        await conn.execute(text("INSERT INTO hr_avito_escalations(event_key,chat_id,reason) VALUES (:key,:chat,'human_takeover') ON CONFLICT(event_key) DO NOTHING"), {"key": "human:" + chat, "chat": chat})
-                    continue
                 incoming = [m for m in messages if m.get("direction") == "in" and m.get("type") == "text"]
                 if not incoming:
                     continue
                 newest = max(incoming, key=lambda m: int(m.get("created", 0)))
-                if escalated:
-                    # Recover only a formerly unknown FAQ after a dialogue upgrade.
-                    # Human takeovers and genuinely unknown questions remain owner-held.
-                    async with self.engine.connect() as conn:
-                        reasons = set((await conn.execute(text("SELECT reason FROM hr_avito_escalations WHERE chat_id=:chat AND reason NOT LIKE 'resolved%'"), {"chat": chat})).scalars())
-                        last_response = await conn.scalar(text("SELECT response FROM hr_avito_outbox WHERE chat_id=:chat AND state='sent' ORDER BY created_at DESC LIMIT 1"), {"chat": chat})
-                    old_fallback = "Спасибо! Передам ваш ответ и вопросы владельцу «Фотобосс» для обсуждения следующего шага. Решение о найме и окончательные условия согласует владелец."
-                    answer, needs_owner = reply((newest.get("content") or {}).get("text", ""), roles[item_id], messages)
-                    if reasons == {"owner_review"} and last_response == old_fallback and answer and not needs_owner:
-                        await self.send_once("resolved:" + chat + ":" + str(newest["id"]) + ":" + DIALOGUE_VERSION, chat, answer)
-                        async with self.engine.begin() as conn:
-                            await conn.execute(text("UPDATE hr_avito_escalations SET reason='resolved_dialogue' WHERE chat_id=:chat AND reason='owner_review'"), {"chat": chat})
+                latest_out = max((int(m.get("created", 0)) for m in messages if m.get("direction") == "out" and m.get("type") == "text"), default=-1)
+                # A human reply owns its turn, not every future turn in the chat.
+                # Only respond to a newer candidate message, never to an already
+                # answered message or an outgoing appointment confirmation.
+                if int(newest.get("created", 0)) <= latest_out:
                     continue
+                if escalated:
+                    answer, needs_owner = reply((newest.get("content") or {}).get("text", ""), roles[item_id], messages)
+                    if needs_owner:
+                        continue
+                    async with self.engine.begin() as conn:
+                        await conn.execute(text("UPDATE hr_avito_escalations SET reason='resolved_dialogue' WHERE chat_id=:chat AND reason IN ('owner_review','human_takeover')"), {"chat": chat})
                 # Process all consecutive inbound texts in the current turn, not only
                 # the last fragment. Existing journal keys protect already answered turns.
                 latest_out = max((int(m.get("created", 0)) for m in messages if m.get("direction") == "out" and m.get("type") == "text"), default=-1)
                 pending = sorted([m for m in incoming if int(m.get("created", 0)) > latest_out], key=lambda m: int(m.get("created", 0)))
                 if not pending:
                     continue
-                key = "in:" + chat + ":" + str(newest["id"])
+                key = ("resolved:" if escalated else "in:") + chat + ":" + str(newest["id"])
+                async with self.engine.connect() as conn:
+                    repaired = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE event_key=:key"), {"key": "resolved:" + chat + ":" + str(newest["id"])})
+                if repaired:
+                    continue
                 value = "\n".join((m.get("content") or {}).get("text", "") for m in pending)
                 answer, escalate = reply(value, roles[item_id], messages)
                 if not answer:
