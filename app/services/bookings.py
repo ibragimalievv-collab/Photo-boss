@@ -210,12 +210,10 @@ async def notify_photographer_rescheduled(bot, session, booking: Booking):
     photographer = await session.get(User, booking.photographer_id)
     if photographer is None or not photographer.active:
         return False
-    from ..push_notifications import app_channel, queue_notice
+    from ..push_notifications import app_channel
     if app_channel():
-        await queue_notice(session, photographer.id, kind='reminder',
-            event_key=f'rescheduled:{booking.id}:{booking.shoot_date}:{booking.shoot_time}',
-            message=f'Съёмка №{booking.id} перенесена.')
-        return True
+        from .booking_notices import queue_photographer_change
+        return await queue_photographer_change(session, booking, 'rescheduled')
     try:
         await bot.send_message(
             photographer.tg_id,
@@ -234,12 +232,10 @@ async def notify_photographer_cancelled(bot, session, booking: Booking):
     photographer = await session.get(User, booking.photographer_id)
     if photographer is None or not photographer.active:
         return False
-    from ..push_notifications import app_channel, queue_notice
+    from ..push_notifications import app_channel
     if app_channel():
-        await queue_notice(session, photographer.id, kind='reminder',
-            event_key=f'cancelled:{booking.id}:{booking.shoot_date}:{booking.shoot_time}',
-            message=f'Съёмка №{booking.id} отменена.')
-        return True
+        from .booking_notices import queue_photographer_change
+        return await queue_photographer_change(session, booking, 'cancelled')
     try:
         await bot.send_message(
             photographer.tg_id,

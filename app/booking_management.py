@@ -113,6 +113,10 @@ class BookingManagement:
                 action = 'booking_restored'
             await audit(session, user, action, 'booking', b.id, json.dumps({
                 'before': before, 'after': snapshot(b, client, shoot), 'reason': reason.strip()}, ensure_ascii=False))
+            if action in {'booking_rescheduled', 'booking_cancelled'}:
+                from .services.booking_notices import queue_photographer_change
+                await queue_photographer_change(session, b,
+                    'rescheduled' if action == 'booking_rescheduled' else 'cancelled')
             await session.commit()
         return web.json_response({'ok': True, 'bookingId': bid})
 

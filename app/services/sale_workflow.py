@@ -8,6 +8,7 @@ from sqlalchemy import func, or_, select
 from ..config import config
 from ..models import (
     Booking,
+    Compensation,
     Package,
     PayrollEntry,
     Photo,
@@ -337,15 +338,17 @@ async def complete_sale(session, actor, draft_id):
         await session.flush()
 
     if manager is not None:
-        manager_percent_value = Decimal(
-            str(
-                await setting(
-                    session,
-                    "MANAGER_PERCENT",
-                    config.manager_percent,
-                )
+        # Personal agreed terms override the global default, including an
+        # explicit zero rate. Freeze the applied rate on this sale so future
+        # changes cannot rewrite its historical commission.
+        personal_rate = await session.scalar(select(Compensation.sales_percent).where(
+            Compensation.user_id == manager.id, Compensation.role == "MANAGER"
+        ).order_by(Compensation.id.desc()).limit(1))
+        manager_percent_value = Decimal(str(
+            personal_rate if personal_rate is not None else await setting(
+                session, "MANAGER_PERCENT", config.manager_percent
             )
-        )
+        ))
         if not manager_percent_value.is_finite() or not 0<=manager_percent_value<=100:
             raise ValueError("Проверьте ставку менеджера: от 0 до 100 процентов.")
         manager_amount = (

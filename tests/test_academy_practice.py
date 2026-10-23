@@ -335,7 +335,7 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
 
         async def unavailable_second(path, **kwargs):
             if f"/{aid}-2-" in path:
-                raise YandexDiskError("provider 500")
+                raise YandexDiskError("Missing original", http_status=404)
             return await original_download(path, **kwargs)
 
         self.storage.download_bytes.side_effect = unavailable_second
@@ -350,6 +350,45 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT photos FROM academy_practice_reviews WHERE assignment_id=:id"
             ), {"id": aid}).scalar()
             assert len(json.loads(archive)) == 5
+
+    async def test_pending_review_storage_outage_preserves_all_photos_and_retries(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        original_download = self.storage.download_bytes.side_effect
+        self.storage.download_bytes.side_effect = YandexDiskError('Unavailable', http_status=503)
+        analyzer = AsyncMock(return_value={"status": "unavailable", "retryable": False})
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), patch(
+                "app.academy_practice.analyze_training_set", analyzer):
+            outcomes = await self.practice.process_pending(self.storage)
+        _, data = await self.request(f"/{aid}")
+        assert data["status"] == "PENDING_REVIEW"
+        assert data["reviewSource"] == "AI_PENDING"
+        assert outcomes[aid]["errorCode"] == "storage_unavailable"
+        assert outcomes[aid]["retryable"] is True and outcomes[aid]["nextRetryAt"]
+        assert all(shot["uploaded"] for shot in data["shots"])
+        analyzer.assert_not_awaited()
+        self.storage.delete.assert_not_awaited()
+        with self.engine.inner.begin() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM academy_practice_reviews")).scalar() == 0
+            conn.execute(text("UPDATE training_assignments SET ai_analysis='{}' WHERE id=:id"), {"id": aid})
+        self.storage.download_bytes.side_effect = original_download
+        with patch("app.academy_practice.config", SimpleNamespace(openai_api_key="fixture")), patch(
+                "app.academy_practice.analyze_training_set", analyzer):
+            await self.practice.process_pending(self.storage)
+        analyzer.assert_awaited_once()
+        assert all(shot["uploaded"] for shot in (await self.request(f"/{aid}"))[1]["shots"])
+
+    async def test_startup_storage_outage_preserves_failed_assignment_photos(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("UPDATE training_assignments SET review_source='AI_FAILED',ai_analysis='{}' WHERE id=:id"), {"id": aid})
+        self.storage.download_bytes.side_effect = YandexDiskError('Unavailable', http_status=503)
+        await self.practice.recover_stalled_storage(self.storage)
+        _, data = await self.request(f"/{aid}")
+        assert data["status"] == "PENDING_REVIEW" and data["reviewSource"] == "AI_FAILED"
+        assert all(shot["uploaded"] for shot in data["shots"])
+        self.storage.delete.assert_not_awaited()
 
     async def test_stalled_review_with_readable_photos_is_requeued(self):
         aid = await self.start()
@@ -507,7 +546,7 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
                 with self.engine.inner.begin() as conn:
                     conn.execute(text("UPDATE training_assignments SET ai_analysis=:data WHERE id=:id"),
                                  {"id": aid, "data": json.dumps(replacement)})
-                raise YandexDiskError("old download failed")
+                raise YandexDiskError("Missing original", http_status=404)
             return await original_download(path, **kwargs)
 
         self.storage.download_bytes.side_effect = superseded_download
