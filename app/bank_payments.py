@@ -35,11 +35,18 @@ def configured():
 
 
 def bank_url(value):
-    parsed = urlparse(value or '')
-    return (parsed.scheme == 'https' and not parsed.username and not parsed.password
-            and parsed.port in (None, 443) and parsed.hostname in {
-                'ecommerce.sberbank.ru', 'ecomtest.sberbank.ru', 'ecomift.sberbank.ru',
-                'securepayments.sberbank.ru', 'sbergate.com', 'payecom.ru'})
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urlparse(value)
+        return (parsed.scheme == 'https' and not parsed.username and not parsed.password
+                and parsed.port in (None, 443) and parsed.hostname in {
+                    'ecommerce.sberbank.ru', 'ecomtest.sberbank.ru', 'ecomift.sberbank.ru',
+                    'securepayments.sberbank.ru', 'sbergate.com', 'payecom.ru'})
+    except ValueError:
+        # Invalid ports/brackets in a provider response must not turn an
+        # uncertain invoice into an unhandled server error.
+        return False
 
 
 async def bank_call(method, payload):
@@ -140,7 +147,7 @@ class BankPayments:
         optional = {'discountId', 'albumId', 'albumQuantity', 'sourceDraftId'}
         if (set(body) - optional != {'bookingId', 'total', 'sold', 'tariffId', 'amount', 'requestKey', 'purpose'}
                 or type(body['bookingId']) is not int or type(body['total']) is not int or type(body['sold']) is not int
-                or body['purpose'] not in {'PURCHASE', 'DEPOSIT', 'BALANCE'}
+                or not isinstance(body['purpose'], str) or body['purpose'] not in {'PURCHASE', 'DEPOSIT', 'BALANCE'}
                 or (body.get('sourceDraftId') is not None and
                     (type(body['sourceDraftId']) is not int or body['sourceDraftId'] <= 0))
                 or (body['purpose'] == 'PURCHASE' and not 0 < body['sold'] <= body['total'] <= 10000)
