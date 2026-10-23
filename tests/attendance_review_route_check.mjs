@@ -41,4 +41,8 @@ assert.match(root.innerHTML,/Подтверждено/);
 assert.match(root.innerHTML,/data-expected-at=/);
 assert.equal(context.location.hash,'#attendance');
 assert.doesNotMatch(root.innerHTML,/Кандидаты|Команда и найм/,'A review must keep the leader in attendance controls without loading HR');
+state.items[0].confirmedAt='2026-10-21T06:10:37+00:00';
+await context.loadAttendanceControls();
+root.innerHTML=context.attendanceControlsView();
+assert.match(root.innerHTML,/step="1" name="verifiedAt" value="2026-10-21T\d{2}:\d{2}:37"/,'Reopening a confirmed timestamp must preserve its seconds');
 console.log('PASS: independent leadership route, self-approval hidden, missing times honest, decision reload stays in controls');
