@@ -24,10 +24,12 @@ from .operational_reset import (
     _verified_archive,
     install_archive_guards,
 )
-from .operations_guard import sqlite_operation_barrier
+from .operations_guard import current_generation, sqlite_operation_barrier
 from .services.booking_notices import notice_booking_id
 
 REQUEST_ID = 'all-booking-shoot-sales-owner-20261021'
+REQUEST_ENV = 'PHOTO_BOSS_WORK_HISTORY_RESET_REQUEST'
+SCOPE = 'all-existing-booking-shoot-sale-history'
 PRODUCTION_SERVICE = 'srv-damohb1mirbc73as0rl0'
 log = logging.getLogger(__name__)
 
@@ -70,7 +72,24 @@ def business_rows(before, tables):
     return {name: rows for name, rows in selected.items() if rows}
 
 
-async def reset_old_work(engine, admin_ids):
+async def startup_work_history_reset(engine, raw, admin_ids):
+    """A historical service identity alone must never authorize deleting work."""
+    if not raw.strip():
+        return None
+    try:
+        request = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        raise ResetError('Invalid work history reset deployment request') from exc
+    if (not isinstance(request, dict)
+            or set(request) != {'requestId', 'scope', 'expectedGeneration'}
+            or request['requestId'] != REQUEST_ID or request['scope'] != SCOPE
+            or not isinstance(request['expectedGeneration'], str)
+            or len(request['expectedGeneration']) > 100):
+        raise ResetError('Invalid work history reset deployment scope')
+    return await reset_old_work(engine, admin_ids, expected_generation=request['expectedGeneration'])
+
+
+async def reset_old_work(engine, admin_ids, *, expected_generation=None):
     async with sqlite_operation_barrier(engine), engine.begin() as conn:
         tables = await _reflect(conn)
         await _lock(conn, tables)
@@ -80,6 +99,8 @@ async def reset_old_work(engine, admin_ids):
                 raise ResetError('Work history reset request scope mismatch')
             result = json.loads(previous['row_counts']) | {'replayed': True}
         else:
+            if expected_generation is not None and await current_generation(conn) != expected_generation:
+                raise ResetError('Work history reset targets a different operational generation')
             owners = (await conn.execute(text("""SELECT DISTINCT u.id,u.tg_id FROM users u
                 JOIN user_roles r ON r.user_id=u.id
                 WHERE u.active=true AND r.role='OWNER' ORDER BY u.id"""))).mappings()

@@ -70,6 +70,13 @@ def password_matches(value, encoded):
         return False
 
 
+def archive_filename(photo):
+    """Use a flat, portable ZIP member name, including for legacy stored names."""
+    name = photo.filename.replace('\\', '/').rsplit('/', 1)[-1]
+    name = re.sub(r'[\x00-\x1f\x7f<>:"/\\|?*]', '_', name).strip(' .')
+    return f'{photo.id}-{name or "photo"}'
+
+
 class Delivery:
     def __init__(self, api):
         self.api = api
@@ -453,7 +460,7 @@ class Delivery:
                 with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED) as archive:
                     for p in files:
                         raw = await self.bytes(p)
-                        await asyncio.to_thread(archive.writestr, f'{p.id}-{p.filename}', raw)
+                        await asyncio.to_thread(archive.writestr, archive_filename(p), raw)
                 output.seek(0)
                 response = web.StreamResponse(headers={'Content-Type':'application/zip',
                     'Content-Disposition':'attachment; filename="Photo-Boss-Album.zip"',

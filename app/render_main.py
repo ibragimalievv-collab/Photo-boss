@@ -99,10 +99,13 @@ async def on_startup(app):
     from .work_history_reset import (
         PRODUCTION_SERVICE,
         log_booking_readiness,
-        reset_old_work,
+        startup_work_history_reset,
     )
+    from .work_history_reset import (
+        REQUEST_ENV as WORK_HISTORY_RESET_ENV,
+    )
+    await startup_work_history_reset(engine, os.getenv(WORK_HISTORY_RESET_ENV, ''), config.admin_ids)
     if os.getenv('RENDER_SERVICE_ID') == PRODUCTION_SERVICE:
-        await reset_old_work(engine, config.admin_ids)
         from .hotel_price_defaults import apply_owner_hotel_prices
         await apply_owner_hotel_prices(engine, config.admin_ids)
         await log_booking_readiness(engine)
@@ -186,12 +189,23 @@ async def on_cleanup(app):
         if task:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await task
-    await app["dispatcher"].storage.close()
-    await app["bot"].session.close()
-    from .operations_guard import close_operation_leases
-    await close_operation_leases(engine)
-    await engine.dispose()
+                try:
+                    await task
+                except Exception:
+                    logger.exception("Background task failed before shutdown: %s", key)
+    # A failed worker or unavailable Redis must not leave other tasks, HTTP
+    # sessions or database leases alive during Render's shutdown window.
+    try:
+        await app["dispatcher"].storage.close()
+    finally:
+        try:
+            await app["bot"].session.close()
+        finally:
+            from .operations_guard import close_operation_leases
+            try:
+                await close_operation_leases(engine)
+            finally:
+                await engine.dispose()
 
 
 def main():
