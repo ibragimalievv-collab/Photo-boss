@@ -40,9 +40,11 @@ async def prepare():
     work.api.body = AsyncMock(side_effect=lambda r: r['body'])
     work.api.bot = SimpleNamespace()
     async with factory() as session:
-        session.add_all([User(id=3, tg_id=3, name='Owner'), UserRole(user_id=3, role='OWNER'),
-            User(id=4, tg_id=4, name='Scoped admin'), UserRole(user_id=4, role='ADMIN'),
-            User(id=5, tg_id=5, name='Other admin'), UserRole(user_id=5, role='ADMIN'),
+        session.add_all([User(id=3, tg_id=3, name='Owner'),
+            User(id=4, tg_id=4, name='Scoped admin'), User(id=5, tg_id=5, name='Other admin')])
+        await session.flush()
+        session.add_all([UserRole(user_id=3, role='OWNER'),
+            UserRole(user_id=4, role='ADMIN'), UserRole(user_id=5, role='ADMIN'),
             HotelEmployee(user_id=1, hotel_id=1), HotelEmployee(user_id=4, hotel_id=1),
             Setting(key=point_key(1), value=json.dumps(POINT)),
             Shift(user_id=1, hotel_id=1, start_at=NOW.replace(hour=6, minute=0, tzinfo=None),
