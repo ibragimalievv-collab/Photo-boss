@@ -449,6 +449,7 @@ class AcademyPractice:
         by_index = {s["pose_index"]: s for s in shots}
         unavailable = [index for index in range(1, 6) if index not in by_index]
         uploaded = []
+        deferred = False
         for index in range(1, 6):
             shot = by_index.get(index)
             if shot is None:
@@ -459,9 +460,18 @@ class AcademyPractice:
                         or len(payload) > MAX_IMAGE_BYTES):
                     raise ValueError("Stored practice photo is not a bounded JPEG")
                 uploaded.append(payload)
-            except (OSError, ValueError, TelegramAPIError, YandexDiskError):
+            except YandexDiskError as exc:
+                if exc.http_status == 404:
+                    unavailable.append(index)
+                else:
+                    # A timeout, quota/permission error or provider outage does
+                    # not prove that an original disappeared. Retain its slot.
+                    deferred = True
+            except (OSError, TelegramAPIError):
+                deferred = True
+            except ValueError:
                 unavailable.append(index)
-        return uploaded, unavailable
+        return uploaded, unavailable, deferred
 
     async def recover_stalled_storage(self, storage):
         """Repair old AI_FAILED reviews after checking every stored practice photo."""
@@ -475,7 +485,10 @@ class AcademyPractice:
             async with self.engine.connect() as conn:
                 shots = await self.api.rows(conn, """SELECT pose_index,submitted_file_id
                     FROM training_submissions WHERE assignment_id=:id ORDER BY pose_index""", id=row["id"])
-            _, unavailable = await self._load_submissions(row, shots, storage)
+            _, unavailable, deferred = await self._load_submissions(row, shots, storage)
+            if deferred:
+                logger.warning("Academy assignment %s storage verification deferred", row["id"])
+                continue
             if unavailable:
                 await self._reopen_unavailable_photos(
                     row, shots, unavailable, expected_sources={"AI_FAILED"}
@@ -569,8 +582,8 @@ class AcademyPractice:
                     WHERE assignment_id=:id ORDER BY pose_index""", id=row["id"])
             category = CATEGORY_BY_SLUG[row["category_slug"]]
             if config.openai_api_key:
-                uploaded, unavailable = await self._load_submissions(row, shots, storage)
-                if unavailable:
+                uploaded, unavailable, deferred = await self._load_submissions(row, shots, storage)
+                if unavailable and not deferred:
                     reopened = await self._reopen_unavailable_photos(
                         row, shots, unavailable, expected_sources={"AI_PROCESSING"},
                         processing_lease=lease,
@@ -578,13 +591,17 @@ class AcademyPractice:
                     if reopened:
                         outcomes[row["id"]] = {"status": "storage_unavailable", "unavailable_indexes": unavailable}
                     continue
-                try:
-                    references = [p.read_bytes() for p in category.image_paths]
-                except OSError:
-                    result = ai_unavailable('academy_review', config.academy_analysis_model, 'invalid_output')
+                if deferred:
+                    result = {"status": "unavailable", "errorCode": "storage_unavailable", "retryable": True,
+                              "message": "Хранилище временно недоступно. Фотографии сохранены; проверка будет повторена."}
                 else:
-                    result = await analyze_training_set(category, references, uploaded,
-                                                        assignment_context=context, previous_review=previous_review)
+                    try:
+                        references = [p.read_bytes() for p in category.image_paths]
+                    except OSError:
+                        result = ai_unavailable('academy_review', config.academy_analysis_model, 'invalid_output')
+                    else:
+                        result = await analyze_training_set(category, references, uploaded,
+                                                            assignment_context=context, previous_review=previous_review)
             review = result.get("review", {}) if result.get("status") == "completed" else {}
             decision = review.get("decision")
             reshoot = review.get("reshoot_indexes", [])
