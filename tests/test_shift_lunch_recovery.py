@@ -11,7 +11,14 @@ from test_workflow_replay import ACTOR, packet, setup
 
 from app.attendance import Attendance
 from app.miniapp_security import AccessError
-from app.models import Hotel, HotelEmployee, Shift, ShiftCheckIn, ShiftCheckOut, WorkBreak
+from app.models import (
+    Hotel,
+    HotelEmployee,
+    Shift,
+    ShiftCheckIn,
+    ShiftCheckOut,
+    WorkBreak,
+)
 from app.work_breaks import WorkBreaks
 
 DAY = date(2026, 9, 22)
