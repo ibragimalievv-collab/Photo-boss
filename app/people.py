@@ -103,7 +103,8 @@ class People:
 
     async def current_editor(self, conn, actor_id, target_id=None):
         # Lock in a stable order. Re-read active/roles inside the mutation transaction.
-        await self.api.rows(conn, "SELECT id FROM users WHERE id IN (:actor,:target) ORDER BY id FOR UPDATE",
+        from .db import user_lock_clause
+        await self.api.rows(conn, "SELECT id FROM users WHERE id IN (:actor,:target) ORDER BY id" + user_lock_clause(conn),
                             actor=actor_id, target=target_id or actor_id)
         users = await self.api.rows(conn, "SELECT active FROM users WHERE id=:id", id=actor_id)
         if not users or not users[0]["active"]:

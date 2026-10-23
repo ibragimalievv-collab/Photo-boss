@@ -235,6 +235,7 @@ function install() {
       if(version!==generation)return;data=saved;pointSaved=true;
      }
      const saved=await api('/attendance/photo',{method:'POST',body:{purpose,date:gpsRequired()?data.date:localDay(new Date(photoAt)),image:photo}});if(version!==generation)return;data=saved;retakePurpose=null;photo=null;point=null;pointSaved=false;
+     window.dispatchEvent(new CustomEvent('pb-attendance-saved'));
     }
     catch(e){if(e.status&&e.status<500)throw e;await queueOffline();}
     if(version!==generation)return;

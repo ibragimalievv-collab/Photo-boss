@@ -10,6 +10,7 @@ from aiohttp import ClientPayloadError, web
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from .db import user_lock_clause
 from .miniapp_security import AccessError, utc_bounds
 from .models import utc_now
 from .operations_guard import require_generation
@@ -23,13 +24,13 @@ logger = logging.getLogger(__name__)
 def operation_diagnostic(body, *, result=None, error=None):
     """Log only known operation fields; never file bytes, names or request keys."""
     kinds = {'sale_start', 'sale_receipt', 'sale_counts', 'sale_selected', 'sale_disk_selected', 'sale_complete',
-             'shoot_photo', 'shoot_complete', 'shoot_retry', 'booking_receipt'}
+             'shoot_photo', 'shoot_complete', 'shoot_retry', 'booking_receipt', 'break_start', 'break_end', 'attendance'}
     if not isinstance(body, dict) or not isinstance(body.get('kind'), str) or body['kind'] not in kinds:
         return
     detail = {'kind': body['kind']}
     if isinstance(result, dict):
         for field in ('bookingId', 'draftId', 'shootingId', 'photoId', 'saleId',
-                      'selectedPhotos', 'declaredSold', 'declaredTotal'):
+                      'selectedPhotos', 'declaredSold', 'declaredTotal', 'breakId', 'attendanceId'):
             value = result.get(field)
             if type(value) is int:
                 detail[field] = value
@@ -180,7 +181,7 @@ class Workday:
                 sales_generation = await conn.scalar(text("SELECT value FROM settings WHERE key='sales:generation'"))
                 if sales_generation and body.get('salesGeneration', '') != sales_generation:
                     raise AccessError('Продажи обнулены владельцем. Обновите приложение и начните продажу заново; старые файлы сохранены.', 409)
-            users=await self.api.rows(conn,'SELECT id,active FROM users WHERE id=:uid FOR UPDATE',uid=a['id'])
+            users=await self.api.rows(conn,'SELECT id,active FROM users WHERE id=:uid'+user_lock_clause(conn),uid=a['id'])
             if not users or not users[0]['active']: raise AccessError('Доступ отключён.',403)
             roles={r['role'] for r in await self.api.rows(conn,'SELECT role FROM user_roles WHERE user_id=:uid',uid=a['id'])}
             if not roles & {'OWNER','ADMIN','PHOTOGRAPHER','MANAGER'}: raise AccessError('Рабочая роль снята.',403)

@@ -40,9 +40,11 @@ async def prepare():
     work.api.body = AsyncMock(side_effect=lambda r: r['body'])
     work.api.bot = SimpleNamespace()
     async with factory() as session:
-        session.add_all([User(id=3, tg_id=3, name='Owner'), UserRole(user_id=3, role='OWNER'),
-            User(id=4, tg_id=4, name='Scoped admin'), UserRole(user_id=4, role='ADMIN'),
-            User(id=5, tg_id=5, name='Other admin'), UserRole(user_id=5, role='ADMIN'),
+        session.add_all([User(id=3, tg_id=3, name='Owner'),
+            User(id=4, tg_id=4, name='Scoped admin'), User(id=5, tg_id=5, name='Other admin')])
+        await session.flush()
+        session.add_all([UserRole(user_id=3, role='OWNER'),
+            UserRole(user_id=4, role='ADMIN'), UserRole(user_id=5, role='ADMIN'),
             HotelEmployee(user_id=1, hotel_id=1), HotelEmployee(user_id=4, hotel_id=1),
             Setting(key=point_key(1), value=json.dumps(POINT)),
             Shift(user_id=1, hotel_id=1, start_at=NOW.replace(hour=6, minute=0, tzinfo=None),
@@ -121,9 +123,20 @@ def test_recent_confirmed_evidence_can_be_corrected_by_current_scoped_leader(mon
         try:
             await submit(service)
             owner = {'id': 3, 'roles': ['OWNER']}
+            # asyncpg returns datetimes; SQLite raw text queries return strings
+            # and previously hid the production-only confirmed_at JSON failure.
+            original_rows = service.api.rows
+            async def postgres_dates(conn, sql, **params):
+                rows = await original_rows(conn, sql, **params)
+                if 'AS confirmed_at' in sql:
+                    return [dict(r) | {'confirmed_at': datetime.fromisoformat(r['confirmed_at'])
+                        if isinstance(r['confirmed_at'], str) else r['confirmed_at']} for r in rows]
+                return rows
+            service.api.rows = postgres_dates
             state = json.loads((await service.pending({'miniapp_actor': owner})).text)
             item = state['items'][0]
             assert item['status'] == 'STARTED' and item['confirmedAt']
+            assert 'confirmed_at' not in item
             correction = {'miniapp_actor': owner, 'body': {'userId': 1, 'date': str(DAY),
                 'purpose': 'start', 'approved': True, 'expectedAt': item['confirmedAt'],
                 'verifiedAt': '2026-09-22T08:55:00+03:00', 'note': 'Уточнено время прибытия по контролю руководителя'}}

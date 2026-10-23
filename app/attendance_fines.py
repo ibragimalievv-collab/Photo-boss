@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from aiohttp import web
 from sqlalchemy import text
 
+from .db import user_lock_clause
 from .hotel_points import context_key, read_json, review_required, revision, save_json
 from .miniapp_security import AccessError, utc_bounds
 
@@ -219,7 +220,7 @@ async def sweep(api, now):
             since=max(since, now-timedelta(days=7)).replace(tzinfo=None), now=now.replace(tzinfo=None))
         days = sorted({(r['user_id'], utc(r['start_at']).astimezone(api.tz).date()) for r in plans})
         for uid, day in days:
-            await api.rows(conn, 'SELECT id FROM users WHERE id=:uid FOR UPDATE', uid=uid)
+            await api.rows(conn, 'SELECT id FROM users WHERE id=:uid' + user_lock_clause(conn), uid=uid)
             await reconcile_day(api, conn, uid, day, now)
 
 
