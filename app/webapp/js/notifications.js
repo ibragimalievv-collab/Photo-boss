@@ -38,7 +38,7 @@ export async function notificationsView(){
 }
 document.addEventListener('click',async event=>{
  const ownerButton=event.target.closest('[data-owner-telegram]');
- if(ownerButton){const ticket=revision,status=document.querySelector('#ownerTelegramStatus');ownerButton.disabled=true;
+ if(ownerButton?.dataset.ownerTelegram){const ticket=revision,status=document.querySelector('#ownerTelegramStatus');ownerButton.disabled=true;
   try{if(ownerButton.dataset.ownerTelegram==='toggle'){
    const enabled=!state.ownerTelegram;await api('/push/owner-telegram',{method:'POST',body:{enabled}});
    if(ticket!==revision)return;state.ownerTelegram=enabled;
