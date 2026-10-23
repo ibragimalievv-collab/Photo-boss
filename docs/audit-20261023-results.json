@@ -270,5 +270,24 @@
     "passed": 27,
     "failed": 0
   },
-  "pullRequest": "https://github.com/ibragimalievv-collab/Photo-boss/pull/101"
+  "pullRequest": "https://github.com/ibragimalievv-collab/Photo-boss/pull/101",
+  "renderReadOnly": {
+    "serviceId": "srv-damohb1mirbc73as0rl0",
+    "repositoryMatched": true,
+    "healthCheckPath": "/health",
+    "startCommand": "python -m app.render_main",
+    "instances": 1,
+    "deployedCommit": "2ce6587e5cb36a8ba8b3b2a8d807c0689aa0d96a",
+    "liveDeploy": "dep-dbdkh9m417fc738nqb10",
+    "autoDeployTrigger": "commit",
+    "branch": "main",
+    "errorLogWindow": "2026-10-23T11:46:00Z/2026-10-23T20:27:00Z",
+    "errorLogs": 0,
+    "http500502503Logs": 0,
+    "serverFailureOrRestartEvents": 0,
+    "latencyMetric": "empty/not verified",
+    "databaseStatus": "available",
+    "databaseExternalConnections": "blocked; no allowlist modifications",
+    "databaseReadQuery": "blocked by IP allowlist"
+  }
 }
