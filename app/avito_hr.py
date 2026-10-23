@@ -235,7 +235,7 @@ async def publish(engine, payloads):
 
 
 INTRO = "Здравствуйте! Я автоматический HR-помощник «Фотобосс»."
-DIALOGUE_VERSION = "short-context-v2"
+DIALOGUE_VERSION = "all-dialogues-v3"
 
 
 def reply(value, role, history=()):
@@ -248,7 +248,12 @@ def reply(value, role, history=()):
     last = outbound[-1].lower().replace("ё", "е") if outbound else ""
     first = not outbound
     prefix = INTRO + " " if first else ""
-    if any(w in value for w in ("не пишите", "не писать", "не беспокойте", "не интересно", "неинтересно", "не подходит", "отказываюсь")):
+    if any(w in value for w in ("не пишите", "не писать", "не беспокойте", "не интересно", "неинтересно", "не подходит", "отказываюсь", "неактуально", "не актуально", "больше не ищу")):
+        return "", False
+    if "?" not in value and any(w in value for w in ("скину", "пришлю", "отправлю")) and (
+            any(w in value for w in ("портфолио", "пример", "работ")) or "портфолио" in last or "примеры" in last):
+        return prefix + "Хорошо, буду ждать примеры работ.", False
+    if value in {"нет", "нет спасибо", "нет, спасибо"} and any(w in last for w in ("вас интересует", "вам интересн", "актуальна", "подходит")):
         return "", False
     answers = []
     def has(*words):
@@ -262,8 +267,8 @@ def reply(value, role, history=()):
         answers.append("Выплаты еженедельно.")
     if has("бонус", "преми") and not any("есть бонусы" in a for a in answers):
         answers.append("Есть бонусы; правила и суммы уточню у владельца." if has("сколько", "как", "сумм", "расчет") else "Да, есть бонусы.")
-    if has("жиль", "прожив", "квартир", "жить"):
-        answers.append("Есть частичная компенсация жилья; сумму и условия нужно согласовать с владельцем.")
+    if has("жиль", "жиле", "жили", "прожив", "квартир", "жить") or (has("компенсац") and not has("проезд", "билет", "дорог")):
+        answers.append("Жильё предоставляем, компания оплачивает 50%. Сейчас стоимость — 10 000 ₽ в месяц: 5 000 ₽ оплачивает компания, 5 000 ₽ — сотрудник.")
     if has("проезд", "билет", "переезд", "дорог"):
         answers.append("Проезд компенсируется после приезда и минимум месяца работы; сумму согласует владелец.")
     if has("график", "выходн", "рабочие дни", "3/1", "3 на 1"):
@@ -361,71 +366,89 @@ class Worker:
             return
         roles = {int(r["item_id"]): r["role"] for r in rows}
         self.uid = (await self.api.request("GET", "/core/v1/accounts/self"))["id"]
-        query = {"createdAtFrom": "2026-10-20", "vacancyIds": ",".join(map(str, roles))}
-        for _ in range(20):
-            result = await self.api.request("GET", "/job/v1/applications/get_ids?" + urllib.parse.urlencode(query))
-            ids = [x["id"] for x in result.get("applies", [])]
-            if not ids:
+        # Messenger is the source of dialogue coverage: applications may contain
+        # only a system event/call and no candidate-authored text.
+        offset = 0
+        while True:
+            query = urllib.parse.urlencode({"item_ids": ",".join(map(str, roles)),
+                "chat_types": "u2i", "limit": 100, "offset": offset})
+            result = await self.api.request("GET", f"/messenger/v2/accounts/{self.uid}/chats?" + query)
+            chats = result.get("chats", []) if isinstance(result, dict) else result
+            for entry in chats:
+                item = (entry.get("context") or {}).get("value") or {}
+                try:
+                    item_id = int(item.get("id", 0))
+                except (TypeError, ValueError):
+                    continue
+                if item_id not in roles or not entry.get("id"):
+                    continue
+                await self.process_chat(str(entry["id"]), roles[item_id])
+            if len(chats) < 100:
                 break
-            apps = await self.api.request("POST", "/job/v1/applications/get_by_ids", {"ids": ids})
-            for app in apps.get("applies", []):
-                item_id = int(app.get("vacancy_id", 0))
-                chat = ((app.get("contacts") or {}).get("chat") or {}).get("value")
-                if item_id not in roles or not chat:
-                    continue
-                async with self.engine.connect() as conn:
-                    escalated = await conn.scalar(text("SELECT count(*) FROM hr_avito_escalations WHERE chat_id=:chat AND reason NOT LIKE 'resolved%'"), {"chat": chat})
-                    stopped = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE chat_id=:chat AND state='stopped'"), {"chat": chat})
-                if stopped:
-                    continue
-                messages = await self.api.request("GET", f"/messenger/v3/accounts/{self.uid}/chats/{urllib.parse.quote(chat, safe='')}/messages/?limit=100&offset=0")
-                messages = messages if isinstance(messages, list) else messages.get("messages", [])
-                async with self.engine.connect() as conn:
-                    sent_ids = set((await conn.execute(text("SELECT message_id FROM hr_avito_outbox WHERE chat_id=:chat AND state='sent'"), {"chat": chat})).scalars())
-                incoming = [m for m in messages if m.get("direction") == "in" and m.get("type") == "text"]
-                if not incoming:
-                    continue
-                newest = max(incoming, key=lambda m: int(m.get("created", 0)))
-                latest_out = max((int(m.get("created", 0)) for m in messages if m.get("direction") == "out" and m.get("type") == "text"), default=-1)
-                # A human reply owns its turn, not every future turn in the chat.
-                # Only respond to a newer candidate message, never to an already
-                # answered message or an outgoing appointment confirmation.
-                if int(newest.get("created", 0)) <= latest_out:
-                    continue
-                if escalated:
-                    answer, needs_owner = reply((newest.get("content") or {}).get("text", ""), roles[item_id], messages)
-                    if needs_owner:
-                        continue
-                    async with self.engine.begin() as conn:
-                        await conn.execute(text("UPDATE hr_avito_escalations SET reason='resolved_dialogue' WHERE chat_id=:chat AND reason IN ('owner_review','human_takeover')"), {"chat": chat})
-                # Process all consecutive inbound texts in the current turn, not only
-                # the last fragment. Existing journal keys protect already answered turns.
-                latest_out = max((int(m.get("created", 0)) for m in messages if m.get("direction") == "out" and m.get("type") == "text"), default=-1)
-                pending = sorted([m for m in incoming if int(m.get("created", 0)) > latest_out], key=lambda m: int(m.get("created", 0)))
-                if not pending:
-                    continue
-                key = ("resolved:" if escalated else "in:") + chat + ":" + str(newest["id"])
-                async with self.engine.connect() as conn:
-                    repaired = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE event_key=:key"), {"key": "resolved:" + chat + ":" + str(newest["id"])})
-                if repaired:
-                    continue
-                value = "\n".join((m.get("content") or {}).get("text", "") for m in pending)
-                answer, escalate = reply(value, roles[item_id], messages)
-                if not answer:
-                    async with self.engine.begin() as conn:
-                        await conn.execute(text("INSERT INTO hr_avito_outbox(event_key,chat_id,response,state) VALUES (:key,:chat,'','stopped') ON CONFLICT(event_key) DO NOTHING"), {"key": key, "chat": chat})
-                    continue
-                await self.send_once(key, chat, answer)
-                if escalate:
-                    async with self.engine.begin() as conn:
-                        await conn.execute(text("INSERT INTO hr_avito_escalations(event_key,chat_id,reason) VALUES (:key,:chat,'owner_review') ON CONFLICT(event_key) DO NOTHING"), {"key": key, "chat": chat})
-                await asyncio.sleep(1)
-            if len(ids) < 100:
-                break
-            query["cursor"] = ids[-1]
-        else:
-            raise ValueError("Application pagination limit")
+            offset += 100
         self.last_check = int(time.time())
+
+    async def read_messages(self, chat):
+        messages, offset = [], 0
+        while True:
+            result = await self.api.request("GET", f"/messenger/v3/accounts/{self.uid}/chats/{urllib.parse.quote(chat, safe='')}/messages/?limit=100&offset={offset}")
+            batch = result if isinstance(result, list) else result.get("messages", [])
+            messages.extend(batch)
+            if len(batch) < 100:
+                return messages
+            offset += 100
+
+    async def process_chat(self, chat, role):
+        async with self.engine.connect() as conn:
+            blocked = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE chat_id=:chat AND state IN ('stopped','uncertain')"), {"chat": chat})
+        if blocked:
+            return
+        messages = await self.read_messages(chat)
+        texts = [m for m in messages if m.get("type") == "text"]
+        outgoing = [m for m in texts if m.get("direction") == "out"]
+        incoming = [m for m in texts if m.get("direction") == "in"]
+        latest_out = max((int(m.get("created", 0)) for m in outgoing), default=-1)
+        pending = sorted([m for m in incoming if int(m.get("created", 0)) > latest_out], key=lambda m: int(m.get("created", 0)))
+        if pending:
+            newest = pending[-1]
+            key = "in:" + chat + ":" + str(newest["id"])
+            # Respect both normal and previous repair keys, even if API history
+            # has not yet reflected the outgoing message.
+            async with self.engine.connect() as conn:
+                processed = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE event_key IN (:key,:repaired)"), {"key": key, "repaired": "resolved:" + chat + ":" + str(newest["id"])})
+            if processed:
+                return
+            value = "\n".join((m.get("content") or {}).get("text", "") for m in pending)
+            answer, escalate = reply(value, role, messages)
+        elif not texts and any(m.get("direction") == "in" and (
+                m.get("type") == "appCall" or (m.get("type") == "system" and
+                (m.get("content") or {}).get("flow_id") == "job" and
+                any(word in (m.get("content") or {}).get("text", "").lower()
+                    for word in ("откликнул", "посмотрел ваш телефон")))) for m in messages):
+            key = "welcome:" + chat
+            title = "фотографа" if role == "PHOTOGRAPHER" else "менеджера по записи"
+            answer, escalate = INTRO + f" Спасибо за отклик на вакансию {title}. Что хотели бы узнать о работе?", False
+        else:
+            return
+        if not answer:
+            async with self.engine.begin() as conn:
+                await conn.execute(text("INSERT INTO hr_avito_outbox(event_key,chat_id,response,state) VALUES (:key,:chat,'','stopped') ON CONFLICT(event_key) DO NOTHING"), {"key": key, "chat": chat})
+            return
+        # Re-read immediately before reserving the turn: a human or newer input
+        # must not be overwritten by a reply generated from stale history.
+        fresh = await self.read_messages(chat)
+        signature = lambda rows: {(str(m.get("id")), m.get("direction")) for m in rows if m.get("type") == "text"}
+        if signature(fresh) != signature(messages):
+            return
+        await self.send_once(key, chat, answer)
+        async with self.engine.begin() as conn:
+            if escalate:
+                # Unknown questions are tracked per turn; they never suppress
+                # replies to later candidate messages, including known questions.
+                await conn.execute(text("INSERT INTO hr_avito_escalations(event_key,chat_id,reason) VALUES (:key,:chat,'owner_review') ON CONFLICT(event_key) DO NOTHING"), {"key": key, "chat": chat})
+            else:
+                await conn.execute(text("UPDATE hr_avito_escalations SET reason='resolved_dialogue' WHERE chat_id=:chat AND reason='human_takeover'"), {"chat": chat})
+        await asyncio.sleep(1)
 
     async def run(self):
         while True:
@@ -437,7 +460,7 @@ class Worker:
                 reason = "http_" + str(exc.status) if isinstance(exc, APIError) else type(exc).__name__
                 await self.pause(reason)
                 log.error("Avito HR paused (%s)", reason)
-            await asyncio.sleep(300)
+            await asyncio.sleep(60)
 
     async def health(self, request):
         if not self.ready:
@@ -447,7 +470,7 @@ class Worker:
             count = await conn.scalar(text("SELECT count(*) FROM hr_avito_vacancies WHERE status='activated'"))
             escalations = await conn.scalar(text("SELECT count(*) FROM hr_avito_escalations WHERE reason NOT LIKE 'resolved%'"))
             sent = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE state='sent'"))
-        return web.json_response({"enabled": True, "ready": self.ready, "paused": bool(control["paused"]), "reason": control["reason"], "managedVacancies": count, "lastCheck": self.last_check, "lastProbe": self.last_probe, "sent": sent, "ownerReview": escalations})
+        return web.json_response({"enabled": True, "ready": self.ready, "paused": bool(control["paused"]), "reason": control["reason"], "managedVacancies": count, "lastCheck": self.last_check, "lastProbe": self.last_probe, "sent": sent, "ownerReview": escalations, "dialogueVersion": DIALOGUE_VERSION, "pollSeconds": 60})
 
 
 def install_avito_hr(app, engine):
@@ -474,3 +497,4 @@ def install_avito_hr(app, engine):
             worker.ready = False
     app.cleanup_ctx.append(lifetime)
     return worker
+
