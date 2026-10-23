@@ -509,13 +509,14 @@ class AppPush:
         return user
 
     async def status(self, request):
-        from .config import config
         from .models import OwnerTelegramDelivery
-        from .owner_telegram import START_KEY
+        from .owner_telegram import OWNER_KEY, START_KEY
         async with AsyncSession(self.api.engine) as session:
             actor = await self.actor(session, request)
-            owner_copy = actor.tg_id in config.admin_ids and bool(await session.scalar(
+            owner_eligible = actor.tg_id > 0 and bool(await session.scalar(
                 select(UserRole.id).where(UserRole.user_id == actor.id, UserRole.role == 'OWNER')))
+            preference = await session.get(Setting, OWNER_KEY+str(actor.id)) if owner_eligible else None
+            owner_copy = bool(preference)
             mirror_start = await session.get(Setting, START_KEY) if owner_copy else None
             rows = list(await session.scalars(select(Notification).where(Notification.user_id == actor.id,
                 Notification.kind.in_(KINDS), Notification.resolved_at.is_(None)).order_by(Notification.id.desc()).limit(30)))
@@ -535,7 +536,8 @@ class AppPush:
                         description = await booking_description(session, booking)
                 copy = await session.get(OwnerTelegramDelivery, notice.id) if owner_copy else None
                 telegram_state = (copy.status if copy else 'PENDING' if mirror_start and
-                    notice.created_at >= datetime.fromisoformat(mirror_start.value) else 'HISTORY_ONLY') if owner_copy else None
+                    notice.created_at >= max(datetime.fromisoformat(mirror_start.value),
+                        datetime.fromisoformat(preference.value)) else 'HISTORY_ONLY') if owner_copy else None
                 items.append({'id': notice.id, 'title': payload_for(notice)['title'],
                     'kind': notice.kind,
                     'description': description,
@@ -545,6 +547,7 @@ class AppPush:
                     'ownerTelegramState': telegram_state})
             return web.json_response({'configured': configured(), 'channel': 'app' if app_channel() else 'telegram',
                 'ownerTelegram': owner_copy and app_channel(),
+                'canConfigureOwnerTelegram': owner_eligible,
                 'activeDevices': active_devices,
                 'publicKey': os.getenv('WEB_PUSH_PUBLIC_KEY') if configured() else None,
                 'items': items}, headers={'Cache-Control':'no-store'})
@@ -565,6 +568,25 @@ class AppPush:
                 row.user_id, row.subscription, row.active, row.updated_at = actor.id, json.dumps(value), True, utc_now()
             else:
                 session.add(PushSubscription(user_id=actor.id, endpoint_hash=digest, subscription=json.dumps(value)))
+            await session.commit()
+        return web.json_response({'ok': True})
+
+    async def owner_telegram(self, request):
+        from .owner_telegram import OWNER_KEY
+        body = await self.api.body(request)
+        if set(body) != {'enabled'} or type(body['enabled']) is not bool:
+            raise AccessError('Укажите включение копий для своего аккаунта.', 400)
+        async with AsyncSession(self.api.engine) as session:
+            actor = await self.actor(session, request)
+            if actor.tg_id <= 0 or not await session.scalar(select(UserRole.id).where(
+                    UserRole.user_id == actor.id, UserRole.role == 'OWNER')):
+                raise AccessError('Telegram-копии доступны только своему аккаунту владельца.', 403)
+            key = OWNER_KEY+str(actor.id)
+            saved = await session.get(Setting, key, with_for_update=True)
+            if body['enabled'] and not saved:
+                session.add(Setting(key=key, value=utc_now().isoformat()))
+            elif not body['enabled'] and saved:
+                await session.delete(saved)
             await session.commit()
         return web.json_response({'ok': True})
 
@@ -616,3 +638,4 @@ def install_push(app, api):
     app.router.add_post('/api/miniapp/push/unsubscribe', service.unsubscribe)
     app.router.add_post('/api/miniapp/push/test', service.test)
     app.router.add_post('/api/miniapp/push/read', service.read)
+    app.router.add_post('/api/miniapp/push/owner-telegram', service.owner_telegram)

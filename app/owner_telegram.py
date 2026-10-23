@@ -27,6 +27,7 @@ from .push_notifications import app_channel, eligible, payload_for, queue_notice
 
 log = logging.getLogger(__name__)
 START_KEY = 'notify:owner-telegram:enabled-at'
+OWNER_KEY = 'notify:owner-telegram:'
 WORK_EVENTS = {
     'booking_created': 'Создана запись', 'booking_updated': 'Запись изменена',
     'booking_rescheduled': 'Съёмка перенесена', 'booking_cancelled': 'Съёмка отменена',
@@ -117,8 +118,9 @@ async def deliver_owner_copies(engine, bot):
             return 0
         since = max(datetime.fromisoformat(start.value), utc_now()-timedelta(days=1))
         notices = list(await session.scalars(select(Notification).join(User, User.id == Notification.user_id)
-            .where(User.active.is_(True), User.tg_id.in_(config.admin_ids),
+            .where(User.active.is_(True), User.tg_id > 0,
                 User.id.in_(select(UserRole.user_id).where(UserRole.role == 'OWNER')),
+                select(Setting.key).where(Setting.key == OWNER_KEY + User.id.cast(String)).exists(),
                 Notification.created_at >= since, Notification.resolved_at.is_(None),
                 ~select(OwnerTelegramDelivery.notification_id).where(
                     OwnerTelegramDelivery.notification_id == Notification.id).exists())
@@ -140,7 +142,9 @@ async def deliver_owner_copies(engine, bot):
             user = await session.get(User, notice.user_id) if notice else None
             owner = user and await session.scalar(select(UserRole.id).where(
                 UserRole.user_id == user.id, UserRole.role == 'OWNER'))
-            if (not owner or not user.active or user.tg_id not in config.admin_ids or notice.created_at < since
+            preference = await session.get(Setting, OWNER_KEY+str(user.id)) if user else None
+            if (not owner or not user.active or user.tg_id <= 0 or not preference
+                    or notice.created_at < max(since, datetime.fromisoformat(preference.value))
                     or not await eligible(session, notice, SimpleNamespace(user_id=user.id, active=True),
                         include_read=True, for_delivery=True)):
                 delivery.status = 'SKIPPED'
