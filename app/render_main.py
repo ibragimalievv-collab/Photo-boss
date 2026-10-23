@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk, storage_recovery_loop
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.43-shift-sales-recovery"
+RELEASE = "miniapp-3.44-attendance-transaction-recovery"
 
 
 async def app_redirect(request):

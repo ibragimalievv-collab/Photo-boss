@@ -27,12 +27,14 @@ from app.attendance import Attendance, install_attendance
 from app.hotel_points import context_key
 from app.miniapp_api import install_miniapp
 from app.models import (
+    HotelEmployee,
     Notification,
     Setting,
     ShiftCheckIn,
     ShiftCheckOut,
     User,
     UserRole,
+    WorkBreak,
 )
 from app.people import install_people
 from app.services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
@@ -43,7 +45,8 @@ from app.work_chat import install_work_chat
 async def make_fixture(directory):
     engine, factory = await fixture('sqlite+aiosqlite:///' + str(directory / 'attendance.db'))
     async with factory() as session:
-        session.add_all([User(id=3, tg_id=3, name='Fixture owner'), UserRole(user_id=3, role='OWNER')])
+        session.add_all([User(id=3, tg_id=3, name='Fixture owner'), UserRole(user_id=3, role='OWNER'),
+                         HotelEmployee(user_id=1, hotel_id=1)])
         await session.commit()
     bot = SimpleNamespace(token=TOKEN, send_message=AsyncMock(),
         me=AsyncMock(return_value=SimpleNamespace(username='fixture_bot')))
@@ -179,6 +182,38 @@ async def main(*, gps_only=False):
                             assert len(notices) == 2 and {row.user_id for row in notices} == {1, 3}
                             assert all(json.loads(row.payload)['status'] == 'STARTED' for row in notices)
 
+                        if gps_only:
+                            await dialog.locator('[data-att=close]').click()
+                            await page.goto(str(server.make_url('/app/#workday')))
+                            await expect(page.locator('[data-lunch=start]')).to_be_enabled()
+                            # Server commits, but the client loses the acknowledgement.
+                            # Retrying the durable operation must replay one interval.
+                            async def lose_lunch_ack(route):
+                                await route.fetch()
+                                await route.fulfill(status=503, content_type='application/json',
+                                    body=json.dumps({'error': 'Fixture lost acknowledgement'}))
+                            await page.route('**/operations/sync', lose_lunch_ack, times=1)
+                            await page.locator('[data-lunch=start]').click()
+                            await wait_async(page, """async()=>{
+                                const {outboxRows}=await import('/app/js/outbox.js');
+                                return (await outboxRows()).some(r=>r.kind==='break_start'&&r.errorStatus===503);
+                            }""")
+                            await page.evaluate("""async()=>{
+                                const {outboxRows,retryOperation}=await import('/app/js/outbox.js');
+                                const row=(await outboxRows()).find(r=>r.kind==='break_start');
+                                await retryOperation(row.key);
+                            }""")
+                            await expect(page.locator('[data-lunch=end]')).to_be_enabled()
+                            await page.reload()
+                            await expect(page.locator('[data-lunch=end]')).to_be_enabled()
+                            await page.locator('[data-lunch=end]').click()
+                            await expect(page.locator('[data-lunch=start]')).to_be_enabled()
+                            async with factory() as session:
+                                assert await session.scalar(select(func.count(WorkBreak.id))) == 1
+                                saved_break = await session.scalar(select(WorkBreak))
+                                assert saved_break.ended_at >= saved_break.started_at
+                            await page.goto(str(server.make_url('/app/#home')))
+                            await page.locator('#attendanceCard [data-att=open]').click()
                         ended = await capture_and_confirm('end')
                         assert ended['end']['status'] == 'FINISHED'
                         assert ended['end']['locationSaved'] is gps_only

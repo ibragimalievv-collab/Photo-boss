@@ -20,6 +20,7 @@ from uuid import uuid4
 from aiohttp import web
 from sqlalchemy import text
 
+from .db import user_lock_clause
 from .hotel_points import (
     capture_context,
     context_key,
@@ -149,7 +150,7 @@ class Attendance:
 
     async def locked_actor(self, conn, request):
         actor = request['miniapp_actor']
-        people = await self.api.rows(conn, 'SELECT id,active FROM users WHERE id=:uid FOR UPDATE', uid=actor['id'])
+        people = await self.api.rows(conn, 'SELECT id,active FROM users WHERE id=:uid' + user_lock_clause(conn), uid=actor['id'])
         roles = await self.api.rows(conn, 'SELECT role FROM user_roles WHERE user_id=:uid', uid=actor['id'])
         if not people or not people[0]['active'] or not any(x['role'] in WORK_ROLES for x in roles):
             raise AccessError('Личная отметка доступна активному фотографу или менеджеру записи.')
@@ -608,7 +609,7 @@ class Attendance:
                             if key not in scopes:
                                 scopes[key] = await self.day_in_scope(conn, actor, key[0], day)
                             if scopes[key]:
-                                items.append(dict(r) | {'purpose': purpose, 'shift_date': str(r['shift_date']),
+                                items.append({k: v for k, v in dict(r).items() if k != 'confirmed_at'} | {'purpose': purpose, 'shift_date': str(r['shift_date']),
                                     'offline_claimed_at': utc(r['offline_claimed_at']).isoformat() if r['offline_claimed_at'] else None,
                                     'location_received_at': utc(r['location_received_at']).isoformat() if r['location_received_at'] else None,
                                     'confirmedAt': utc(r['confirmed_at']).isoformat() if r['confirmed_at'] else None,

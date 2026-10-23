@@ -126,7 +126,7 @@ class WorkBreaks:
             query = select(WorkBreak).where((WorkBreak.shift_date == day) |
                 ((WorkBreak.user_id == actor.id) & WorkBreak.ended_at.is_(None)))
             if 'OWNER' not in roles:
-                query = query.where(WorkBreak.hotel_id.in_(allowed)) if editor else query.where(WorkBreak.user_id == actor.id)
+                query = query.where(WorkBreak.hotel_id.in_(allowed) | (WorkBreak.user_id == actor.id)) if editor else query.where(WorkBreak.user_id == actor.id)
             rows = list(await session.scalars(query.order_by(WorkBreak.started_at)))
             result = []
             for row in rows:
@@ -150,7 +150,7 @@ class WorkBreaks:
         return web.json_response({'date': str(day), 'timezone': str(self.api.tz), 'actorId': actor.id,
             'canEdit': editor, 'canStart': bool(can_start),
             'startPendingReview': bool(check and check.status == 'PENDING_REVIEW'), 'items': result,
-            'hotels': [{'id': h.id, 'name': h.name} for h in hotels if 'OWNER' in roles or h.id in (allowed | planned if not editor else allowed)],
+            'hotels': [{'id': h.id, 'name': h.name} for h in hotels if 'OWNER' in roles or h.id in (allowed | planned)],
             'employees': [{'id': u.id, 'name': u.name} for u in employees]})
 
     async def save(self, request):
@@ -170,7 +170,7 @@ class WorkBreaks:
                 uid, hid = body['userId'], body['hotelId']
                 if type(uid) is not int or type(hid) is not int:
                     raise AccessError('Выберите сотрудника и отель.', 400)
-                employee = await session.get(User, uid, with_for_update=True)
+                employee = await session.get(User, uid, with_for_update={'key_share': True})
                 if not employee or not employee.active:
                     raise AccessError('Сотрудник недоступен.', 404)
                 day = self.api.day(body['date'])
@@ -186,7 +186,7 @@ class WorkBreaks:
                     raise AccessError('Отметка не найдена.', 404)
                 await hotel_access(session, actor.id, roles, row.hotel_id, manage=True)
                 # Serialize overlapping changes against self-service actions too.
-                await session.get(User, row.user_id, with_for_update=True)
+                await session.get(User, row.user_id, with_for_update={'key_share': True})
                 row = await session.get(WorkBreak, row.id, with_for_update=True, populate_existing=True)
                 if body['revision'] != stamp(row.updated_at):
                     raise AccessError('Отметка уже изменена. Обновите данные.', 409)

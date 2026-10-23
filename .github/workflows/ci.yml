@@ -120,7 +120,9 @@ jobs:
         env:
           PYTHONPATH: .
           UPDATE_POSTGRES_TEST_URL: postgresql+asyncpg://postgres:ci-only-password@127.0.0.1:5432/hotel_photo_bot
-        run: python tests/update_postgres_check.py
+        run: |
+          python tests/update_postgres_check.py
+          python tests/attendance_postgres_check.py
 
       - name: Stop test stack
         if: always()

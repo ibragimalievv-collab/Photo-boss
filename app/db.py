@@ -36,6 +36,16 @@ class Base(DeclarativeBase):
     pass
 
 
+def user_lock_clause(conn):
+    """Serialize a user's operations without blocking notification foreign keys.
+
+    We never change the user's primary key. PostgreSQL FOR UPDATE also blocks
+    KEY SHARE acquired by inserts referencing other users and can deadlock two
+    simultaneous attendance/fine transactions that notify each other.
+    """
+    return ' FOR NO KEY UPDATE' if conn.dialect.name == 'postgresql' else ' FOR UPDATE'
+
+
 async def init_db():
     import_module(".models", package=__package__)
     async with engine.begin() as connection:
