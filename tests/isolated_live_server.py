@@ -5,6 +5,7 @@ identities, camera/GPS adapters and local file storage are explicit test
 boundaries, not evidence of real Telegram/Disk/device delivery.
 """
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
@@ -100,7 +101,7 @@ Object.defineProperty(navigator,'mediaDevices',{value:{getUserMedia:async constr
 Object.defineProperty(navigator,'geolocation',{value:{getCurrentPosition(ok){ok({coords:{latitude:44.9,longitude:37.3,accuracy:8},timestamp:Date.now()});}},configurable:true});
 addEventListener('DOMContentLoaded',()=>{const bar=document.createElement('aside');bar.style='position:fixed;z-index:100000;bottom:0;left:0;right:0;background:#ffe68c;color:#111;padding:8px;font:13px sans-serif';bar.innerHTML='ИЗОЛИРОВАННЫЙ ТЕСТ · синтетические данные, камера/GPS, локальные файлы · внешние отправки отключены · '+ROLE_LINKS;document.body.append(bar);});
 </script>'''.replace('INIT_DATA', json.dumps(signed(uid))).replace('ROLE_LINKS', json.dumps(' '.join(
-        f'<a style="margin:0 7px;color:#111" href="/qa/actor/{i}">{name}</a>' for i, name in ROLES.items())))
+        f'<a style="margin:0 7px;color:#111" href="/qa/actor/{i}">{name}</a>' for i, name in ROLES.items())+' <a style="color:#111" href="/qa/photo-failure">Следующее фото: один сбой 503</a>'))
 
 
 async def build_app():
@@ -112,14 +113,16 @@ async def build_app():
     async with factory() as session:
         if not await session.scalar(select(User.id).limit(1)):
             session.add_all([User(id=i, tg_id=i, name='QA '+name) for i, name in ROLES.items()])
-            session.add_all([Hotel(id=1, name='QA Мовенпик'), Hotel(id=2, name='QA Фиолето'),
+            session.add_all([Hotel(id=1, name='QA Фиолето'), Hotel(id=2, name='QA Мовенпик'),
                              Package(id=1, name='QA 400 рублей', price_per_photo=400)])
             await session.flush()
             today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
             for uid, role in ((1, 'MANAGER'), (2, 'PHOTOGRAPHER'), (3, 'OWNER'), (4, 'ADMIN')):
-                session.add_all([UserRole(user_id=uid, role=role), HotelEmployee(user_id=uid, hotel_id=1)])
+                session.add_all([UserRole(user_id=uid, role=role), HotelEmployee(user_id=uid, hotel_id=2)])
+                if uid == 1:
+                    session.add(HotelEmployee(user_id=uid, hotel_id=1))
                 if uid in (1, 2):
-                    session.add(Shift(user_id=uid, hotel_id=1, start_at=today,
+                    session.add(Shift(user_id=uid, hotel_id=2, start_at=today,
                         end_at=today+timedelta(hours=23), status='PLANNED'))
             await session.commit()
     files = LocalFiles()
@@ -142,6 +145,10 @@ async def build_app():
             uid = 1
         if request.path == '/':
             return web.Response(text='Photo Boss isolated QA: no real employee data or integrations')
+        if request.path == '/qa/photo-failure':
+            response = web.HTTPFound('/app/#home')
+            response.set_cookie('pb_qa_photo_failure', '1', httponly=True, samesite='Strict')
+            return response
         if request.path.startswith('/qa/actor/'):
             target = int(request.path.rsplit('/', 1)[1])
             if target not in ROLES:
@@ -154,6 +161,10 @@ async def build_app():
                 '<script src="https://telegram.org/js/telegram-web-app.js"></script>', qa_script(uid))
             return web.Response(text=html, content_type='text/html', headers={'Cache-Control':'no-store'})
         if request.path.startswith('/api/miniapp/'):
+            if request.path == '/api/miniapp/attendance/photo' and request.cookies.get('pb_qa_photo_failure') == '1':
+                response = web.json_response({'error': 'QA: one injected temporary photo upload failure'}, status=503)
+                response.del_cookie('pb_qa_photo_failure')
+                return response
             headers = dict(request.headers)
             headers['X-Telegram-Init-Data'] = signed(uid)
             request = request.clone(headers=headers)
@@ -172,9 +183,17 @@ async def build_app():
     app['yandex_disk'] = files
     app.router.add_get('/', lambda request: web.Response(text='Isolated QA'))
     app.router.add_get('/qa/actor/{id}', lambda request: web.Response(text='QA selector'))
+    app.router.add_get('/qa/photo-failure', lambda request: web.Response(text='QA failure selector'))
     app.router.add_get('/api/miniapp/storage/status', lambda request: web.json_response(files.public_status()))
+    async def startup(app):
+        from app.services.booking_reminders import booking_reminder_loop
+        app['qa_reminder_task'] = asyncio.create_task(booking_reminder_loop(engine))
     async def cleanup(app):
+        app['qa_reminder_task'].cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await app['qa_reminder_task']
         await engine.dispose()
+    app.on_startup.append(startup)
     app.on_cleanup.append(cleanup)
     return app
 
