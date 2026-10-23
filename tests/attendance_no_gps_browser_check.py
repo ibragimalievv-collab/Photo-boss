@@ -182,7 +182,9 @@ async def main(*, gps_only=False):
                             assert len(notices) == 2 and {row.user_id for row in notices} == {1, 3}
                             assert all(json.loads(row.payload)['status'] == 'STARTED' for row in notices)
 
+                        gps_before_lunch = 0
                         if gps_only:
+                            gps_before_lunch = await page.evaluate('window.fixtureGpsRequests')
                             await dialog.locator('[data-att=close]').click()
                             await page.goto(str(server.make_url('/app/#workday')))
                             await expect(page.locator('[data-lunch=start]')).to_be_enabled()
@@ -240,7 +242,7 @@ async def main(*, gps_only=False):
                             assert len(notices) == 4
                             assert len([row for row in notices if row.user_id == 3]) == 2
                             assert {json.loads(row.payload)['status'] for row in notices} == {'STARTED', 'FINISHED'}
-                        gps_count = await page.evaluate('window.fixtureGpsRequests')
+                        gps_count = gps_before_lunch + await page.evaluate('window.fixtureGpsRequests')
                         await page.goto(str(server.make_url('/app/#home')))
                         await page.locator('#attendanceCard [data-att=open]').click()
                         await expect(dialog).to_contain_text('Смена завершена')
