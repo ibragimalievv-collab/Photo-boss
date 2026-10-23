@@ -35,7 +35,9 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements-dev.txt
-      - run: python tests/attendance_postgres_check.py
+      - run: |
+          python tests/attendance_postgres_check.py
+          python tests/app_postgres_audit.py
 
   render-runtime:
     runs-on: ubuntu-latest
