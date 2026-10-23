@@ -1,6 +1,7 @@
 """Real app UI and HTTP practice API, isolated staff and image storage."""
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -31,7 +32,7 @@ async def main():
     coach_provider = patch('app.academy_coach.structured', AsyncMock(return_value={'status': 'completed', 'data': plan}))
     coach_config.start(); coach_provider.start()
     async with async_playwright() as p:
-        browser = await p.chromium.launch()
+        browser = await p.chromium.launch(executable_path=os.getenv('CALLS_CHROMIUM_PATH') or None)
         try:
             async def route(r):
                 nonlocal lost_upload_reply, delayed_assignment

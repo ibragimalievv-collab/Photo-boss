@@ -74,7 +74,7 @@ async def main():
         try:
             with patch.object(photo_storage, 'Session', factory), patch.object(photo_edits, 'Session', factory):
                 async with async_playwright() as p:
-                    browser = await p.chromium.launch(args=['--ignore-certificate-errors'])
+                    browser = await p.chromium.launch(executable_path=os.getenv('CALLS_CHROMIUM_PATH') or None,args=['--ignore-certificate-errors'])
                     context = await browser.new_context(ignore_https_errors=True, viewport={'width':360,'height':800}, is_mobile=True)
                     await context.add_init_script('window.Telegram={WebApp:{initData:'+json.dumps(signed(2))+',ready(){},expand(){},setHeaderColor(){},setBackgroundColor(){},onEvent(){},BackButton:{show(){},hide(){},onClick(){}}}};')
                     await context.route('https://telegram.org/**', lambda r:r.fulfill(status=200,content_type='text/javascript',body=''))
@@ -200,7 +200,10 @@ async def main():
                     await context.set_offline(False)
                     await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.error);}")
                     await page.evaluate("async()=>{const m=await import('/app/js/outbox.js');const row=(await m.outboxRows()).find(r=>r.error);await m.retryOperation(row.key);}")
-                    await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');const rows=(await m.outboxRows()).filter(r=>r.kind==='delivery_photo');return rows.length===150&&rows.every(r=>r.status==='synced'&&!r.hasBlob);}")
+                    # This assertion transfers 300 MB sequentially through the real
+                    # browser transport; slower CI hosts need more than the small
+                    # media-call default. Keep checking every original and replay.
+                    await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');const rows=(await m.outboxRows()).filter(r=>r.kind==='delivery_photo');return rows.length===150&&rows.every(r=>r.status==='synced'&&!r.hasBlob);}",timeout=120000)
                     assert len(attempts)==151 and len(set(attempts))==150
                     assert not errors,errors
                     await browser.close()
