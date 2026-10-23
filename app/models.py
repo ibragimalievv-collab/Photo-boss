@@ -602,6 +602,16 @@ class PushDelivery(Base):
     __table_args__ = (UniqueConstraint('notification_id', 'subscription_id', name='uq_push_notice_device'),)
 
 
+class OwnerTelegramDelivery(Base):
+    __tablename__ = 'owner_telegram_deliveries'
+    notification_id: Mapped[int] = mapped_column(ForeignKey('notifications.id', ondelete='CASCADE'), primary_key=True)
+    status: Mapped[str] = mapped_column(String(20), default='PENDING')
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
 class BookingReminder(Base):
     __tablename__ = "booking_reminders"
     id: Mapped[int] = mapped_column(primary_key=True)

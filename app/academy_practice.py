@@ -385,8 +385,30 @@ class AcademyPractice:
             result = await self.detail_data(conn, actor, aid)
         return web.json_response(result)
 
+    async def recover_photos(self, request):
+        actor = request['miniapp_actor']
+        aid = positive_id(request.match_info['id'])
+        async with self.engine.connect() as conn:
+            row = await self.assignment(conn, actor, aid)
+            if row['user_id'] != actor['id'] or row['status'] != 'ACTIVE':
+                raise AccessError('Восстановление доступно в своём открытом задании.', 409)
+            shots = await self.api.rows(conn, 'SELECT * FROM training_submissions WHERE assignment_id=:id', id=aid)
+        missing = []
+        for shot in shots:
+            try:
+                await photo_bytes(self.api.bot, request.app['yandex_disk'], shot['submitted_file_id'])
+            except YandexDiskError as exc:
+                if exc.http_status != 404:
+                    raise
+                missing.append(shot['pose_index'])
+        if missing:
+            await self._reopen_unavailable_photos(row, shots, missing,
+                expected_sources={row['review_source']}, expected_status='ACTIVE')
+        async with self.engine.connect() as conn:
+            return web.json_response(await self.detail_data(conn, actor, aid))
+
     async def _reopen_unavailable_photos(self, row, shots, indexes, *, expected_sources,
-                                       processing_lease=None):
+                                       processing_lease=None, expected_status='PENDING_REVIEW'):
         """Reopen only unreadable slots while retaining an immutable failure snapshot."""
         indexes = sorted(set(indexes))
         result = {"status": "storage_unavailable", "unavailable_indexes": indexes}
@@ -396,7 +418,7 @@ class AcademyPractice:
                 "SELECT status,review_source,ai_analysis FROM training_assignments WHERE id=:id FOR UPDATE",
                 id=row["id"],
             )
-            if (not current or current[0]["status"] != "PENDING_REVIEW"
+            if (not current or current[0]["status"] != expected_status
                     or current[0]["review_source"] not in expected_sources):
                 return False
             if processing_lease is not None:
@@ -661,5 +683,6 @@ def install_academy_practice(app, miniapp):
     app.router.add_post(prefix + "/{id}/review", service.review)
     app.router.add_post(prefix + "/{id}/retry", service.retry)
     app.router.add_post(prefix + "/{id}/retake", service.retake)
+    app.router.add_post(prefix + "/{id}/recover-photos", service.recover_photos)
     return service
 

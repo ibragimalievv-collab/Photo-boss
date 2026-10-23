@@ -33,8 +33,8 @@ COMMON = ('me', 'dashboard', 'bookings?date=2026-09-22', 'schedule?week=2026-09-
           'galleries', 'booking-control', 'attendance', 'push', 'chat/people',
           'chat/presence', 'chat/unread', 'chat/calls', 'chat/calls/history')
 LEADERS = ('attendance/pending', 'attendance/fines', 'hotel-points', 'people',
-           'documents', 'hr', 'discipline', 'shoot-control', 'delivery-contacts')
-OWNER = ('audit', 'insights', 'events', 'storage/status', 'storage/inventory',
+           'documents', 'hr', 'discipline?from=2026-09-22&to=2026-09-22', 'shoot-control')
+OWNER = ('delivery-contacts', 'audit', 'insights', 'events', 'storage/status', 'storage/inventory',
          'storage/sales-audit', 'diagnostics/ai')
 
 
@@ -70,6 +70,11 @@ async def main():
             await client.start_server()
             failures, checks = [], 0
             for uid, role in ((1, 'manager'), (2, 'photographer'), (3, 'owner'), (4, 'admin')):
+                headers = {'X-Telegram-Init-Data': signed(uid)}
+                rules = await (await client.get('/api/miniapp/chat/rules', headers=headers)).json()
+                accepted = await client.post('/api/miniapp/chat/rules/accept', headers=headers,
+                    json={'version': rules['version'], 'sha256': rules['sha256']})
+                assert accepted.status == 200, await accepted.text()
                 for group in (COMMON, LEADERS, OWNER):
                     allowed = group is COMMON or (group is LEADERS and role in {'owner', 'admin'}) or role == 'owner'
                     for path in group:

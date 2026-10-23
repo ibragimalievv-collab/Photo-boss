@@ -875,7 +875,7 @@ class MiniApp:
         cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
         async with self.engine.connect() as conn:
             completed = await self.rows(conn, "SELECT topic_slug FROM academy_lesson_progress WHERE user_id=:uid", uid=uid)
-            practices = await self.rows(conn, "SELECT id,category_slug,status FROM training_assignments WHERE user_id=:uid ORDER BY id DESC", uid=uid)
+            practices = await self.rows(conn, "SELECT * FROM training_assignments WHERE user_id=:uid ORDER BY id DESC", uid=uid)
             reviews = await self.rows(conn, "SELECT id,quality_score,issues,recommendation FROM academy_reviews WHERE user_id=:uid ORDER BY id DESC LIMIT 30", uid=uid)
             ai_reviews = await self.rows(conn, """SELECT r.id,r.result FROM academy_practice_reviews r
                 JOIN training_assignments a ON a.id=r.assignment_id WHERE a.user_id=:uid ORDER BY r.id DESC LIMIT 30""", uid=uid)
@@ -931,7 +931,8 @@ class MiniApp:
             "carryOver": True, "completed": done, "points": len(done)*10,
             "totalPoints": len(done)*10 + sum(p["status"] == "COMPLETED" for p in practices)*100,
             "acceptedCount": sum(p["status"] == "COMPLETED" for p in practices),
-            "practices": [{"id": p["id"], "category": p["category_slug"], "status": p["status"]} for p in practices],
+            "practices": [{"id": p["id"], "category": p["category_slug"], "status": p["status"],
+                           "reviewSource": p.get("review_source")} for p in practices],
             "reviews": fresh_reviews + [{"id": r["id"], "score": r["quality_score"], "issues": r["issues"], "recommendation": r["recommendation"], "source": "ARCHIVE"} for r in reviews],
             "personalTip": tip,
             "finalExam": {"eligible": course_done, "category": "final_exam",

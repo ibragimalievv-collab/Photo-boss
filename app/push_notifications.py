@@ -500,15 +500,21 @@ class AppPush:
         self.api = api
 
     async def actor(self, session, request):
-        user = await session.get(User, request['miniapp_actor']['id'], with_for_update=True)
+        user = await session.get(User, request['miniapp_actor']['id'], with_for_update={'key_share': True})
         roles = set(await session.scalars(select(UserRole.role).where(UserRole.user_id == user.id))) if user else set()
         if not user or not user.active or not roles & ROLES:
             raise AccessError('Рабочий доступ отключён.', 403)
         return user
 
     async def status(self, request):
+        from .config import config
+        from .models import OwnerTelegramDelivery
+        from .owner_telegram import START_KEY
         async with AsyncSession(self.api.engine) as session:
             actor = await self.actor(session, request)
+            owner_copy = actor.tg_id in config.admin_ids and bool(await session.scalar(
+                select(UserRole.id).where(UserRole.user_id == actor.id, UserRole.role == 'OWNER')))
+            mirror_start = await session.get(Setting, START_KEY) if owner_copy else None
             rows = list(await session.scalars(select(Notification).where(Notification.user_id == actor.id,
                 Notification.kind.in_(KINDS), Notification.resolved_at.is_(None)).order_by(Notification.id.desc()).limit(30)))
             active_devices = await session.scalar(select(func.count(PushSubscription.id)).where(
@@ -525,13 +531,18 @@ class AppPush:
                     booking = await session.get(Booking, bid)
                     if booking:
                         description = await booking_description(session, booking)
+                copy = await session.get(OwnerTelegramDelivery, notice.id) if owner_copy else None
+                telegram_state = (copy.status if copy else 'PENDING' if mirror_start and
+                    notice.created_at >= datetime.fromisoformat(mirror_start.value) else 'HISTORY_ONLY') if owner_copy else None
                 items.append({'id': notice.id, 'title': payload_for(notice)['title'],
                     'kind': notice.kind,
                     'description': description,
                     'url': payload_for(notice)['url'], 'read': bool(notice.acknowledged_at),
                     'createdAt': notice.created_at.isoformat()+'Z',
-                    'pushState': await push_delivery_state(session, notice, active_devices=active_devices)})
+                    'pushState': await push_delivery_state(session, notice, active_devices=active_devices),
+                    'ownerTelegramState': telegram_state})
             return web.json_response({'configured': configured(), 'channel': 'app' if app_channel() else 'telegram',
+                'ownerTelegram': owner_copy and app_channel(),
                 'activeDevices': active_devices,
                 'publicKey': os.getenv('WEB_PUSH_PUBLIC_KEY') if configured() else None,
                 'items': items}, headers={'Cache-Control':'no-store'})
