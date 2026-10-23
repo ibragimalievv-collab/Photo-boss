@@ -42,7 +42,7 @@ async function loadPhotos(){
 function analysisMarkup(data){
  const a=data.analysis;if(!a)return '';
  if(a.status==='owner')return `<div class="practice-feedback"><strong>Решение владельца</strong><p>${esc(a.comment||'Набор принят.')}</p></div>`;
- if(a.status==='storage_unavailable')return `<p class="practice-feedback">Не удалось прочитать ${esc((a.unavailable_indexes||[]).map(i=>`кадр ${i}`).join(', ')||'один из кадров')} из хранилища. Остальные фотографии сохранены; загрузите только отмеченные кадры заново.</p>`;
+ if(a.status==='storage_unavailable')return `<p class="practice-feedback">Не удалось прочитать ${esc((a.unavailable_indexes||[]).map(i=>`кадр ${i}`).join(', ')||'один из кадров')} из хранилища. ${data.shots.some(s=>s.uploaded)?'Доступные загруженные кадры остаются в задании.':'Доступных загруженных оригиналов в задании сейчас нет.'} Загрузите недостающие кадры, а также ранее назначенную пересъёмку; история прежних работ сохранена.</p>`;
  if(a.status==='processing')return `<p class="practice-feedback">ИИ проверяет сохранённые фотографии. Попытка ${(a.attempts||0)+1}/3. Повторно отправлять фото не нужно.</p>`;
  if(a.status!=='completed')return `<p class="practice-feedback">${esc(reviewSummary(data)||'AI-проверка временно недоступна. Фотографии сохранены; повторите проверку.')}${a.nextRetryAt?' Следующая попытка запланирована автоматически; фотографии повторно загружать не нужно.':''}</p>`;
  const r=a.review;

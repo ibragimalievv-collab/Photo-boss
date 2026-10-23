@@ -11,11 +11,35 @@ from test_workflow_replay import ACTOR, packet, setup
 
 from app.attendance import Attendance
 from app.miniapp_security import AccessError
-from app.models import HotelEmployee, ShiftCheckIn, ShiftCheckOut, WorkBreak
+from app.models import Hotel, HotelEmployee, Shift, ShiftCheckIn, ShiftCheckOut, WorkBreak
 from app.work_breaks import WorkBreaks
 
 DAY = date(2026, 9, 22)
 NOW = datetime(2026, 9, 22, 8, tzinfo=UTC)
+
+
+def test_lunch_defaults_to_single_planned_hotel_and_requires_choice_for_multiple_plans():
+    async def run():
+        engine, factory, work = await setup()
+        try:
+            async with factory() as session:
+                session.add(Hotel(id=2, name='Planned hotel'))
+                await session.flush()
+                session.add_all([HotelEmployee(user_id=1, hotel_id=1), HotelEmployee(user_id=1, hotel_id=2),
+                    Shift(user_id=1, hotel_id=2, start_at=NOW.replace(hour=6, tzinfo=None),
+                        end_at=NOW.replace(hour=18, tzinfo=None), status='PLANNED')])
+                await session.commit()
+            request = {'miniapp_actor': ACTOR}
+            first = json.loads((await WorkBreaks(work.api).listing(request)).text)
+            assert len(first['hotels']) == 2 and first['defaultHotelId'] == 2
+            async with factory() as session:
+                session.add(Shift(user_id=1, hotel_id=1, start_at=NOW.replace(hour=6, tzinfo=None),
+                    end_at=NOW.replace(hour=18, tzinfo=None), status='PLANNED'))
+                await session.commit()
+            assert json.loads((await WorkBreaks(work.api).listing(request)).text)['defaultHotelId'] is None
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
 
 
 def test_pending_start_allows_lunch_return_and_online_end_without_approving_evidence(monkeypatch):

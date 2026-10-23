@@ -27,3 +27,12 @@ for(const reset of [events.get('pb-operations-reset'),accountEvents.get('pb-chat
  assert.equal(vm.runInContext('pendingKey',isolated),null);
 }
 console.log('PASS: lunch drops old account and reset responses');
+const view=vm.createContext({Date,Number,Promise,Error,setTimeout,esc:String,document:{addEventListener(){}},window:{addEventListener(){}}});
+vm.runInContext(source,view);
+vm.runInContext('state={actorId:1,items:[],timezone:"Europe/Moscow",hotels:[{id:3,name:"First"},{id:9,name:"Planned"}],defaultHotelId:9,canStart:true,canEdit:false}',view);
+assert.match(vm.runInContext('lunchView()',view),/<option value="9" selected>Planned/);
+vm.runInContext('state.defaultHotelId=null',view);
+assert.match(vm.runInContext('lunchView()',view),/<option value="">Выберите отель смены/);
+vm.runInContext('selectedHotel=3',view);
+assert.match(vm.runInContext('lunchView()',view),/<option value="3" selected>First/);
+console.log('PASS: planned hotel selected; ambiguous plans require explicit choice; manual choice retained');
