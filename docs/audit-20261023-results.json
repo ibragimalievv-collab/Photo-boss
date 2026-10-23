@@ -255,5 +255,20 @@
       }
     ]
   },
-  "deployment": "not performed"
+  "deployment": "not performed",
+  "legacyBrowser": {
+    "runtime": "Chromium134 with isolated Fontconfig excluding workspace OpenAI Sans",
+    "scripts": [
+      "booking_recovery_browser_check.py",
+      "academy_practice_browser_check.py",
+      "photo_storage_browser_check.py"
+    ],
+    "result": "passed",
+    "productionCSSChanged": false
+  },
+  "finalAcademyRetest": {
+    "passed": 27,
+    "failed": 0
+  },
+  "pullRequest": "https://github.com/ibragimalievv-collab/Photo-boss/pull/101"
 }

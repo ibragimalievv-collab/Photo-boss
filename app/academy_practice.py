@@ -593,7 +593,7 @@ class AcademyPractice:
                     continue
                 if deferred:
                     result = {"status": "unavailable", "errorCode": "storage_unavailable", "retryable": True,
-                              "message": "Хранилище временно недоступно. Фотографии сохранены; проверка будет повторена."}
+                              "message": "Хранилище временно недоступно. Фотографии сохранены; повторите проверку."}
                 else:
                     try:
                         references = [p.read_bytes() for p in category.image_paths]
