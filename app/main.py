@@ -160,6 +160,8 @@ async def main():
         reminder_task = asyncio.create_task(booking_reminder_loop(engine))
         from .push_notifications import push_loop
         push_task = asyncio.create_task(push_loop(engine))
+        from .owner_telegram import owner_telegram_loop
+        owner_telegram_task = asyncio.create_task(owner_telegram_loop(engine, bot, storage))
         try:
             me = await bot.me()
             logger.info("Telegram bot @%s is authenticated", me.username)
@@ -168,6 +170,9 @@ async def main():
                 bot, allowed_updates=dispatcher.resolve_used_update_types(), close_bot_session=False,
             )
         finally:
+            owner_telegram_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await owner_telegram_task
             reminder_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await reminder_task

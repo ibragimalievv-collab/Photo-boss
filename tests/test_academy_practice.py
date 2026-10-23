@@ -87,6 +87,36 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
             assert status == 201, data
         return data
 
+    async def test_active_missing_original_reopens_only_404_slot_and_preserves_history(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("UPDATE training_assignments SET status='ACTIVE',review_source='AI' WHERE id=:id"), {'id': aid})
+        original = self.storage.download_bytes.side_effect
+        async def missing(path, **kwargs):
+            if f'/{aid}-2-' in path:
+                raise YandexDiskError('Missing original', http_status=404)
+            return await original(path, **kwargs)
+        self.storage.download_bytes.side_effect = missing
+        status, data = await self.request(f'/{aid}/recover-photos', body={})
+        assert status == 200, data
+        assert data['reviewSource'] == 'STORAGE_RETRY'
+        assert [s['index'] for s in data['shots'] if not s['uploaded']] == [2]
+        assert (await self.request(f'/{aid}/recover-photos', body={}))[0] == 200
+        with self.engine.inner.connect() as conn:
+            snapshots = conn.execute(text('SELECT photos FROM academy_practice_reviews WHERE assignment_id=:id'), {'id': aid}).all()
+            assert len(snapshots) == 1 and len(json.loads(snapshots[0][0])) == 5
+        self.storage.delete.assert_not_awaited()
+
+    async def test_storage_transient_error_never_removes_active_practice_photo(self):
+        aid = await self.start()
+        await self.upload_all(aid)
+        with self.engine.inner.begin() as conn:
+            conn.execute(text("UPDATE training_assignments SET status='ACTIVE' WHERE id=:id"), {'id': aid})
+        self.storage.download_bytes.side_effect = YandexDiskError('Unavailable', http_status=503)
+        assert (await self.request(f'/{aid}/recover-photos', body={}))[0] == 503
+        assert all(s['uploaded'] for s in (await self.request(f'/{aid}'))[1]['shots'])
+
     async def test_auth_gating_and_private_photo_access(self):
         assert (await self.request(token="forged"))[0] == 401
         assert (await self.request(uid=6))[0] == 403

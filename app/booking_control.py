@@ -169,7 +169,9 @@ class BookingControl:
             notifications = list(await session.scalars(select(Notification).where(
                 Notification.user_id == actor['id'], Notification.kind == 'manager_idle',
                 Notification.resolved_at.is_(None)).order_by(Notification.id.desc()).limit(10))) if settings['enabled'] else []
-            result = {'settings': settings, 'canConfigure': 'OWNER' in actor['roles'], 'supervisor': supervisor,
+            from .push_notifications import app_channel
+            result = {'settings': settings, 'channel': 'app' if app_channel() else 'telegram',
+                      'canConfigure': 'OWNER' in actor['roles'], 'supervisor': supervisor,
                       'notifications': [{'id': n.id, 'text': n.text} for n in notifications]}
             if supervisor:
                 allowed = None if 'OWNER' in actor['roles'] else set(await session.scalars(select(HotelEmployee.hotel_id).where(HotelEmployee.user_id == actor['id'])))
@@ -209,7 +211,7 @@ def telegram_text(message):
 async def remind(session, bot, user, kind, prefix, message, now, interval, *, payload=None):
     # Operations may run in both the bot and web processes. Serialize delivery
     # for each recipient before reading the deduplication row.
-    await session.get(User, user.id, with_for_update=True)
+    await session.get(User, user.id, with_for_update={'key_share': True})
     previous = await session.scalar(select(Notification).where(
         Notification.user_id == user.id, Notification.kind == kind,
         Notification.event_key.startswith(prefix)).order_by(Notification.id.desc()).limit(1).with_for_update())

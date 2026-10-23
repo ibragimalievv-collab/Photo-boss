@@ -68,4 +68,12 @@ swHandlers.push({data:{json:()=>({title:'Скоро съёмка',expiresAt:'210
 assert.equal(notes.length,2,'A reminder before its deadline can still appear');
 swHandlers.notificationclick({notification:{close(){},data:{url:'/app/#academy'}},waitUntil:p=>promise=p});await promise;
 assert(requests.some(r=>r.url==='https://pb.example/app/#academy'));
-console.log('PASS: permission click, subscription, account detach, queued test, reminder expiry without losing inbox details, system notification and safe click route');
+const ownerClick=async action=>handlers.click({target:{closest:selector=>selector==='[data-owner-telegram]'?{dataset:{ownerTelegram:action},disabled:false}:null}});
+vm.runInContext('state.ownerTelegram=false',ctx);
+await ownerClick('toggle');
+const ownPreference=requests.findLast(r=>r.path==='/push/owner-telegram');
+assert.deepEqual(JSON.parse(JSON.stringify(ownPreference.opts.body)),{enabled:true});
+assert.equal(vm.runInContext('state.ownerTelegram',ctx),true);
+await ownerClick('test');assert.match(status.textContent,/Статус отправки Telegram/);
+await ownerClick('toggle');assert.equal(vm.runInContext('state.ownerTelegram',ctx),false);
+console.log('PASS: permission click, subscription, account detach, owner-only Telegram toggle/test, reminder expiry without losing inbox details, system notification and safe click route');

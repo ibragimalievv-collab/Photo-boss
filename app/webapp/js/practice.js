@@ -35,7 +35,8 @@ async function loadPhotos(){
  const ticket=version;
  for(const img of panel.querySelectorAll('[data-practice-photo]')){
   try{const blob=await photoFetch(img.dataset.practicePhoto);if(ticket!==version)return;const url=URL.createObjectURL(blob);urls.add(url);img.src=url;}
-  catch{if(ticket===version){img.alt='Фото не загрузилось. Нажмите «Обновить».';}}
+  catch(e){if(ticket===version){img.alt=e.status===404?'Оригинал не найден в хранилище.':'Фото не загрузилось. Нажмите «Обновить».';
+   if(e.status===404&&current?.own&&current.status==='ACTIVE'){const recover=panel.querySelector('[data-practice-recover]');if(recover)recover.hidden=false;}}}
  }
 }
 function analysisMarkup(data){
@@ -71,6 +72,7 @@ function renderAssignment(data){
   ${editable?'<p>Загрузите исходный JPEG до 8 МБ: размер и EXIF сохраняются. PNG и WebP преобразуются в JPEG без уменьшения; их EXIF не сохраняется. Фото больше 8 МБ нужно уменьшить самостоятельно. После пятого кадра начнётся проверка.</p>':''}
   ${data.canRetry?`<button class="btn primary" data-practice-retry>Повторить AI-проверку</button>`:''}
   ${data.canRetake?'<button class="btn" data-practice-retake>Переснять спорные кадры</button><p>Указанные ИИ кадры откроются для замены. Если номера не указаны — все пять. Прежние работы останутся в истории.</p>':''}
+  <button class="btn" data-practice-recover hidden>Проверить хранилище и открыть повторную загрузку недоступных кадров</button>
   <button class="practice-refresh" data-practice-refresh>Обновить</button>`);
  loadPhotos();
 }
@@ -135,6 +137,7 @@ panel.addEventListener('click',async e=>{
  const ticket=version,operation=++mutation;
  try{
   setBusy(true);
+  if(b.hasAttribute('data-practice-recover'))return await updateAssignment(api(`/academy/practice/${current.id}/recover-photos`,{method:'POST',body:{}}));
   if(b.hasAttribute('data-practice-retake')){const indexes=current.analysis?.review?.reshoot_indexes;return await updateAssignment(api(`/academy/practice/${current.id}/retake`,{method:'POST',body:{indexes:indexes?.length?indexes:[1,2,3,4,5]}}));}
   if(b.hasAttribute('data-practice-retry')){const id=current.id;await api(`/academy/practice/${id}/retry`,{method:'POST',body:{}});if(ticket===version&&panel.open)return await showAssignment(id);return;}
   if(b.hasAttribute('data-practice-plan')){close();document.dispatchEvent(new CustomEvent('pb-open-academy-coach'));return;}

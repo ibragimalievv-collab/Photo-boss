@@ -29,7 +29,7 @@ from .services.booking_notices import booking_description, notice_booking_id
 
 log = logging.getLogger(__name__)
 ROLES = {'OWNER', 'ADMIN', 'PHOTOGRAPHER', 'MANAGER'}
-KINDS = {'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test', 'lunch_start', 'lunch_end', 'attendance', 'attendance_fine', 'sale_discount', 'manager_idle', 'manager_advice'}
+KINDS = {'service_status', 'work_event', 'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test', 'lunch_start', 'lunch_end', 'attendance', 'attendance_fine', 'sale_discount', 'manager_idle', 'manager_advice'}
 
 
 def app_channel():
@@ -157,6 +157,8 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
     roles = set(await session.scalars(select(UserRole.role).where(UserRole.user_id == notice.user_id)))
     if not user or not user.active or not roles & ROLES:
         return False
+    if notice.kind in {'work_event', 'service_status'}:
+        return 'OWNER' in roles
     if notice.kind in {'manager_idle', 'manager_advice'}:
         from .booking_control import preferences
         from .models import HotelEmployee, Shift, ShiftCheckIn, ShiftCheckOut
@@ -322,7 +324,7 @@ def payload_for(notice):
             'sale_ready': '/app/#workflow', 'sale_created': '/app/#finance', 'academy': '/app/#academy',
             'attendance': '/app/#workday', 'attendance_fine': '/app/#finance', 'sale_discount': '/app/#workflow',
             'manager_idle': '/app/#home', 'manager_advice': '/app/#home'}
-    titles = {'booking_assignment': 'Назначена съёмка', 'booking_reminder': 'Скоро съёмка', 'chat': 'Новое сообщение', 'call': 'Входящий звонок',
+    titles = {'service_status': 'Состояние подключений', 'work_event': 'Рабочее событие', 'booking_assignment': 'Назначена съёмка', 'booking_reminder': 'Скоро съёмка', 'chat': 'Новое сообщение', 'call': 'Входящий звонок',
               'sale_ready': 'Съёмка готова к продаже', 'sale_created': 'Оформлена продажа', 'academy': 'Готов разбор практики', 'push_test': 'Проверка уведомлений',
               'lunch_start': 'Сотрудник ушёл на обед', 'lunch_end': 'Сотрудник вернулся с обеда',
               'attendance': 'Отметка смены', 'attendance_fine': 'Контроль времени смены',
@@ -500,15 +502,22 @@ class AppPush:
         self.api = api
 
     async def actor(self, session, request):
-        user = await session.get(User, request['miniapp_actor']['id'], with_for_update=True)
+        user = await session.get(User, request['miniapp_actor']['id'], with_for_update={'key_share': True})
         roles = set(await session.scalars(select(UserRole.role).where(UserRole.user_id == user.id))) if user else set()
         if not user or not user.active or not roles & ROLES:
             raise AccessError('Рабочий доступ отключён.', 403)
         return user
 
     async def status(self, request):
+        from .models import OwnerTelegramDelivery
+        from .owner_telegram import OWNER_KEY, START_KEY
         async with AsyncSession(self.api.engine) as session:
             actor = await self.actor(session, request)
+            owner_eligible = actor.tg_id > 0 and bool(await session.scalar(
+                select(UserRole.id).where(UserRole.user_id == actor.id, UserRole.role == 'OWNER')))
+            preference = await session.get(Setting, OWNER_KEY+str(actor.id)) if owner_eligible else None
+            owner_copy = bool(preference)
+            mirror_start = await session.get(Setting, START_KEY) if owner_copy else None
             rows = list(await session.scalars(select(Notification).where(Notification.user_id == actor.id,
                 Notification.kind.in_(KINDS), Notification.resolved_at.is_(None)).order_by(Notification.id.desc()).limit(30)))
             active_devices = await session.scalar(select(func.count(PushSubscription.id)).where(
@@ -525,13 +534,20 @@ class AppPush:
                     booking = await session.get(Booking, bid)
                     if booking:
                         description = await booking_description(session, booking)
+                copy = await session.get(OwnerTelegramDelivery, notice.id) if owner_copy else None
+                telegram_state = (copy.status if copy else 'PENDING' if mirror_start and
+                    notice.created_at >= max(datetime.fromisoformat(mirror_start.value),
+                        datetime.fromisoformat(preference.value)) else 'HISTORY_ONLY') if owner_copy else None
                 items.append({'id': notice.id, 'title': payload_for(notice)['title'],
                     'kind': notice.kind,
                     'description': description,
                     'url': payload_for(notice)['url'], 'read': bool(notice.acknowledged_at),
                     'createdAt': notice.created_at.isoformat()+'Z',
-                    'pushState': await push_delivery_state(session, notice, active_devices=active_devices)})
+                    'pushState': await push_delivery_state(session, notice, active_devices=active_devices),
+                    'ownerTelegramState': telegram_state})
             return web.json_response({'configured': configured(), 'channel': 'app' if app_channel() else 'telegram',
+                'ownerTelegram': owner_copy and app_channel(),
+                'canConfigureOwnerTelegram': owner_eligible,
                 'activeDevices': active_devices,
                 'publicKey': os.getenv('WEB_PUSH_PUBLIC_KEY') if configured() else None,
                 'items': items}, headers={'Cache-Control':'no-store'})
@@ -552,6 +568,25 @@ class AppPush:
                 row.user_id, row.subscription, row.active, row.updated_at = actor.id, json.dumps(value), True, utc_now()
             else:
                 session.add(PushSubscription(user_id=actor.id, endpoint_hash=digest, subscription=json.dumps(value)))
+            await session.commit()
+        return web.json_response({'ok': True})
+
+    async def owner_telegram(self, request):
+        from .owner_telegram import OWNER_KEY
+        body = await self.api.body(request)
+        if set(body) != {'enabled'} or type(body['enabled']) is not bool:
+            raise AccessError('Укажите включение копий для своего аккаунта.', 400)
+        async with AsyncSession(self.api.engine) as session:
+            actor = await self.actor(session, request)
+            if actor.tg_id <= 0 or not await session.scalar(select(UserRole.id).where(
+                    UserRole.user_id == actor.id, UserRole.role == 'OWNER')):
+                raise AccessError('Telegram-копии доступны только своему аккаунту владельца.', 403)
+            key = OWNER_KEY+str(actor.id)
+            saved = await session.get(Setting, key, with_for_update=True)
+            if body['enabled'] and not saved:
+                session.add(Setting(key=key, value=utc_now().isoformat()))
+            elif not body['enabled'] and saved:
+                await session.delete(saved)
             await session.commit()
         return web.json_response({'ok': True})
 
@@ -603,3 +638,4 @@ def install_push(app, api):
     app.router.add_post('/api/miniapp/push/unsubscribe', service.unsubscribe)
     app.router.add_post('/api/miniapp/push/test', service.test)
     app.router.add_post('/api/miniapp/push/read', service.read)
+    app.router.add_post('/api/miniapp/push/owner-telegram', service.owner_telegram)
