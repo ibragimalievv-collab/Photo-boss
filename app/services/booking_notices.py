@@ -34,3 +34,32 @@ async def booking_description(session, booking):
     if hotel and hotel.address:
         lines.append(f'Место: {hotel.address}')
     return '\n'.join(lines)
+
+
+async def queue_photographer_change(session, booking, change):
+    """Queue inside the booking transaction, before its caller commits."""
+    from uuid import uuid4
+
+    from ..models import User
+    from ..push_notifications import queue_notice
+
+    if change not in {'rescheduled', 'cancelled'}:
+        raise ValueError('Unsupported booking change')
+    photographer = await session.get(User, booking.photographer_id) if booking.photographer_id else None
+    if not photographer or not photographer.active:
+        return False
+    description = await booking_description(session, booking)
+    if change == 'rescheduled':
+        message = (f'Съёмка №{booking.id} перенесена на '
+                   f'{booking.shoot_date:%d.%m.%Y} в {booking.shoot_time:%H:%M}.')
+    else:
+        message = f'Съёмка №{booking.id} отменена.'
+        if booking.cancellation_reason:
+            description += f'\nПричина: {booking.cancellation_reason}'
+    # A later move back to a previous date is a new event too. The booking lock
+    # and revision check prevent command retries from creating another notice.
+    await queue_notice(session, photographer.id, kind='reminder',
+        event_key=f'{change}:{booking.id}:{uuid4().hex}',
+        url=f'/app/#shootings?booking={booking.id}', message=message,
+        payload={'bookingId': booking.id, 'description': description})
+    return True

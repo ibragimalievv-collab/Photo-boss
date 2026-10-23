@@ -454,8 +454,12 @@ async def action(c: CallbackQuery, state):
         setattr(sh, timestamp, now)
         b.status = target
         await audit(s, u, f"shooting_{act}", "shooting", sid)
+        from ..push_notifications import app_channel
+        in_app = app_channel()
+        if act == "ready" and in_app:
+            await notify_manager_ready_for_sale(c.bot, s, b)
         await s.commit()
-        if act == "ready":
+        if act == "ready" and not in_app:
             await notify_manager_ready_for_sale(c.bot, s, b)
     await state.clear()
     await c.answer()

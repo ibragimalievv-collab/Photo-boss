@@ -287,6 +287,13 @@ async def owned_booking(session, telegram_id, booking_id, *, lock=False):
     return (await session.scalars(query)).one_or_none(), manager
 
 
+async def booking_has_work(session, booking, shooting):
+    """Recheck under the booking lock; an earlier bot menu is not authority."""
+    return bool((shooting and (shooting.started_at or shooting.status in {
+        'SHOOTING', 'SHOT', 'UPLOADING', 'READY_FOR_MANAGER', 'READY_FOR_SALE', 'COMPLETED', 'SOLD'}))
+        or await session.scalar(select(Sale.id).where(Sale.booking_id == booking.id).limit(1)))
+
+
 def callback_booking_id(data):
     try:
         value = int(data.rsplit(":", 1)[1])
@@ -404,12 +411,15 @@ async def finish_reschedule(m, state, current_roles):
         if booking is None:
             await state.clear()
             return await m.answer("Запись не найдена.")
+        shooting = await s.scalar(select(Shooting).where(
+            Shooting.booking_id == booking.id).with_for_update())
+        if (booking.status not in {"NEW", "PENDING_CONFIRMATION", "CONFIRMED", "ASSIGNED", "RESCHEDULED"}
+                or await booking_has_work(s, booking, shooting)):
+            await state.clear()
+            return await m.answer("Съёмка уже начата, закрыта или продана. Перенос недоступен.")
         booking.shoot_date = date.fromisoformat(data["reschedule_date"])
         booking.shoot_time = new_time
         booking.status = "RESCHEDULED"
-        shooting = (
-            await s.scalars(select(Shooting).where(Shooting.booking_id == booking.id))
-        ).one_or_none()
         if shooting:
             shooting.status = "ASSIGNED"
         await audit(
@@ -420,8 +430,13 @@ async def finish_reschedule(m, state, current_roles):
             booking.id,
             f"date={booking.shoot_date.isoformat()};time={booking.shoot_time.isoformat()}",
         )
+        from ..push_notifications import app_channel
+        in_app = app_channel()
+        if in_app:
+            await notify_photographer_rescheduled(m.bot, s, booking)
         await s.commit()
-        await notify_photographer_rescheduled(m.bot, s, booking)
+        if not in_app:
+            await notify_photographer_rescheduled(m.bot, s, booking)
     await state.clear()
     await m.answer(
         f"📅 Съёмка #{booking.id} перенесена на {booking.shoot_date:%d.%m.%Y} в {booking.shoot_time:%H:%M}.",
@@ -494,8 +509,11 @@ async def cancel_confirm(c: CallbackQuery, state, current_roles):
             await state.clear()
             return await c.answer("Съёмка уже закрыта.", show_alert=True)
         shooting = await s.scalar(
-            select(Shooting).where(Shooting.booking_id == booking.id)
+            select(Shooting).where(Shooting.booking_id == booking.id).with_for_update()
         )
+        if await booking_has_work(s, booking, shooting):
+            await state.clear()
+            return await c.answer("Съёмка уже начата или продана. Отмена недоступна.", show_alert=True)
         booking.status = "CANCELLED"
         booking.cancellation_reason = reason
         booking.cancelled_at = datetime.now(UTC).replace(tzinfo=None)
@@ -509,8 +527,13 @@ async def cancel_confirm(c: CallbackQuery, state, current_roles):
             booking.id,
             f"reason={reason}",
         )
+        from ..push_notifications import app_channel
+        in_app = app_channel()
+        if in_app:
+            await notify_photographer_cancelled(c.bot, s, booking)
         await s.commit()
-        await notify_photographer_cancelled(c.bot, s, booking)
+        if not in_app:
+            await notify_photographer_cancelled(c.bot, s, booking)
     await state.clear()
     await c.answer("Съёмка отменена.")
     await c.message.answer(
