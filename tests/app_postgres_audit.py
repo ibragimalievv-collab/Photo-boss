@@ -21,6 +21,8 @@ from test_miniapp_release import TOKEN, signed
 from app.academy_practice import install_academy_practice
 from app.attendance import install_attendance
 from app.miniapp_api import install_miniapp
+from app.models import AuditLog, Setting, utc_now
+from app.owner_telegram import START_KEY, queue_owner_work_events
 from app.people import install_people
 from app.services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
 from app.work_calls import install_work_calls
@@ -56,6 +58,15 @@ async def main():
                 return list((await conn.execute(text(sql), params)).mappings())
             attendance.api.rows = rows
             await submit(attendance, latitude=44.9)
+            from sqlalchemy.ext.asyncio import AsyncSession
+            async with AsyncSession(engine) as session:
+                session.add(Setting(key=START_KEY, value=utc_now().isoformat()))
+                session.add(AuditLog(action='booking_created', entity='booking', entity_id=123))
+                await session.commit()
+            await queue_owner_work_events(engine)
+            await queue_owner_work_events(engine)
+            async with engine.connect() as conn:
+                assert await conn.scalar(text("SELECT count(*) FROM notifications WHERE kind='work_event'")) == 1
             bot = SimpleNamespace(token=TOKEN, send_message=AsyncMock(),
                 me=AsyncMock(return_value=SimpleNamespace(username='isolated_qa_bot')))
             app = web.Application(client_max_size=25*1024*1024)

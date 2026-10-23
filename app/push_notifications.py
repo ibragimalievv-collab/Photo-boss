@@ -29,7 +29,7 @@ from .services.booking_notices import booking_description, notice_booking_id
 
 log = logging.getLogger(__name__)
 ROLES = {'OWNER', 'ADMIN', 'PHOTOGRAPHER', 'MANAGER'}
-KINDS = {'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test', 'lunch_start', 'lunch_end', 'attendance', 'attendance_fine', 'sale_discount', 'manager_idle', 'manager_advice'}
+KINDS = {'service_status', 'work_event', 'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test', 'lunch_start', 'lunch_end', 'attendance', 'attendance_fine', 'sale_discount', 'manager_idle', 'manager_advice'}
 
 
 def app_channel():
@@ -157,6 +157,8 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
     roles = set(await session.scalars(select(UserRole.role).where(UserRole.user_id == notice.user_id)))
     if not user or not user.active or not roles & ROLES:
         return False
+    if notice.kind in {'work_event', 'service_status'}:
+        return 'OWNER' in roles
     if notice.kind in {'manager_idle', 'manager_advice'}:
         from .booking_control import preferences
         from .models import HotelEmployee, Shift, ShiftCheckIn, ShiftCheckOut
@@ -322,7 +324,7 @@ def payload_for(notice):
             'sale_ready': '/app/#workflow', 'sale_created': '/app/#finance', 'academy': '/app/#academy',
             'attendance': '/app/#workday', 'attendance_fine': '/app/#finance', 'sale_discount': '/app/#workflow',
             'manager_idle': '/app/#home', 'manager_advice': '/app/#home'}
-    titles = {'booking_assignment': 'Назначена съёмка', 'booking_reminder': 'Скоро съёмка', 'chat': 'Новое сообщение', 'call': 'Входящий звонок',
+    titles = {'service_status': 'Состояние подключений', 'work_event': 'Рабочее событие', 'booking_assignment': 'Назначена съёмка', 'booking_reminder': 'Скоро съёмка', 'chat': 'Новое сообщение', 'call': 'Входящий звонок',
               'sale_ready': 'Съёмка готова к продаже', 'sale_created': 'Оформлена продажа', 'academy': 'Готов разбор практики', 'push_test': 'Проверка уведомлений',
               'lunch_start': 'Сотрудник ушёл на обед', 'lunch_end': 'Сотрудник вернулся с обеда',
               'attendance': 'Отметка смены', 'attendance_fine': 'Контроль времени смены',

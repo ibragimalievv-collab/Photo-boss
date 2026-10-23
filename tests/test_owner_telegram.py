@@ -7,14 +7,18 @@ from aiogram.methods import SendMessage
 from sqlalchemy import select
 from test_workflow_services import fixture
 
-from app.models import Notification, OwnerTelegramDelivery, User, UserRole
-from app.owner_telegram import deliver_owner_copies
+from app.models import AuditLog, Notification, OwnerTelegramDelivery, User, UserRole
+from app.owner_telegram import (
+    deliver_owner_copies,
+    queue_connection_state,
+    queue_owner_work_events,
+)
 from app.push_notifications import queue_notice
 
 
 def test_owner_copy_preserves_app_read_state_and_never_sends_staff_or_history(monkeypatch):
     monkeypatch.setenv('PHOTO_BOSS_NOTIFICATION_CHANNEL', 'app')
-    monkeypatch.setattr('app.owner_telegram.config', SimpleNamespace(admin_ids=(3,)))
+    monkeypatch.setattr('app.owner_telegram.config', SimpleNamespace(admin_ids=(3,), openai_api_key=''))
     async def run():
         engine, factory = await fixture()
         bot = SimpleNamespace(send_message=AsyncMock())
@@ -39,6 +43,23 @@ def test_owner_copy_preserves_app_read_state_and_never_sends_staff_or_history(mo
                 assert notice.acknowledged_at is None and not notice.sent
                 assert (await session.get(OwnerTelegramDelivery, nid)).status == 'ACCEPTED'
                 assert len(list(await session.scalars(select(OwnerTelegramDelivery)))) == 1
+                session.add(AuditLog(action='booking_created', entity='booking', entity_id=42,
+                    details='Private audit details must never be copied'))
+                await session.commit()
+            await queue_owner_work_events(engine)
+            await queue_owner_work_events(engine)
+            async with factory() as session:
+                events = list(await session.scalars(select(Notification).where(Notification.kind == 'work_event')))
+                assert len(events) == 1 and events[0].user_id == 3
+                assert 'Private audit' not in events[0].text
+                assert 'booking=42' in events[0].payload
+            storage = SimpleNamespace(public_status=lambda: {'configured': True, 'connected': True,
+                'readVerified': True, 'writeVerified': True})
+            await queue_connection_state(engine, storage)
+            await queue_connection_state(engine, storage)
+            async with factory() as session:
+                assert len(list(await session.scalars(select(Notification).where(
+                    Notification.kind == 'service_status')))) == 1
         finally:
             await engine.dispose()
     asyncio.run(run())

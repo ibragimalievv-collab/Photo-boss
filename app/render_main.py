@@ -164,7 +164,7 @@ async def on_startup(app):
     await log_push_state(engine)
     app['push_notification_task'] = asyncio.create_task(push_loop(engine))
     from .owner_telegram import owner_telegram_loop
-    app['owner_telegram_task'] = asyncio.create_task(owner_telegram_loop(engine, bot))
+    app['owner_telegram_task'] = asyncio.create_task(owner_telegram_loop(engine, bot, app['yandex_disk']))
     from .storage_inventory import log_recent_inventory
     app['storage_inventory_task'] = asyncio.create_task(log_recent_inventory(engine, app['yandex_disk']))
     app["chat_cleanup_task"] = asyncio.create_task(cleanup_loop(engine, app["yandex_disk"]))

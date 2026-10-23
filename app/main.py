@@ -161,7 +161,7 @@ async def main():
         from .push_notifications import push_loop
         push_task = asyncio.create_task(push_loop(engine))
         from .owner_telegram import owner_telegram_loop
-        owner_telegram_task = asyncio.create_task(owner_telegram_loop(engine, bot))
+        owner_telegram_task = asyncio.create_task(owner_telegram_loop(engine, bot, storage))
         try:
             me = await bot.me()
             logger.info("Telegram bot @%s is authenticated", me.username)
