@@ -41,6 +41,8 @@ The exact blocking SQL/transaction is **not yet established**. Do not label this
 
 An additional push-triggered `test` check at the same PR head succeeded; this does not negate the timed-out pull-request run. The separate PostgreSQL attendance/HTTP audit, Render-runtime Python suite, browser workflows, calls, TURN fixture, delivery and recovery checks passed. Local full suite also passed: **1154 passed in 91.89 seconds**.
 
+The published QA source `5274025` also completed its automatic CI run **39952825735 with success**. This is further isolated evidence, not a replacement for the unresolved PR run or proof of the specific smoke blocker. At the handoff check there were no remaining CI runs executing for that QA commit, and the local pytest and local temporary QA-server processes had exited.
+
 ## Confirmed in production 3.45
 
 - Existing signed-in workspace loaded and footer showed 3.45. The available real account combines four roles; this is not four independently authenticated production users.
