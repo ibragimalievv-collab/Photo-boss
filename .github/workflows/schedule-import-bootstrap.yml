@@ -46,6 +46,7 @@ jobs:
           git apply /tmp/schedule-import.patch
           git apply --check .github/schedule-import-fixes.patch
           git apply .github/schedule-import-fixes.patch
+          sed -i 's/async def lose_first_reply(route, lost=lost):/async def lose_first_reply(route, _request, lost=lost):/' tests/schedule_text_browser_check.py
       - run: pip install -r requirements-dev.txt playwright==1.51.0
       - run: python -m playwright install --with-deps chromium
       - name: Parser, permissions, preservation and rollback regression
