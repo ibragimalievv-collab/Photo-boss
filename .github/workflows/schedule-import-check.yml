@@ -1,22 +1,51 @@
 name: Schedule text import checks
 on:
+  pull_request:
   push:
-    branches: ['feat/schedule-text-import-20261024']
+    branches: [main]
 permissions:
   contents: read
 jobs:
-  verification-dependencies:
+  schedule:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: schedule_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U test -d schedule_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      BOT_TOKEN: 123456:CI_ONLY_DO_NOT_USE_FOR_TELEGRAM
+      ADMIN_TELEGRAM_IDS: '5000000001'
+      DATABASE_URL: 'sqlite+aiosqlite:///:memory:'
+      UPDATE_POSTGRES_TEST_URL: 'postgresql+asyncpg://test:test@127.0.0.1:5432/schedule_test'
+      PYTHONPATH: .
+      SCHEDULE_QA_DIR: schedule-qa
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - run: |
-          pip wheel -r requirements-dev.txt --wheel-dir wheels
+      - run: pip install -r requirements-dev.txt playwright==1.51.0
+      - run: python -m playwright install --with-deps chromium
+      - name: Parser, permissions, preservation and rollback regression
+        run: |
+          ruff check app tests
+          python -m pytest -q tests/test_schedule_text_import.py tests/test_schedule_batch.py tests/test_miniapp_release.py
+          for f in app/webapp/js/schedule-import.js app/webapp/js/schedule-editor.js app/webapp/js/app.js app/webapp/sw.js; do node --check "$f"; done
+      - name: PostgreSQL concurrent import verification
+        run: python tests/schedule_text_postgres_check.py
+      - name: Desktop and narrow mobile browser verification
+        run: python tests/schedule_text_browser_check.py
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: photo-boss-test-wheels
-          path: wheels
-          retention-days: 1
+          name: schedule-browser-evidence
+          path: schedule-qa
+          retention-days: 7
