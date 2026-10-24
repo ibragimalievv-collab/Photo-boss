@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: |
-          pip download -r requirements-dev.txt --only-binary=:all: --dest wheels
+          pip wheel -r requirements-dev.txt --wheel-dir wheels
       - uses: actions/upload-artifact@v4
         with:
           name: photo-boss-test-wheels
