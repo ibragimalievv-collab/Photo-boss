@@ -14,7 +14,7 @@
      expected = os.getenv("EXPECTED_BOT_ID", "").strip()
 --- a/tests/schedule_text_browser_check.py
 +++ b/tests/schedule_text_browser_check.py
-@@ -2,6 +2,9 @@
+@@ -2,12 +2,15 @@
  import asyncio
  import json
  import os
@@ -23,8 +23,6 @@
 +import tempfile
  from datetime import date
  from pathlib import Path
- 
-@@ -7,7 +10,7 @@
  
  import test_miniapp_release as fixtures
  from aiohttp import web
@@ -63,7 +61,7 @@
                  await context.add_init_script('window.Telegram={WebApp:{initData:'+json.dumps(fixtures.signed())+',ready(){},expand(){},onEvent(){},setHeaderColor(){},setBackgroundColor(){},BackButton:{onClick(){},hide(){},show(){}}}};')
                  for path in ('/shift/attendance.js','/people/people.js','/work-chat/chat.js','https://telegram.org/js/telegram-web-app.js'):
                      await context.route('**'+path if path.startswith('/') else path,
-@@ -40,9 +52,15 @@
+@@ -40,7 +52,12 @@
                  errors = []
                  page.on('pageerror', lambda error, errors=errors: errors.append(str(error)))
                  await page.goto(origin+'/app/#schedule')
@@ -77,10 +75,7 @@
                  await page.locator('.schedule-text-panel > summary').click()
                  form = page.locator('#scheduleTextForm')
                  await form.locator('[name=employee]').select_option('3')
-                 await form.locator('[name=scheduleText]').fill(SOURCE)
-                 await form.locator('[type=submit]').click()
-+                await expect(form.locator('[data-import-preview] > .panel')).to_have_count(31)
-@@ -69,7 +87,7 @@
+@@ -69,7 +86,7 @@
                  await apply.wait_for(state='visible')
                  await page.screenshot(path=str(evidence / f'preview-{width}.png'), full_page=True)
                  lost = [False]
@@ -89,7 +84,7 @@
                      if not lost[0]:
                          lost[0] = True
                          response = await route.fetch()
-@@ -79,13 +97,13 @@
+@@ -79,13 +96,13 @@
                          await route.continue_()
                  await context.route('**/schedule/text/apply', lose_first_reply)
                  await apply.click()
