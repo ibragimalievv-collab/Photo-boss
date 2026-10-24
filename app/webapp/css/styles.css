@@ -97,3 +97,9 @@
 @media(max-width:380px){.topbar [data-action="themes"]{display:none}}
 
 .icon-button[data-action="app-notifications"]{position:relative}.notification-count{position:absolute;top:0;right:0;min-width:16px;padding:1px 3px;border-radius:9px;background:#c84242;color:#fff;font-size:10px;line-height:14px;text-align:center}.notification-count[hidden]{display:none}
+
+/* A single paste/preview/apply form must fit the narrowest supported phone. */
+.schedule-text-panel{min-width:0;max-width:100%}
+.schedule-text-panel fieldset{min-width:0;border:0;margin:0;padding:0}
+.schedule-text-panel textarea,.schedule-text-panel select{min-width:0;max-width:100%;box-sizing:border-box}
+.schedule-text-panel [data-import-preview] .panel{overflow-wrap:anywhere}

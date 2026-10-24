@@ -118,6 +118,7 @@ ACTIONS = {
     "miniapp_screen_capture_changed": "Изменил разрешение на скриншоты",
     "miniapp_shift_created": "Назначил смену",
     "miniapp_shift_cancelled": "Отменил запланированную смену",
+    "miniapp_schedule_text_applied": "Применил график из текста",
     "miniapp_password_changed": "Настроил личный вход",
 }
 
@@ -650,7 +651,7 @@ class MiniApp:
             result = await self.finance_data(conn, actor, start, end, period)
         return web.json_response(result)
 
-    async def shifts_data(self, conn, actor, start, end, *, team=False):
+    async def shifts_data(self, conn, actor, start, end, *, team=False, include_days=False):
         lower, upper = utc_bounds(start, end, self.tz)
         own = actor["permissions"]["financeScope"] == "self"
         clause = ""
@@ -692,7 +693,9 @@ class MiniApp:
                 'breaks': [{'start': as_utc(item['started_at']).astimezone(self.tz).strftime('%H:%M'),
                             'end': as_utc(item['ended_at']).astimezone(self.tz).strftime('%H:%M') if item['ended_at'] else None}
                            for item in breaks]})
-        return items
+        from .schedule_import import decorate_calendar
+        return await decorate_calendar(self, conn, actor, start, end, items,
+                                       team=team, include_days=include_days)
 
     async def dashboard(self, request):
         actor, today = request["miniapp_actor"], self.today()
@@ -715,7 +718,7 @@ class MiniApp:
         if not 0 <= (end-start).days <= 31:
             raise AccessError("Период графика должен быть не длиннее 31 дня.", 400)
         async with self.engine.connect() as conn:
-            items = await self.shifts_data(conn, actor, start, end)
+            items = await self.shifts_data(conn, actor, start, end, include_days=True)
             employees, hotels, unavailable = [], [], []
             if actor["permissions"]["manageSchedule"]:
                 # Keep the complete roster available to the editor. In particular,
@@ -809,6 +812,8 @@ class MiniApp:
                     VALUES (:uid,:hid,:start,:end,'PLANNED') RETURNING id""", uid=uid, hid=hid, start=start, end=end))[0]
                 detail = f"{names[uid]} · {payload['date']} {payload['start']}–{payload['end']} · отель №{hid}; новая запланированная смена"
                 await self.audit_write(conn, actor, "miniapp_shift_created", "shift", row["id"], detail)
+                from .schedule_import import forget_day_plan
+                await forget_day_plan(conn, uid, payload['date'])
                 ids.append(row['id'])
         return ids
 
@@ -847,6 +852,8 @@ class MiniApp:
                 uid=shift["user_id"], day=day):
                 raise AccessError("Начавшуюся или прошедшую смену отменять нельзя.", 409)
             await conn.execute(text("UPDATE shifts SET status='CANCELLED' WHERE id=:id"), {"id": sid})
+            from .schedule_import import forget_day_plan
+            await forget_day_plan(conn, shift["user_id"], day)
             await self.audit_write(conn, actor, "miniapp_shift_cancelled", "shift", sid,
                 f"Сотрудник №{shift['user_id']} · {day} · статус: PLANNED → CANCELLED")
         return web.json_response({"ok": True})
@@ -1061,7 +1068,7 @@ class MiniApp:
                    "js/realtime-training.js", "js/voice-training.js", "js/booking-control.js", "js/form-state.js", "js/galleries.js", "js/gallery-view.js", "js/gallery-client.js", "css/galleries.css", "js/development.js", "js/academy-coach.js", "js/academy-mentor.js", "js/booking-diagnostic.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg", "assets/academy/exposure.svg", "assets/academy/window-light.svg", "assets/academy/perspective.svg", "assets/academy/group-depth.svg"}
-        allowed.add('js/sale-files.js')
+        allowed.update({'js/sale-files.js', 'js/schedule-import.js'})
         allowed.update({'js/attendance-fines.js', 'js/hotel-points.js', 'js/storage-audit.js', 'js/notifications.js', 'js/lunch.js', 'js/hotel-pricing.js', 'js/bank-payments.js', 'js/disk-folder-audit.js', 'js/sale-disk.js'})
         if name not in allowed:
             raise web.HTTPNotFound()
@@ -1090,6 +1097,8 @@ class MiniApp:
             ("POST", "/handoff", self.handoff)]
         for method, path, handler in routes:
             app.router.add_route(method, PREFIX + path, handler)
+        from .schedule_import import install_schedule_import
+        install_schedule_import(app, self)
         from .academy_coach import install_academy_coach
         install_academy_coach(app, self)
         from .academy_mentor import install_academy_mentor
