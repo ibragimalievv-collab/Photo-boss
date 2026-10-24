@@ -68,6 +68,31 @@
                  await page.locator('.schedule-text-panel > summary').click()
                  form = page.locator('#scheduleTextForm')
                  await form.locator('[name=employee]').select_option('3')
+@@ -69,7 +86,7 @@
+                 await apply.wait_for(state='visible')
+                 await page.screenshot(path=str(evidence / f'preview-{width}.png'), full_page=True)
+                 lost = [False]
+-                async def lose_first_reply(route, lost=lost):
++                async def lose_first_reply(route, _request, lost=lost):
+                     if not lost[0]:
+                         lost[0] = True
+                         response = await route.fetch()
+@@ -79,13 +96,13 @@
+                         await route.continue_()
+                 await context.route('**/schedule/text/apply', lose_first_reply)
+                 await apply.click()
+-                await page.wait_for_function('!document.querySelector("#scheduleTextForm")._busy')
++                await expect(form.locator("[type=submit]")).to_be_enabled()
+                 # No success after a lost response; retry uses the same request key.
+                 assert 'Успешное сохранение пока не подтверждено' in await form.locator('[data-import-message]').inner_text()
+                 with fixture.engine.inner.connect() as conn:
+                     count = conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one()
+                 await apply.dblclick()
+-                await page.wait_for_function('document.querySelector("[data-import-message]").textContent.includes("повторно проверен")')
++                await expect(form.locator("[data-import-message]")).to_contain_text("повторно проверен")
+                 with fixture.engine.inner.connect() as conn:
+                     assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == count
+                     assert conn.execute(text("SELECT COUNT(*) FROM settings WHERE key LIKE 'schedule.day:%'")).scalar_one() == 31
 --- a/app/webapp/index.html
 +++ b/app/webapp/index.html
 @@ -22,7 +22,7 @@
