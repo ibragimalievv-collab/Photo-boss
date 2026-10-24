@@ -32,7 +32,7 @@ from .yandex_disk import install_yandex_disk, storage_recovery_loop
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.45-notifications-practice-recovery"
+RELEASE = "miniapp-3.46-schedule-text-import"
 
 
 async def app_redirect(request):
@@ -112,6 +112,11 @@ async def on_startup(app):
     from .hotel_points import REVIEW_ENV, SEED_ENV, review_required, startup_hotel_point
     await startup_hotel_point(engine, os.getenv(SEED_ENV, ''), config.admin_ids)
     logger.info('Attendance protection: manual_review=%s flag=%s', review_required(), REVIEW_ENV)
+    from .schedule_import_startup import REQUEST_ENV as SCHEDULE_IMPORT_ENV
+    from .schedule_import_startup import startup_schedule_import
+    if os.getenv(SCHEDULE_IMPORT_ENV, '').strip():
+        await startup_schedule_import(app['schedule_import'], os.environ[SCHEDULE_IMPORT_ENV],
+                                      config.admin_ids, service_id=os.getenv('RENDER_SERVICE_ID', ''))
     bot = app["bot"]
     me = await bot.me()
     expected = os.getenv("EXPECTED_BOT_ID", "").strip()
