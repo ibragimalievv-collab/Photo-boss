@@ -349,7 +349,7 @@ class Worker:
             control = (await conn.execute(text("SELECT paused,reason FROM hr_avito_control WHERE id=1"))).mappings().one()
             uncertain = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE state='uncertain'"))
         if control['paused']:
-            if control['reason'] not in {'URLError', 'TimeoutError', 'ConnectionError'} or uncertain:
+            if control['reason'] not in {'URLError', 'TimeoutError', 'ConnectionError', 'http_500', 'http_502', 'http_503', 'http_504'} or uncertain:
                 return
             # Probe only: never replay a possibly delivered send. Credentials stay
             # server-side, and a failed probe leaves the durable pause untouched.
