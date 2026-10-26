@@ -20,11 +20,13 @@ async def deliver_owner_notifications(session, bot, now, tz_name):
     from ..push_notifications import app_channel
     if app_channel():
         return 0
+    from .operations_locks import lock_background_notifications
+    await lock_background_notifications(session)
     day = now.astimezone(ZoneInfo(tz_name)).date()-timedelta(days=1)
     owner_ids = list(await session.scalars(select(UserRole.user_id).where(UserRole.role=='OWNER').order_by(UserRole.user_id)))
     sent = 0
     for uid in owner_ids:
-        user = await session.get(User,uid,with_for_update=True)
+        user = await session.get(User,uid)
         if not user or not user.active or not await session.scalar(select(UserRole.id).where(UserRole.user_id==uid,UserRole.role=='OWNER')):
             continue
         setting = await session.get(Setting,f'notify:owner:{uid}')

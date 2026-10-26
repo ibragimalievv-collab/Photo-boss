@@ -407,7 +407,15 @@ async def main():
                         await form.locator('..').locator('summary').click()
                         await form.locator('..').get_by_role('button', name='Посмотреть фото').click()
                         await form.locator('..').get_by_alt_text('Фото отметки смены').wait_for()
-                        value = await panel.evaluate("async purpose=>{const {api}=await import('/app/js/api.js');return (await api('/attendance/pending')).items.find(r=>r.purpose===purpose).offline_claimed_at.slice(0,16);}", purpose)
+                        # datetime-local uses the browser's timezone. Keeping
+                        # UTC digits while stripping the offset invents a later
+                        # (possibly future) time in non-UTC browser contexts.
+                        value = await panel.evaluate("""async purpose=>{
+                            const {api}=await import('/app/js/api.js');
+                            const claimed=(await api('/attendance/pending')).items.find(r=>r.purpose===purpose).offline_claimed_at;
+                            const time=new Date(claimed);
+                            return new Date(time.getTime()-time.getTimezoneOffset()*60000).toISOString().slice(0,19);
+                        }""", purpose)
                         await form.locator('[name=verifiedAt]').fill(value)
                         await form.locator('[name=note]').fill('Checked photo and shift time')
                         await form.locator('button[type=submit],button:not([type])').click()

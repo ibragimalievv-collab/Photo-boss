@@ -135,7 +135,8 @@ def test_technical_metadata_uses_available_exif_and_excludes_location():
     assert "private" not in json.dumps(metadata)
 
 
-def test_provider_receives_immutable_goal_and_full_previous_analysis(monkeypatch):
+@pytest.mark.parametrize('preprepared', [False, True])
+def test_provider_receives_immutable_goal_and_full_previous_analysis(monkeypatch, preprepared):
     captured = {}
 
     class Response:
@@ -170,7 +171,8 @@ def test_provider_receives_immutable_goal_and_full_previous_analysis(monkeypatch
     previous = {"status": "completed", "sameAssignment": True, "review": {
         "issues": ["Кадр 2: глубокая тень"], "next_action": "Повернуться к окну", "score": 72}}
     images = [jpeg_fixture()] * 5
-    result = asyncio.run(ai.analyze_training_set(CATEGORY_BY_SLUG["woman"], images, images,
+    submissions = [ai.prepare_training_image(image) for image in images] if preprepared else images
+    result = asyncio.run(ai.analyze_training_set(CATEGORY_BY_SLUG["woman"], images, submissions,
                          assignment_context={"successCriteria": ["Лицо освещено"], "focus": "light"}, previous_review=previous))
     assert result["status"] == "completed"
     prompt = " ".join(item.get("text", "") for item in captured["input"][0]["content"])
@@ -188,3 +190,24 @@ def test_ai_previews_are_bounded_and_report_original_and_analysis_dimensions():
         assert source.size == (4000, 3000)
     small = jpeg_fixture()
     assert ai.analysis_copy(small)[0] is small
+
+
+def test_training_copy_accepts_camera_jpeg_over_eight_mib_and_preserves_exif():
+    import random
+
+    image = Image.frombytes('RGB', (2500, 2500), random.Random(7).randbytes(2500 * 2500 * 3))
+    original = io.BytesIO()
+    exif = Image.Exif()
+    exif[0x0110] = 'Camera original'
+    image.save(original, format='JPEG', quality=100, exif=exif)
+    raw = original.getvalue()
+    assert len(raw) > 8 * 1024 * 1024
+    prepared = ai.prepare_training_image(raw)
+    assert len(prepared.content) <= ai.MAX_ANALYSIS_BYTES
+    assert prepared.dimensions['original']['bytes'] == len(raw)
+    assert prepared.dimensions['original']['width'] == 2500
+    assert prepared.metadata['width'] == 2500
+    assert ai.data_url(prepared.content).startswith('data:image/jpeg;base64,')
+    assert raw == original.getvalue()
+    with Image.open(io.BytesIO(raw)) as saved:
+        assert saved.getexif()[0x0110] == 'Camera original'

@@ -147,10 +147,15 @@ class WorkBreaks:
                 ShiftCheckOut.user_id == actor.id, ShiftCheckOut.shift_date == day,
                 ShiftCheckOut.status.in_(['FINISHED', 'PENDING_REVIEW'])))
             can_start = start_recorded(check.__dict__ if check else None) and not ended
+            visible_hotels = [h for h in hotels if 'OWNER' in roles or h.id in (allowed | planned)]
+            planned_hotels = [h.id for h in visible_hotels if h.id in planned]
+            default_hotel = (planned_hotels[0] if len(planned_hotels) == 1 else
+                             visible_hotels[0].id if not planned_hotels and len(visible_hotels) == 1 else None)
         return web.json_response({'date': str(day), 'timezone': str(self.api.tz), 'actorId': actor.id,
             'canEdit': editor, 'canStart': bool(can_start),
             'startPendingReview': bool(check and check.status == 'PENDING_REVIEW'), 'items': result,
-            'hotels': [{'id': h.id, 'name': h.name} for h in hotels if 'OWNER' in roles or h.id in (allowed | planned)],
+            'defaultHotelId': default_hotel,
+            'hotels': [{'id': h.id, 'name': h.name} for h in visible_hotels],
             'employees': [{'id': u.id, 'name': u.name} for u in employees]})
 
     async def save(self, request):

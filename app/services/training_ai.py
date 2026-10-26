@@ -5,6 +5,8 @@ import base64
 import io
 import json
 import logging
+import os
+from dataclasses import dataclass
 
 import aiohttp
 from PIL import Image, ImageOps
@@ -13,9 +15,22 @@ from ..config import config
 from .ai_diagnostics import compatible_schema, http_failure, record, unavailable
 
 logger = logging.getLogger(__name__)
-MAX_IMAGE_BYTES = 8 * 1024 * 1024
+# Source originals and AI request copies have independent limits. Camera JPEGs
+# commonly exceed the former 8 MiB API-transport cap; never shrink saved originals.
+try:
+    _original_limit_mb = int(os.getenv("PHOTO_BOSS_ACADEMY_MAX_IMAGE_MB", "256"))
+except ValueError:
+    _original_limit_mb = 256
+MAX_IMAGE_BYTES = max(32, min(1024, _original_limit_mb)) * 1024 * 1024
 MAX_ANALYSIS_BYTES = 1536 * 1024
 MAX_ANALYSIS_EDGE = 2048
+
+
+@dataclass(frozen=True)
+class PreparedTrainingImage:
+    content: bytes
+    dimensions: dict
+    metadata: dict
 
 SCHEMA = {
     "type": "object",
@@ -113,7 +128,7 @@ def validate(result, *, require_evidence=False, assignment_context=None, previou
 
 
 def data_url(content):
-    if not content.startswith(b"\xff\xd8\xff") or len(content) > MAX_IMAGE_BYTES:
+    if not content.startswith(b"\xff\xd8\xff") or len(content) > MAX_ANALYSIS_BYTES:
         raise ValueError("Expected bounded JPEG")
     return "data:image/jpeg;base64," + base64.b64encode(content).decode("ascii")
 
@@ -161,6 +176,12 @@ def analysis_copy(content):
     raise ValueError("Cannot prepare bounded analysis copy")
 
 
+def prepare_training_image(content):
+    """Release each large original before downloading the next practice frame."""
+    preview, dimensions = analysis_copy(content)
+    return PreparedTrainingImage(preview, dimensions, technical_metadata(content))
+
+
 async def analyze_training_set(category, references, submissions, *, assignment_context=None, previous_review=None):
     model = config.academy_analysis_model
     if not config.openai_api_key:
@@ -183,13 +204,14 @@ async def analyze_training_set(category, references, submissions, *, assignment_
     try:
         for index, (reference, submission) in enumerate(zip(references, submissions), 1):
             reference_copy, _ = await asyncio.to_thread(analysis_copy, reference)
-            submission_copy, dimensions = await asyncio.to_thread(analysis_copy, submission)
+            prepared = submission if isinstance(submission, PreparedTrainingImage) else await asyncio.to_thread(prepare_training_image, submission)
+            submission_copy, dimensions = prepared.content, prepared.dimensions
             image_evidence.append({"index": index, **dimensions})
             content.extend([
                 {"type": "input_text", "text": f"Кадр {index}: эталон"},
                 {"type": "input_image", "detail": "high", "image_url": data_url(reference_copy)},
                 {"type": "input_text", "text": f"Кадр {index}: работа фотографа. Технические метаданные оригинала: " +
-                    json.dumps(technical_metadata(submission)) + ". Размеры оригинала и копии для анализа: " + json.dumps(dimensions)},
+                    json.dumps(prepared.metadata) + ". Размеры оригинала и копии для анализа: " + json.dumps(dimensions)},
                 {"type": "input_image", "detail": "high", "image_url": data_url(submission_copy)},
             ])
     except (OSError, ValueError, TypeError, AttributeError, Image.DecompressionBombError):

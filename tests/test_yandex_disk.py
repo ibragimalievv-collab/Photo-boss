@@ -1,11 +1,87 @@
 """Yandex.Disk storage safety checks. No provider network is used."""
 import asyncio
 import hashlib
+import io
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.yandex_disk import ROOT, YandexDisk, YandexDiskError, safe_path
+
+
+@pytest.mark.parametrize('lost_response', [False, True])
+def test_streamed_original_is_verified_by_size_and_checksum(monkeypatch, lost_response):
+    from app import yandex_disk as module
+
+    raw = b'camera-original' * 700000
+    digest = hashlib.sha256(raw).hexdigest()
+    md5 = hashlib.md5(raw, usedforsecurity=False).hexdigest()
+    captured = {}
+
+    class Response:
+        status = 201
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class Session:
+        def __init__(self, **kwargs):
+            captured['timeout'] = kwargs['timeout'].total
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def request(self, method, href, **kwargs):
+            assert method == 'PUT' and href.startswith('https://')
+            assert hasattr(kwargs['data'], 'read'), 'Provider must receive a stream'
+            assert kwargs['data'].read() == raw
+            assert kwargs['headers']['Content-Length'] == str(len(raw))
+            if lost_response:
+                raise asyncio.TimeoutError('lost acknowledgement')
+            return Response()
+
+    disk = YandexDisk('private-token')
+    disk._json = AsyncMock(return_value={'href': 'https://upload.example.invalid/original', 'method': 'PUT'})
+    metadata = {'type': 'file', 'size': len(raw), 'sha256': digest}
+    disk.metadata = AsyncMock(return_value=metadata)
+    monkeypatch.setattr(module.aiohttp, 'ClientSession', Session)
+    with io.BytesIO(raw) as source:
+        result = asyncio.run(disk.upload_file(ROOT + '/academy/original.jpg', source,
+                            size=len(raw), sha256=digest, md5=md5, content_type='image/jpeg'))
+    assert result == metadata and captured['timeout'] == 300
+    disk.metadata.assert_awaited_once()
+
+
+def test_streamed_original_mismatched_checksum_cannot_commit(monkeypatch):
+    from app import yandex_disk as module
+
+    class Session:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def request(self, *args, **kwargs):
+            raise asyncio.TimeoutError('lost acknowledgement')
+
+    disk = YandexDisk('private-token')
+    disk._json = AsyncMock(return_value={'href': 'https://upload.example.invalid/original'})
+    disk.metadata = AsyncMock(return_value={'type': 'file', 'size': 3, 'sha256': 'wrong'})
+    monkeypatch.setattr(module.aiohttp, 'ClientSession', Session)
+    with io.BytesIO(b'abc') as source, pytest.raises(YandexDiskError) as failure:
+        asyncio.run(disk.upload_file(ROOT + '/academy/original.jpg', source,
+                    size=3, sha256=hashlib.sha256(b'abc').hexdigest(), md5='unused'))
+    assert failure.value.code == 'upload_timeout'
 
 
 @pytest.mark.parametrize("path", [

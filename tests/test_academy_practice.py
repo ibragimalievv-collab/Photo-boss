@@ -1,6 +1,7 @@
 import asyncio
 import json
 import unittest
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -187,6 +188,164 @@ class PracticeTests(unittest.IsolatedAsyncioTestCase):
         self.storage.upload_bytes.side_effect = YandexDiskError("offline")
         assert (await self.request(f"/{aid}/photos/2", payload=payload[:-2]+b"2\xff\xd9"))[0] == 503
         assert sum(s["uploaded"] for s in (await self.request(f"/{aid}"))[1]["shots"]) == 1
+
+    async def test_camera_original_over_25_mib_streams_unchanged_and_has_small_preview(self):
+        import hashlib
+        import io
+
+        from PIL import Image
+
+        from app.services.training_ai import MAX_IMAGE_BYTES
+
+        aid = await self.start()
+        image = io.BytesIO()
+        Image.new('RGB', (128, 96), 'blue').save(image, format='JPEG')
+        jpeg = image.getvalue()
+        # Valid JPEG application segments make a deterministic camera-sized file
+        # without allocating a huge decoded bitmap in this endpoint test.
+        segment = b'\xff\xef\xff\xff' + b'x' * 65533
+        raw = jpeg[:2] + segment * 513 + jpeg[2:]
+        assert 32 * 1024 * 1024 < len(raw) < MAX_IMAGE_BYTES
+
+        async def stream_upload(path, source, **kwargs):
+            assert kwargs['size'] == len(raw)
+            assert kwargs['sha256'] == hashlib.sha256(raw).hexdigest()
+            assert kwargs['md5'] == hashlib.md5(raw, usedforsecurity=False).hexdigest()
+            source.seek(0)
+            self.files[path] = source.read()
+
+        self.storage.upload_file = AsyncMock(side_effect=stream_upload)
+        status, data = await self.request(f'/{aid}/photos/1', payload=raw)
+        assert status == 201 and data['maxOriginalBytes'] == MAX_IMAGE_BYTES
+        self.storage.upload_file.assert_awaited_once()
+        self.storage.upload_bytes.assert_not_awaited()
+        assert (await self.request(f'/{aid}/photos/1')) == (200, raw)
+        status, preview = await self.request(f'/{aid}/photos/1?preview=1')
+        assert status == 200 and len(preview) < 1536 * 1024
+        assert next(iter(self.files.values())) == raw
+        # Replaying a lost response must reuse the committed file, even when large.
+        assert (await self.request(f'/{aid}/photos/1', payload=raw))[0] == 200
+        self.storage.upload_file.assert_awaited_once()
+
+    async def test_actual_server_bound_is_enforced_before_storage(self):
+        aid = await self.start()
+        with patch('app.academy_practice.MAX_IMAGE_BYTES', 32):
+            status, _ = await self.request(f'/{aid}/photos/1', payload=b'\xff\xd8\xff' + b'x' * 64 + b'\xff\xd9')
+        assert status == 413
+        self.storage.upload_bytes.assert_not_awaited()
+        assert not any(s['uploaded'] for s in (await self.request(f'/{aid}'))[1]['shots'])
+
+    async def test_slow_storage_does_not_lock_other_practice_uploads(self):
+        aid = await self.start()
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def upload(path, raw, **kwargs):
+            if f'/{aid}-1-' in path:
+                started.set()
+                await release.wait()
+            self.files[path] = raw
+
+        self.storage.upload_bytes.side_effect = upload
+        pending = asyncio.create_task(self.request(f'/{aid}/photos/1', payload=b'\xff\xd8\xffone\xff\xd9'))
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            assert not self.practice.lock.locked()
+            status, _ = await asyncio.wait_for(self.request(f'/{aid}/photos/2', payload=b'\xff\xd8\xfftwo\xff\xd9'), 1)
+            assert status == 201
+        finally:
+            release.set()
+            status, _ = await pending
+        assert status == 201
+        assert sum(s['uploaded'] for s in (await self.request(f'/{aid}'))[1]['shots']) == 2
+
+    async def test_concurrent_same_frame_keeps_one_reference_and_cleans_only_orphan(self):
+        aid = await self.start()
+        release, calls = asyncio.Event(), 0
+
+        async def upload(path, raw, **kwargs):
+            nonlocal calls
+            calls += 1
+            self.files[path] = raw
+            if calls == 2:
+                release.set()
+            await asyncio.wait_for(release.wait(), 1)
+
+        async def delete(path):
+            self.files.pop(path)
+
+        self.storage.upload_bytes.side_effect = upload
+        self.storage.delete.side_effect = delete
+        payload = b'\xff\xd8\xffsame-frame\xff\xd9'
+        results = await asyncio.gather(self.request(f'/{aid}/photos/1', payload=payload),
+                                       self.request(f'/{aid}/photos/1', payload=payload))
+        assert sorted(status for status, _ in results) == [200, 201]
+        assert calls == 2 and len(self.files) == 1
+        self.storage.delete.assert_awaited_once()
+        assert (await self.request(f'/{aid}/photos/1')) == (200, payload)
+
+    async def test_lost_database_commit_acknowledgement_preserves_referenced_original(self):
+        aid = await self.start()
+        original_begin = self.engine.begin
+        lost = False
+
+        @asynccontextmanager
+        async def uncertain_commit():
+            nonlocal lost
+            async with original_begin() as conn:
+                yield conn
+            if not lost:
+                lost = True
+                raise OSError('commit acknowledgement lost')
+
+        payload = b'\xff\xd8\xffcommitted-original\xff\xd9'
+        with patch.object(self.engine, 'begin', uncertain_commit):
+            status, _ = await self.request(f'/{aid}/photos/1', payload=payload)
+        assert status == 503 and lost
+        self.storage.delete.assert_not_awaited()
+        assert (await self.request(f'/{aid}/photos/1')) == (200, payload)
+        before = self.storage.upload_bytes.await_count
+        assert (await self.request(f'/{aid}/photos/1', payload=payload))[0] == 200
+        assert self.storage.upload_bytes.await_count == before
+
+    async def test_revoked_staff_during_upload_is_rechecked_before_linking(self):
+        aid = await self.start()
+        for revoke in ('UPDATE users SET active=FALSE WHERE id=3',
+                       "DELETE FROM user_roles WHERE user_id=3"):
+            with self.engine.inner.begin() as conn:
+                conn.execute(text('UPDATE users SET active=TRUE WHERE id=3'))
+            started, release = asyncio.Event(), asyncio.Event()
+
+            async def upload(path, raw, *, _started=started, _release=release, **kwargs):
+                self.files[path] = raw
+                _started.set()
+                await _release.wait()
+
+            async def delete(path):
+                self.files.pop(path)
+
+            self.storage.upload_bytes.side_effect = upload
+            self.storage.delete.side_effect = delete
+            self.storage.delete.reset_mock()
+            pending = asyncio.create_task(self.request(f'/{aid}/photos/1', payload=b'\xff\xd8\xffrevoked\xff\xd9'))
+            await asyncio.wait_for(started.wait(), 1)
+            with self.engine.inner.begin() as conn:
+                conn.execute(text(revoke))
+            release.set()
+            status, _ = await pending
+            assert status == 403
+            assert not self.files
+            self.storage.delete.assert_awaited_once()
+            with self.engine.inner.connect() as conn:
+                assert conn.execute(text('SELECT COUNT(*) FROM training_submissions')).scalar() == 0
+
+    async def test_uncertain_database_cleanup_retains_original_until_absence_confirmed(self):
+        aid = await self.start()
+        path = f'app:/PhotoBoss/academy/{aid}-1-unconfirmed.jpg'
+        self.files[path] = b'original whose commit outcome is unknown'
+        with patch.object(self.service, 'rows', AsyncMock(side_effect=OSError('database unavailable'))):
+            await self.practice._cleanup_upload(self.storage, aid, path)
+        self.storage.delete.assert_not_awaited()
+        assert path in self.files
 
     async def test_lost_upload_response_can_replay_the_fifth_frame_without_a_second_write(self):
         aid = await self.start()

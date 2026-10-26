@@ -70,10 +70,16 @@ def configured_from_env() -> tuple[str, str]:
 
 def validate_saved(metadata, payload):
     """A successful PUT alone is not proof that the expected original was saved."""
-    if not isinstance(metadata, dict) or metadata.get('type') != 'file' or metadata.get('size') != len(payload):
+    validate_saved_digest(metadata, len(payload), hashlib.sha256(payload).hexdigest(),
+                          hashlib.md5(payload, usedforsecurity=False).hexdigest())
+
+
+def validate_saved_digest(metadata, size, sha256, md5):
+    """Validate a streamed original without making an in-memory byte copy."""
+    if not isinstance(metadata, dict) or metadata.get('type') != 'file' or metadata.get('size') != size:
         raise YandexDiskError('Сохранение файла ещё не подтверждено: размер не совпадает.', code="integrity")
     digest = metadata.get('sha256')
-    valid = digest == hashlib.sha256(payload).hexdigest() if digest else metadata.get('md5') == hashlib.md5(payload, usedforsecurity=False).hexdigest()
+    valid = digest == sha256 if digest else metadata.get('md5') == md5
     if not valid:
         raise YandexDiskError('Сохранение файла ещё не подтверждено: контрольная сумма не совпадает.', code="integrity")
 
@@ -230,6 +236,38 @@ class YandexDisk:
         return metadata
     async def download_bytes(self, path: str, *, max_bytes=20 * 1024 * 1024):
         return await self._download_bytes(safe_path(path), max_bytes=max_bytes)
+
+    async def upload_file(self, path, source, *, size, sha256, md5, content_type="application/octet-stream"):
+        """Stream a seekable private original and confirm provider size/checksum."""
+        path = safe_path(path)
+        data = await self._json("GET", "/resources/upload", params={"path": path, "overwrite": "true"})
+        href = data.get("href") if isinstance(data, dict) else None
+        method = data.get("method", "PUT") if isinstance(data, dict) else "PUT"
+        if not isinstance(href, str) or not href.startswith("https://") or method not in {"PUT", "POST"}:
+            raise YandexDiskError("Yandex.Disk did not return a valid upload target", code="unsafe_target")
+        source.seek(0)
+        try:
+            async with (
+                aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session,
+                session.request(method, href, data=source,
+                                headers={"Content-Type": content_type, "Content-Length": str(size)}) as response,
+            ):
+                if response.status not in (200, 201, 202):
+                    raise YandexDiskError(f"Yandex.Disk upload HTTP {response.status}",
+                                          code="upload_http", http_status=response.status)
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            # A lost acknowledgement must not turn into a duplicate upload.
+            try:
+                metadata = await self.metadata(path)
+                validate_saved_digest(metadata, size, sha256, md5)
+                return metadata
+            except YandexDiskError:
+                pass
+            code = "upload_timeout" if isinstance(exc, asyncio.TimeoutError) else "upload_network"
+            raise YandexDiskError("Не удалось подтвердить загрузку на Яндекс.Диск. Повторите попытку.", code=code) from exc
+        metadata = await self.metadata(path)
+        validate_saved_digest(metadata, size, sha256, md5)
+        return metadata
 
     async def disk_download_bytes(self, path: str, *, max_bytes=20 * 1024 * 1024):
         return await self._download_bytes(safe_disk_read_path(path), max_bytes=max_bytes)

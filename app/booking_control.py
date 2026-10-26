@@ -209,9 +209,9 @@ def telegram_text(message):
 
 
 async def remind(session, bot, user, kind, prefix, message, now, interval, *, payload=None):
-    # Operations may run in both the bot and web processes. Serialize delivery
-    # for each recipient before reading the deduplication row.
-    await session.get(User, user.id, with_for_update={'key_share': True})
+    # activity_tick holds the background transaction advisory lock before any
+    # notification writes. Do not acquire a user row after a notification row:
+    # attendance holds those same resources in the opposite order.
     previous = await session.scalar(select(Notification).where(
         Notification.user_id == user.id, Notification.kind == kind,
         Notification.event_key.startswith(prefix)).order_by(Notification.id.desc()).limit(1).with_for_update())
@@ -273,6 +273,9 @@ def supervisor_message(data, advice, idle):
 
 
 async def activity_tick(session, bot, now):
+    from .services.operations_locks import lock_background_notifications
+
+    await lock_background_notifications(session)
     settings = await preferences(session)
     now = utc(now)
     if not settings['enabled']:
@@ -297,7 +300,7 @@ async def activity_tick(session, bot, now):
         current_ids.add(nid)
         sent += delivered
     admins = list(await session.scalars(select(User).join(UserRole, UserRole.user_id == User.id)
-        .where(User.active.is_(True), UserRole.role.in_(['OWNER', 'ADMIN'])).distinct()))
+        .where(User.active.is_(True), UserRole.role.in_(['OWNER', 'ADMIN'])).distinct().order_by(User.id)))
     for user in admins:
         user_roles = set(await session.scalars(select(UserRole.role).where(UserRole.user_id == user.id)))
         ids = None if 'OWNER' in user_roles else set(await session.scalars(select(HotelEmployee.hotel_id).where(HotelEmployee.user_id == user.id)))

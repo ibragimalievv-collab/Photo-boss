@@ -29,12 +29,12 @@ function setBusy(value){busy=value;for(const control of panel.querySelectorAll('
 function shell(title,html){cleanup();panel.innerHTML=`<header class="practice-head"><button data-practice-home aria-label="Назад">‹</button><h2 id="practiceTitle">${esc(title)}</h2><button data-practice-close aria-label="Закрыть">×</button></header><div class="practice-body"><p class="practice-error" role="alert" hidden></p><p class="practice-upload-progress" role="status" hidden>Дождитесь подтверждения операции. Во время загрузки не выбирайте следующий кадр.</p>${html}</div>`;if(!panel.open){lastFocus=document.activeElement;panel.showModal();}setBusy(busy);}
 function error(e){const el=panel.querySelector('.practice-error');if(el){el.hidden=false;el.textContent=e.message||'Не удалось загрузить практику.';}}
 async function photoFetch(path,options={}){
- return api(path,{...options,responseType:options.method==='POST'?undefined:'blob',timeoutMs:90000});
+ return api(path,{...options,responseType:options.method==='POST'?undefined:'blob',timeoutMs:options.method==='POST'?360000:90000});
 }
 async function loadPhotos(){
  const ticket=version;
  for(const img of panel.querySelectorAll('[data-practice-photo]')){
-  try{const blob=await photoFetch(img.dataset.practicePhoto);if(ticket!==version)return;const url=URL.createObjectURL(blob);urls.add(url);img.src=url;}
+  try{const path=img.dataset.practicePhoto;const blob=await photoFetch(path+(path.includes('/photos/')?'?preview=1':''));if(ticket!==version)return;const url=URL.createObjectURL(blob);urls.add(url);img.src=url;}
   catch(e){if(ticket===version){img.alt=e.status===404?'Оригинал не найден в хранилище.':'Фото не загрузилось. Нажмите «Обновить».';
    if(e.status===404&&current?.own&&current.status==='ACTIVE'){const recover=panel.querySelector('[data-practice-recover]');if(recover)recover.hidden=false;}}}
  }
@@ -42,7 +42,7 @@ async function loadPhotos(){
 function analysisMarkup(data){
  const a=data.analysis;if(!a)return '';
  if(a.status==='owner')return `<div class="practice-feedback"><strong>Решение владельца</strong><p>${esc(a.comment||'Набор принят.')}</p></div>`;
- if(a.status==='storage_unavailable')return `<p class="practice-feedback">Не удалось прочитать ${esc((a.unavailable_indexes||[]).map(i=>`кадр ${i}`).join(', ')||'один из кадров')} из хранилища. Остальные фотографии сохранены; загрузите только отмеченные кадры заново.</p>`;
+ if(a.status==='storage_unavailable')return `<p class="practice-feedback">Не удалось прочитать ${esc((a.unavailable_indexes||[]).map(i=>`кадр ${i}`).join(', ')||'один из кадров')} из хранилища. ${data.shots.some(s=>s.uploaded)?'Доступные загруженные кадры остаются в задании.':'Доступных загруженных оригиналов в задании сейчас нет.'} Загрузите недостающие кадры, а также ранее назначенную пересъёмку; история прежних работ сохранена.</p>`;
  if(a.status==='processing')return `<p class="practice-feedback">ИИ проверяет сохранённые фотографии. Попытка ${(a.attempts||0)+1}/3. Повторно отправлять фото не нужно.</p>`;
  if(a.status!=='completed')return `<p class="practice-feedback">${esc(reviewSummary(data)||'AI-проверка временно недоступна. Фотографии сохранены; повторите проверку.')}${a.nextRetryAt?' Следующая попытка запланирована автоматически; фотографии повторно загружать не нужно.':''}</p>`;
  const r=a.review;
@@ -69,7 +69,7 @@ function renderAssignment(data){
   <div class="practice-pair"><figure><img data-practice-photo="${esc(s.reference)}" alt="Учебный референс ${s.index}"><figcaption>Референс</figcaption></figure>
   ${s.photo?`<figure><img data-practice-photo="${esc(s.photo)}" alt="Работа фотографа ${s.index}"><figcaption>Ваш кадр сохранён</figcaption></figure>`:'<p class="practice-missing">Кадр ещё не загружен</p>'}</div>
   ${editable&&!s.uploaded?`<label class="practice-upload">Загрузить кадр ${s.index}<input type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" data-practice-upload="${s.index}"></label>`:''}</article>`).join('')}</div>
-  ${editable?'<p>Загрузите исходный JPEG до 8 МБ: размер и EXIF сохраняются. PNG и WebP преобразуются в JPEG без уменьшения; их EXIF не сохраняется. Фото больше 8 МБ нужно уменьшить самостоятельно. После пятого кадра начнётся проверка.</p>':''}
+  ${editable?`<p>Загрузите исходный JPEG: разрешение и EXIF сохраняются. Крупные файлы передаются потоком; текущий предел сервера — ${Math.floor((data.maxOriginalBytes||256*1024*1024)/1024/1024)} МБ на кадр. Для ИИ создаётся отдельная копия; исходник не уменьшается. PNG и WebP преобразуются в JPEG без уменьшения; их EXIF не сохраняется. После пятого кадра начнётся проверка.</p>`:''}
   ${data.canRetry?`<button class="btn primary" data-practice-retry>Повторить AI-проверку</button>`:''}
   ${data.canRetake?'<button class="btn" data-practice-retake>Переснять спорные кадры</button><p>Указанные ИИ кадры откроются для замены. Если номера не указаны — все пять. Прежние работы останутся в истории.</p>':''}
   <button class="btn" data-practice-recover hidden>Проверить хранилище и открыть повторную загрузку недоступных кадров</button>
@@ -99,33 +99,34 @@ export async function openPractice(id=null,category=null){
   try{const data=await api(`/academy/practice/${current.id}`);if(ticket===version&&panel.open&&current?.id===data.id&&JSON.stringify(data)!==JSON.stringify(current))renderAssignment(data);}catch(e){if(ticket===version&&panel.open)error(e);}
  },5000);
 }
-async function preparePhoto(file){
+async function preparePhoto(file,maximum=256*1024*1024){
  if(!file)throw new Error('Выберите JPEG, PNG или WebP.');
  // Some phone/cloud file pickers omit MIME or report a generic binary file.
  // The server still validates JPEG content; an explicit foreign MIME is rejected.
  const extension=file.name?.split('.').pop()?.toLowerCase();
  const kind=!file.type||file.type==='application/octet-stream'?({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp'}[extension]||''):file.type;
  if(!['image/jpeg','image/png','image/webp'].includes(kind))throw new Error(['heic','heif'].includes(extension)||/heic|heif/.test(file.type)?'HEIC/HEIF не поддерживается. Экспортируйте фото в JPEG и загрузите эту копию.':'Выберите JPEG, PNG или WebP.');
- if(file.size>25*1024*1024)throw new Error('Исходное фото больше 25 МБ. Выберите уменьшенную копию.');
+ if(!file.size)throw new Error('Выберите непустой файл фотографии.');
+ if(file.size>maximum)throw new Error(`Текущий предел сервера — ${Math.floor(maximum/1024/1024)} МБ на кадр.`);
  if(kind==='image/jpeg'){
-  if(file.size>8*1024*1024)throw new Error('JPEG больше 8 МБ. Сохраните отдельную копию до 8 МБ; её детализация может быть ниже.');
-  // A byte copy preserves EXIF and avoids file-backed multipart transport differences.
-  return new Blob([await file.arrayBuffer()],{type:'image/jpeg'});
+  // Blob wraps the original without allocating a full second camera-sized buffer.
+  return new Blob([file],{type:'image/jpeg'});
  }
  const image=await createImageBitmap(file);
  try{
-  if(image.width*image.height>32*1024*1024)throw new Error('Для PNG/WebP больше 32 Мп сохраните отдельный JPEG до 8 МБ.');
+  if(image.width*image.height>80*1024*1024)throw new Error('Для PNG/WebP больше 80 Мп экспортируйте исходник в JPEG и загрузите его без уменьшения.');
   const canvas=document.createElement('canvas');canvas.width=image.width;canvas.height=image.height;
   const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(image,0,0,canvas.width,canvas.height);
   const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.9));
-  if(!blob||blob.size>8*1024*1024)throw new Error('После преобразования фото больше 8 МБ. Подготовьте отдельную JPEG-копию до 8 МБ.');
+  if(!blob)throw new Error('Не удалось преобразовать фото. Экспортируйте его в JPEG и загрузите без уменьшения.');
+  if(blob.size>maximum)throw new Error(`Преобразованный JPEG превышает текущий предел сервера ${Math.floor(maximum/1024/1024)} МБ.`);
   return blob;
  }finally{image.close();}
 }
 panel.addEventListener('change',async e=>{
  const input=e.target.closest('[data-practice-upload]');if(!input||!input.files?.[0]||busy)return;
  const aid=current.id,ticket=version,operation=++mutation;setBusy(true);
- try{const blob=await preparePhoto(input.files[0]);if(ticket!==version||!panel.open)return;const body=new FormData();body.append('file',blob,'practice.jpg');
+ try{const blob=await preparePhoto(input.files[0],current.maxOriginalBytes||256*1024*1024);if(ticket!==version||!panel.open)return;const body=new FormData();body.append('file',blob,'practice.jpg');
   const data=await photoFetch(`/academy/practice/${aid}/photos/${input.dataset.practiceUpload}`,{method:'POST',body});
   if(ticket===version&&panel.open&&current?.id===aid)renderAssignment(data);
  }catch(err){if(ticket===version&&panel.open){error(err);input.value='';}}finally{if(operation===mutation)setBusy(false);}
