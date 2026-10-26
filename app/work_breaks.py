@@ -1,6 +1,7 @@
 """Recorded lunch intervals with server time, hotel scope and audited corrections."""
 import json
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from aiohttp import web
@@ -38,6 +39,13 @@ def stamp(value):
     return value.isoformat() + 'Z' if value else None
 
 
+def next_revision(previous):
+    # A retry must fail its old revision even when two edits share the same
+    # clock tick (or a test/server clock is temporarily held constant).
+    now = utc_now()
+    return max(now, previous + timedelta(microseconds=1)) if previous else now
+
+
 def parse_time(value):
     try:
         result = datetime.fromisoformat(value.replace('Z', '+00:00'))
@@ -46,6 +54,40 @@ def parse_time(value):
         return result.astimezone(UTC).replace(tzinfo=None)
     except (ValueError, TypeError, AttributeError):
         raise AccessError('Укажите дату и время с часовым поясом.', 400) from None
+
+
+async def notify_break(session, row, *, phase, event_key, actor=None, reason=None, created=False):
+    """Commit lunch facts and review requests with their underlying interval."""
+    from .config import config
+    from .push_notifications import queue_notice, scoped_supervisors
+
+    employee = await session.get(User, row.user_id)
+    hotel = await session.get(Hotel, row.hotel_id)
+    tz = ZoneInfo(config.training_timezone)
+    local_start = row.started_at.replace(tzinfo=UTC).astimezone(tz)
+    local_end = row.ended_at.replace(tzinfo=UTC).astimezone(tz) if row.ended_at else None
+    label = ('Обед закрыт по окончанию смены. Отдельной отметки возвращения нет — проверьте интервал.'
+             if phase == 'lunch_attention' else
+             'Руководитель добавил отметку обеда.' if created else 'Руководитель исправил время обеда.')
+    description = (f'{label}\nСотрудник: {employee.name if employee else "не указан"}\n'
+                   f'Отель: {hotel.name if hotel else "не указан"}\n'
+                   f'Начало: {local_start:%d.%m.%Y %H:%M}\n'
+                   f'Окончание: {local_end.strftime("%d.%m.%Y %H:%M") if local_end else "ещё на обеде"}')
+    if actor is not None:
+        description += f'\nИзменил: {actor.name}'
+    if reason:
+        description += f'\nОснование: {reason}'
+    recipients = await scoped_supervisors(session, row.hotel_id) | {row.user_id}
+    for uid in sorted(recipients):
+        recipient = await session.get(User, uid)
+        if recipient and recipient.active:
+            await queue_notice(session, uid, kind=phase, event_key=event_key,
+                url='/app/#workday', message=description,
+                payload={'workBreakId': row.id, 'userId': row.user_id, 'hotelId': row.hotel_id,
+                         'date': str(row.shift_date), 'startedAt': stamp(row.started_at),
+                         'endedAt': stamp(row.ended_at), 'reason': reason,
+                         'canReview': uid != row.user_id, 'description': description,
+                         'automatic': phase == 'lunch_attention', 'created': created})
 
 
 class WorkBreaks:
@@ -80,7 +122,7 @@ class WorkBreaks:
                 if not current or current.hotel_id != data['hotelId']:
                     raise AccessError('Открытая отметка обеда не найдена.', 409)
                 current.ended_at = max(now, current.started_at)
-                current.updated_at = now
+                current.updated_at = next_revision(current.updated_at)
             else:
                 if current:
                     raise AccessError('Вы уже на обеде. Сначала отметьте возвращение.', 409)
@@ -198,15 +240,22 @@ class WorkBreaks:
                 before = {'startedAt': stamp(row.started_at), 'endedAt': stamp(row.ended_at)}
             if start.replace(tzinfo=UTC).astimezone(self.api.tz).date() != row.shift_date or (end and end - start > timedelta(hours=24)):
                 raise AccessError('Начало обеда должно относиться к выбранной смене; интервал — не более суток.', 400)
+            # Assign a new row's ID before constructing the exclusion. Query
+            # autoflush used to insert it after ``id != -1`` was constructed,
+            # so every manually added interval incorrectly overlapped itself.
+            await session.flush()
             overlap = await session.scalar(select(WorkBreak.id).where(WorkBreak.user_id == row.user_id,
                 WorkBreak.id != (row.id or -1), *([WorkBreak.started_at < end] if end else []),
                 (WorkBreak.ended_at.is_(None) | (WorkBreak.ended_at > start))).limit(1))
             if overlap:
                 raise AccessError('Этот интервал пересекается с другим обедом сотрудника.', 409)
-            row.started_at, row.ended_at, row.updated_at = start, end, utc_now()
+            row.started_at, row.ended_at, row.updated_at = start, end, next_revision(row.updated_at)
             await session.flush()
             await audit(session, actor, 'break_corrected', 'work_break', row.id,
                 json.dumps({'before': before, 'after': {'startedAt': stamp(start), 'endedAt': stamp(end)}, 'reason': body['reason'].strip()}, ensure_ascii=False))
+            await notify_break(session, row, phase='lunch_corrected', actor=actor,
+                event_key=f'work-break:{row.id}:corrected:{uuid4().hex}',
+                reason=body['reason'].strip(), created=creating)
             await session.commit()
         return web.json_response({'ok': True, 'id': row.id})
 
@@ -218,9 +267,12 @@ async def close_breaks(session, user_id, day, when, actor):
     for row in rows:
         if when < row.started_at:
             raise AccessError('Завершение смены раньше отметки обеда. Сначала исправьте время обеда.', 409)
-        row.ended_at, row.updated_at = when, utc_now()
+        row.ended_at, row.updated_at = when, next_revision(row.updated_at)
         await audit(session, actor, 'break_closed_with_shift', 'work_break', row.id,
                     'Окончание по завершению смены; отдельная отметка возвращения отсутствует.')
+        await notify_break(session, row, phase='lunch_attention',
+            event_key=f'work-break:{row.id}:closed-with-shift',
+            reason='Отдельная отметка возвращения с обеда не поступила.')
 
 
 def install_breaks(app, api):

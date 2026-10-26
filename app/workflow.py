@@ -71,6 +71,26 @@ from .yandex_disk import (
 KINDS = frozenset({'booking', 'sale_start', 'sale_counts', 'sale_complete', 'sale_receipt',
                    'sale_selected', 'sale_disk_selected', 'booking_receipt', 'shoot_photo', 'shoot_complete', 'shoot_retry', 'photo_edit', 'delivery_photo', 'delivery_handoff'})
 MEDIA_KINDS = frozenset({'sale_receipt', 'sale_selected', 'booking_receipt', 'shoot_photo', 'delivery_photo'})
+PREPARED_MEDIA_KINDS = MEDIA_KINDS | {'sale_disk_selected', 'sale_complete'}
+
+
+def validate_media(kind, raw):
+    if kind in MEDIA_KINDS:
+        if not raw or len(raw) < 100:
+            raise AccessError('Прикрепите изображение.', 400)
+        try:
+            image_format(raw)
+        except ValueError as exc:
+            raise AccessError('Нужен поддерживаемый формат изображения: JPEG или PNG.', 400) from exc
+        if kind in {'sale_receipt', 'booking_receipt'} and len(raw) > 8 * 1024 * 1024:
+            raise AccessError('Чек должен быть не больше 8 МБ.', 413)
+    elif raw is not None:
+        raise AccessError('В этой операции не должно быть вложения.', 400)
+
+
+def media_identity(kind, data, raw):
+    return (kind, json.dumps(data, sort_keys=True, ensure_ascii=False),
+            hashlib.sha256(raw).hexdigest() if raw is not None else None)
 
 
 def fields(data, expected):
@@ -344,18 +364,143 @@ class Workflow:
             await storage.upload_bytes(path, raw, content_type=mime)
         return path
 
-    async def apply(self, conn, actor_data, kind, data, raw=None):
-        if kind in MEDIA_KINDS:
-            if not raw or len(raw) < 100:
-                raise AccessError('Прикрепите изображение.', 400)
-            try:
-                image_format(raw)
-            except ValueError as exc:
-                raise AccessError('Нужен поддерживаемый формат изображения: JPEG или PNG.',400) from exc
-            if kind in {'sale_receipt', 'booking_receipt'} and len(raw) > 8 * 1024 * 1024:
-                raise AccessError('Чек должен быть не больше 8 МБ.', 413)
-        elif raw is not None:
-            raise AccessError('В этой операции не должно быть вложения.', 400)
+    async def prepare_media(self, actor_data, kind, data, raw=None):
+        """Authorize briefly, then release the DB connection before provider I/O.
+
+        This is preparation only: no sale, receipt, photo or operation-ledger row
+        is written here. apply() repeats authorization and business-state checks
+        under the original transactional user/booking locks before linking a
+        confirmed original. A concurrent change may leave a private orphan, but
+        never a falsely acknowledged upload or a second financial operation.
+        """
+        if kind not in PREPARED_MEDIA_KINDS:
+            return None
+        validate_media(kind, raw)
+        prepared = {'identity': media_identity(kind, data, raw), 'references': {}}
+        try:
+            if kind == 'delivery_photo':
+                from .delivery import Delivery
+                prepared['delivery'] = await Delivery(self.api).prepare_photo(actor_data, data, raw)
+                return prepared
+            async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
+                actor = await session.get(User, actor_data['id'])
+                roles = set(actor_data['roles'])
+                if actor is None or not actor.active:
+                    raise AccessError('Доступ отключён.', 403)
+                if kind.startswith('sale_'):
+                    expected = {'sale_receipt': 'draft', 'sale_selected': 'draft',
+                                'sale_disk_selected': 'draft revision path', 'sale_complete': 'draft price'}[kind]
+                    fields(data, expected)
+                    did = await target(session, actor, data['draft'], 'draftId')
+                    draft = await session.get(SaleDraft, did)
+                    if draft is None:
+                        raise AccessError('Черновик не найден.', 404)
+                    booking = await session.get(Booking, draft.booking_id)
+                    if draft.created_by_id != actor.id or not await can_sell(actor, roles, booking, session=session):
+                        raise AccessError('Нет доступа к этой продаже.', 403)
+                    prepared['target'] = did
+                    if kind == 'sale_receipt' and draft.status != 'AWAITING_RECEIPT':
+                        raise AccessError('Этот черновик продажи уже закрыт.', 409)
+                    if kind == 'sale_selected':
+                        digest = hashlib.sha256(raw).hexdigest()
+                        old = await session.scalar(select(SaleDraftPhoto).where(
+                            SaleDraftPhoto.draft_id == did, SaleDraftPhoto.sha256 == digest))
+                        if draft.status == 'COMPLETED' and old:
+                            prepared['completed_duplicate'] = True
+                        elif draft.status != 'AWAITING_SELECTED':
+                            raise AccessError('Сначала сохраните чек и количество кадров.', 409)
+                        elif not old and await selected_count(session, did) >= draft.sold_photos:
+                            raise AccessError('Все выбранные кадры уже сохранены.', 409)
+                        elif not old and await already_purchased_photo(session, booking.id, digest):
+                            raise AccessError('Этот кадр уже куплен в предыдущей продаже. Выберите новый кадр для допродажи.', 409)
+                    from .disk_sale_media import binding, reference
+                    if kind == 'sale_disk_selected':
+                        source = await binding(session, booking.id)
+                        if not source or source.get('revision') != data['revision']:
+                            raise AccessError('Папка съёмки изменилась. Откройте её и выберите фотографии заново.', 409)
+                        prepared['source'] = source
+                    # An already completed sale only needs its transactional
+                    # duplicate acknowledgement; provider availability must
+                    # not prevent the original queued completion from replaying.
+                    if kind != 'sale_receipt' and draft.status != 'COMPLETED':
+                        external = list(await session.scalars(select(SaleDraftPhoto.storage_path).where(
+                            SaleDraftPhoto.draft_id == did, SaleDraftPhoto.storage_path.like('disk-ref:%'))))
+                        prepared['references'] = {file_id: await reference(session, file_id) for file_id in external}
+                elif kind == 'booking_receipt':
+                    fields(data, 'booking purpose')
+                    bid = await target(session, actor, data['booking'], 'bookingId')
+                    booking = await session.get(Booking, bid)
+                    if not await can_access_booking(session, actor.id, roles, booking):
+                        raise AccessError('Нет доступа к записи.', 403)
+                    if data['purpose'] not in ('DEPOSIT', 'PAYMENT'):
+                        raise AccessError('Неизвестный вид чека.', 400)
+                    pending = await session.scalar(select(Receipt.id).where(Receipt.booking_id == bid,
+                        Receipt.purpose == data['purpose'], Receipt.status == 'PENDING'))
+                    if pending:
+                        raise AccessError(f'Чек №{pending} уже ожидает проверки.', 409)
+                    if await expected_amount(session, booking, data['purpose']) <= 0:
+                        raise AccessError('Дополнительная оплата не требуется.', 409)
+                    prepared['target'] = bid
+                else:
+                    fields(data, 'shooting')
+                    sid = await target(session, actor, data['shooting'], 'shootingId')
+                    shooting = await session.get(Shooting, sid)
+                    booking = await session.get(Booking, shooting.booking_id) if shooting else None
+                    if not await can_access_booking(session, actor.id, roles, booking, photos=True):
+                        raise AccessError('Нет доступа к съёмке.', 403)
+                    old = await session.scalar(select(PhotoStorage.id).where(PhotoStorage.shooting_id == sid,
+                        PhotoStorage.sha256 == hashlib.sha256(raw).hexdigest()).limit(1))
+                    if not old and (shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at):
+                        raise AccessError('Загрузка новых кадров уже закрыта или ещё недоступна.', 409)
+                    prepared['target'] = sid
+            # Detached identity/targets above are all that provider calls need.
+            # No connection, transaction or business row lock remains checked out.
+            if kind in {'sale_receipt', 'booking_receipt'}:
+                prepared['file'] = await self.save_telegram(actor, raw, receipt=True)
+                prepared['analysis'] = await extract_receipt(raw)
+            elif kind == 'sale_selected' and not prepared.get('completed_duplicate'):
+                prepared['path'] = await self.save_selected(draft, raw)
+            elif kind == 'shoot_photo':
+                from .push_notifications import app_channel
+                if app_channel():
+                    prepared['path'] = await self.save_disk_original(f'/shootings/{sid}', raw)
+                else:
+                    prepared['file'] = await self.save_telegram(actor, raw)
+            if kind == 'sale_disk_selected':
+                from .disk_sale_media import prepare_selection, selection_reference
+                prepared['selection'] = await prepare_selection(prepared['source'], data)
+                file_id, saved = selection_reference(prepared['target'], booking.id, prepared['selection'])
+                prepared['references'][file_id] = saved
+            if prepared['references']:
+                from .disk_sale_media import verify_saved_reference
+                # The incoming Disk original has just been downloaded and
+                # checksum-verified by prepare_selection; verify earlier refs.
+                incoming = file_id if kind == 'sale_disk_selected' else None
+                for known_id, saved in prepared['references'].items():
+                    if known_id == incoming:
+                        continue
+                    await verify_saved_reference(saved)
+            return prepared
+        except AccessError:
+            raise
+        except ValueError as exc:
+            raise AccessError(str(exc), 409) from exc
+        except YandexDiskError as exc:
+            if kind == 'sale_disk_selected':
+                from .disk_folder_audit import provider_error
+                raise AccessError(provider_error(exc), exc.http_status if exc.http_status in {401, 403, 404} else 503) from exc
+            raise AccessError('Яндекс.Диск временно недоступен. Вложение сохранено локально.', 503) from exc
+
+    async def complete_prepared_sale(self, session, actor, draft_id, prepared_media):
+        if prepared_media is None:
+            return await complete_sale(session, actor, draft_id)
+        return await complete_sale(session, actor, draft_id,
+                                   verified_references=prepared_media['references'])
+
+    async def apply(self, conn, actor_data, kind, data, raw=None, *, prepared_media=None):
+        validate_media(kind, raw)
+        if prepared_media is not None and prepared_media['identity'] != media_identity(kind, data, raw):
+            raise AccessError('Подготовленное вложение не соответствует операции.', 409)
         try:
             async with AsyncSession(bind=conn, expire_on_commit=False) as session:
                 actor = await session.get(User, actor_data['id'])
@@ -369,16 +514,17 @@ class Workflow:
                     result = {'bookingId': booking.id}
                 elif kind.startswith('delivery_'):
                     from .delivery import Delivery
-                    result = await Delivery(self.api).apply(session, actor_data, kind, data, raw)
+                    result = await Delivery(self.api).apply(session, actor_data, kind, data, raw,
+                        **({'prepared': prepared_media['delivery']} if prepared_media is not None else {}))
                 elif kind == 'photo_edit':
                     from .photo_edits import apply
                     result = await apply(session, actor_data, data)
                 elif kind.startswith('sale_'):
-                    result = await self.sale(session, actor, roles, kind, data, raw)
+                    result = await self.sale(session, actor, roles, kind, data, raw, prepared_media=prepared_media)
                 elif kind == 'booking_receipt':
-                    result = await self.receipt(session, actor, roles, data, raw)
+                    result = await self.receipt(session, actor, roles, data, raw, prepared_media=prepared_media)
                 else:
-                    result = await self.shoot(session, actor, roles, kind, data, raw)
+                    result = await self.shoot(session, actor, roles, kind, data, raw, prepared_media=prepared_media)
                 await session.flush()
                 # Bound to the outer transaction; no independent financial commit.
                 return result
@@ -394,7 +540,7 @@ class Workflow:
                 raise AccessError(provider_error(exc), exc.http_status if exc.http_status in {401, 403, 404} else 503) from exc
             raise AccessError('Яндекс.Диск временно недоступен. Вложение сохранено локально.', 503) from exc
 
-    async def sale(self, session, actor, roles, kind, data, raw):
+    async def sale(self, session, actor, roles, kind, data, raw, *, prepared_media=None):
         if kind == 'sale_start':
             fields(data, 'booking price tariffId' if 'tariffId' in data else 'booking price')
             bid = await target(session, actor, data['booking'], 'bookingId')
@@ -405,6 +551,8 @@ class Workflow:
             optional = ('tariffId', 'discountId', 'albumId', 'albumQuantity') if kind == 'sale_counts' else ()
             fields(data, expected + ''.join(' ' + key for key in optional if key in data))
             did = await target(session, actor, data['draft'], 'draftId')
+            if prepared_media is not None and prepared_media['target'] != did:
+                raise AccessError('Черновик изменился. Повторите отправку.', 409)
             preview = await session.get(SaleDraft, did)
             if preview is None:
                 raise AccessError('Черновик не найден.', 404)
@@ -444,22 +592,32 @@ class Workflow:
                 'paymentStatus': saved.payment_status, 'draftStatus': draft.status,
                 'selectedPhotos': await selected_count(session, draft.id), 'duplicate': True}
         if kind == 'sale_receipt':
-            file_id, unique_id = await self.save_telegram(actor, raw, receipt=True)
+            file_id, unique_id = prepared_media['file'] if prepared_media is not None else await self.save_telegram(actor, raw, receipt=True)
+            analysis = prepared_media['analysis'] if prepared_media is not None else await extract_receipt(raw)
             await capture_draft_receipt(session, actor, draft, file_id, unique_id,
-                hashlib.sha256(raw).hexdigest(), await extract_receipt(raw))
+                hashlib.sha256(raw).hexdigest(), analysis)
+            from .operational_alerts import queue_receipt_review
+            await queue_receipt_review(session, booking, actor.id, analysis=analysis, expected=None,
+                                       event_key='receipt-review:draft:' + str(draft.id))
         elif kind == 'sale_counts':
             amount = await set_sale_counts(session, actor, draft, data['total'], data['sold'],
                 tariff_id=data.get('tariffId'), discount_id=data.get('discountId'),
                 album_id=data.get('albumId'), album_quantity=data.get('albumQuantity'))
             result['amount'] = str(amount)
+            if draft.receipt_file_id:
+                from .operational_alerts import queue_receipt_review
+                await queue_receipt_review(session, booking, actor.id,
+                    analysis=receipt_analysis(draft.receipt_analysis), expected=money(draft.expected_amount),
+                    event_key=f'receipt-review:draft:{draft.id}:expected:{money(draft.expected_amount)}')
         elif kind == 'sale_disk_selected':
             from .disk_sale_media import select_photo
-            result |= await select_photo(session, actor, booking, draft, data)
+            result |= await select_photo(session, actor, booking, draft, data,
+                **({'prepared': prepared_media['selection']} if prepared_media is not None else {}))
             # The submitted sale must finish with its last confirmed original,
             # regardless of whether it came from the device or an existing Disk
             # folder. Mobile browsers may stop before sale_complete is sent.
             if draft.status == 'AWAITING_SELECTED' and await selected_count(session, draft.id) == draft.sold_photos:
-                complete = await complete_sale(session, actor, draft.id)
+                complete = await self.complete_prepared_sale(session, actor, draft.id, prepared_media)
                 result |= {'saleId': complete.sale.id, 'amount': str(complete.sale_amount),
                            'soldPhotos': complete.sale.sold_photos, 'paymentStatus': complete.sale.payment_status}
         elif kind == 'sale_selected':
@@ -471,7 +629,7 @@ class Workflow:
             if draft.status != 'AWAITING_SELECTED':
                 raise AccessError('Сначала сохраните чек и количество кадров.', 409)
             if duplicate:
-                path = await self.save_selected(draft, raw)
+                path = prepared_media['path'] if prepared_media is not None else await self.save_selected(draft, raw)
                 duplicate.storage_path = path
                 duplicate.telegram_file_id = path
                 return result | {'photoId': duplicate.id, 'duplicate': True, 'storageVerified': True,
@@ -482,7 +640,7 @@ class Workflow:
                 raise AccessError('Все выбранные кадры уже сохранены.', 409)
             if await already_purchased_photo(session, booking.id, digest):
                 raise AccessError('Этот кадр уже куплен в предыдущей продаже. Выберите новый кадр для допродажи.', 409)
-            path = await self.save_selected(draft, raw)
+            path = prepared_media['path'] if prepared_media is not None else await self.save_selected(draft, raw)
             # The confirmed private original is sufficient. A second upload to
             # Telegram used to block acceptance after Disk had already stored it.
             photo = SaleDraftPhoto(draft_id=draft.id, telegram_file_id=path,
@@ -495,20 +653,22 @@ class Workflow:
             # with the last confirmed original, even if the browser closes
             # before its queued sale_complete request can be transmitted.
             if await selected_count(session, draft.id) == draft.sold_photos:
-                complete = await complete_sale(session, actor, draft.id)
+                complete = await self.complete_prepared_sale(session, actor, draft.id, prepared_media)
                 result |= {'saleId': complete.sale.id, 'amount': str(complete.sale_amount),
                            'soldPhotos': complete.sale.sold_photos, 'paymentStatus': complete.sale.payment_status}
         elif kind == 'sale_complete':
-            complete = await complete_sale(session, actor, draft.id)
+            complete = await self.complete_prepared_sale(session, actor, draft.id, prepared_media)
             result |= {'saleId': complete.sale.id, 'amount': str(complete.sale_amount), 'soldPhotos': complete.sale.sold_photos,
                        'paymentStatus': complete.sale.payment_status}
         return result | {'selectedPhotos': await selected_count(session, draft.id),
             'declaredSold': draft.sold_photos, 'declaredTotal': draft.declared_photo_count,
             'draftStatus': draft.status}
 
-    async def receipt(self, session, actor, roles, data, raw):
+    async def receipt(self, session, actor, roles, data, raw, *, prepared_media=None):
         fields(data, 'booking purpose')
         bid = await target(session, actor, data['booking'], 'bookingId')
+        if prepared_media is not None and prepared_media['target'] != bid:
+            raise AccessError('Запись изменилась. Повторите отправку.', 409)
         booking = await session.get(Booking, bid, with_for_update=True)
         if not await can_access_booking(session, actor.id, roles, booking):
             raise AccessError('Нет доступа к записи.', 403)
@@ -521,20 +681,25 @@ class Workflow:
         expected = await expected_amount(session, booking, data['purpose'])
         if expected <= 0:
             raise AccessError('Дополнительная оплата не требуется.', 409)
-        file_id, unique_id = await self.save_telegram(actor, raw, receipt=True)
-        analysis = await extract_receipt(raw)
+        file_id, unique_id = prepared_media['file'] if prepared_media is not None else await self.save_telegram(actor, raw, receipt=True)
+        analysis = prepared_media['analysis'] if prepared_media is not None else await extract_receipt(raw)
         receipt = Receipt(booking_id=bid, uploaded_by_id=actor.id, purpose=data['purpose'],
             file_id=file_id, file_unique_id=unique_id, image_sha256=hashlib.sha256(raw).hexdigest(),
             operation_key=operation_key(analysis.get('fields', {})), analysis=json.dumps(analysis, ensure_ascii=False),
             expected_amount=expected, status='PENDING')
         session.add(receipt)
         await session.flush()
+        from .operational_alerts import queue_receipt_review
+        await queue_receipt_review(session, booking, actor.id, analysis=analysis, expected=expected,
+                                   event_key='receipt-review:receipt:' + str(receipt.id))
         await audit(session, actor, 'receipt_uploaded', 'receipt', receipt.id)
         return {'bookingId': bid, 'receiptId': receipt.id}
 
-    async def shoot(self, session, actor, roles, kind, data, raw):
+    async def shoot(self, session, actor, roles, kind, data, raw, *, prepared_media=None):
         fields(data, 'shooting')
         sid = await target(session, actor, data['shooting'], 'shootingId')
+        if prepared_media is not None and prepared_media['target'] != sid:
+            raise AccessError('Съёмка изменилась. Повторите отправку.', 409)
         preview = await session.get(Shooting, sid)
         booking = await session.get(Booking, preview.booking_id, with_for_update=True) if preview else None
         shooting = await session.get(Shooting, sid, with_for_update=True, populate_existing=True) if preview else None
@@ -553,7 +718,7 @@ class Workflow:
             if app_channel():
                 if not duplicate and (shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at):
                     raise AccessError('Загрузка новых кадров уже закрыта или ещё недоступна.', 409)
-                path = await self.save_disk_original(f'/shootings/{sid}', raw)
+                path = prepared_media['path'] if prepared_media is not None else await self.save_disk_original(f'/shootings/{sid}', raw)
                 if duplicate:
                     photo = await session.get(Photo, duplicate.photo_id)
                     storage = duplicate
@@ -572,7 +737,7 @@ class Workflow:
                 return {'shootingId': sid, 'photoId': photo.id, 'duplicate': bool(duplicate),
                         'storageStatus': 'STORED', 'storageVerified': True}
             if duplicate:
-                file_id, unique_id = await self.save_telegram(actor, raw)
+                file_id, unique_id = prepared_media['file'] if prepared_media is not None else await self.save_telegram(actor, raw)
                 original = await session.get(Photo, duplicate.photo_id)
                 original.file_id = file_id
                 duplicate.telegram_file_id = file_id
@@ -582,7 +747,7 @@ class Workflow:
                 return {'shootingId': sid, 'photoId': duplicate.photo_id, 'duplicate': True, 'storageStatus': 'PENDING'}
             if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
                 raise AccessError('Загрузка новых кадров уже закрыта или ещё недоступна.', 409)
-            file_id, unique_id = await self.save_telegram(actor, raw)
+            file_id, unique_id = prepared_media['file'] if prepared_media is not None else await self.save_telegram(actor, raw)
             photo = Photo(shooting_id=sid, file_id=file_id)
             session.add(photo)
             await session.flush()

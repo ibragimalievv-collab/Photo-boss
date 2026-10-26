@@ -109,6 +109,11 @@ async def verify_reference(session, file_id):
     saved = await reference(session, file_id)
     if saved is None:
         return None
+    return await verify_saved_reference(saved)
+
+
+async def verify_saved_reference(saved):
+    """Verify a detached reference after the caller releases its DB connection."""
     data = await Reader(saved['source']).metadata(saved['path'])
     digest = data.get('sha256') or data.get('md5')
     expected = saved['sha256'] if data.get('sha256') else saved['md5']
@@ -125,8 +130,8 @@ async def load_reference(session, file_id, *, max_bytes=20 * 1024 * 1024):
     return raw
 
 
-async def select_photo(session, actor, booking, draft, data):
-    source = await binding(session, booking.id)
+async def prepare_selection(source, data):
+    """Read and verify the original without holding a transaction or row lock."""
     if not source or data['revision'] != source['revision']:
         raise ValueError('Папка съёмки изменилась. Откройте её и выберите фотографии заново.')
     path = safe_source_path(source, data['path'])
@@ -142,6 +147,24 @@ async def select_photo(session, actor, booking, draft, data):
     digest, md5 = result['sha256'], hashlib.md5(raw, usedforsecurity=False).hexdigest()
     if metadata.get('md5') and metadata['md5'] != md5:
         raise ValueError('Контрольная сумма фотографии изменилась. Повторите выбор.')
+    return {'source': json.loads(json.dumps(source)), 'path': path, 'sha256': digest,
+            'md5': md5, 'bytes': len(raw), 'name': metadata['name']}
+
+
+def selection_reference(draft_id, booking_id, prepared):
+    rid = str(uuid5(NAMESPACE_URL, f'photo-boss:disk-sale:{draft_id}:{prepared["sha256"]}'))
+    return FILE_PREFIX + rid, prepared | {'bookingId': booking_id}
+
+
+async def select_photo(session, actor, booking, draft, data, *, prepared=None):
+    source = await binding(session, booking.id)
+    if not source or data['revision'] != source['revision']:
+        raise ValueError('Папка съёмки изменилась. Откройте её и выберите фотографии заново.')
+    if prepared is None:
+        prepared = await prepare_selection(source, data)
+    elif prepared['source'] != source or prepared['path'] != safe_source_path(source, data['path']):
+        raise ValueError('Папка съёмки изменилась. Откройте её и выберите фотографии заново.')
+    digest = prepared['sha256']
     old = await session.scalar(select(SaleDraftPhoto).where(SaleDraftPhoto.draft_id == draft.id, SaleDraftPhoto.sha256 == digest))
     if draft.status != 'AWAITING_SELECTED' and not (draft.status == 'COMPLETED' and old):
         raise ValueError('Сначала сохраните количество кадров в продаже.')
@@ -149,11 +172,9 @@ async def select_photo(session, actor, booking, draft, data):
         raise ValueError('Все выбранные кадры уже сохранены.')
     if not old and await already_purchased_photo(session, booking.id, digest):
         raise ValueError('Этот кадр уже куплен в предыдущей продаже. Выберите новый кадр для допродажи.')
-    rid = str(uuid5(NAMESPACE_URL, f'photo-boss:disk-sale:{draft.id}:{digest}'))
-    file_id = FILE_PREFIX + rid
-    value = json.dumps({
-        'source': source, 'path': path, 'bookingId': booking.id, 'sha256': digest, 'md5': md5,
-        'bytes': len(raw), 'name': metadata['name']}, ensure_ascii=False)
+    file_id, saved_value = selection_reference(draft.id, booking.id, prepared)
+    rid = file_id[len(FILE_PREFIX):]
+    value = json.dumps(saved_value, ensure_ascii=False)
     saved = await session.get(Setting, REFERENCE + rid)
     if saved:
         saved.value = value
@@ -161,15 +182,15 @@ async def select_photo(session, actor, booking, draft, data):
         session.add(Setting(key=REFERENCE + rid, value=value))
     if old:
         old.telegram_file_id = old.storage_path = file_id
-        old.byte_size = len(raw)
+        old.byte_size = prepared['bytes']
         await session.flush()
         await audit(session, actor, 'sale_disk_photo_relinked', 'sale_draft', draft.id, f'photo={old.id};same_checksum')
         return {'photoId': old.id, 'duplicate': True, 'storageVerified': True}
     photo = SaleDraftPhoto(draft_id=draft.id, telegram_file_id=file_id,
-        telegram_unique_id='disk-selected:' + digest, storage_path=file_id, sha256=digest, byte_size=len(raw))
+        telegram_unique_id='disk-selected:' + digest, storage_path=file_id, sha256=digest, byte_size=prepared['bytes'])
     session.add(photo)
     await session.flush()
-    await audit(session, actor, 'sale_disk_photo_selected', 'sale_draft', draft.id, f'photo={photo.id};bytes={len(raw)}')
+    await audit(session, actor, 'sale_disk_photo_selected', 'sale_draft', draft.id, f'photo={photo.id};bytes={prepared["bytes"]}')
     return {'photoId': photo.id, 'storageVerified': True}
 
 
@@ -192,41 +213,79 @@ class DiskSaleMedia:
         return actor, booking
 
     async def folder(self, request):
+        if request.method == 'POST':
+            return await self.bind_folder(request)
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
-            actor, booking = await self.authorize(session, request, lock=request.method == 'POST')
+            _, booking = await self.authorize(session, request)
             source = await binding(session, booking.id)
-            if request.method == 'POST':
-                body = await self.api.body(request)
-                if not isinstance(body, dict) or set(body) != {'source'}:
-                    raise AccessError('Укажите папку или ссылку Яндекс.Диска.', 400)
-                try:
-                    requested = parse_source(body['source'])
-                    if requested['kind'] == 'private' and 'OWNER' not in request['disk_sale_roles']:
-                        raise AccessError('Закрытую папку рабочего Диска привязывает владелец. Можно прикрепить доступную ссылку.', 403)
-                    reader = Reader(requested)
-                    metadata = await reader.metadata(requested['root'])
-                    if metadata.get('type') not in {'dir', 'file'}:
-                        raise ValueError('Яндекс не подтвердил папку или файл.')
-                    if metadata['type'] == 'file' and not PHOTO.search(metadata.get('name', '')):
-                        raise ValueError('По ссылке должна быть папка или фотография JPEG, PNG, WebP.')
-                    source = requested | {'revision': str(uuid4()), 'type': metadata['type'], 'name': metadata.get('name', 'Яндекс.Диск')}
-                    if source['kind'] == 'private':
-                        source['account'] = source_id(reader.disk)
-                    row = await session.get(Setting, BINDING + str(booking.id))
-                    if row:
-                        row.value = json.dumps(source, ensure_ascii=False)
-                    else:
-                        session.add(Setting(key=BINDING + str(booking.id), value=json.dumps(source, ensure_ascii=False)))
-                    await audit(session, actor, 'sale_disk_folder_bound', 'booking', booking.id, source['kind'])
-                    await session.commit()
-                except ValueError as exc:
-                    raise AccessError(str(exc), 400) from exc
-                except YandexDiskError as exc:
-                    raise AccessError(provider_error(exc), 403 if exc.http_status in {401, 403} else 503) from exc
-            if not source:
-                return web.json_response({'connected': False})
-            return web.json_response({'connected': True, 'revision': source['revision'], 'root': source['root'],
-                'kind': source['kind'], 'name': source['name'], 'source': source.get('publicKey', source['root'])})
+        return self.folder_response(source)
+
+    @staticmethod
+    def folder_response(source):
+        if not source:
+            return web.json_response({'connected': False})
+        return web.json_response({'connected': True, 'revision': source['revision'], 'root': source['root'],
+            'kind': source['kind'], 'name': source['name'], 'source': source.get('publicKey', source['root'])})
+
+    @staticmethod
+    async def folder_generations(session):
+        return tuple([await session.scalar(select(Setting.value).where(Setting.key == key)) or ''
+                      for key in ('operations:generation', 'sales:generation')])
+
+    @staticmethod
+    def authorize_source(request, source):
+        if source['kind'] == 'private' and 'OWNER' not in request['disk_sale_roles']:
+            raise AccessError('Закрытую папку рабочего Диска привязывает владелец. Можно прикрепить доступную ссылку.', 403)
+
+    async def bind_folder(self, request):
+        body = await self.api.body(request)
+        if not isinstance(body, dict) or set(body) != {'source'}:
+            raise AccessError('Укажите папку или ссылку Яндекс.Диска.', 400)
+        try:
+            requested = parse_source(body['source'])
+            async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
+                _, booking = await self.authorize(session, request)
+                self.authorize_source(request, requested)
+                previous = await binding(session, booking.id)
+                generations = await self.folder_generations(session)
+            # The middleware's reset barrier remains held, but the application
+            # pool and user/booking rows are free while the provider responds.
+            reader = Reader(requested)
+            metadata = await reader.metadata(requested['root'])
+            if metadata.get('type') not in {'dir', 'file'}:
+                raise ValueError('Яндекс не подтвердил папку или файл.')
+            if metadata['type'] == 'file' and not PHOTO.search(metadata.get('name', '')):
+                raise ValueError('По ссылке должна быть папка или фотография JPEG, PNG, WebP.')
+            source = requested | {'revision': str(uuid4()), 'type': metadata['type'], 'name': metadata.get('name', 'Яндекс.Диск')}
+            if source['kind'] == 'private':
+                source['account'] = source_id(reader.disk)
+            async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
+                actor, booking = await self.authorize(session, request, lock=True)
+                self.authorize_source(request, requested)
+                current = await self.folder_generations(session)
+                if current[0] != generations[0]:
+                    from .operations_guard import OperationsResetError
+                    raise OperationsResetError(current[0])
+                if current[1] != generations[1]:
+                    raise AccessError('Продажи обнулены владельцем. Обновите приложение и повторите привязку папки.', 409)
+                if await binding(session, booking.id) != previous:
+                    raise AccessError('Папка съёмки изменилась во время проверки. Откройте съёмку и повторите привязку.', 409)
+                if source['kind'] == 'private' and source_id(read_storage()) != source['account']:
+                    raise AccessError('Подключённый Диск изменился. Повторите привязку папки съёмки.', 409)
+                row = await session.get(Setting, BINDING + str(booking.id))
+                if row:
+                    row.value = json.dumps(source, ensure_ascii=False)
+                else:
+                    session.add(Setting(key=BINDING + str(booking.id), value=json.dumps(source, ensure_ascii=False)))
+                await audit(session, actor, 'sale_disk_folder_bound', 'booking', booking.id, source['kind'])
+                await session.commit()
+            return self.folder_response(source)
+        except AccessError:
+            raise
+        except ValueError as exc:
+            raise AccessError(str(exc), 400) from exc
+        except YandexDiskError as exc:
+            raise AccessError(provider_error(exc), 403 if exc.http_status in {401, 403} else 503) from exc
 
     async def takeover(self, request):
         if 'OWNER' not in request['miniapp_actor']['roles']:
@@ -256,28 +315,37 @@ class DiskSaleMedia:
             source = await binding(session, booking.id)
             if not source:
                 raise AccessError('Сначала прикрепите ссылку или выберите папку этой съёмки.', 409)
-            try:
-                path = safe_source_path(source, request.query.get('path', source['root']))
-                reader = Reader(source)
-                items = [await reader.metadata(path)] if source['type'] == 'file' else await reader.listing(path)
-                rows = []
-                for item in items:
-                    if source['type'] == 'file':
-                        child = path
-                    elif source['kind'] == 'private':
-                        child = child_path(path, item)
-                    else:
-                        name = item.get('name')
-                        if not isinstance(name, str) or not name or '/' in name:
-                            raise ValueError('Некорректное имя файла на Диске.')
-                        child = safe_source_path(source, path.rstrip('/') + '/' + name)
-                    if item.get('type') == 'dir' or (item.get('type') == 'file' and PHOTO.search(item.get('name', ''))):
-                        rows.append({'path': child, 'name': item['name'], 'type': item['type'], 'size': item.get('size')})
-                return web.json_response({'path': path, 'root': source['root'], 'revision': source['revision'], 'items': rows})
-            except ValueError as exc:
-                raise AccessError(str(exc), 400) from exc
-            except YandexDiskError as exc:
-                raise AccessError(provider_error(exc), 403 if exc.http_status in {401, 403} else 503) from exc
+            generations = await self.folder_generations(session)
+        try:
+            path = safe_source_path(source, request.query.get('path', source['root']))
+            reader = Reader(source)
+            # Browsing a slow provider must not reserve a slot needed to save
+            # another employee's booking or shift.
+            items = [await reader.metadata(path)] if source['type'] == 'file' else await reader.listing(path)
+            rows = []
+            for item in items:
+                if source['type'] == 'file':
+                    child = path
+                elif source['kind'] == 'private':
+                    child = child_path(path, item)
+                else:
+                    name = item.get('name')
+                    if not isinstance(name, str) or not name or '/' in name:
+                        raise ValueError('Некорректное имя файла на Диске.')
+                    child = safe_source_path(source, path.rstrip('/') + '/' + name)
+                if item.get('type') == 'dir' or (item.get('type') == 'file' and PHOTO.search(item.get('name', ''))):
+                    rows.append({'path': child, 'name': item['name'], 'type': item['type'], 'size': item.get('size')})
+            async with AsyncSession(self.api.engine) as session:
+                _, booking = await self.authorize(session, request)
+                if await binding(session, booking.id) != source or await self.folder_generations(session) != generations:
+                    raise AccessError('Папка съёмки изменилась. Откройте её заново.', 409)
+            return web.json_response({'path': path, 'root': source['root'], 'revision': source['revision'], 'items': rows})
+        except AccessError:
+            raise
+        except ValueError as exc:
+            raise AccessError(str(exc), 400) from exc
+        except YandexDiskError as exc:
+            raise AccessError(provider_error(exc), 403 if exc.http_status in {401, 403} else 503) from exc
 
 
 def install_disk_sale_media(app, api):

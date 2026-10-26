@@ -203,7 +203,90 @@ class Delivery:
             await session.commit()
             return web.json_response(await self.describe(session, a, b))
 
-    async def apply(self, session, actor, kind, data, raw=None):
+    @staticmethod
+    def photo_identity(data, raw):
+        return (data['booking'], data['filename'], data.get('photoSet', 'ALL'),
+                data.get('selected', False), hashlib.sha256(raw).hexdigest())
+
+    @staticmethod
+    def photo_context(booking, client):
+        return (booking.id, booking.client_id, booking.shoot_date.isoformat(),
+                str(booking.shoot_time), client.name if client else 'Гость')
+
+    @staticmethod
+    def photo_folders(booking, client):
+        guest = re.sub(r'[^A-Za-zА-Яа-яЁё0-9 ._()#-]', '_', (client.name if client else 'Гость'))[:60].strip(' .') or 'Гость'
+        stamp = f"{booking.shoot_date.isoformat()}_{str(booking.shoot_time)[:5].replace(':','-')}_{guest.replace(' ', '_')}"
+        booking_folder = ROOT + f'/delivery/booking-{booking.id}'
+        folder = booking_folder + '/' + stamp
+        return booking_folder, folder, folder + '/Все фото', folder + '/Выбранные'
+
+    @staticmethod
+    async def verify_photo(raw):
+        # Reading a large image or waiting for a worker thread also belongs
+        # outside the final database transaction.
+        from PIL import Image
+        def verify():
+            with Image.open(io.BytesIO(raw)) as image:
+                if image.width * image.height > 60_000_000:
+                    raise ValueError('Изображение слишком большое.')
+                image.verify()
+        try:
+            await asyncio.to_thread(verify)
+        except Exception as exc:
+            raise AccessError('Не удалось прочитать фотографию. Нужен JPEG или PNG.', 400) from exc
+
+    async def prepare_photo(self, actor, data, raw):
+        """Read-only preflight, then verify and upload without a DB lease."""
+        if not ({'booking', 'filename'} <= set(data) <= {'booking', 'filename', 'selected', 'photoSet'}):
+            raise AccessError('Некорректные поля выдачи.', 400)
+        if type(data['booking']) is not int:
+            raise AccessError('Некорректная съёмка.', 400)
+        photo_set = data.get('photoSet', 'ALL')
+        if not isinstance(photo_set, str) or photo_set not in {'ALL', 'SELECTED'} or ('selected' in data and type(data['selected']) is not bool) or ('photoSet' in data and 'selected' in data):
+            raise AccessError('Выберите папку: все фотографии или выбранные фотографии.', 400)
+        if not raw or len(raw) > 20 * 1024 * 1024:
+            raise AccessError('Фото: не более 20 МБ.', 413)
+        if not isinstance(data['filename'], str) or not data['filename'] or len(data['filename']) > 250:
+            raise AccessError('Некорректное имя фото.', 400)
+        ext, mime = image_format(raw)
+        digest = hashlib.sha256(raw).hexdigest()
+        async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
+            b = await self.booking(session, actor, data['booking'])
+            g = await session.scalar(select(DeliveryGallery).where(DeliveryGallery.booking_id == b.id))
+            from .gallery_workspace import read_setting
+            meta = await read_setting(session, f'gallery:meta:{b.id}', {})
+            if meta.get('purged') or meta.get('trashed'):
+                raise AccessError('Проект удалён или находится в корзине. Загрузка недоступна.', 409)
+            old = await session.scalar(select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id,
+                DeliveryPhoto.sha256 == digest, DeliveryPhoto.upload_set == photo_set)) if g else None
+            old_path = old.disk_path if old else None
+            client = await session.get(Client, b.client_id)
+            context = self.photo_context(b, client)
+            booking_folder, folder, all_folder, selected_folder = self.photo_folders(b, client)
+        await self.verify_photo(raw)
+        token, client_id = configured_from_env()
+        if not token:
+            raise AccessError('Яндекс Диск недоступен. Фото остаётся в очереди.', 503)
+        storage = YandexDisk(token, client_id)
+        prepared = {'identity': self.photo_identity(data, raw), 'context': context}
+        if old_path:
+            try:
+                validate_saved(await storage.metadata(old_path), raw)
+                return prepared | {'path': old_path}
+            except YandexDiskError as exc:
+                if 'HTTP 404' not in str(exc) and 'не совпадает' not in str(exc):
+                    raise
+        for directory in (ROOT, ROOT + '/delivery', booking_folder, folder, all_folder, selected_folder):
+            await storage.ensure_dir(directory)
+        path = (selected_folder if photo_set == 'SELECTED' else all_folder) + f'/{digest}.{ext}'
+        await storage.upload_bytes(path, raw, content_type=mime)
+        selected = photo_set == 'SELECTED' or data.get('selected', False)
+        if selected and photo_set == 'ALL':
+            await storage.upload_bytes(selected_folder + f'/{digest}.{ext}', raw, content_type=mime)
+        return prepared | {'path': path}
+
+    async def apply(self, session, actor, kind, data, raw=None, *, prepared=None):
         photo_fields = {'booking', 'filename'} <= set(data) <= {'booking', 'filename', 'selected', 'photoSet'}
         if not (photo_fields if kind == 'delivery_photo' else set(data) == {'booking', 'delivered'}):
             raise AccessError('Некорректные поля выдачи.', 400)
@@ -230,19 +313,29 @@ class Delivery:
         if not isinstance(name, str) or not name or len(name)>250:
             raise AccessError('Некорректное имя фото.', 400)
         ext, mime = image_format(raw)
-        # Verify the actual image rather than accepting a filename or magic bytes alone.
-        from PIL import Image
-        def verify():
-            with Image.open(io.BytesIO(raw)) as image:
-                if image.width * image.height > 60_000_000:
-                    raise ValueError('Изображение слишком большое.')
-                image.verify()
-        try:
-            await asyncio.to_thread(verify)
-        except Exception as exc:
-            raise AccessError('Не удалось прочитать фотографию. Нужен JPEG или PNG.', 400) from exc
+        if prepared is None:
+            await self.verify_photo(raw)
+        elif prepared['identity'] != self.photo_identity(data, raw):
+            raise AccessError('Подготовленное фото не соответствует операции.', 409)
         digest = hashlib.sha256(raw).hexdigest()
         old = await session.scalar(select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id, DeliveryPhoto.sha256 == digest, DeliveryPhoto.upload_set == photo_set))
+        if prepared is not None:
+            client = await session.get(Client, b.client_id)
+            if prepared['context'] != self.photo_context(b, client):
+                raise AccessError('Данные съёмки изменились. Повторите загрузку.', 409)
+            path = prepared['path']
+            if old:
+                old.disk_path, old.byte_size = path, len(raw)
+                await session.flush()
+                return {'bookingId': b.id, 'photoId': old.id, 'duplicate': True, 'storageVerified': True}
+            name = re.sub(r'[^\w .()-]', '_', name)[:140] or 'photo.' + ext
+            selected = photo_set == 'SELECTED' or data.get('selected', False)
+            photo = DeliveryPhoto(gallery_id=g.id, uploaded_by_id=actor['id'], filename=name,
+                disk_path=path, sha256=digest, byte_size=len(raw), selected=selected, upload_set=photo_set)
+            session.add(photo)
+            await session.flush()
+            await audit(session, await session.get(User, actor['id']), 'delivery_photo_uploaded', 'booking', b.id)
+            return {'bookingId': b.id, 'photoId': photo.id, 'selected': selected, 'uploadSet': photo_set}
         token, client_id = configured_from_env()
         if not token:
             raise AccessError('Яндекс Диск недоступен. Фото остаётся в очереди.', 503)
@@ -255,12 +348,7 @@ class Delivery:
                 if 'HTTP 404' not in str(exc) and 'не совпадает' not in str(exc):
                     raise
         client = await session.get(Client, b.client_id)
-        guest = re.sub(r'[^A-Za-zА-Яа-яЁё0-9 ._()#-]', '_', (client.name if client else 'Гость'))[:60].strip(' .') or 'Гость'
-        stamp = f"{b.shoot_date.isoformat()}_{str(b.shoot_time)[:5].replace(':','-')}_{guest.replace(' ', '_')}"
-        booking_folder = ROOT + f'/delivery/booking-{b.id}'
-        folder = booking_folder + '/' + stamp
-        all_folder = folder + '/Все фото'
-        selected_folder = folder + '/Выбранные'
+        booking_folder, folder, all_folder, selected_folder = self.photo_folders(b, client)
         for directory in (ROOT, ROOT + '/delivery', booking_folder, folder, all_folder, selected_folder):
             await storage.ensure_dir(directory)
         path = (selected_folder if photo_set == 'SELECTED' else all_folder) + f'/{digest}.{ext}'

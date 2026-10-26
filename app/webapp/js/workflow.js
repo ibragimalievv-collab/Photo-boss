@@ -8,6 +8,8 @@ import {esc,todayKey} from './domain.js';
 import {enqueueBatch,outboxRows,retryOperation,flushOutbox,syncOutboxNow,enqueueOperation,enqueueFilesOneByOne,replaceOperationFile,canReplaceOperationFile,canReplaceDiskSelection,replaceDiskSelection,saleQueueRepairable,repairSaleQueue,rejectedSaleCounts,rejectedBooking,repairBookingQueue} from './outbox.js';
 import {checkSaleFiles} from './sale-files.js';
 let data=null,queue=[],selected=null,folderBusy=false,loadVersion=0,selectionVersion=0;
+const discountRequests=new Set();
+const discountRequestKey=(actor,booking)=>`${actor}:${booking}`;
 const roubles=value=>new Intl.NumberFormat('ru-RU',{style:'currency',currency:'RUB',maximumFractionDigits:2}).format(Number(value||0));
 const frameTotal=b=>b.fullUploaded?(b.uploadedOriginals??b.totalFrames):(b.draft?.total||b.totalFrames||'');
 const saleable=b=>Boolean(b.draft)||b.status==='READY_FOR_SALE'||(['SOLD','COMPLETED'].includes(b.status)&&b.sales?.length);
@@ -22,20 +24,35 @@ function mountDiscountPanel(){
  const panel=document.createElement('section');panel.id='saleDiscountPanel';panel.className='notice';
  panel.innerHTML=`<h3>Вся съёмка со скидкой 50%</h3><p>Скидку подтверждает владелец или администратор отеля. Она действует только на все кадры съёмки; альбом оплачивается отдельно. Сначала укажите фактическое общее число кадров в форме продажи.</p><button type="button" class="btn ghost" data-sale-discount-request ${fixed?'disabled':''}>Запросить скидку 50% на всю съёмку</button>${approvals.map(row=>`<p>Запрос №${row.id}: ${row.total} кадров × ${esc(row.unitPrice)} ₽ × 50% = ${esc(row.amount)} ₽ · ${esc(({PENDING:'Ожидает подтверждения',APPROVED:'Подтверждён',REJECTED:'Отказано'})[row.status]||row.status)} ${data.canApproveDiscount&&row.status==='PENDING'?`<button type="button" class="btn" data-sale-discount-decision="${row.id}" data-decision="APPROVED">Подтвердить</button><button type="button" class="btn ghost" data-sale-discount-decision="${row.id}" data-decision="REJECTED">Отказать</button>`:''}</p>`).join('')}<label class="field">Скидка для этой продажи<select class="input" form="workflowSale" name="discountId" ${fixed?'disabled':''}><option value="">Без скидки</option>${approvals.filter(row=>row.status==='APPROVED').map(row=>`<option value="${row.id}" ${fixed?.discountId===row.id?'selected':''}>Согласована 50% · все ${row.total} кадров · ${esc(row.amount)} ₽</option>`).join('')}</select></label><p role="status"></p>`;
  form.before(panel);
+ if(discountRequests.has(discountRequestKey(data.actorId,b.id)))for(const control of panel.querySelectorAll('button'))control.disabled=true;
 }
 document.addEventListener('click',async event=>{
  const button=event.target.closest('[data-sale-discount-request],[data-sale-discount-decision]');if(!button)return;
  const panel=button.closest('#saleDiscountPanel'),form=document.querySelector('#workflowSale'),b=data?.bookings.find(row=>row.id===selected),context=selectionContext();
- button.disabled=true;
+ if(!b||!form||!panel)return;
+ const requestKey=discountRequestKey(context.actor,b.id);
+ if(discountRequests.has(requestKey))return;
+ discountRequests.add(requestKey);
+ const controls=[...panel.querySelectorAll('button')].map(control=>[control,control.disabled]);
+ for(const [control] of controls)control.disabled=true;
  try{
   if(button.hasAttribute('data-sale-discount-request')){
    const total=Number(form?.elements.total.value);if(!Number.isInteger(total)||total<1||total>10000)throw Error('Укажите общее число кадров съёмки.');
    await api('/sale-discounts',{method:'POST',body:{bookingId:b.id,total}});
   }else await api(`/sale-discounts/${button.dataset.saleDiscountDecision}/decision`,{method:'POST',body:{decision:button.dataset.decision}});
   if(!selectionCurrent(context))return;
-  captureForms();if(await loadWorkflow(b.id))workflowSelect(b.id);
+  captureForms();if(await loadWorkflow(b.id)){discountRequests.delete(requestKey);workflowSelect(b.id);}
  }catch(error){if(panel?.isConnected)panel.querySelector('[role=status]').textContent=error.message;}
- finally{button.disabled=false;}
+ finally{
+  discountRequests.delete(requestKey);
+  if(panel.isConnected)for(const [control,disabled] of controls)control.disabled=disabled;
+  else if(data?.actorId===context.actor&&selected===b.id&&workflowRoute()===context.route){
+   const chosen=document.querySelector('#saleDiscountPanel [name=discountId]')?.value;
+   mountDiscountPanel();
+   const select=document.querySelector('#saleDiscountPanel [name=discountId]');
+   if(select&&chosen&&[...select.options].some(option=>option.value===chosen))select.value=chosen;
+  }
+ }
 });
 const labels={local:'В очереди на этом устройстве — не отправлено',syncing:'Передаётся на сервер',synced:'Сервер принял',error:'Ошибка отправки'};
 const kinds={booking:'Бронь',booking_receipt:'Чек брони',sale_start:'Черновик продажи',sale_receipt:'Чек продажи',sale_counts:'Количество кадров',sale_selected:'Выбранный кадр',sale_disk_selected:'Кадр с Яндекс.Диска',sale_complete:'Оформление продажи',shoot_photo:'Кадр полной съёмки',shoot_complete:'Завершение загрузки',checklist:'Контрольный пункт',shift_report:'Замечание',attendance:'Отметка смены'};

@@ -67,7 +67,11 @@ async def create_booking_record(session, actor, data, photographer_id=None):
             raise ValueError
     except (ValueError, TypeError, KeyError, AttributeError, InvalidOperation) as exc:
         raise ValueError('Проверьте данные гостя, дату, количество гостей и сумму брони.') from exc
-    hotel = await session.get(Hotel, data['hotel_id'], with_for_update=True)
+    # All bookings need a consistent hotel/rate snapshot, but they never modify
+    # the hotel. Shared locks let different managers record guests concurrently
+    # while an exclusive tariff/hotel change still waits until those snapshots
+    # are committed. FOR UPDATE unnecessarily queued every guest in one hotel.
+    hotel = await session.get(Hotel, data['hotel_id'], with_for_update={'read': True})
     package = await session.get(Package, data['package_id'])
     if hotel is None or not hotel.active or package is None or not package.active:
         raise ValueError('Отель или пакет больше не доступны. Обновите данные.')

@@ -37,8 +37,28 @@ function harness(){
   reset:()=>{for(const fn of documentListeners['pb-chat-account-reset']||[])fn();},
   submit:form=>{context.formFixture=form;return vm.runInContext('workflowSubmit(formFixture)',context);},
   click:button=>{context.buttonFixture=button;return vm.runInContext('workflowClick(buttonFixture)',context);},
+  discount:button=>documentListeners.click[0]({target:{closest:()=>button}}),
   replacement:()=>replaced,
  };
+}
+
+// A repeated request cannot refresh an old PENDING snapshot over a decision.
+// Disable all actions in that booking's panel until its request and refresh end.
+{
+ const h=harness(),form=h.form(),gate=deferred();form.elements.total={value:'3'};
+ const status={textContent:''},panel={isConnected:true,querySelector:()=>status};
+ const request={disabled:false,closest:()=>panel,hasAttribute:()=>true};
+ const approve={disabled:false,closest:()=>panel,hasAttribute:()=>false,dataset:{saleDiscountDecision:'1',decision:'APPROVED'}};
+ panel.querySelectorAll=()=>[request,approve];
+ h.respond(path=>path==='/sale-discounts'?gate.promise:response());
+ const pending=h.discount(request);
+ assert.equal(request.disabled,true);assert.equal(approve.disabled,true);
+ await h.discount(approve);assert.equal(h.requests.length,1,'A decision must wait for the in-flight request refresh');
+ gate.resolve({ok:true});await pending;
+ assert.equal(request.disabled,false);assert.equal(approve.disabled,false);
+ h.respond(async path=>path.includes('/decision')?{ok:true}:response());
+ await h.discount(approve);
+ assert.equal(h.requests.filter(row=>row.path.includes('/decision')).length,1);
 }
 
 // An older selection must never win merely because its HTTP response arrived last.

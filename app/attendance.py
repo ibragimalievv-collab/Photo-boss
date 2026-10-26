@@ -34,6 +34,7 @@ WORK_ROLES = frozenset({'PHOTOGRAPHER', 'MANAGER'})
 MAX_JSON = 900_000
 MAX_PHOTO = 650_000
 LOCATION_TTL = 300
+_UNPREPARED_MEDIA = object()
 
 
 def gps_required():
@@ -286,13 +287,63 @@ class Attendance:
                 caption=f'Photo Boss · {title}', protect_content=True)
         return message.photo[-1].file_id
 
+    def photo_evidence(self, start, end):
+        """Bind an upload to the evidence and policy checked before network I/O."""
+        return (gps_required(), geofence_required(), review_required(), start, end)
+
+    def require_photo_evidence(self, expected, start, end):
+        if expected != self.photo_evidence(start, end):
+            raise AccessError('Данные смены изменились во время загрузки фото. Обновите экран и повторите отметку.', 409)
+
+    async def photo_preflight(self, request, purpose, now, day):
+        """Reject invalid/replayed requests before uploading; release DB locks first.
+
+        Slow object storage must not occupy the connection pool or a user's row
+        lock. The final transaction rechecks the actor, day and exact evidence,
+        so a new GPS sample or leadership decision cannot be overwritten by an
+        upload that started earlier.
+        """
+        is_start = purpose == 'start'
+        _table, _field, final, _at = attendance_fields(purpose)
+        async with self.api.engine.begin() as conn:
+            actor = await self.locked_actor(conn, request)
+            start, end = await self.records(conn, actor['id'], day, lock=True)
+            row = start if is_start else end
+            if not is_start and not start_recorded(start):
+                raise AccessError('Сначала подтвердите начало смены.', 409)
+            previous = (row or {}).get('geofence') or {}
+            if not gps_required():
+                if row and row['status'] == final:
+                    return web.json_response(self.result(actor, start, end, now)), None
+                if row and row['status'] == 'PENDING_REVIEW' and previous.get('source') == 'offline':
+                    raise AccessError('Офлайн-отметка ожидает проверки руководителя; время устройства нельзя подтвердить автоматически.', 409)
+            else:
+                renewed = bool(row and row['status'] == 'PENDING_REVIEW' and not geofence_required()
+                    and previous.get('source') == 'online' and isinstance(previous.get('recovery'), dict))
+                if row and (row['status'] == final or (row['status'] == 'PENDING_REVIEW' and not renewed)):
+                    return web.json_response(self.result(actor, start, end, now)), None
+                if (not row or (row['status'] != 'AWAITING_PHOTO' and not renewed)
+                        or row.get('latitude') is None or row.get('longitude') is None
+                        or not row.get('location_received_at')):
+                    raise AccessError('Сначала отправьте геолокацию.', 409)
+                if not 0 <= (now - utc(row['location_received_at'])).total_seconds() <= LOCATION_TTL:
+                    raise AccessError('Геолокация устарела. Получите её повторно.', 409)
+            return None, self.photo_evidence(start, end)
+
     async def photo(self, request):
         body = await self.payload(request, photo=True)
         raw = photo_bytes(body)
         now = self.now()
         day = now.astimezone(self.api.tz).date()
+        response, expected = await self.photo_preflight(request, body['purpose'], now, day)
+        if response is not None:
+            return response
+        # This network request intentionally runs without a DB transaction.
+        file_id = await self.send_photo(request['miniapp_actor'], raw, body['purpose'])
+        if self.now().astimezone(self.api.tz).date() != day:
+            raise AccessError('Рабочая дата изменилась. Обновите экран.', 409)
         if not gps_required():
-            return await self.photo_without_gps(request, body, raw, now, day)
+            return await self.photo_without_gps(request, body, file_id, now, day, expected)
         purpose, is_start = body['purpose'], body['purpose'] == 'start'
         table, field, final, _at = attendance_fields(purpose)
         async with self.api.engine.begin() as conn:
@@ -307,6 +358,7 @@ class Attendance:
                 and previous_context.get('source') == 'online' and isinstance(recovery, dict))
             if row and (row['status'] == final or (row['status'] == 'PENDING_REVIEW' and not renewed)):
                 return web.json_response(self.result(actor, start, end, now))
+            self.require_photo_evidence(expected, start, end)
             if (not row or (row['status'] != 'AWAITING_PHOTO' and not renewed)
                     or row.get('latitude') is None or row.get('longitude') is None
                     or not row.get('location_received_at')):
@@ -320,10 +372,8 @@ class Attendance:
                     when = original
             if not is_start and start.get('started_at') and when < utc(start['started_at']):
                 raise AccessError('Сохранённое завершение раньше начала смены. Время должен проверить руководитель.', 409)
-            # User and attendance locks serialize retries in the Mini App/bot.
-            # Every recovery requires both a NEW GPS request and a NEW upload;
-            # merely switching policy or reading status never approves evidence.
-            file_id = await self.send_photo(actor, raw, purpose)
+            # User and attendance locks serialize the final write. Every
+            # recovery still requires both NEW GPS and a NEW successful upload.
             if self.now().astimezone(self.api.tz).date() != day:
                 raise AccessError('Рабочая дата изменилась. Обновите экран.', 409)
             if review_required() or not geofence_required():
@@ -367,7 +417,7 @@ class Attendance:
             start, end = await self.records(conn, actor['id'], day)
         return web.json_response(self.result(actor, start, end, self.now()))
 
-    async def photo_without_gps(self, request, body, raw, now, day):
+    async def photo_without_gps(self, request, body, file_id, now, day, expected):
         """Explicit temporary policy: a fresh upload, no assertion of location."""
         purpose = body['purpose']
         is_start = purpose == 'start'
@@ -380,6 +430,7 @@ class Attendance:
                 raise AccessError('Сначала сохраните начало смены.', 409)
             if row and row['status'] == final:
                 return web.json_response(self.result(actor, start, end, now))
+            self.require_photo_evidence(expected, start, end)
             previous = (row or {}).get('geofence') or {}
             renewed = bool(row and row['status'] == 'PENDING_REVIEW')
             if renewed and previous.get('source') == 'offline':
@@ -406,7 +457,6 @@ class Attendance:
                     when = original
             if not is_start and start.get('started_at') and when < utc(start['started_at']):
                 raise AccessError('Сохранённое завершение раньше начала смены. Время должен проверить руководитель.', 409)
-            file_id = await self.send_photo(actor, raw, purpose)
             if self.now().astimezone(self.api.tz).date() != day:
                 raise AccessError('Рабочая дата изменилась. Обновите экран.', 409)
             if renewed:
@@ -471,6 +521,21 @@ class Attendance:
                            f'{"Начало" if purpose == "start" else "Завершение"} смены: {time_label}\n'
                            f'Отель: {context.get("hotelName", "нужна проверка привязки")}\n'
                            f'{automatic_notice if row.status in {"STARTED", "FINISHED"} else "Нужна проверка руководителя"}.')
+            review_reason = None
+            if row.status == 'PENDING_REVIEW' and decision is None:
+                if context.get('source') == 'offline':
+                    review_reason = 'Отметка получена офлайн: время устройства и присутствие требуют проверки руководителя.'
+                elif purpose == 'end' and await conn.scalar(text(
+                        'SELECT status FROM shift_check_ins WHERE user_id=:uid AND shift_date=:day'),
+                        {'uid': worker_id, 'day': day}) != 'STARTED':
+                    review_reason = 'Начало смены ещё не подтверждено; проверьте обе отметки.'
+                elif (context.get('gpsRequired') is not False and row.location_received_at
+                        and (self.now() - utc(row.location_received_at)).total_seconds() > LOCATION_TTL):
+                    review_reason = 'Координаты устарели к завершению загрузки фото. Проверьте время и отметку.'
+                elif isinstance(context.get('notice'), str):
+                    review_reason = context['notice']
+                if review_reason:
+                    description += f'\nПричина проверки: {review_reason}'
             if decision:
                 reviewer = await session.get(User, actor['id'])
                 outcome = ('Отметка отклонена руководителем' if row.status == 'REJECTED' else
@@ -492,6 +557,7 @@ class Attendance:
                         payload={'attendanceId': row_id, 'purpose': purpose, 'userId': worker_id,
                                  'date': str(day), 'hotelId': context.get('hotelId'), 'status': row.status,
                                  'reviewed': decision is not None, 'canReview': uid != worker_id,
+                                 'requiresReview': row.status == 'PENDING_REVIEW', 'reviewReason': review_reason,
                                  'description': description})
             await session.flush()
 
@@ -532,7 +598,8 @@ class Attendance:
              'miniapp; геолокация и фото сохранены; при получении отметки расстояние до отеля не проверялось; начисления рассчитаны по сохранённому времени'
              if zone_waived else f'miniapp; геолокация и фото сохранены; штраф={fine:g}'))
 
-    async def offline(self, conn, actor, day, data, raw):
+    def offline_input(self, actor, day, data, raw):
+        """The same validation runs before storage and before the final write."""
         if not WORK_ROLES & set(actor['roles']):
             raise AccessError('Отметка доступна фотографу или менеджеру.', 403)
         if set(data) != {'purpose', 'claimedAt', 'latitude', 'longitude', 'accuracy'} or data['purpose'] not in ('start', 'end'):
@@ -547,23 +614,54 @@ class Attendance:
         if not raw or len(raw) > MAX_PHOTO:
             raise AccessError('Прикрепите снимок живой камеры.', 400)
         photo_bytes({'purpose': data['purpose'], 'date': str(day), 'image': 'data:image/jpeg;base64,' + base64.b64encode(raw).decode()})
-        table, field, final, _ = attendance_fields(data['purpose'])
+        return now, claimed, without_gps, lat, lon, accuracy
+
+    async def offline_state(self, conn, actor, day, data):
+        _table, _field, final, _ = attendance_fields(data['purpose'])
         start, end = await self.records(conn, actor['id'], day, lock=True)
         row = start if data['purpose'] == 'start' else end
         if row and row['status'] == final:
-            return {'attendanceStatus': final, 'alreadyConfirmed': True}
+            return row, final
         if row and row['status'] == 'PENDING_REVIEW':
             raise AccessError('Отметка уже ожидает проверки. Не создавайте повторную.', 409)
         if data['purpose'] == 'end' and not start_recorded(start):
             raise AccessError('Сначала синхронизируйте начало смены.', 424)
+        return row, None
+
+    async def prepare_offline_media(self, actor, day, data, raw):
+        """Save offline evidence without consuming a DB connection during I/O."""
+        self.offline_input(actor, day, data, raw)
+        async with self.api.engine.begin() as conn:
+            await self.locked_actor(conn, {'miniapp_actor': actor})
+            _row, final = await self.offline_state(conn, actor, day, data)
+            if final:
+                return None
+            user = (await self.api.rows(conn, 'SELECT tg_id FROM users WHERE id=:id', id=actor['id']))[0]
+        return await self.send_photo(actor | {'tg_id': user['tg_id']}, raw, data['purpose'])
+
+    async def offline(self, conn, actor, day, data, raw, *, prepared_file_id=_UNPREPARED_MEDIA):
+        now, claimed, without_gps, lat, lon, accuracy = self.offline_input(actor, day, data, raw)
+        table, field, _final, _ = attendance_fields(data['purpose'])
+        row, confirmed = await self.offline_state(conn, actor, day, data)
+        if confirmed:
+            return {'attendanceStatus': confirmed, 'alreadyConfirmed': True}
+        if prepared_file_id is None:
+            # Preparation saw a confirmed row and intentionally stored nothing.
+            # A later correction must trigger a fresh preparation, never a
+            # fallback upload while the final transaction holds user locks.
+            raise AccessError('Состояние отметки изменилось. Повторите синхронизацию.', 409)
         if row is None:
             extra, values = (',late,fine_amount', ',FALSE,0') if data['purpose'] == 'start' else ('', '')
             await conn.execute(text(f'INSERT INTO {table}(user_id,shift_date,status,initiated_at{extra}) VALUES (:uid,:day,\'AWAITING_LOCATION\',:now{values})'),
                 {'uid': actor['id'], 'day': day, 'now': now.replace(tzinfo=None)})
             start, end = await self.records(conn, actor['id'], day, lock=True)
             row = start if data['purpose'] == 'start' else end
-        user = (await self.api.rows(conn, 'SELECT tg_id FROM users WHERE id=:id', id=actor['id']))[0]
-        file_id = await self.send_photo(actor | {'tg_id': user['tg_id']}, raw, data['purpose'])
+        file_id = prepared_file_id
+        if file_id is _UNPREPARED_MEDIA:
+            # Compatibility for transaction-owned bot callers. Workday prepares
+            # the media first and supplies its ID for the atomic final write.
+            user = (await self.api.rows(conn, 'SELECT tg_id FROM users WHERE id=:id', id=actor['id']))[0]
+            file_id = await self.send_photo(actor | {'tg_id': user['tg_id']}, raw, data['purpose'])
         await conn.execute(text(f'''UPDATE {table} SET latitude=:lat,longitude=:lon,{field}=:file,
             location_received_at=:now,offline_claimed_at=:claimed,status='PENDING_REVIEW' WHERE id=:id'''),
             {'id': row['id'], 'lat': lat, 'lon': lon, 'file': file_id, 'now': None if without_gps else now.replace(tzinfo=None), 'claimed': claimed.replace(tzinfo=None)})
