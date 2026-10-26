@@ -40,8 +40,10 @@ async def main():
                 'PHOTO_BOSS_NOTIFICATION_CHANNEL': 'app'}):
             _, factory, _api = await test_insights.fixture()
             async with factory() as session:
+                session.add(User(id=3, tg_id=3, name='CI Manager'))
+                await session.flush()
                 session.add_all([
-                    User(id=3, tg_id=3, name='CI Manager'), UserRole(user_id=3, role='MANAGER'),
+                    UserRole(user_id=3, role='MANAGER'),
                     Shift(user_id=3, hotel_id=1, start_at=NOW.replace(tzinfo=None)-timedelta(hours=2),
                         end_at=NOW.replace(tzinfo=None)+timedelta(hours=3)),
                     ShiftCheckIn(user_id=3, shift_date=NOW.date(), status='STARTED',
