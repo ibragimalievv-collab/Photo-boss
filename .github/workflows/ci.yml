@@ -198,7 +198,9 @@ jobs:
       - name: Verify sale notifications and attendance exceptions
         run: python tests/notifications_fines_browser_check.py
       - name: Verify mobile discount approval, album and deposit calculation
-        run: python tests/pricing_approval_browser_check.py
+        run: |
+          python tests/pricing_approval_browser_check.py
+          python tests/hotel_pricing_browser_check.py
       - name: Verify cold offline start and replay of sales with photos
         env:
           WORKFLOW_TEST_CERT: /tmp/photo-boss-test-cert.pem

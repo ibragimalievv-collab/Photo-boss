@@ -20,6 +20,7 @@ from app.disk_sale_media import (
 from app.miniapp_security import AccessError
 from app.models import (
     Booking,
+    OperationRequest,
     PayrollEntry,
     Receipt,
     Sale,
@@ -183,6 +184,62 @@ def test_workflow_disk_last_photo_finishes_sale_without_browser_completion(monke
                 assert await session.scalar(select(func.count(SaleDraftPhoto.id))) == 2
             disk.upload_bytes.assert_not_awaited()
             disk.delete.assert_not_awaited()
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_rejected_stale_folder_reference_can_reselect_under_same_key_without_changing_accepted_data(monkeypatch):
+    """Only definitive pre-ledger folder validation may change its saved payload."""
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
+    from sqlalchemy import text
+    from test_workflow_replay import packet
+
+    from app.workday import Workday
+
+    async def run():
+        engine, factory, feature, request, source, disk, did = await prepared(monkeypatch)
+        try:
+            async def rows(conn, sql, **params):
+                return list((await conn.execute(text(sql.replace(' FOR UPDATE', '')), params)).mappings())
+
+            work = Workday(SimpleNamespace(engine=engine, rows=rows, day=date.fromisoformat,
+                today=lambda: date(2026, 9, 22), tz=ZoneInfo('Europe/Moscow')))
+            actor = {'id': 1, 'roles': ['OWNER']}
+            stale = packet('stale-disk-reference', 'sale_disk_selected', {'draft': {'id': did},
+                'revision': source['revision'], 'path': 'disk:/Hotel/a.jpg'})
+            fresh = json.loads((await feature.folder(request)).text)
+            assert fresh['revision'] != source['revision']
+            with pytest.raises(AccessError, match='Папка съёмки изменилась') as error:
+                await work.execute(actor, stale)
+            assert error.value.status == 409
+            async with factory() as session:
+                assert await session.scalar(select(func.count(OperationRequest.id))) == 0
+                assert await session.scalar(select(func.count(Sale.id))) == 0
+                assert await session.scalar(select(func.count(SaleDraftPhoto.id))) == 0
+                assert await session.scalar(select(func.count(Receipt.id))) == 0
+                saved_draft = await session.get(SaleDraft, did)
+                assert saved_draft.receipt_file_id == 'receipt-test'
+            corrected = stale | {'data': stale['data'] | {'revision': fresh['revision']}}
+            first = json.loads((await work.execute(actor, corrected)).text)
+            assert json.loads((await work.execute(actor, corrected)).text) == first
+            with pytest.raises(AccessError, match='Ключ уже использован'):
+                await work.execute(actor, corrected | {'data': corrected['data'] | {'path': 'disk:/Hotel/Family/b.jpg'}})
+            second = packet('fresh-disk-second', 'sale_disk_selected', {'draft': {'id': did},
+                'revision': fresh['revision'], 'path': 'disk:/Hotel/Family/b.jpg'})
+            result = json.loads((await work.execute(actor, second)).text)
+            assert result['draftStatus'] == 'COMPLETED'
+            assert json.loads((await work.execute(actor, second)).text) == result
+            async with factory() as session:
+                assert await session.scalar(select(func.count(OperationRequest.id))) == 2
+                assert await session.scalar(select(func.count(Sale.id))) == 1
+                assert await session.scalar(select(func.count(PayrollEntry.id))) == 1
+                assert await session.scalar(select(func.count(Receipt.id))) == 1
+                assert await session.scalar(select(func.count(SaleDraftPhoto.id))) == 2
+            disk.delete.assert_not_awaited()
+            disk.upload_bytes.assert_not_awaited()
         finally:
             await engine.dispose()
     asyncio.run(run())

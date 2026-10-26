@@ -14,12 +14,15 @@ export function bookingPriceNote(data,hotelId){
 }
 export function pricingView(data){
  state=data;if(!data.canConfigurePricing)return '';
- return `<details class="panel section"><summary>Фиксированные цены отелей, пакеты и альбомы</summary><p>У каждого отеля одна цена кадра. Задавать её может владелец или администратор своего отеля. Изменение применяется только к новым записям; согласованные цены прежних записей и продаж сохраняются. Пустое число кадров у пакета означает всю съёмку. Печатный альбом — отдельный товар, его цена не меняет число купленных фотографий.</p>
+ return `<details class="panel section" id="hotelPricingPanel"><summary>Фиксированные цены отелей, пакеты и альбомы</summary><p>У каждого отеля одна цена кадра. Задавать её может владелец или администратор своего отеля. Изменение применяется только к новым записям; согласованные цены прежних записей и продаж сохраняются. Пустое число кадров у пакета означает всю съёмку. Печатный альбом — отдельный товар, его цена не меняет число купленных фотографий.</p>
  <form id="hotelPricingForm" class="form-grid"><input type="hidden" name="replaces"><input type="hidden" name="originalKind"><label class="field">Отель<select class="input" name="hotelId">${data.hotels.map(h=>`<option value="${h.id}">${esc(h.name)}</option>`).join('')}</select></label><label class="field">Название<input class="input" name="name" minlength="2" maxlength="150" required></label><label class="field">Тип<select class="input" name="kind"><option value="UNIT">Фиксированная цена одного кадра в отеле</option><option value="PACKAGE">Пакет за фиксированную сумму</option><option value="ALBUM">Печатный альбом — цена за штуку</option></select></label><label class="field">Цена, ₽<input class="input" name="price" type="number" min="0.01" step="0.01" required></label><label class="field">Кадров в пакете (пусто — вся съёмка)<input class="input" name="photoCount" type="number" min="1" max="10000"></label><button class="btn primary">Сохранить тариф</button><p role="status"></p></form>
- ${data.hotels.map(h=>`<p>${esc(h.name)} · ${esc(bookingPriceNote(data,h.id))}</p>`).join('')}
- ${(data.tariffs||[]).map(t=>`<p>${esc(data.hotels.find(h=>h.id===t.hotelId)?.name)} · ${esc(t.name)} · ${esc(t.price)} ₽ ${t.kind==='UNIT'?'за кадр':`за ${t.photoCount||'все'} фото`} <button type="button" class="btn ghost" data-tariff-edit="${t.id}">Изменить</button></p>`).join('')}
- ${(data.albums||[]).map(t=>`<p>${esc(data.hotels.find(h=>h.id===t.hotelId)?.name)} · ${esc(t.name)} · ${esc(t.price)} ₽/шт. <button type="button" class="btn ghost" data-album-edit="${t.id}">Изменить альбом</button></p>`).join('')}</details>`;
+ <div id="hotelPricingRows">${pricingRows(data)}</div></details>`;
 }
+function pricingRows(data){return ` ${data.hotels.map(h=>`<p>${esc(h.name)} · ${esc(bookingPriceNote(data,h.id))}</p>`).join('')}
+ ${(data.tariffs||[]).map(t=>`<p>${esc(data.hotels.find(h=>h.id===t.hotelId)?.name)} · ${esc(t.name)} · ${esc(t.price)} ₽ ${t.kind==='UNIT'?'за кадр':`за ${t.photoCount||'все'} фото`} <button type="button" class="btn ghost" data-tariff-edit="${t.id}">Изменить</button></p>`).join('')}
+ ${(data.albums||[]).map(t=>`<p>${esc(data.hotels.find(h=>h.id===t.hotelId)?.name)} · ${esc(t.name)} · ${esc(t.price)} ₽/шт. <button type="button" class="btn ghost" data-album-edit="${t.id}">Изменить альбом</button></p>`).join('')}`;
+}
+
 function bookingUnit(b){
  return b.pricing||(Number(b.price)>0?{tariffId:null,kind:'UNIT',price:b.price,name:'Цена записи',photoCount:null}:null);
 }
@@ -54,6 +57,50 @@ export function updatePricePreview(form,b,tariffs){
  return amount===null?null:{amount,due,creditAmount,tariffId:fixed?.tariffId||t?.tariffId||t?.id||null,
   discountId,albumId:savedAlbum?.albumId||album?.id||null,albumQuantity:album?albumCount:null};
 }
-document.addEventListener('click',event=>{const b=event.target.closest('[data-tariff-edit],[data-album-edit]');if(!b)return;const album=b.dataset.albumEdit!==undefined,t=album?{...state.albums.find(t=>t.id===Number(b.dataset.albumEdit)),kind:'ALBUM',photoCount:null}:state.tariffs.find(t=>t.id===Number(b.dataset.tariffEdit)),f=document.querySelector('#hotelPricingForm');if(!t||!f)return;for(const k of ['hotelId','name','kind','price','photoCount'])f.elements[k].value=t[k]??'';f.elements.originalKind.value=t.kind;f.elements.replaces.value=t.id;f.scrollIntoView({block:'center'});});
+function refreshSalePricing(){
+ const form=document.querySelector('#workflowSale');
+ const booking=state?.bookings?.find(row=>row.id===Number(form?.dataset.draftScope));
+ if(!form||!booking||form.dataset.pendingKeys||booking.draft?.pricing)return;
+ const template=document.createElement('div');template.innerHTML=tariffOptions(booking,state.tariffs);
+ let changed=false;
+ for(const name of ['tariffId','albumId']){
+  const select=form.elements[name],replacement=template.querySelector(`[name="${name}"]`);
+  if(!select||!replacement)continue;
+  const value=select.value;select.innerHTML=replacement.innerHTML;
+  if([...select.options].some(option=>option.value===value))select.value=value;
+  else{select.value='';changed=changed||Boolean(value);}
+ }
+ let notice=form.querySelector('[data-pricing-selection-notice]');
+ if(changed){if(!notice){notice=document.createElement('p');notice.dataset.pricingSelectionNotice='';notice.setAttribute('role','status');form.append(notice);}notice.textContent='Выбранный тариф или альбом изменён. Выберите актуальный вариант и проверьте сумму перед сохранением продажи.';}
+ updatePricePreview(form,booking,state.tariffs);
+}
+document.addEventListener('click',event=>{
+ const button=event.target.closest('[data-tariff-edit],[data-album-edit]');if(!button)return;
+ const album=button.dataset.albumEdit!==undefined;
+ const item=(album?state?.albums:state?.tariffs)?.find(row=>row.id===Number(album?button.dataset.albumEdit:button.dataset.tariffEdit));
+ const form=document.querySelector('#hotelPricingForm');if(!item||!form)return;
+ const tariff=album?{...item,kind:'ALBUM',photoCount:null}:item;
+ for(const key of ['hotelId','name','kind','price','photoCount'])form.elements[key].value=tariff[key]??'';
+ form.elements.originalKind.value=tariff.kind;form.elements.replaces.value=tariff.id;form.scrollIntoView({block:'center'});
+});
 document.addEventListener('change',event=>{const form=event.target.form;if(form?.id!=='hotelPricingForm'||event.target.name!=='kind')return;if(form.elements.originalKind.value&&form.elements.originalKind.value!==event.target.value)form.elements.replaces.value='';if(event.target.value!=='PACKAGE')form.elements.photoCount.value='';});
-document.addEventListener('submit',async event=>{const form=event.target;if(form.id!=='hotelPricingForm')return;event.preventDefault();const f=new FormData(form),button=form.querySelector('button');button.disabled=true;try{const body={hotelId:Number(f.get('hotelId')),name:f.get('name'),kind:f.get('kind'),price:f.get('price'),photoCount:f.get('kind')==='PACKAGE'&&f.get('photoCount')?Number(f.get('photoCount')):null,replaces:f.get('replaces')?Number(f.get('replaces')):null};const saved=await api('/hotel-tariffs',{method:'POST',body});const list=body.kind==='ALBUM'?'albums':'tariffs';state[list]=(state[list]||[]).filter(t=>t.id!==body.replaces&&!(body.kind==='UNIT'&&t.kind==='UNIT'&&t.hotelId===body.hotelId));state[list].push({...body,id:saved.id});if(body.kind==='UNIT'){const hotel=state.hotels.find(h=>h.id===body.hotelId);if(hotel){hotel.fixedUnitTariffId=saved.id;hotel.unitPrice=body.price;}}const note=document.querySelector('#bookingFixedPrice'),hotelId=document.querySelector('#workflowBooking')?.elements.hotel_id?.value;if(note)note.textContent=bookingPriceNote(state,hotelId);form.reset();form.querySelector('[role=status]').textContent=body.kind==='ALBUM'?'Цена альбома сохранена. Согласованные продажи сохраняют прежнюю цену.':'Цена сохранена для новых записей; прежние записи сохраняют свою цену.';document.dispatchEvent(new CustomEvent('pb-pricing-updated'));}catch(error){form.querySelector('[role=status]').textContent=error.message;}finally{button.disabled=false;}});
+document.addEventListener('submit',async event=>{
+ const form=event.target;if(form.id!=='hotelPricingForm')return;event.preventDefault();
+ const fields=new FormData(form),button=form.querySelector('button'),catalogue=state;button.disabled=true;
+ try{
+  const body={hotelId:Number(fields.get('hotelId')),name:fields.get('name'),kind:fields.get('kind'),price:fields.get('price'),photoCount:fields.get('kind')==='PACKAGE'&&fields.get('photoCount')?Number(fields.get('photoCount')):null,replaces:fields.get('replaces')?Number(fields.get('replaces')):null};
+  const saved=await api('/hotel-tariffs',{method:'POST',body}),list=body.kind==='ALBUM'?'albums':'tariffs';
+  catalogue[list]=(catalogue[list]||[]).filter(row=>row.id!==body.replaces&&!(body.kind==='UNIT'&&row.kind==='UNIT'&&row.hotelId===body.hotelId));
+  catalogue[list].push({...body,id:saved.id});
+  if(body.kind==='UNIT'){const hotel=catalogue.hotels.find(row=>row.id===body.hotelId);if(hotel){hotel.fixedUnitTariffId=saved.id;hotel.unitPrice=body.price;}}
+  // A pending response belongs to the catalogue that initiated the save.
+  if(state!==catalogue)return;
+  const rows=document.querySelector('#hotelPricingRows');if(rows)rows.innerHTML=pricingRows(catalogue);
+  refreshSalePricing();
+  const note=document.querySelector('#bookingFixedPrice'),hotelId=document.querySelector('#workflowBooking')?.elements.hotel_id?.value;
+  if(note)note.textContent=bookingPriceNote(catalogue,hotelId);
+  if(form.isConnected){form.reset();form.querySelector('[role=status]').textContent=body.kind==='ALBUM'?'Цена альбома сохранена. Согласованные продажи сохраняют прежнюю цену.':'Цена сохранена для новых записей; прежние записи сохраняют свою цену.';}
+  document.dispatchEvent(new CustomEvent('pb-pricing-updated'));
+ }catch(error){if(form.isConnected)form.querySelector('[role=status]').textContent=error.message;}
+ finally{button.disabled=false;}
+});

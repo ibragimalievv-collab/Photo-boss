@@ -46,7 +46,7 @@ jobs:
           mkdir -p /tmp/photo-boss-calls-qa
           openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORKFLOW_TEST_KEY" -out "$WORKFLOW_TEST_CERT" -days 1 -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1' 2>/dev/null
           failed=0
-          for script in operations_reset_browser_check workflow_browser_check disk_sale_browser_check sale_counts_recovery_browser_check academy_coach_browser_check academy_practice_browser_check sales_followup_browser_check; do
+          for script in operations_reset_browser_check workflow_browser_check disk_sale_browser_check disk_selection_recovery_browser_check sale_counts_recovery_browser_check academy_coach_browser_check academy_practice_browser_check sales_followup_browser_check; do
             python "tests/${script}.py" || failed=1
           done
           exit "$failed"

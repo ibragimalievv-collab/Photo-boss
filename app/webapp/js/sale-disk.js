@@ -68,6 +68,8 @@ async function linked(panel,ticket){
  const result=await api(`/bookings/${panel.dataset.booking}/disk-folder`,{allowSnapshot:false});
  if(!active(panel,ticket))return;
  if(!result.connected){
+  const saved=state(panel);saved.paths.clear();saved.revision=null;
+  panel.querySelector('[data-sale-disk-files]').innerHTML='';selection(panel);
   if(panel.dataset.owner==='1'&&panel.closest('form').elements.photoSource?.value==='disk')await browse(panel,'disk:/',ticket);
   else note(panel,'Владелец ещё не выбрал папку этой съёмки. Можно прикрепить доступную ссылку в пункте «Прикрепить ссылку».');
   return;

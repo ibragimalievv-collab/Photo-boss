@@ -5,12 +5,15 @@ import {pricingView,tariffOptions,updatePricePreview,bookingPriceNote} from './h
 import {captureForm,captureForms,restoreForms,clearForm} from './form-state.js';
 import {api} from './api.js';
 import {esc,todayKey} from './domain.js';
-import {enqueueBatch,outboxRows,retryOperation,flushOutbox,syncOutboxNow,enqueueOperation,enqueueFilesOneByOne,replaceOperationFile,canReplaceOperationFile,saleQueueRepairable,repairSaleQueue,rejectedSaleCounts,rejectedBooking,repairBookingQueue} from './outbox.js';
+import {enqueueBatch,outboxRows,retryOperation,flushOutbox,syncOutboxNow,enqueueOperation,enqueueFilesOneByOne,replaceOperationFile,canReplaceOperationFile,canReplaceDiskSelection,replaceDiskSelection,saleQueueRepairable,repairSaleQueue,rejectedSaleCounts,rejectedBooking,repairBookingQueue} from './outbox.js';
 import {checkSaleFiles} from './sale-files.js';
-let data=null,queue=[],selected=null,folderBusy=false;
+let data=null,queue=[],selected=null,folderBusy=false,loadVersion=0,selectionVersion=0;
 const roubles=value=>new Intl.NumberFormat('ru-RU',{style:'currency',currency:'RUB',maximumFractionDigits:2}).format(Number(value||0));
 const frameTotal=b=>b.fullUploaded?(b.uploadedOriginals??b.totalFrames):(b.draft?.total||b.totalFrames||'');
 const saleable=b=>Boolean(b.draft)||b.status==='READY_FOR_SALE'||(['SOLD','COMPLETED'].includes(b.status)&&b.sales?.length);
+const workflowRoute=()=>typeof location==='undefined'?null:location.hash;
+const selectionContext=()=>({version:selectionVersion,actor:data?.actorId,route:workflowRoute()});
+const selectionCurrent=context=>context.version===selectionVersion&&context.actor===data?.actorId&&context.route===workflowRoute();
 function mountDiscountPanel(){
  document.querySelector('#saleDiscountPanel')?.remove();
  const b=data?.bookings.find(row=>row.id===selected),form=document.querySelector('#workflowSale');
@@ -22,29 +25,43 @@ function mountDiscountPanel(){
 }
 document.addEventListener('click',async event=>{
  const button=event.target.closest('[data-sale-discount-request],[data-sale-discount-decision]');if(!button)return;
- const panel=button.closest('#saleDiscountPanel'),form=document.querySelector('#workflowSale'),b=data?.bookings.find(row=>row.id===selected);
+ const panel=button.closest('#saleDiscountPanel'),form=document.querySelector('#workflowSale'),b=data?.bookings.find(row=>row.id===selected),context=selectionContext();
  button.disabled=true;
  try{
   if(button.hasAttribute('data-sale-discount-request')){
    const total=Number(form?.elements.total.value);if(!Number.isInteger(total)||total<1||total>10000)throw Error('Укажите общее число кадров съёмки.');
    await api('/sale-discounts',{method:'POST',body:{bookingId:b.id,total}});
   }else await api(`/sale-discounts/${button.dataset.saleDiscountDecision}/decision`,{method:'POST',body:{decision:button.dataset.decision}});
-  captureForms();await loadWorkflow(selected);workflowSelect(selected);
+  if(!selectionCurrent(context))return;
+  captureForms();if(await loadWorkflow(b.id))workflowSelect(b.id);
  }catch(error){if(panel?.isConnected)panel.querySelector('[role=status]').textContent=error.message;}
  finally{button.disabled=false;}
 });
 const labels={local:'В очереди на этом устройстве — не отправлено',syncing:'Передаётся на сервер',synced:'Сервер принял',error:'Ошибка отправки'};
 const kinds={booking:'Бронь',booking_receipt:'Чек брони',sale_start:'Черновик продажи',sale_receipt:'Чек продажи',sale_counts:'Количество кадров',sale_selected:'Выбранный кадр',sale_disk_selected:'Кадр с Яндекс.Диска',sale_complete:'Оформление продажи',shoot_photo:'Кадр полной съёмки',shoot_complete:'Завершение загрузки',checklist:'Контрольный пункт',shift_report:'Замечание',attendance:'Отметка смены'};
 export async function loadWorkflow(bookingId=null){
- const suffix=bookingId||selected;let next;
+ const ticket=++loadVersion,context=selectionContext(),suffix=bookingId||selected;let next,missing=false;
+ const current=()=>ticket===loadVersion&&selectionCurrent(context);
  try{next=await api('/workflow'+(suffix?'?booking='+Number(suffix):''));}
- catch(error){if(!suffix||![403,404].includes(error.status))throw error;selected=null;next=await api('/workflow');}
- if(data?.actorId!==next.actorId)selected=null;
- data=next;queue=await outboxRows();
+ catch(error){if(!current())return false;if(!suffix||![403,404].includes(error.status))throw error;missing=true;next=await api('/workflow');}
+ if(!current())return false;
+ const rows=await outboxRows();
+ if(!current())return false;
+ if(missing||data?.actorId!==next.actorId)selected=null;
+ data=next;queue=rows;
  if(bookingId&&data.bookings.some(b=>b.id===Number(bookingId)))selected=Number(bookingId);
  if(!selected)try{selected=Number(sessionStorage.getItem('pb-workflow-sale:'+data.actorId))||null;}catch{}
  if(selected&&!data.bookings.some(b=>b.id===selected))selected=null;
+ return true;
 }
+function saleFormBooking(form,actor=data?.actorId){
+ const id=Number(form.dataset.draftScope);
+ if(form.isConnected===false||!Number.isSafeInteger(id)||id<1||id!==selected||actor!==data?.actorId)throw new Error('Съёмка или аккаунт изменились. Откройте нужную продажу и проверьте её данные.');
+ const booking=data?.bookings.find(row=>row.id===id);
+ if(!booking)throw new Error('Выберите доступную съёмку.');
+ return booking;
+}
+
 function salesHistory(b){
  const rows=b.sales||[],receipts=b.receipts||[],draft=draftReceiptView(b.draft);if(!rows.length&&!receipts.length)return draft;
  return `<section class="notice" data-sales-history><h3>История покупок · ${esc(b.client||'Гость')}</h3>
@@ -96,7 +113,7 @@ async function viewReceipt(path){
  receiptViewer=viewer;document.body.append(viewer);viewer.showModal();
 }
 
-function replacementControl(r){return canReplaceOperationFile(r)&&r.hasBlob?`<label class="field">${r.kind==='sale_receipt'?'Прикрепить другой чек к этой же продаже':'Исправить отклонённый файл без новой продажи'}<input class="input" type="file" accept="image/jpeg,image/png,image/webp" data-workflow-replace="${r.key}"></label>`:'';}
+function replacementControl(r){if(r.kind==='sale_disk_selected'&&canReplaceDiskSelection(r))return `<button type="button" class="btn ghost" data-workflow="replace-disk-photo" data-key="${esc(r.key)}">Заменить отклонённый кадр выбранным на Диске</button>`;return canReplaceOperationFile(r)&&r.hasBlob?`<label class="field">${r.kind==='sale_receipt'?'Прикрепить другой чек к этой же продаже':'Исправить отклонённый файл без новой продажи'}<input class="input" type="file" accept="image/jpeg,image/png,image/webp" data-workflow-replace="${r.key}"></label>`:'';}
 function queueView(){
  const inProgress=queue.filter(r=>r.status==='local'||r.status==='syncing').length;
  const errors=queue.filter(r=>r.status==='error').length;
@@ -148,6 +165,7 @@ export async function workflowFolderChange(input){
  }finally{folderBusy=false;input.disabled=false;input.value='';}
 }
 export async function workflowSubmit(form){
+ const actor=data?.actorId;if(form.id==='workflowSale')saleFormBooking(form,actor);
  captureForm(form);
  if(form.dataset.pendingKeys){
   const keys=JSON.parse(form.dataset.pendingKeys),rows=(await outboxRows()).filter(r=>keys.includes(r.key));
@@ -158,12 +176,12 @@ export async function workflowSubmit(form){
    queue=await outboxRows();updateFormProgress();return;
   }
   if(form.id==='workflowSale'&&form.dataset.repairing==='1'){
-   const b=data.bookings.find(b=>b.id===selected),d=b?.draft,total=Number(form.elements.total.value),sold=Number(form.elements.sold.value),photos=imageFiles(form,'selected');
+   const b=saleFormBooking(form,actor),d=b?.draft,total=Number(form.elements.total.value),sold=Number(form.elements.sold.value),photos=imageFiles(form,'selected');
    const rejected=rejectedSaleCounts(rows),diskPhotos=!rejected&&(form.elements.photoSource?.value||'device')!=='device'?selectedDiskPhotos(form):[];
    if(!d?.mine||!(rejected?['AWAITING_COUNTS','AWAITING_SELECTED'].includes(d.status):d.status==='AWAITING_SELECTED')||!Number.isInteger(total)||!Number.isInteger(sold)||sold<1||sold+(b.soldTotal||0)>total)throw new Error('Проверьте фактическое количество кадров и доступ к продаже.');
    if(sold<d.selected)throw new Error(`Уже принято ${d.selected} выбранных фото. Проданное количество не может быть меньше.`);
    if(!rejected&&(photos.length+diskPhotos.length>sold||photos.length+diskPhotos.length+Number(d.selected||0)<sold))throw new Error(`Не хватает ${Math.max(0,sold-Number(d.selected||0))} новых выбранных кадров. Повторные фотографии не увеличивают количество.`);
-   await checkSaleFiles(photos);
+   await checkSaleFiles(photos);saleFormBooking(form,actor);
    const added=await repairSaleQueue(keys,{draftId:d.id,total,sold,price:b.price},photos,diskPhotos);
    form.dataset.pendingKeys=JSON.stringify([...keys,...added.map(row=>row.key)]);delete form.dataset.repairing;captureForm(form);
    queue=await outboxRows();updateFormProgress();return;
@@ -178,11 +196,11 @@ export async function workflowSubmit(form){
   const booking=add('booking',bookingFormData(form));
   if(receipt)add('booking_receipt',{booking,purpose:'DEPOSIT'},receipt);
  }else if(form.id==='workflowSale'){
-  const b=data.bookings.find(b=>b.id===selected);if(!b)throw new Error('Выберите съёмку.');const d=b.draft,total=Number(f.get('total')),sold=Number(f.get('sold'));
+  const b=saleFormBooking(form,actor);const d=b.draft,total=Number(f.get('total')),sold=Number(f.get('sold'));
   const useDisk=(form.elements.photoSource?.value||'device')!=='device',diskPhotos=useDisk?selectedDiskPhotos(form):[],photos=useDisk?[]:imageFiles(form,'selected');if(!Number.isInteger(total)||!Number.isInteger(sold)||sold<1||sold+(b.soldTotal||0)>total)throw new Error('Проверьте количество кадров.');
   if(sold<(d?.selected||0))throw new Error(`Уже принято ${d.selected} выбранных фото. Проданное количество не может быть меньше.`);
   if(photos.length+diskPhotos.length>sold||photos.length+diskPhotos.length+(d?.selected||0)<sold)throw new Error(`Нужно прикрепить ${Math.max(0,sold-(d?.selected||0))} новых выбранных кадров. Повторные фотографии не увеличивают количество.`);
-  await checkSaleFiles(photos);
+  await checkSaleFiles(photos);saleFormBooking(form,actor);
   const startData={booking:{id:b.id},price:b.price},startTariff=d?.pricing?.tariffId||Number(f.get('tariffId'));
   if(startTariff>0)startData.tariffId=startTariff;
   const draft=add('sale_start',startData);
@@ -196,6 +214,7 @@ export async function workflowSubmit(form){
   for(const photo of imageFiles(form,'photos'))add('shoot_photo',{shooting:{id:b.shootingId}},photo);
   if(f.get('finish'))add('shoot_complete',{shooting:{id:b.shootingId}});
  }
+ if(form.id==='workflowSale')saleFormBooking(form,actor);
  await enqueueBatch(items);
  form.dataset.pendingKeys=JSON.stringify(items.map(row=>row.key));captureForm(form);
  queue=await outboxRows();const list=document.querySelector('#workflowQueue');if(list)list.innerHTML=queueView();updateFormProgress();
@@ -221,7 +240,7 @@ async function resetCompletedForm(form,{refresh=true}={}){
   const savedBooking=form.id==='workflowBooking'&&bookingAccepted(keys.map(k=>rows.find(r=>r.key===k)));
   if(!keys.length||(!savedBooking&&!keys.every(k=>rows.some(r=>r.key===k&&r.status==='synced'))))throw new Error('Сначала завершите текущую отправку.');
   const id=form.id;
-  if(refresh)await loadWorkflow();
+  if(refresh&&!await loadWorkflow())return null;
   if(!form.isConnected)return null;
   clearForm(form);form.reset();form.remove();
   captureForms();
@@ -246,9 +265,18 @@ export async function openWorkflowBooking(){
 }
 export async function workflowClick(button){
  const kind=button.dataset.workflow;
- if(kind==='takeover-sale'){await api(`/bookings/${Number(button.dataset.booking)}/sale-takeover`,{method:'POST',body:{}});captureForms();await loadWorkflow(Number(button.dataset.booking));document.querySelector('#app').innerHTML=workflowView();restoreForms();updateFormProgress();refreshQuote();return;}
+ if(kind==='replace-disk-photo'){
+  const form=document.querySelector('#workflowSale');if(!form)throw new Error('Откройте продажу с отклонённым кадром.');
+  const actor=data?.actorId,b=saleFormBooking(form,actor),key=button.dataset.key,keys=JSON.parse(form.dataset.pendingKeys||'[]');
+  if(!keys.includes(key))throw new Error('Откройте исходную продажу этого кадра. Другая съёмка не будет изменена.');
+  const photos=selectedDiskPhotos(form);if(photos.length!==1)throw new Error('Выберите на Диске ровно один новый кадр для замены отклонённого.');
+  const rows=await outboxRows();saleFormBooking(form,actor);
+  if(!canReplaceDiskSelection(rows.find(row=>row.key===key)))throw new Error('Замена недоступна: проверьте результат прежней отправки.');
+  await replaceDiskSelection(key,photos[0],b.draft?.id);queue=await outboxRows();updateFormProgress();return;
+ }
+ if(kind==='takeover-sale'){const booking=Number(button.dataset.booking),context=selectionContext();await api(`/bookings/${booking}/sale-takeover`,{method:'POST',body:{}});if(!selectionCurrent(context))return;captureForms();if(!await loadWorkflow(booking))return;document.querySelector('#app').innerHTML=workflowView();restoreForms();updateFormProgress();refreshQuote();return;}
  if(kind==='receipt-view'){await viewReceipt(button.dataset.receiptPath);return;}
- if(kind==='sale-history'){await loadWorkflow(Number(button.dataset.booking));workflowSelect(button.dataset.booking);document.querySelector('#workflowSale')?.scrollIntoView({block:'center'});return;}
+ if(kind==='sale-history'){if(!await loadWorkflow(Number(button.dataset.booking)))return;workflowSelect(button.dataset.booking);document.querySelector('#workflowSale')?.scrollIntoView({block:'center'});return;}
  if(kind==='repair-booking'){
   const form=button.closest('form');if(form?.id!=='workflowBooking')return;
   queue=await outboxRows();const keys=JSON.parse(form.dataset.pendingKeys||'[]');
@@ -257,7 +285,7 @@ export async function workflowClick(button){
  }
  if(kind==='repair-sale'){
   const form=button.closest('form');if(form?.id!=='workflowSale')return;
-  await loadWorkflow(selected);const b=data.bookings.find(b=>b.id===selected),d=b?.draft,keys=JSON.parse(form.dataset.pendingKeys||'[]'),rows=keys.map(key=>queue.find(row=>row.key===key));
+  const booking=saleFormBooking(form).id;if(!await loadWorkflow(booking)||form.isConnected===false)return;const b=saleFormBooking(form),d=b?.draft,keys=JSON.parse(form.dataset.pendingKeys||'[]'),rows=keys.map(key=>queue.find(row=>row.key===key));
   const rejected=rejectedSaleCounts(rows);
   if(!d?.mine||!(rejected?['AWAITING_COUNTS','AWAITING_SELECTED'].includes(d.status):d.status==='AWAITING_SELECTED')||!saleQueueRepairable(rows))throw new Error('Сначала дождитесь подтверждения всех файлов или исправьте ошибку отправки в очереди.');
   form.dataset.repairing='1';form.elements.total.value=frameTotal(b)||d.total||'';form.elements.total.readOnly=Boolean(b.fullUploaded);form.elements.sold.value=(rejected?rejected.data.sold:d.sold)||'';form.elements.selected.value='';
@@ -278,8 +306,8 @@ if(kind==='sync'){
  if(note)note.textContent=messages[result?.state]||'Проверка завершена; обновите состояние файлов.';
  return;
 }
-if(button.dataset.workflow==='refresh'){captureForms();await loadWorkflow();document.querySelector('#app').innerHTML=workflowView();restoreForms();updateFormProgress();return;}if(button.dataset.workflow==='retry-storage'){await enqueueOperation('shoot_retry',todayKey(),{shooting:{id:Number(button.dataset.shooting)}});return;}if(button.dataset.workflow==='retry')await retryOperation(button.dataset.key);else await flushOutbox();}
-export function workflowSelect(id){if(document.querySelector('#workflowSale')?.dataset.resetting==='1')return;captureForms();selected=Number(id)||null;try{sessionStorage.setItem('pb-workflow-sale:'+data.actorId,String(selected||''));}catch{}document.querySelector('#app').innerHTML=workflowView();mountDiscountPanel();restoreForms();updateFormProgress();refreshQuote();}
+if(button.dataset.workflow==='refresh'){captureForms();if(!await loadWorkflow())return;document.querySelector('#app').innerHTML=workflowView();restoreForms();updateFormProgress();return;}if(button.dataset.workflow==='retry-storage'){await enqueueOperation('shoot_retry',todayKey(),{shooting:{id:Number(button.dataset.shooting)}});return;}if(button.dataset.workflow==='retry')await retryOperation(button.dataset.key);else await flushOutbox();}
+export function workflowSelect(id){if(!data||document.querySelector('#workflowSale')?.dataset.resetting==='1')return;selectionVersion++;loadVersion++;captureForms();selected=Number(id)||null;try{sessionStorage.setItem('pb-workflow-sale:'+data.actorId,String(selected||''));}catch{}document.querySelector('#app').innerHTML=workflowView();mountDiscountPanel();restoreForms();updateFormProgress();refreshQuote();}
 function refreshConnection(){const el=document.querySelector('#workflowNotice');if(el)el.textContent=connectionNote();}
 window.addEventListener('online',refreshConnection);window.addEventListener('offline',refreshConnection);
 let saleRefreshTimer=null,saleRefreshVersion=0,saleRefreshDue=0,lastSaleRefreshAt=0;
@@ -293,8 +321,9 @@ function scheduleSaleRefresh(immediate=false){
   if(!document.querySelector('#workflowSalesSummary')||!actor||actor!==data?.actorId)return;
   try{
    lastSaleRefreshAt=Date.now();
-   const booking=selected,next=await api('/workflow'+(booking?'?booking='+booking:''));
+   const booking=selected,context=selectionContext(),load=loadVersion,next=await api('/workflow'+(booking?'?booking='+booking:''));
    if(version!==saleRefreshVersion||actor!==data?.actorId||next.actorId!==actor)return;
+   if(!selectionCurrent(context)||load!==loadVersion)return;
    if(booking!==selected){scheduleSaleRefresh();return;}
    data=next;
    const overview=document.querySelector('#workflowSalesSummary');if(overview)overview.innerHTML=salesOverview();
@@ -332,6 +361,10 @@ function updateFormProgress(){
   if(bookingRepairing)for(const el of [...form.elements])if(el.name&&el.type!=='file')el.disabled=false;
   if(repairing)for(const name of rejected?['total']:['total','sold','selected'])form.elements[name].disabled=false;
   if(repairing&&!rejected)for(const el of form.querySelectorAll('[data-sale-disk] input,[data-sale-disk] button,[data-sale-disk] fieldset'))el.disabled=false;
+  if(form.id==='workflowSale'&&rows.some(row=>row?.kind==='sale_disk_selected'&&canReplaceDiskSelection(row))){
+   for(const el of form.querySelectorAll('[data-sale-disk] input,[data-sale-disk] button,[data-sale-disk] fieldset'))el.disabled=false;
+   note.textContent+=' Папка Диска изменилась: выберите один новый кадр в форме продажи и нажмите «Заменить отклонённый кадр» у ошибки в очереди. Чек и принятые фото сохранятся.';
+  }
   const button=form.querySelector('button[type="submit"],button:not([type])');
   if(button){button.disabled=finished;button.textContent=bookingRepairing?'Сохранить исправленную запись':repairing?(rejected?'Сохранить общее количество и продолжить':'Сохранить исправление и завершить'):finished?'Сохранено':failed?'Повторить отправку сохранённых данных':'Проверить отправку';}
   let bookingRepair=form.querySelector('[data-workflow="repair-booking"]');
@@ -355,7 +388,7 @@ document.addEventListener('change',async event=>{
 
 document.addEventListener('submit',async event=>{
  if(event.target.id!=='workflowLookup')return;event.preventDefault();const form=event.target,button=form.querySelector('button');button.disabled=true;
- try{const id=Number(new FormData(form).get('bookingId'));captureForms();await loadWorkflow(id);if(!data.bookings.some(b=>b.id===id))throw Error('Съёмка не найдена или недоступна.');workflowSelect(id);}
+ try{const id=Number(new FormData(form).get('bookingId'));captureForms();if(!await loadWorkflow(id))return;if(!data.bookings.some(b=>b.id===id))throw Error('Съёмка не найдена или недоступна.');workflowSelect(id);}
  catch(error){const el=document.querySelector('#workflowNotice');if(el)el.textContent=error.message;}finally{button.disabled=false;}
 });
 
@@ -364,6 +397,13 @@ document.addEventListener('input',event=>{if(event.target.closest('#workflowSale
 document.addEventListener('change',event=>{if(event.target.closest('#workflowSale')||event.target.name==='discountId')refreshQuote();});
 window.addEventListener('pb-workflow-mounted',()=>{mountDiscountPanel();refreshQuote();});
 
-window.addEventListener('pb-bank-paid',async()=>{await loadWorkflow(selected);refreshQuote();});
+window.addEventListener('pb-bank-paid',async event=>{if(event.detail?.bookingId&&Number(event.detail.bookingId)!==selected)return;if(await loadWorkflow(selected))refreshQuote();});
 
 document.addEventListener('change',event=>{if(event.target?.name==='hotel_id'&&event.target.form?.id==='workflowBooking'){const note=document.querySelector('#bookingFixedPrice');if(note)note.textContent=bookingPriceNote(data,Number(event.target.value));}});
+
+function invalidateWorkflowView(){loadVersion++;selectionVersion++;saleRefreshVersion++;if(saleRefreshTimer)clearTimeout(saleRefreshTimer);saleRefreshTimer=null;}
+window.addEventListener('hashchange',invalidateWorkflowView);
+window.addEventListener('pagehide',invalidateWorkflowView);
+function resetWorkflow(){invalidateWorkflowView();data=null;queue=[];selected=null;clearComparisons();clearReceiptViewer();}
+document.addEventListener('pb-chat-account-reset',resetWorkflow);
+window.addEventListener('pb-operations-reset',resetWorkflow);
