@@ -11,17 +11,17 @@ const source=original.replace(/^import .*;\n/gm,'').replaceAll('export ','').rep
 `);
 
 function fixture(){
- const events=new Map(),requests=[],cameras=[];
+ const events=new Map(),documentEvents=new Map(),requests=[],cameras=[];
  const dialog={open:false,setAttribute(){},addEventListener(){},querySelector(){return null;},close(){this.open=false;},showModal(){this.open=true;}};
  const root={querySelector(){return null;},prepend(){}};
- const document={querySelector:s=>s==='#app'?root:null,createElement:tag=>tag==='dialog'?dialog:{},head:{append(){}},body:{append(){}},addEventListener(){}};
+ const document={querySelector:s=>s==='#app'?root:null,createElement:tag=>tag==='dialog'?dialog:{},head:{append(){}},body:{append(){}},addEventListener:(name,handler)=>documentEvents.set(name,handler)};
  const c=vm.createContext({console,Date,Number,Intl,Promise,Error,setTimeout,clearTimeout,document,location:{hash:''},
   window:{addEventListener:(name,handler)=>events.set(name,handler)},
   navigator:{mediaDevices:{getUserMedia:()=>new Promise(resolve=>cameras.push(resolve))}},
   MutationObserver:class{observe(){}},api:()=>new Promise(resolve=>requests.push(resolve)),
   outboxRows:async()=>[],esc:x=>x,requestAnimationFrame(){},cameraStops:0});
  vm.runInContext(source,c);
- return {c,events,requests,cameras};
+ return {c,events,documentEvents,requests,cameras};
 }
 
 {
@@ -55,4 +55,18 @@ function fixture(){
  assert.equal(c.attendanceTest.state().busy,false);
 }
 
-console.log('PASS: reset clears attendance photo/GPS/camera, drops stale status and stops late camera streams');
+{
+ const {c,documentEvents,requests}=fixture();
+ c.attendanceTest.prime();
+ const inFlight=c.attendanceTest.refresh();
+ documentEvents.get('pb-chat-account-reset')();
+ const state=c.attendanceTest.state();
+ assert.equal(state.data,null,'An account change must discard the previous employee shift');
+ assert.equal(state.photo,null);assert.equal(state.point,null);assert.equal(state.photoAt,null);
+ assert.equal(state.cameraStream,null);assert.equal(state.open,false);assert.equal(c.cameraStops,1);
+ requests.shift()({eligible:true,start:{status:'STARTED'},end:{status:'FINISHED'}});
+ await inFlight;
+ assert.equal(c.attendanceTest.state().data,null,'The previous employee response must not refill a new account');
+}
+
+console.log('PASS: reset and account change clear attendance photo/GPS/camera, drop stale status and stop late camera streams');

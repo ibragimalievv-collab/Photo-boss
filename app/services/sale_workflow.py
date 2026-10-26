@@ -238,7 +238,7 @@ async def set_sale_counts(session, actor, draft, total, sold, *, tariff_id=None,
     return amount
 
 
-async def complete_sale(session, actor, draft_id):
+async def complete_sale(session, actor, draft_id, *, verified_references=None):
     """Commit-free canonical sale operation, shared by bot and offline replay."""
     from types import SimpleNamespace
 
@@ -258,11 +258,18 @@ async def complete_sale(session, actor, draft_id):
         raise ValueError(f'Загружено {count} выбранных кадров, а продано указано {draft.sold_photos}. Исправьте количество кадров в этой продаже.')
     if not draft.sold_photos or count != draft.sold_photos:
         raise ValueError(f"Сначала загрузите все выбранные фотографии: {count}/{draft.sold_photos or 0}.")
-    from ..disk_sale_media import FILE_PREFIX, verify_reference
+    from ..disk_sale_media import FILE_PREFIX, reference, verify_reference
     external = list(await session.scalars(select(SaleDraftPhoto.storage_path).where(
         SaleDraftPhoto.draft_id == draft.id, SaleDraftPhoto.storage_path.like(FILE_PREFIX + '%'))))
     for file_id in external:
-        await verify_reference(session, file_id)
+        if verified_references is None:
+            await verify_reference(session, file_id)
+        elif (file_id not in verified_references
+              or await reference(session, file_id) != verified_references[file_id]):
+            # Provider reads happened before taking the booking lock. A changed
+            # or newly added DB reference needs a fresh preparation, never an
+            # external read while retaining the financial transaction.
+            raise ValueError('Фотография на Диске изменилась. Повторно выберите оригинал перед продажей.')
     already_sold = await session.scalar(select(func.coalesce(func.sum(Sale.sold_photos), 0)).where(Sale.booking_id == booking.id))
     if not draft.declared_photo_count or already_sold + draft.sold_photos > draft.declared_photo_count:
         raise ValueError("Количество проданных кадров изменилось. Проверьте продажу.")
@@ -336,6 +343,11 @@ async def complete_sale(session, actor, draft_id):
         )
         session.add(receipt)
         await session.flush()
+
+        from ..operational_alerts import queue_receipt_review
+        await queue_receipt_review(session, booking, actor.id,
+            analysis=json.loads(draft.receipt_analysis or '{}'), expected=amount,
+            event_key=f'receipt-review:draft:{draft.id}:expected:{money(amount)}')
 
     if manager is not None:
         # Personal agreed terms override the global default, including an

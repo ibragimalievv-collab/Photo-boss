@@ -38,6 +38,7 @@ jobs:
       - run: |
           python tests/attendance_postgres_check.py
           python tests/operations_postgres_check.py
+          python tests/booking_concurrency_postgres_check.py
           python tests/app_postgres_audit.py
 
   render-runtime:

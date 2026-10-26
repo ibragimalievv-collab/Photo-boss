@@ -14,7 +14,7 @@ function fixture(api){
   document:{hidden:false,addEventListener:(event,handler)=>{handlers[event]=handler;}},
   setTimeout(fn,delay){timers.push({fn,delay});return timers.length;},clearTimeout(){},
   localAction:async(_store,_mode,fn)=>fn({get:key=>rows.get(key),put:r=>rows.set(r.key,r),add:r=>rows.set(r.key,r)}),
-  api:async(path,{body})=>{const op=body instanceof FormData?JSON.parse(body.get('operation')):body;calls.push(op.key);return api(op,path);}});
+  api:async(path,{body,...options})=>{const op=body instanceof FormData?JSON.parse(body.get('operation')):body;calls.push(op.key);return api(op,path,options);}});
  vm.runInContext(source,context);
  vm.runInContext(`userId=42;outboxRows=async()=>[...rows.values()].map(r=>({...r,hasBlob:!!r.blob,blob:null}));`,context);
  const add=(key,extra={})=>{rows.set(key,{key,userId:42,kind:'shoot_photo',date:'2026-10-17',data:{shooting:{id:7}},
@@ -253,6 +253,107 @@ for(const laterStatus of ['syncing','synced']){
  await f.run(`enqueueBatch([{kind:'shoot_photo',date:'2026-10-17',data:{shooting:{id:7}},blob:new Blob(['next'],{type:'image/jpeg'})}])`);
  finishFirst({ok:true});await flushing;await settle();
  assert.deepEqual(f.calls,['first','new-1']);assert.equal(f.rows.get('new-1').status,'synced');
+}
+// Saving a new booking must not wait behind a slow original or camera upload.
+// Keep the old request unresolved: completing it first would hide the freeze.
+for(const kind of ['shoot_photo','attendance']){
+ let finish;const slow=new Promise(resolve=>{finish=resolve;});
+ const timeouts=new Map();
+ const f=fixture(async(op,_path,options)=>{timeouts.set(op.key,options.timeoutMs);return op.key==='slow-upload'?slow:{bookingId:81};});
+ f.add('slow-upload',{kind});
+ const flushing=f.run('flushOutbox()');await settle();
+ try{
+  await f.run(`enqueueBatch([{key:'booking-during-upload',kind:'booking',date:'2026-10-17',data:{client_name:'Гость'}}])`);
+  await settle();
+  assert.equal(f.rows.get('slow-upload').status,'syncing');
+  assert.equal(f.rows.get('booking-during-upload').status,'synced',`${kind} must not hold a new booking in the local queue`);
+  assert.equal(timeouts.get('booking-during-upload'),20000,'Small booking requests have a bounded ordinary timeout');
+  assert.equal(timeouts.get('slow-upload'),180000,'The original upload keeps its media timeout and bytes');
+  assert.equal(f.calls.filter(key=>key==='booking-during-upload').length,1);
+ }finally{finish({photoId:9});await flushing;await settle();}
+}
+// Arrival/departure photos have their own ordered worker; a sale original may
+// remain in flight while attendance is acknowledged and booking stays usable.
+{
+ let finish;const slow=new Promise(resolve=>{finish=resolve;});
+ const f=fixture(async op=>op.key==='sale-original'?slow:{ok:true});
+ f.add('sale-original',{kind:'sale_selected',data:{draft:{id:3}}});
+ const flushing=f.run('flushOutbox()');await settle();
+ try{
+  await f.run(`enqueueBatch([{key:'arrival',kind:'attendance',date:'2026-10-17',data:{purpose:'start'},blob:new Blob(['camera-original'],{type:'image/jpeg'})}])`);
+  await settle();
+  assert.equal(f.rows.get('sale-original').status,'syncing');
+  assert.equal(f.rows.get('arrival').status,'synced','A large sale upload must not freeze attendance');
+  assert.equal(f.rows.get('arrival').blob,null);
+ }finally{finish({photoId:9});await flushing;await settle();}
+}
+// Separating booking creation from uploads must not let its own receipt race
+// before the server assigned a booking ID or retry it after an avoidable 424.
+{
+ let finish;const slow=new Promise(resolve=>{finish=resolve;});
+ const f=fixture(async op=>op.kind==='booking'?slow:{receiptId:5});
+ f.add('new-booking',{kind:'booking',blob:null,data:{client_name:'Гость'}});
+ f.add('new-booking-receipt',{kind:'booking_receipt',data:{booking:{key:'new-booking'}}});
+ const flushing=f.run('flushOutbox()');await settle();
+ assert.deepEqual(f.calls,['new-booking'],'Receipt must wait for its original booking acknowledgement');
+ assert.equal(f.rows.get('new-booking-receipt').status,'local');
+ finish({bookingId:81});await flushing;await settle();
+ assert.deepEqual(f.calls,['new-booking','new-booking-receipt']);
+ assert.equal(f.rows.get('new-booking-receipt').status,'synced');
+ assert.equal(f.rows.get('new-booking-receipt').errorStatus,0);
+}
+// A lost arrival response may already be committed. Departure must wait for
+// that same original arrival key to be acknowledged, including retry cooldown.
+{
+ const f=fixture(async()=>({ok:true}));
+ f.add('arrival-retrying',{kind:'attendance',data:{purpose:'start'},retryAt:130000,errorStatus:503,error:'Response lost'});
+ f.add('lunch-start-waiting',{kind:'break_start',blob:null,data:{hotelId:1}});
+ f.add('lunch-end-waiting',{kind:'break_end',blob:null,data:{hotelId:1}});
+ f.add('checklist-waiting',{kind:'checklist',blob:null,data:{key:'done',done:true}});
+ f.add('departure-waiting',{kind:'attendance',data:{purpose:'end'}});
+ f.add('report-waiting',{kind:'shift_report',blob:null,data:{note:'Смена закрыта'}});
+ f.add('next-day-arrival',{kind:'attendance',date:'2026-10-18',data:{purpose:'start'}});
+ await f.run('flushOutbox()');
+ assert.deepEqual(f.calls,['next-day-arrival'],'An uncertain arrival holds its departure, without blocking another day');
+ assert.equal(f.rows.get('departure-waiting').status,'local');
+ f.setNow(130001);await f.run('flushOutbox()');
+ assert.deepEqual(f.calls,['next-day-arrival','arrival-retrying','lunch-start-waiting','lunch-end-waiting','checklist-waiting','departure-waiting','report-waiting']);
+ assert.equal(f.rows.get('departure-waiting').status,'synced');
+}
+// A definitive old checklist rejection cannot freeze a valid new camera mark.
+{
+ const f=fixture(async()=>({ok:true}));
+ f.add('obsolete-checklist',{kind:'checklist',blob:null,status:'error',errorStatus:400,error:'Пункт больше не доступен',data:{itemKey:'removed',done:true}});
+ f.add('fresh-arrival',{kind:'attendance',data:{purpose:'start'}});
+ await f.run('flushOutbox()');
+ assert.deepEqual(f.calls,['fresh-arrival']);
+ assert.equal(f.rows.get('fresh-arrival').status,'synced');
+ assert.equal(f.rows.get('obsolete-checklist').status,'error');
+}
+// A camera retake has a new key. Keep the rejected original for review while
+// allowing the new valid bytes to reach the server in this very same pass.
+{
+ const f=fixture(async op=>{if(op.key==='bad-camera-original'){const error=new Error('Нужен снимок живой камеры');error.status=400;throw error;}return {ok:true};});
+ f.add('bad-camera-original',{kind:'attendance',data:{purpose:'start'}});
+ f.add('fresh-camera-retake',{kind:'attendance',data:{purpose:'start'},blob:new Blob(['new camera original'],{type:'image/jpeg'})});
+ await f.run('flushOutbox()');
+ assert.deepEqual(f.calls,['bad-camera-original','fresh-camera-retake']);
+ assert.equal(f.rows.get('bad-camera-original').status,'error');
+ assert.equal(await f.rows.get('bad-camera-original').blob.text(),'original');
+ assert.equal(f.rows.get('fresh-camera-retake').status,'synced');
+}
+// A definitive rejected arrival is no acknowledgement. Let departure receive
+// the server's explicit 424 and retain it for retry rather than silently stall.
+{
+ const f=fixture(async()=>{const error=new Error('Сначала синхронизируйте начало смены.');error.status=424;throw error;});
+ f.add('rejected-arrival',{kind:'attendance',status:'error',errorStatus:400,data:{purpose:'start'}});
+ f.add('departure-without-start',{kind:'attendance',data:{purpose:'end'}});
+ await f.run('flushOutbox()');
+ assert.deepEqual(f.calls,['departure-without-start']);
+ assert.equal(f.rows.get('departure-without-start').status,'local');
+ assert.equal(f.rows.get('departure-without-start').errorStatus,424);
+ assert.equal(f.rows.get('departure-without-start').error,'Сначала синхронизируйте начало смены.');
+ assert.ok(f.rows.get('departure-without-start').blob);
 }
 // Only a newly confirmed login recovers a 401. Genuine access denial stays put.
 {

@@ -24,6 +24,7 @@ from .main import (
 from .miniapp_api import install_miniapp
 from .miniapp_security import webhook_secret
 from .people import install_people
+from .request_diagnostics import request_diagnostics
 from .services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
 from .services.photo_storage import storage_loop
 from .work_calls import ice_config, install_work_calls
@@ -32,7 +33,7 @@ from .yandex_disk import install_yandex_disk, storage_recovery_loop
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.47-shift-academy-recovery"
+RELEASE = "miniapp-3.48-concurrent-operations"
 
 
 async def app_redirect(request):
@@ -217,7 +218,8 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     dispatcher, bot = create_dispatcher(), create_bot()
     install_launch_policies(dispatcher, bot)
-    app = web.Application(client_max_size=25*1024*1024)
+    app = web.Application(client_max_size=25*1024*1024,
+                          middlewares=[request_diagnostics])
     app["bot"], app["dispatcher"] = bot, dispatcher
     app.router.add_get("/", health)
     app.router.add_get("/health", health)

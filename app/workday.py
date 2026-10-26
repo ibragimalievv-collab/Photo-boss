@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 def operation_diagnostic(body, *, result=None, error=None):
     """Log only known operation fields; never file bytes, names or request keys."""
     kinds = {'sale_start', 'sale_receipt', 'sale_counts', 'sale_selected', 'sale_disk_selected', 'sale_complete',
-             'shoot_photo', 'shoot_complete', 'shoot_retry', 'booking_receipt', 'break_start', 'break_end', 'attendance'}
+             'shoot_photo', 'shoot_complete', 'shoot_retry', 'booking', 'booking_receipt', 'break_start', 'break_end', 'attendance'}
     if not isinstance(body, dict) or not isinstance(body.get('kind'), str) or body['kind'] not in kinds:
         return
     detail = {'kind': body['kind']}
@@ -149,13 +149,20 @@ class Workday:
             return response
         except AccessError as exc:
             operation_diagnostic(body, error=exc)
+            try:
+                from .operational_alerts import alert_rejected_operation
+                await alert_rejected_operation(self.api, a, body, exc)
+            except Exception:
+                # The original operation has already rolled back. An alert
+                # failure must not replace its actionable, retryable response.
+                logger.warning('Rejected operation alert could not be recorded', exc_info=True)
             raise
         except IntegrityError as exc:
             operation_diagnostic(body, error=AccessError('Conflict', 409))
             raise AccessError('Операция или вложение уже учтены. Обновите данные перед повтором.', 409) from exc
 
     async def _execute(self, a, body, raw=None):
-        from .workflow import KINDS, Workflow
+        from .workflow import KINDS, PREPARED_MEDIA_KINDS, Workflow
         if not isinstance(body, dict):
             raise AccessError('Некорректная операция.', 400)
         required = {'key','kind','date','data','actorId'}
@@ -171,26 +178,68 @@ class Workday:
         if type(body['actorId']) is not int or body['actorId'] != a['id']: raise AccessError('Аккаунт изменился. Операция принадлежит другому сотруднику.',403)
         payload = json.dumps(body,sort_keys=True,ensure_ascii=False).encode()
         digest=hashlib.sha256(payload + (b'\x00'+hashlib.sha256(raw).digest() if raw is not None else b'')).hexdigest()
+        kind = body['kind']
+        prepared_media, attendance_file = None, None
+        if kind in PREPARED_MEDIA_KINDS | {'attendance'}:
+            # Reject stale/replayed/unauthorized work before provider I/O. Close
+            # this transaction before uploads/AI so slow storage cannot consume
+            # every pooled connection or hold the employee's row lock.
+            async with self.api.engine.begin() as conn:
+                roles, day, replay = await self.operation_state(conn, a, body, digest)
+            if replay is not None:
+                return web.json_response(replay)
+            current_actor = a | {'roles': sorted(roles)}
+            if kind == 'attendance':
+                from .attendance import Attendance
+                attendance_file = await Attendance(self.api).prepare_offline_media(
+                    current_actor, day, body['data'], raw)
+            else:
+                prepared_media = await Workflow(self.api).prepare_media(
+                    current_actor, kind, body['data'], raw)
+
+        async def transaction():
+            return await self.apply_operation(a, body, raw, digest,
+                prepared_media=prepared_media, attendance_file=attendance_file)
+
+        # These branches only perform database work (prepared media is already
+        # durable). A deadlock victim must start a fresh transaction; rechecking
+        # the original key preserves exactly-once acknowledgements/commissions.
+        retryable = {'booking', 'checklist', 'shift_report', 'break_start', 'break_end',
+                     'sale_start', 'sale_counts', 'photo_edit', 'shoot_retry', 'delivery_handoff'}
+        if kind in retryable or prepared_media is not None or attendance_file is not None:
+            from .transaction_retry import retry_transaction
+            return await retry_transaction(transaction)
+        return await transaction()
+
+    async def operation_state(self, conn, a, body, digest):
+        """Revalidate both before storage and under the final operation lock."""
+        # Never acknowledge a pre-reset operation, even if its key remains
+        # in the shared idempotency ledger. Manual cash outflows survive
+        # the reset and retain their original payload hash and replay.
+        if body['kind'] != 'cash_expense':
+            await require_generation(conn, body.get('generation', ''))
+        if body['kind'].startswith('sale_') or body['kind'] == 'booking':
+            sales_generation = await conn.scalar(text("SELECT value FROM settings WHERE key='sales:generation'"))
+            if sales_generation and body.get('salesGeneration', '') != sales_generation:
+                raise AccessError('Продажи обнулены владельцем. Обновите приложение и начните продажу заново; старые файлы сохранены.', 409)
+        users=await self.api.rows(conn,'SELECT id,active FROM users WHERE id=:uid'+user_lock_clause(conn),uid=a['id'])
+        if not users or not users[0]['active']: raise AccessError('Доступ отключён.',403)
+        roles={r['role'] for r in await self.api.rows(conn,'SELECT role FROM user_roles WHERE user_id=:uid',uid=a['id'])}
+        if not roles & {'OWNER','ADMIN','PHOTOGRAPHER','MANAGER'}: raise AccessError('Рабочая роль снята.',403)
+        old=await self.api.rows(conn,'SELECT payload_hash,result FROM operation_requests WHERE user_id=:uid AND request_key=:key',uid=a['id'],key=body['key'])
+        if old:
+            if old[0]['payload_hash']!=digest: raise AccessError('Ключ уже использован для других данных.',409)
+            return roles, None, parsed(old[0]['result'])
+        day=self.api.day(body['date'])
+        if not self.api.today()-timedelta(days=7)<=day<=self.api.today(): raise AccessError('Дата требует ручной проверки; операция не применена.',409)
+        return roles, day, None
+
+    async def apply_operation(self, a, body, raw, digest, *, prepared_media=None, attendance_file=None):
+        from .workflow import KINDS, Workflow
         async with self.api.engine.begin() as conn:
-            # Never acknowledge a pre-reset operation, even if its key remains
-            # in the shared idempotency ledger. Manual cash outflows survive
-            # the reset and retain their original payload hash and replay.
-            if body['kind'] != 'cash_expense':
-                await require_generation(conn, body.get('generation', ''))
-            if body['kind'].startswith('sale_') or body['kind'] == 'booking':
-                sales_generation = await conn.scalar(text("SELECT value FROM settings WHERE key='sales:generation'"))
-                if sales_generation and body.get('salesGeneration', '') != sales_generation:
-                    raise AccessError('Продажи обнулены владельцем. Обновите приложение и начните продажу заново; старые файлы сохранены.', 409)
-            users=await self.api.rows(conn,'SELECT id,active FROM users WHERE id=:uid'+user_lock_clause(conn),uid=a['id'])
-            if not users or not users[0]['active']: raise AccessError('Доступ отключён.',403)
-            roles={r['role'] for r in await self.api.rows(conn,'SELECT role FROM user_roles WHERE user_id=:uid',uid=a['id'])}
-            if not roles & {'OWNER','ADMIN','PHOTOGRAPHER','MANAGER'}: raise AccessError('Рабочая роль снята.',403)
-            old=await self.api.rows(conn,'SELECT payload_hash,result FROM operation_requests WHERE user_id=:uid AND request_key=:key',uid=a['id'],key=body['key'])
-            if old:
-                if old[0]['payload_hash']!=digest: raise AccessError('Ключ уже использован для других данных.',409)
-                return web.json_response(parsed(old[0]['result']))
-            day=self.api.day(body['date'])
-            if not self.api.today()-timedelta(days=7)<=day<=self.api.today(): raise AccessError('Дата требует ручной проверки; операция не применена.',409)
+            roles, day, replay = await self.operation_state(conn, a, body, digest)
+            if replay is not None:
+                return web.json_response(replay)
             data=body['data']
             extra = {}
             if body['kind'] == 'cash_expense':
@@ -203,9 +252,11 @@ class Workday:
                 extra = await WorkBreaks(self.api).record(conn, a | {'roles': sorted(roles)}, day, body['kind'], data)
             elif body['kind'] == 'attendance':
                 from .attendance import Attendance
-                extra = await Attendance(self.api).offline(conn, a | {'roles': sorted(roles)}, day, data, raw)
+                extra = await Attendance(self.api).offline(conn, a | {'roles': sorted(roles)}, day, data, raw,
+                    prepared_file_id=attendance_file)
             elif body['kind'] in KINDS:
-                extra = await Workflow(self.api).apply(conn, a | {'roles': sorted(roles)}, body['kind'], data, raw)
+                extra = await Workflow(self.api).apply(conn, a | {'roles': sorted(roles)}, body['kind'], data, raw,
+                    prepared_media=prepared_media)
             elif raw is not None:
                 raise AccessError('Вложение не поддерживается для этой операции.', 400)
             elif body['kind']=='checklist':

@@ -35,7 +35,9 @@ class HotelPricing:
                 or (body['replaces'] is not None and type(body['replaces']) is not int)):
             raise AccessError('Проверьте название, тип, цену и число кадров тарифа.', 400)
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
-            actor = await session.get(User, a['id'], with_for_update=True)
+            # Serialize edits/dismissal without blocking KEY SHARE foreign-key
+            # checks from another employee's booking or notification insert.
+            actor = await session.get(User, a['id'], with_for_update={'key_share': True})
             roles = await roles_of(session, actor) if actor and actor.active else set()
             await hotel_access(session, a['id'], roles, body['hotelId'], manage=True)
             # Serialize unit-rate replacement across different supervisors.

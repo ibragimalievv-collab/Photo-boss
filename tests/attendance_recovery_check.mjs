@@ -25,7 +25,7 @@ function fixture(respond=async()=>{throw new Error('unexpected request');}){
   enqueueOperation:async(...args)=>queued.push(args),outboxRows:async()=>rows,esc:x=>x??'',requestAnimationFrame(){}});
  vm.runInContext(source,c);c.attendanceTest.prime();
  const click=act=>events.get('click')({target:{closest:()=>({dataset:{att:act}})},preventDefault(){},stopImmediatePropagation(){}});
- return {c,events,cameras,calls,queued,rows,sent,click};
+ return {c,events,windowEvents,cameras,calls,queued,rows,sent,click};
 }
 const base=()=>({eligible:true,date:new Date().toISOString().slice(0,10),timezone:'Europe/Moscow',start:null,end:null,reviewRequired:true});
 const network=()=>Object.assign(new Error('Сеть недоступна'),{status:503});
@@ -270,6 +270,47 @@ const network=()=>Object.assign(new Error('Сеть недоступна'),{stat
  const f=fixture();f.c.attendanceTest.configure({canReview:false});
  assert.doesNotMatch(f.c.attendanceTest.state().html,/data-att="review"/);
  await f.click('review');assert.equal(f.c.location.hash,'');
+}
+
+{
+ const now=new Date().toISOString();
+ const f=fixture(async()=>({...base(),start:{status:'STARTED',at:now,photoSaved:true,locationSaved:true}}));
+ f.c.attendanceTest.configure({start:{status:'PENDING_REVIEW',claimedAt:now,_localOnly:true,evidenceSource:'offline'}});
+ f.rows.push({key:'saved-start',kind:'attendance',date:base().date,status:'synced',data:{purpose:'start',claimedAt:now},result:{attendanceStatus:'STARTED'}});
+ assert.match(f.c.attendanceTest.state().html,/Начало ожидает синхронизации/);
+ await f.windowEvents.get('pb-outbox')();
+ assert.equal(f.c.attendanceTest.state().data.start.status,'STARTED','A server acknowledgement must update the open shift without reopening it');
+ assert.match(f.c.attendanceTest.state().html,/data-att="lunch"/);
+ assert.doesNotMatch(f.c.attendanceTest.state().html,/Начало ожидает синхронизации/);
+ const calls=f.calls.length;
+ await f.windowEvents.get('pb-outbox')();
+ assert.equal(f.calls.length,calls,'Unrelated photo progress must not repeatedly reload a previously acknowledged shift');
+}
+
+{
+ const now=new Date().toISOString();
+ const f=fixture(async()=>({...base(),start:{status:'STARTED',at:now,photoSaved:true,locationSaved:true}}));
+ f.c.attendanceTest.configure({start:{status:'PENDING_REVIEW',claimedAt:now,_localOnly:true,evidenceSource:'offline'}});
+ const camera=f.c.attendanceTest.openCamera();
+ f.rows.push({key:'saved-during-camera',kind:'attendance',date:base().date,status:'synced',data:{purpose:'start',claimedAt:now},result:{attendanceStatus:'STARTED'}});
+ await f.windowEvents.get('pb-outbox')();
+ assert.equal(f.calls.length,0,'A server acknowledgement must not interrupt an active camera');
+ await f.click('camera-back');
+ for(let tick=0;tick<8;tick++)await Promise.resolve();
+ assert.equal(f.c.attendanceTest.state().data.start.status,'STARTED','The deferred acknowledgement must be applied after leaving the camera');
+ let stopped=0;
+ f.cameras.shift()({getTracks:()=>[{stop(){stopped++;}}]});await camera;
+ assert.equal(stopped,1);
+}
+
+{
+ const now=new Date().toISOString(),reason='Координаты требуют проверки: точность устройства неизвестна.';
+ const pending={status:'PENDING_REVIEW',photoSaved:true,locationSaved:true,claimedAt:now,evidenceSource:'online',geofence:{notice:reason}};
+ const f=fixture();
+ f.c.attendanceTest.configure({gpsRequired:true,geofenceRequired:false,start:pending});
+ assert.match(f.c.attendanceTest.state().html,/Координаты требуют проверки: точность устройства неизвестна\./,'The actual pending reason must remain visible with hotel-distance checks disabled');
+ f.c.attendanceTest.configure({start:{status:'STARTED',at:now},end:pending});
+ assert.match(f.c.attendanceTest.state().html,/Координаты требуют проверки: точность устройства неизвестна\./,'A pending end needs its specific review reason too');
 }
 
 console.log('PASS: mandatory GPS with deferred hotel zones, strict mode, pending recovery, offline evidence, camera cleanup and leadership access');

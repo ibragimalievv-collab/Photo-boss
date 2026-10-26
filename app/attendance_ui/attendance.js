@@ -79,7 +79,8 @@ function install() {
  const link=document.createElement('link');link.rel='stylesheet';link.href='/shift/attendance.css';document.head.append(link);
  const tg=window.Telegram?.WebApp;
  const dialog=document.createElement('dialog');dialog.id='attendanceDialog';dialog.className='att-dialog';dialog.setAttribute('aria-label','Моя смена');document.body.append(dialog);
- let data=null, failure='', busy=false, photo=null, purpose='start', retakePurpose=null, generation=0, loading=false, refreshAgain=false;
+ let data=null, failure='', busy=false, photo=null, purpose='start', retakePurpose=null, generation=0, loading=false, refreshAgain=false, outboxRefreshPending=false;
+ const syncedAttendance=new Set();
  let point=null,pointAt=0,photoAt=null,pointSaved=false;
  const localDay=value=>new Intl.DateTimeFormat('en-CA',{timeZone:data?.timezone||'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit'}).format(value);
  let cameraStream=null, cameraActive=false, cameraMode='environment';
@@ -154,6 +155,10 @@ function install() {
   requestAnimationFrame(attachCamera);
  }
  function draw() {
+  // A queued mark may finish while the camera or another attendance step is
+  // active. Apply its acknowledgement after that step, without interrupting
+  // live capture or leaving the card in its local-only state indefinitely.
+  if(outboxRefreshPending&&!busy&&!cameraActive){outboxRefreshPending=false;void refresh();}
   if(!dialog.open)return;
   const currentPhase=phase(data);
   if(retakePurpose&&!canRetake(retakePurpose))retakePurpose=null;
@@ -166,15 +171,17 @@ function install() {
   const fresh=!!point&&Date.now()-pointAt<=300000||!retakePurpose&&!!record?.locationFresh&&!data?._offline&&Date.now()-new Date(record.locationReceivedAt).getTime()<=300000;
   const ready=!gpsRequired()||fresh;
   const evidence=gpsRequired()?'фото и координат':'фото';
-  const policyNotice=data?.eligible?(!gpsRequired()?'<p class="att-notice">Геолокация временно отключена. Координаты не запрашиваются и местоположение не проверяется. Начало и завершение подтверждаются по свежему фото с камеры.</p>':!geofenceRequired()?'<p class="att-notice">Геолокация обязательна: сохраните свежие координаты и фото. Проверка расстояния до отеля временно отключена; метки отелей будут настроены позже. Сохранение GPS не подтверждает нахождение рядом с отелем.</p>':''):'';
+  let policyNotice=data?.eligible?(!gpsRequired()?'<p class="att-notice">Геолокация временно отключена. Координаты не запрашиваются и местоположение не проверяется. Начало и завершение подтверждаются по свежему фото с камеры.</p>':!geofenceRequired()?'<p class="att-notice">Геолокация обязательна: сохраните свежие координаты и фото. Проверка расстояния до отеля временно отключена; метки отелей будут настроены позже. Сохранение GPS не подтверждает нахождение рядом с отелем.</p>':''):'';
+  const pendingReview=p==='REVIEW_START'?data?.start:p==='REVIEW'?data?.end:null;
+  if(typeof pendingReview?.geofence?.notice==='string'&&pendingReview.geofence.notice.trim())policyNotice+=`<p class="notice">Причина проверки: ${esc(pendingReview.geofence.notice)}</p>`;
   const retakeNotice=retakePurpose?`<p class="notice">${gpsRequired()?'Заново получите геолокацию, затем сделайте новое фото':'Сделайте новое фото'} ${purpose==='start'?'в полный рост для подтверждения начала':'рабочего места для подтверждения завершения'} смены. Старая отметка останется в истории проверки.</p>${button('Назад к отметкам','retake-cancel','ghost')}`:'';
-  const pendingStart=p==='REVIEW_START'?(startAvailable()?`<p class="notice">Начало смены записано на сервере. ${data.start.evidenceSource==='offline'?'Офлайн-отметку проверяет руководитель.':geofenceRequired()?esc(data.start?.geofence?.notice||'Этой отметке нужна ручная проверка координат и фото.'):'Эта отметка ожидает проверки по прежнему правилу.'} Работа и обед доступны: повторно начинать смену не нужно. Руководитель может проверить сохранённую отметку в контроле смен. Ниже — оформление завершения смены.</p>`:`<p class="notice">${data.start?._localOnly?'Начало смены сохранено на этом устройстве.':'Нет полного подтверждения начала смены.'} Отправка ${evidence} на сервер ещё не подтверждена. Подключитесь к сети и проверьте синхронизацию; обед станет доступен после принятия отметки сервером. При отсутствии связи можно также сохранить завершение смены на устройстве.</p>${button('Проверить синхронизацию','queue','secondary')}${button('Обновить статус','reload','ghost')}`)+(canRetake('start')?button(retakeLabel('start'),'retake-start','primary'):''):'';
+  const pendingStart=p==='REVIEW_START'?(startAvailable()?`<p class="notice">Начало смены записано на сервере. ${data.start.evidenceSource==='offline'?'Офлайн-отметку проверяет руководитель.':geofenceRequired()?esc(data.start?.geofence?.notice||'Этой отметке нужна ручная проверка координат и фото.'):'Для этой отметки нужна проверка руководителя.'} Работа и обед доступны: повторно начинать смену не нужно. Руководитель может проверить сохранённую отметку в контроле смен. Ниже — оформление завершения смены.</p>`:`<p class="notice">${data.start?._localOnly?'Начало смены сохранено на этом устройстве.':'Нет полного подтверждения начала смены.'} Отправка ${evidence} на сервер ещё не подтверждена. Подключитесь к сети и проверьте синхронизацию; обед станет доступен после принятия отметки сервером. При отсутствии связи можно также сохранить завершение смены на устройстве.</p>${button('Проверить синхронизацию','queue','secondary')}${button('Обновить статус','reload','ghost')}`)+(canRetake('start')?button(retakeLabel('start'),'retake-start','primary'):''):'';
   const locationStep=gpsRequired()?`<div><span class="att-step">1</span><div><strong>Геолокация</strong><p>${fresh?(point&&!pointSaved?'✓ Координаты получены на устройстве. Сервер ещё не подтвердил сохранение.':'✓ Координаты сохранены на сервере.'):record?.locationSaved?'Координаты устарели. Получите их повторно.':'Местоположение запрашивается только по нажатию.'}</p>${button(fresh?'Получить заново':'Проверить геолокацию','location','secondary')} ${button('Настройки доступа','settings','ghost')}</div></div>`:'';
   const captureView=`${retakeNotice}${['STARTED','REVIEW_START'].includes(p)&&startAvailable()?button('Обед / вернулся с обеда','lunch','secondary'):''}${pendingStart}<p>${purpose==='start'?`Чтобы начать смену, отправьте ${gpsRequired()?'геолокацию и ':''}свежее фото в полный рост.`:`Чтобы завершить смену, отправьте ${gpsRequired()?'геолокацию и ':''}фото рабочего места.`}</p><div class="att-steps">${locationStep}<div><span class="att-step">${gpsRequired()?'2':'1'}</span><div><strong>${purpose==='start'?'Фото в полный рост':'Фото рабочего места'}</strong><p>Фото делается только сейчас через камеру. Выбор из галереи отключён.</p>${button(photo?'Переснять':'Сделать фото','camera','secondary',!ready)}${photo?`<img class="att-preview" alt="Сделанная фотография" src="${photo}">`:''}</div></div></div><p class="att-notice">${esc(geoText)} ${gpsRequired()?esc(data?.geoNotice):''} Фото берётся из живого видеопотока камеры непосредственно перед подтверждением.</p>${geofenceRequired()&&data?.reviewRequired?'<p class="att-notice">Внутри настроенной зоны отеля смена подтверждается автоматически после сохранения фото. Если координаты неточные, вне зоны или зона не настроена — проверяет руководитель. Штраф по времени рассчитывается автоматически.</p>':''}<button type="button" class="btn primary full-width" data-att="confirm" ${!freshPhoto()||!ready||busy?'disabled':''}>${busy?'Сохраняем…':geofenceRequired()&&data?.reviewRequired?(geo?.state==='inside'?'Подтвердить смену':'Сохранить для проверки'):purpose==='start'?'Подтвердить начало смены':'Подтвердить завершение смены'}</button><p class="att-caption">При отсутствии связи отметка сохраняется на устройстве, затем отправляется руководителю для проверки. Время телефона само по себе не подтверждает присутствие.</p>`;
   dialog.innerHTML=`<div class="att-dialog-head"><div><div class="eyebrow">PHOTO BOSS · МОЯ СМЕНА</div><h2>${data?retakePurpose?purpose==='start'?'Новое фото начала смены':'Новое фото завершения смены':title():'Статус смены'}</h2></div>${button('Закрыть','close','ghost')}</div><div id="attError" class="att-error" role="alert" ${failure?'':'hidden'}>${esc(failure)}</div>${data?.canReview&&p!=='CONTROL'?button('Контроль смен','review','secondary'):''}${policyNotice}${!data?button('Обновить статус','reload'):p==='CONTROL'?`<p>Ваш аккаунт управляет работой команды. Личное начало смены доступно аккаунтам с ролью фотографа или менеджера записи.</p>${data?.canReview?button('Открыть контроль смен','review'):''}${button('Открыть график сотрудников','schedule','secondary')}`:p==='FINISHED'?`<div class="att-done">✓ Начало: ${clock(data.start.at)}<br>✓ Завершение: ${clock(data.end.at)}<br>${gpsRequired()?'Геолокации и фотографии':'Фотографии и время'} сохранены.</div>${button('Открыть краткий отчёт','report')}${button('Обновить','reload','ghost')}`:p==='REVIEW'?`<p>${data.end?._localOnly?`Завершение смены сохранено на этом устройстве. Отправка ${evidence} и времени на сервер ещё не подтверждена. Подключитесь к сети и проверьте синхронизацию.`:'Данные отметки отправлены на проверку. Синхронизация ещё не подтверждает присутствие. Штрафы по времени рассчитываются автоматически; уважительную причину можно учесть при проверке.'}</p>${canRetake('start')?`<p class="notice">Сначала повторно подтвердите начало. Затем можно подтвердить завершение.</p>${button(retakeLabel('start'),'retake-start','primary')}`:''}${canRetake('end')?button(retakeLabel('end'),'retake-end','primary'):''}${button('Проверить синхронизацию','queue','secondary')}${button('Обновить','reload','ghost')}`:captureView}`;
  }
  async function open(){generation++;stopCamera();retakePurpose=null;photo=null;point=null;pointSaved=false;photoAt=null;if(!dialog.open)dialog.showModal();draw();await refresh();draw();}
- function close(){if(busy&&!cameraActive)return;generation++;stopCamera();busy=false;photo=null;dialog.close();}
+ function close(){if(busy&&!cameraActive)return;generation++;stopCamera();busy=false;photo=null;dialog.close();draw();}
  document.addEventListener('click',async e=>{
   const target=e.target.closest('button');if(!target)return;
   if(target.dataset.action==='shift'){e.preventDefault();e.stopImmediatePropagation();await open();return;}
@@ -248,14 +255,32 @@ function install() {
  dialog.addEventListener('cancel',e=>{if(busy&&!cameraActive)e.preventDefault();else{generation++;stopCamera();busy=false;photo=null;}});
  new MutationObserver(card).observe(root,{childList:true,subtree:false});
  window.addEventListener('hashchange',()=>{if(!busy&&dialog.open)close();card();});
- window.addEventListener('pb-operations-reset',()=>{
+ window.addEventListener('pb-outbox',async()=>{
+  const version=generation;
+  try{
+   const rows=await outboxRows();if(version!==generation||!data)return;
+   let changed=false;
+   for(const row of rows)if(row.kind==='attendance'&&row.date===data.date&&row.status==='synced'&&!syncedAttendance.has(row.key)){
+    syncedAttendance.add(row.key);changed=true;
+   }
+   if(!changed)return;
+   if(busy||cameraActive){outboxRefreshPending=true;return;}
+   await refresh();
+  }catch(error){
+   if(version===generation){failure=error.message||'Не удалось проверить синхронизацию смены.';updateCard();draw();}
+  }
+ });
+ function clearAttendance(accountChanged=false){
   const required=gpsRequired();
   generation++;stopCamera();retakePurpose=null;photo=null;point=null;pointAt=0;pointSaved=false;photoAt=null;data=null;busy=false;
-  failure=required?'Рабочие данные обнулены. Получите геолокацию и сделайте новое фото.':'Рабочие данные обнулены. Сделайте новое фото камерой.';
+  outboxRefreshPending=false;syncedAttendance.clear();refreshAgain=false;
+  failure=accountChanged?'Аккаунт изменился. Откройте свою смену заново.':required?'Рабочие данные обнулены. Получите геолокацию и сделайте новое фото.':'Рабочие данные обнулены. Сделайте новое фото камерой.';
   if(dialog.open)dialog.close();updateCard();
   // A pre-reset status request may still finish; its generation check above
   // discards it. The next open/visibility refresh fetches the cleared ledger.
- });
+ }
+ window.addEventListener('pb-operations-reset',()=>clearAttendance());
+ document.addEventListener('pb-chat-account-reset',()=>clearAttendance(true));
  document.addEventListener('visibilitychange',()=>{
   if(document.hidden){if(cameraActive){generation++;stopCamera();busy=false;failure='Камера была выключена, потому что приложение свернули.';}}
   else if(!busy){refresh().then(draw);}

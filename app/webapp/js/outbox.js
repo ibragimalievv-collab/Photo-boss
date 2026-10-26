@@ -1,6 +1,12 @@
 import {api} from './api.js';
 import {localAction,openLocal,writeOperations} from './localstore.js';
 let userId=null,operationsGeneration='',salesGeneration='',running=false,timer=null,retryDue=0,rerunRequested=false,authEpoch=0,queueRepairing=false;
+// A camera photo or a large sale original must not delay a new booking. Keep
+// bounded, independent workers, while preserving the original order of every
+// sale chain and of attendance events. All workers retain the same durable keys.
+const workers=new Set(),requestedWorkers=new Set();
+const shiftKinds=new Set(['attendance','break_start','break_end','checklist','shift_report']);
+const operationWorker=row=>row.kind==='booking'?'booking':shiftKinds.has(row.kind)?'attendance':'media';
 const scheduleRetry=delay=>{
  const wait=Math.min(2147483647,Math.max(1000,delay)),due=Date.now()+wait;
  // Keep the earliest wake-up: a later blocked row must not postpone an earlier one.
@@ -118,7 +124,7 @@ async function resumeRepairedCompletion(repair){
  const complete=await localAction('operations','readonly',store=>store.get(repair.resumeCompleteKey));
  if(complete?.userId!==userId||complete.resumeByKey!==repair.key||complete.repairAppliedKey===repair.key||!countCompletionError(complete))return;
  complete.status='local';complete.error='';complete.errorStatus=0;complete.retryAt=0;complete.repairAppliedKey=repair.key;
- await update(complete);rerunRequested=true;changed();
+ await update(complete);requestedWorkers.add('media');changed();
 }
 const SALE_DEPENDENCY_RECOVERY='sale-dependency-recovery-v1-20261017';
 function legacySaleDependency(row,previous){
@@ -259,19 +265,36 @@ export async function syncOutboxNow(){
 export async function flushOutbox(){
  if(!userId)return {state:'no-account'};
  if(!navigator.onLine)return {state:'offline'};
- if(running||queueRepairing){rerunRequested=true;return {state:'running'};}
+ if(queueRepairing){rerunRequested=true;return {state:'running'};}
  rerunRequested=false;
- running=true;
- const actor=userId,generation=operationsGeneration,active=()=>actor===userId&&generation===operationsGeneration,summary={state:'done',completed:0,failed:0,temporary:0},blockedSales=new Set(),saleSteps=new Map();
+ const results=await Promise.all(['booking','attendance','media'].map(flushOutboxWorker));
+ const state=results.some(row=>row.state==='running')?'running':results.some(row=>row.state==='backoff')?'backoff':'done';
+ return {state,completed:results.reduce((total,row)=>total+(row.completed||0),0),failed:results.reduce((total,row)=>total+(row.failed||0),0),temporary:results.reduce((total,row)=>total+(row.temporary||0),0)};
+}
+async function flushOutboxWorker(worker){
+ if(!userId)return {state:'no-account'};
+ if(!navigator.onLine)return {state:'offline'};
+ if(workers.has(worker)){requestedWorkers.add(worker);return {state:'running'};}
+ requestedWorkers.delete(worker);workers.add(worker);running=true;
+ const actor=userId,generation=operationsGeneration,active=()=>actor===userId&&generation===operationsGeneration,summary={state:'done',completed:0,failed:0,temporary:0},blockedSales=new Set(),saleSteps=new Map(),blockedAttendance=new Set();
  try{
   // A tab may close after the correction was accepted but before its original
   // completion was reactivated. Recover that link on the next foreground pass.
-  for(const repair of await outboxRows())if(repair.status==='synced'&&repair.resumeCompleteKey)await resumeRepairedCompletion(repair);
+  if(worker==='media')for(const repair of await outboxRows())if(repair.status==='synced'&&repair.resumeCompleteKey)await resumeRepairedCompletion(repair);
   for(const item of await outboxRows()){
    if(!active())break;
+   if(operationWorker(item)!==worker)continue;
    // Legacy rows remain legacy packets; never stamp a freshly adopted reset
    // generation onto an old action, even if another tab held a stale cursor.
    if(item.kind!=='cash_expense'&&(item.generation||'')!==generation)continue;
+   if(worker==='attendance'&&blockedAttendance.has(item.date))continue;
+   // Booking now has a separate worker. Its receipt must still wait for the
+   // exact original booking acknowledgement, rather than racing it into a 424.
+   if(item.kind==='booking_receipt'&&item.data?.booking?.key){
+    const booking=await localAction('operations','readonly',store=>store.get(item.data.booking.key));
+    if(!active())break;
+    if(booking?.userId!==actor||booking.status!=='synced'||!booking.result?.bookingId)continue;
+   }
    if(item.resumeByKey){const repair=await localAction('operations','readonly',store=>store.get(item.resumeByKey));if(repair?.status!=='synced')continue;}
    const sale=saleChain(item);
    if(sale&&blockedSales.has(sale))continue;
@@ -281,11 +304,16 @@ export async function flushOutbox(){
    const row=await localAction('operations','readonly',s=>s.get(item.key));
    if(!active())break;
    if(!row)continue;
+   if(worker==='attendance'&&row.status==='synced')blockedAttendance.delete(row.date);
    if(!['local','syncing'].includes(row.status)&&!legacyMediaError(row)&&!renewedAuth(row)&&!legacySaleDependency(row,previous)){if(sale){previous.push(row);if(row.status!=='synced')blockedSales.add(sale);}continue;}
    if(legacySaleDependency(row,previous)){row.saleDependencyRecovery=SALE_DEPENDENCY_RECOVERY;row.status='local';row.error='';row.retryAt=0;await update(row);}
    if(sale)previous.push(row);
    if(legacyMediaError(row)){row.legacyMediaRecovered=true;row.legacyMediaRecovery=LEGACY_MEDIA_RECOVERY;row.status='local';row.error='';await update(row);}
    if(renewedAuth(row)){row.status='local';row.error='';row.retryAt=0;}
+   // Hold later shift stages only for work that can still be accepted. A
+   // definitive old checklist/photo rejection must not strand a fresh camera
+   // retake or hide the server's explicit missing-start response forever.
+   if(worker==='attendance')blockedAttendance.add(row.date);
    if(row.retryAt>Date.now()){if(sale)blockedSales.add(sale);scheduleRetry(row.retryAt-Date.now());summary.state='backoff';continue;}
    row.authEpoch=authEpoch;
    row.status='syncing';if(!await update(row))break;changed();
@@ -300,7 +328,9 @@ export async function flushOutbox(){
      body=new FormData();body.append('operation',JSON.stringify(operation));body.append('file',upload,row.filename||'upload');
      path='/operations/media';
     }
-    row.result=await api(path,{method:'POST',body,timeoutMs:180000});
+    // Disk selections also transfer original bytes server-side despite using
+    // JSON. Keep their existing media allowance; only booking is a short call.
+    row.result=await api(path,{method:'POST',body,timeoutMs:worker==='booking'?20000:180000});
     if(!active())break;
     row.status='synced';row.error='';row.errorStatus=0;row.retryAt=0;row.blob=null;
     summary.completed++;
@@ -321,16 +351,19 @@ export async function flushOutbox(){
      break;
     }
     summary.failed++;
+    if(worker==='attendance')blockedAttendance.delete(row.date);
     if(e.status===401)break;
     continue;
    }
    await update(row);changed();if(row.resumeCompleteKey)await resumeRepairedCompletion(row);
+   if(worker==='attendance')blockedAttendance.delete(row.date);
+   if(row.kind==='booking')void flushOutboxWorker('media');
   }
- }finally{running=false;changed();if(userId&&(!active()||rerunRequested))void flushOutbox();}
+ }finally{workers.delete(worker);running=workers.size>0;changed();if(userId&&(!active()||requestedWorkers.has(worker)))void flushOutboxWorker(worker);}
  return summary;
 }
 window.addEventListener('online',()=>flushOutbox());
 // Mobile browsers suspend timers in the background even while onLine stays true.
 for(const event of ['focus','pageshow'])window.addEventListener(event,()=>flushOutbox());
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)void flushOutbox();});
-window.addEventListener('pb-operations-reset',event=>{if(event.detail?.userId===userId){operationsGeneration=event.detail.generation;clearTimeout(timer);timer=null;retryDue=0;rerunRequested=false;}});
+window.addEventListener('pb-operations-reset',event=>{if(event.detail?.userId===userId){operationsGeneration=event.detail.generation;clearTimeout(timer);timer=null;retryDue=0;rerunRequested=false;requestedWorkers.clear();}});

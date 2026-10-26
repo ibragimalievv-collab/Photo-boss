@@ -29,7 +29,7 @@ from .services.booking_notices import booking_description, notice_booking_id
 
 log = logging.getLogger(__name__)
 ROLES = {'OWNER', 'ADMIN', 'PHOTOGRAPHER', 'MANAGER'}
-KINDS = {'service_status', 'work_event', 'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test', 'lunch_start', 'lunch_end', 'attendance', 'attendance_fine', 'sale_discount', 'manager_idle', 'manager_advice'}
+KINDS = {'operational_alert', 'service_status', 'work_event', 'booking_assignment', 'booking_reminder', 'control', 'daily_summary', 'chat', 'call', 'sale_ready', 'sale_created', 'academy', 'reminder', 'push_test', 'lunch_start', 'lunch_end', 'lunch_corrected', 'lunch_attention', 'attendance', 'attendance_fine', 'sale_discount', 'manager_idle', 'manager_advice'}
 
 
 def app_channel():
@@ -157,6 +157,18 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
     roles = set(await session.scalars(select(UserRole.role).where(UserRole.user_id == notice.user_id)))
     if not user or not user.active or not roles & ROLES:
         return False
+    if notice.kind == 'operational_alert':
+        from .models import Booking, HotelEmployee
+        try:
+            booking_id = json.loads(notice.payload or '{}').get('bookingId')
+        except (ValueError, TypeError, AttributeError):
+            return False
+        booking = await session.get(Booking, booking_id) if type(booking_id) is int else None
+        if not booking:
+            return False
+        return 'OWNER' in roles or bool('ADMIN' in roles and await session.scalar(
+            select(HotelEmployee.id).where(HotelEmployee.user_id == user.id,
+                                          HotelEmployee.hotel_id == booking.hotel_id).limit(1)))
     if notice.kind in {'work_event', 'service_status'}:
         return 'OWNER' in roles
     if notice.kind in {'manager_idle', 'manager_advice'}:
@@ -224,7 +236,7 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
             return True
         return bool('ADMIN' in roles and await session.scalar(select(HotelEmployee.id).where(
             HotelEmployee.user_id == user.id, HotelEmployee.hotel_id == booking.hotel_id).limit(1)))
-    if notice.kind in {'lunch_start', 'lunch_end'}:
+    if notice.kind in {'lunch_start', 'lunch_end', 'lunch_corrected', 'lunch_attention'}:
         from .models import HotelEmployee, WorkBreak
         try:
             break_id = json.loads(notice.payload or '{}').get('workBreakId')
@@ -322,11 +334,14 @@ async def eligible(session, notice, sub, *, include_read=False, for_delivery=Fal
 def payload_for(notice):
     urls = {'booking_assignment': '/app/#shootings', 'control': '/app/#insights', 'daily_summary': '/app/#insights',
             'sale_ready': '/app/#workflow', 'sale_created': '/app/#finance', 'academy': '/app/#academy',
+            'lunch_start': '/app/#workday', 'lunch_end': '/app/#workday',
+            'lunch_corrected': '/app/#workday', 'lunch_attention': '/app/#workday',
             'attendance': '/app/#workday', 'attendance_fine': '/app/#finance', 'sale_discount': '/app/#workflow',
             'manager_idle': '/app/#home', 'manager_advice': '/app/#home'}
     titles = {'service_status': 'Состояние подключений', 'work_event': 'Рабочее событие', 'booking_assignment': 'Назначена съёмка', 'booking_reminder': 'Скоро съёмка', 'chat': 'Новое сообщение', 'call': 'Входящий звонок',
               'sale_ready': 'Съёмка готова к продаже', 'sale_created': 'Оформлена продажа', 'academy': 'Готов разбор практики', 'push_test': 'Проверка уведомлений',
               'lunch_start': 'Сотрудник ушёл на обед', 'lunch_end': 'Сотрудник вернулся с обеда',
+              'lunch_corrected': 'Время обеда исправлено', 'lunch_attention': 'Нужно проверить отметку обеда',
               'attendance': 'Отметка смены', 'attendance_fine': 'Контроль времени смены',
               'sale_discount': 'Согласование скидки 50%', 'manager_idle': 'Пора пригласить гостей на съёмку',
               'manager_advice': 'Проверьте записи и команду отелей'}
@@ -334,6 +349,9 @@ def payload_for(notice):
         details = json.loads(notice.payload or '{}')
     except (TypeError, ValueError):
         details = {}
+    if notice.kind == 'operational_alert':
+        titles['operational_alert'] = 'Проверьте продажу'
+        urls['operational_alert'] = '/app/#finance'
     if notice.kind == 'attendance':
         titles['attendance'] = ('Отметка начала смены' if details.get('purpose') == 'start'
                                 else 'Отметка завершения смены')
