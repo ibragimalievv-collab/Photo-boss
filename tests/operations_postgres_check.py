@@ -72,8 +72,9 @@ async def main():
                     # Existing owner notices used to be held before operations
                     # waited for this employee. That inversion deadlocked here.
                     await conn.execute(text('UPDATE notifications SET text=text WHERE id=:id'), {'id': target})
-                    await conn.execute(text('''INSERT INTO notifications(user_id,text,event_key,kind,sent)
-                        VALUES (1,'CI only','ci-attendance-overlap','attendance',FALSE)'''))
+                    await conn.execute(text('''INSERT INTO notifications(user_id,text,event_key,kind,sent,created_at)
+                        VALUES (1,'CI only','ci-attendance-overlap','attendance',FALSE,:now)'''),
+                        {'now': NOW.replace(tzinfo=None)})
 
             async def operations():
                 await attendance_locked.wait()
