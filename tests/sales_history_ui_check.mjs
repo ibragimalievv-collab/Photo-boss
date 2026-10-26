@@ -58,12 +58,12 @@ ctx.FormData=class{constructor(form){this.values=form.values;}get(key){return th
 ctx.captureForm=()=>{};ctx.checkSaleFiles=async()=>{};ctx.outboxRows=async()=>[];ctx.enqueueBatch=async items=>{ctx.enqueued=items;};
 let operation=0;ctx.crypto={randomUUID:()=>`operation-${++operation}`};
 ctx.document.querySelector=()=>null;ctx.document.querySelectorAll=()=>[];
-ctx.form={id:'workflowSale',dataset:{},classList:{contains:()=>false},elements:{selected:{files:[]}},values:{total:'10',sold:'7'}};
+ctx.form={id:'workflowSale',dataset:{draftScope:'28'},classList:{contains:()=>false},elements:{selected:{files:[]}},values:{total:'10',sold:'7'}};
 await vm.runInContext('workflowSubmit(form)',ctx);
 assert.deepEqual(Array.from(ctx.enqueued,row=>row.kind),['sale_start','sale_counts','sale_complete']);
 assert.equal(ctx.enqueued[0].data.booking.id,28);
 assert.equal(ctx.enqueued[1].data.sold,7,'only explicit user correction may change declared quantity');
-ctx.form={...ctx.form,dataset:{},values:{total:'10',sold:'6'}};
+ctx.form={...ctx.form,dataset:{draftScope:'28'},values:{total:'10',sold:'6'}};
 await assert.rejects(vm.runInContext('workflowSubmit(form)',ctx),/Уже принято 7 выбранных фото/);
 vm.runInContext(`data.bookings[1].draft.selected=11;`,ctx);
 const overflow=vm.runInContext('workflowView()',ctx);

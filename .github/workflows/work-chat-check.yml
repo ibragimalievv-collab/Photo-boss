@@ -26,7 +26,7 @@ jobs:
           node-version: '22'
       - run: node --check app/work_chat_ui/chat.js
       - run: pip install playwright
-      - run: python -m playwright install --with-deps chromium
+      - run: python -m playwright install chromium
       - run: python tests/work_chat_browser_check.py
       - run: python tests/chat_reliability_browser_check.py
       - run: python tests/chat_media_browser_check.py

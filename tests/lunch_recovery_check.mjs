@@ -27,3 +27,37 @@ for(const reset of [events.get('pb-operations-reset'),accountEvents.get('pb-chat
  assert.equal(vm.runInContext('pendingKey',isolated),null);
 }
 console.log('PASS: lunch drops old account and reset responses');
+const view=vm.createContext({Date,Number,Promise,Error,setTimeout,esc:String,document:{addEventListener(){}},window:{addEventListener(){}}});
+vm.runInContext(source,view);
+vm.runInContext('state={actorId:1,items:[],timezone:"Europe/Moscow",hotels:[{id:3,name:"First"},{id:9,name:"Planned"}],defaultHotelId:9,canStart:true,canEdit:false}',view);
+assert.match(vm.runInContext('lunchView()',view),/<option value="9" selected>Planned/);
+vm.runInContext('state.defaultHotelId=null',view);
+assert.match(vm.runInContext('lunchView()',view),/<option value="">Выберите отель смены/);
+vm.runInContext('selectedHotel=3',view);
+assert.match(vm.runInContext('lunchView()',view),/<option value="3" selected>First/);
+console.log('PASS: planned hotel selected; ambiguous plans require explicit choice; manual choice retained');
+
+
+// A start accepted after a connection outage must unlock the already-open
+// lunch panel without requiring navigation or another photo of the shift.
+{
+ const handlers=new Map(),panel={outerHTML:''},rows=[{key:'offline-start',kind:'attendance',date:'2026-09-22',status:'local'}];
+ let requests=0;
+ const fresh={actorId:1,date:'2026-09-22',timezone:'Europe/Moscow',hotels:[{id:1,name:'Hotel'}],items:[],canStart:true};
+ const pending=vm.createContext({Date,Number,Promise,Error,setTimeout,esc:String,
+  document:{addEventListener(){},querySelector:selector=>selector==='#lunchPanel'?panel:null},
+  window:{addEventListener:(name,handler)=>handlers.set(name,handler)},
+  api:async()=>{requests++;return fresh;},outboxRows:async()=>rows});
+ vm.runInContext(source,pending);
+ vm.runInContext('state={actorId:1,date:"2026-09-22",canStart:false}',pending);
+ await handlers.get('pb-outbox')();
+ assert.equal(requests,0,'A local-only photo must not unlock lunch');
+ rows[0].status='synced';
+ await handlers.get('pb-outbox')();
+ assert.equal(requests,1);
+ assert.equal(vm.runInContext('state.canStart',pending),true);
+ assert.match(panel.outerHTML,/data-lunch="start" >Ушёл на обед/);
+ await handlers.get('pb-outbox')();
+ assert.equal(requests,1,'Other outbox activity must not repeatedly reload an acknowledged attendance row');
+ console.log('PASS: accepted offline shift refreshes lunch eligibility; local-only and repeated queue events do not');
+}

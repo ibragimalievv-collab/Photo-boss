@@ -42,9 +42,17 @@ async def operations_loop(bot, interval=300):
         for name, job in (("operations", run_operations_once), ("backup", maybe_send_daily_backup)):
             try:
                 # An export failure must not roll back or skip independent work.
-                async with Session() as session, operation_lease(session.bind):
-                    value = await job(session, bot)
-                    await session.commit()
+                async def transaction(job=job):
+                    async with Session() as session, operation_lease(session.bind):
+                        value = await job(session, bot)
+                        await session.commit()
+                        return value
+                from .push_notifications import app_channel
+                from .transaction_retry import retry_transaction
+                # App notices are committed with their deduplication records.
+                # Telegram/backup sends cannot be undone, so never replay them.
+                value = (await retry_transaction(transaction)
+                         if name == 'operations' and app_channel() else await transaction())
                 if name == "operations":
                     result.update(value)
                 else:

@@ -22,4 +22,15 @@ ctx.window.Telegram={WebApp:{initData:'fixture-only',openLink:url=>opens.push(['
 vm.runInContext('openDeviceDisk()',ctx);assert.deepEqual(opens[1],['telegram','https://disk.yandex.ru/client/disk']);
 ctx.window.Telegram.WebApp.openLink=()=>{throw Error('Unsupported Telegram client');};
 vm.runInContext('openDeviceDisk()',ctx);assert.deepEqual(opens[2],opens[0]);
+// A removed/revoked binding cannot leave the old selected paths usable.
+const diskNodes=new Map();
+ctx.panel.isConnected=true;ctx.panel.dataset.owner='0';ctx.panel.closest=()=>ctx.form;
+ctx.panel.querySelector=selector=>{if(!diskNodes.has(selector))diskNodes.set(selector,{hidden:false,innerHTML:'old',textContent:''});return diskNodes.get(selector);};
+ctx.api=async()=>({connected:false});
+vm.runInContext("state(panel).revision='revoked';state(panel).paths.add('disk:/Hotel/a.jpg')",ctx);
+await vm.runInContext('linked(panel,version)',ctx);
+assert.equal(vm.runInContext('state(panel).revision',ctx),null);
+assert.equal(vm.runInContext('state(panel).paths.size',ctx),0);
+assert.equal(diskNodes.get('[data-sale-disk-files]').innerHTML,'');
+assert.throws(()=>vm.runInContext('selectedDiskPhotos(form)',ctx),/Сначала прикрепите/);
 console.log('PASS: three photo sources, owner-only private browser, exact selection, account isolation and offline module');

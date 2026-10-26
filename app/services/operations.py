@@ -50,6 +50,9 @@ def reminder_kind(booking, now):
 
 
 async def run_operations_once(session, bot, now=None):
+    from .operations_locks import lock_background_notifications
+
+    await lock_background_notifications(session)
     now = now or datetime.now(UTC)
     bookings = (
         await session.scalars(

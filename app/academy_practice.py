@@ -1,17 +1,18 @@
 """Authenticated Academy assignments, uploads and reviews inside the Mini App."""
 import asyncio
-import contextlib
 import hashlib
 import io
 import json
 import logging
 import re
 import secrets
+import tempfile
 from datetime import UTC, datetime, timedelta
 
 from aiogram.exceptions import TelegramAPIError
 from aiohttp import web
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from .config import config
 from .miniapp_security import AccessError
@@ -23,7 +24,13 @@ from .services.training import (
     TRAINING_CATEGORIES,
     training_day,
 )
-from .services.training_ai import MAX_IMAGE_BYTES, analyze_training_set
+from .services.training_ai import (
+    MAX_ANALYSIS_BYTES,
+    MAX_IMAGE_BYTES,
+    analysis_copy,
+    analyze_training_set,
+    prepare_training_image,
+)
 from .work_chat import positive_id
 from .yandex_disk import ROOT, YandexDiskError
 
@@ -45,7 +52,7 @@ def analysis_data(value):
 class BoundedPhoto(io.BytesIO):
     def write(self, data):
         if self.tell() + len(data) > MAX_IMAGE_BYTES:
-            raise ValueError("Фото больше 8 МБ.")
+            raise ValueError(f"Фото больше {MAX_IMAGE_BYTES // 1024 // 1024} МБ.")
         return super().write(data)
 
 
@@ -157,7 +164,7 @@ class AcademyPractice:
         except ValueError:
             analysis = None
         plan = await self.assignment_context(conn, row)
-        return {"id": aid, "personalInstructions": plan.get("instructions", []),
+        return {"id": aid, "maxOriginalBytes": MAX_IMAGE_BYTES, "personalInstructions": plan.get("instructions", []),
                 "successCriteria": plan.get("successCriteria", []), "personalFocus": plan.get("focus"),
                 "planId": plan.get("planId"), "category": category.slug, "title": category.title,
                 "userName": user[0]["name"], "own": row["user_id"] == actor["id"],
@@ -265,6 +272,8 @@ class AcademyPractice:
         if not rows:
             raise AccessError("Фото не найдено.", 404)
         payload = await photo_bytes(self.api.bot, request.app["yandex_disk"], rows[0]["submitted_file_id"])
+        if request.query.get("preview") == "1":
+            payload, _ = await asyncio.to_thread(analysis_copy, payload)
         return web.Response(body=payload, content_type="image/jpeg")
 
     async def upload(self, request):
@@ -279,60 +288,115 @@ class AcademyPractice:
         if not request.content_type.startswith("multipart/"):
             raise AccessError("Выберите фото.", 400)
         if request.content_length and request.content_length > MAX_IMAGE_BYTES + 8192:
-            raise AccessError("Фото больше 8 МБ.", 413)
+            raise AccessError(f"Фото больше {MAX_IMAGE_BYTES // 1024 // 1024} МБ.", 413)
         reader = await request.multipart()
         part = await reader.next()
         if part is None or part.name != "file":
             raise AccessError("Выберите фото.", 400)
-        payload = bytearray()
-        while chunk := await part.read_chunk(64 * 1024):
-            payload.extend(chunk)
-            if len(payload) > MAX_IMAGE_BYTES:
-                raise AccessError("Фото больше 8 МБ.", 413)
-        if await reader.next() is not None or not payload.startswith(b"\xff\xd8\xff") or not payload.endswith(b"\xff\xd9"):
-            raise AccessError("Нужно одно корректное JPEG-фото.", 415)
-        digest = hashlib.sha256(payload).hexdigest()
-        storage = request.app["yandex_disk"]
-        folder = ROOT + "/academy"
-        path = f"{folder}/{aid}-{pose}-{secrets.token_hex(8)}-{digest}.jpg"
-        saved = False
-        try:
-            async with self.lock, self.engine.begin() as conn:
-                row = await self.assignment(conn, actor, aid, lock=True)
-                if row["user_id"] != actor["id"]:
-                    raise AccessError("Задание уже отправлено на проверку.", 409)
-                shots = await self.api.rows(conn, "SELECT * FROM training_submissions WHERE assignment_id=:id", id=aid)
-                existing = next((s for s in shots if s['pose_index'] == pose), None)
-                if existing and existing['submitted_file_id'].endswith(digest + '.jpg'):
-                    # The upload may have committed before its HTTP response
-                    # was lost, including the fifth photo that starts review.
-                    return web.json_response(await self.detail_data(conn, actor, aid))
-                if existing:
-                    raise AccessError("Кадр уже сохранён. Обновите задание.", 409)
-                if row["status"] != "ACTIVE":
-                    raise AccessError("Задание уже отправлено на проверку.", 409)
-                if any(s["submitted_file_id"].endswith(digest + ".jpg") for s in shots):
-                    raise AccessError("Этот снимок уже загружен. Нужен другой кадр.", 409)
+        # Stream request data to disk instead of holding several camera originals
+        # in server RAM. The provider stream is checked against both digests.
+        with tempfile.TemporaryFile(mode="w+b") as original:
+            sha256, md5 = hashlib.sha256(), hashlib.md5(usedforsecurity=False)
+            size, head, tail = 0, b"", b""
+            while chunk := await part.read_chunk(64 * 1024):
+                size += len(chunk)
+                if size > MAX_IMAGE_BYTES:
+                    raise AccessError(f"Фото больше {MAX_IMAGE_BYTES // 1024 // 1024} МБ.", 413)
+                original.write(chunk)
+                sha256.update(chunk)
+                md5.update(chunk)
+                head = (head + chunk)[:3]
+                tail = (tail + chunk)[-2:]
+            if await reader.next() is not None or head != b"\xff\xd8\xff" or tail != b"\xff\xd9":
+                raise AccessError("Нужно одно корректное JPEG-фото.", 415)
+            digest = sha256.hexdigest()
+            storage = request.app["yandex_disk"]
+            folder = ROOT + "/academy"
+            path = f"{folder}/{aid}-{pose}-{secrets.token_hex(8)}-{digest}.jpg"
+            # Validate before contacting storage, then revalidate under a short
+            # row lock after it succeeds. Slow uploads must not hold a database
+            # transaction or block another employee's Academy operations.
+            async with self.engine.connect() as conn:
+                _, _, replay = await self._validate_upload(conn, actor, aid, pose, digest)
+                if replay is not None:
+                    return web.json_response(replay)
+            attempted, linked = False, False
+            try:
                 await storage.ensure_dir(ROOT)
                 await storage.ensure_dir(folder)
-                await storage.upload_bytes(path, bytes(payload), content_type="image/jpeg")
-                saved = True
-                await conn.execute(text("""INSERT INTO training_submissions
-                    (assignment_id,pose_index,reference_filename,submitted_file_id,submitted_at)
-                    VALUES (:id,:pose,:reference,:file,:now)"""),
-                    {"id": aid, "pose": pose, "reference": f"{pose:02d}.jpg",
-                     "file": DISK_PREFIX + path, "now": datetime.now(UTC).replace(tzinfo=None)})
-                if len(shots) == 4:
-                    await conn.execute(text("""UPDATE training_assignments SET status='PENDING_REVIEW',
-                        review_source='AI_PENDING' WHERE id=:id"""), {"id": aid})
-                    await self.api.audit_write(conn, actor, "training_submitted", "training_assignment", aid, row["category_slug"])
-                result = await self.detail_data(conn, actor, aid)
-        except Exception:
-            if saved:
-                with contextlib.suppress(YandexDiskError):
-                    await storage.delete(path)
-            raise
-        return web.json_response(result, status=201)
+                attempted = True
+                if size <= 8 * 1024 * 1024:
+                    # Keep the established small-file path for bot/provider adapters.
+                    original.seek(0)
+                    await storage.upload_bytes(path, original.read(), content_type="image/jpeg")
+                else:
+                    await storage.upload_file(path, original, size=size, sha256=digest,
+                                              md5=md5.hexdigest(), content_type="image/jpeg")
+                async with self.lock, self.engine.begin() as conn:
+                    row, shots, replay = await self._validate_upload(conn, actor, aid, pose, digest, lock=True)
+                    if replay is not None:
+                        # Another request committed the same bytes during this
+                        # upload. Keep its reference and discard only our new path.
+                        return web.json_response(replay)
+                    await conn.execute(text("""INSERT INTO training_submissions
+                        (assignment_id,pose_index,reference_filename,submitted_file_id,submitted_at)
+                        VALUES (:id,:pose,:reference,:file,:now)"""),
+                        {"id": aid, "pose": pose, "reference": f"{pose:02d}.jpg",
+                         "file": DISK_PREFIX + path, "now": datetime.now(UTC).replace(tzinfo=None)})
+                    if len(shots) == 4:
+                        await conn.execute(text("""UPDATE training_assignments SET status='PENDING_REVIEW',
+                            review_source='AI_PENDING' WHERE id=:id"""), {"id": aid})
+                        await self.api.audit_write(conn, actor, "training_submitted", "training_assignment", aid, row["category_slug"])
+                    result = await self.detail_data(conn, actor, aid)
+                linked = True  # Only after the database commit succeeded.
+            finally:
+                if attempted and not linked:
+                    await self._cleanup_upload(storage, aid, path)
+            return web.json_response(result, status=201)
+
+    async def _cleanup_upload(self, storage, aid, path):
+        """A lost COMMIT acknowledgement is not proof that a file is unlinked."""
+        try:
+            async with self.engine.begin() as conn:
+                # Wait for any uncertain original transaction before testing
+                # absence. Also protect archived originals after a fast review.
+                await self.api.rows(conn, "SELECT id FROM training_assignments WHERE id=:id FOR UPDATE", id=aid)
+                references = await self.api.rows(conn, """SELECT 1 AS present FROM training_submissions
+                    WHERE submitted_file_id=:file UNION ALL
+                    SELECT 1 AS present FROM academy_practice_reviews WHERE photos LIKE :pattern LIMIT 1""",
+                    file=DISK_PREFIX + path, pattern='%' + DISK_PREFIX + path + '%')
+            if references:
+                return
+        except (OSError, RuntimeError, SQLAlchemyError):
+            # Preserve an uncertain original for later cleanup; an extra file is
+            # preferable to silently deleting a committed employee submission.
+            logger.warning("Academy upload cleanup deferred: assignment %s database confirmation unavailable", aid)
+            return
+        try:
+            await storage.delete(path)
+        except YandexDiskError:
+            logger.warning("Academy upload cleanup deferred: assignment %s storage confirmation unavailable", aid)
+
+    async def _validate_upload(self, conn, actor, aid, pose, digest, *, lock=False):
+        current_staff = await self.api.rows(conn, """SELECT id FROM users WHERE id=:uid AND active=TRUE
+            AND EXISTS (SELECT 1 FROM user_roles WHERE user_id=:uid
+                        AND role IN ('OWNER','ADMIN','MANAGER','PHOTOGRAPHER'))""", uid=actor['id'])
+        if not current_staff:
+            raise AccessError("Аккаунт сотрудника или рабочая роль больше не активны.", 403)
+        row = await self.assignment(conn, actor, aid, lock=lock)
+        if row["user_id"] != actor["id"]:
+            raise AccessError("Задание уже отправлено на проверку.", 409)
+        shots = await self.api.rows(conn, "SELECT * FROM training_submissions WHERE assignment_id=:id", id=aid)
+        existing = next((s for s in shots if s['pose_index'] == pose), None)
+        if existing and existing['submitted_file_id'].endswith(digest + '.jpg'):
+            return row, shots, await self.detail_data(conn, actor, aid)
+        if existing:
+            raise AccessError("Кадр уже сохранён. Обновите задание.", 409)
+        if row["status"] != "ACTIVE":
+            raise AccessError("Задание уже отправлено на проверку.", 409)
+        if any(s["submitted_file_id"].endswith(digest + ".jpg") for s in shots):
+            raise AccessError("Этот снимок уже загружен. Нужен другой кадр.", 409)
+        return row, shots, None
 
     async def review(self, request):
         raise AccessError("Практику проверяет AI-помощник. Ручное принятие отключено.", 403)
@@ -445,7 +509,7 @@ class AcademyPractice:
         logger.warning("Academy assignment %s reopened unreadable photos %s", row["id"], indexes)
         return True
 
-    async def _load_submissions(self, row, shots, storage):
+    async def _load_submissions(self, row, shots, storage, *, prepare_large=True):
         by_index = {s["pose_index"]: s for s in shots}
         unavailable = [index for index in range(1, 6) if index not in by_index]
         uploaded = []
@@ -459,7 +523,11 @@ class AcademyPractice:
                 if (not payload.startswith(b"\xff\xd8\xff") or not payload.endswith(b"\xff\xd9")
                         or len(payload) > MAX_IMAGE_BYTES):
                     raise ValueError("Stored practice photo is not a bounded JPEG")
-                uploaded.append(payload)
+                if prepare_large and len(payload) > MAX_ANALYSIS_BYTES:
+                    uploaded.append(await asyncio.to_thread(prepare_training_image, payload))
+                else:
+                    uploaded.append(payload)
+                del payload
             except YandexDiskError as exc:
                 if exc.http_status == 404:
                     unavailable.append(index)
@@ -582,7 +650,7 @@ class AcademyPractice:
                     WHERE assignment_id=:id ORDER BY pose_index""", id=row["id"])
             category = CATEGORY_BY_SLUG[row["category_slug"]]
             if config.openai_api_key:
-                uploaded, unavailable, deferred = await self._load_submissions(row, shots, storage)
+                uploaded, unavailable, deferred = await self._load_submissions(row, shots, storage, prepare_large=True)
                 if unavailable and not deferred:
                     reopened = await self._reopen_unavailable_photos(
                         row, shots, unavailable, expected_sources={"AI_PROCESSING"},

@@ -32,7 +32,7 @@ async def current_revision(factory, bid):
             await session.scalar(select(Shooting).where(Shooting.booking_id == bid))))
 
 
-@pytest.mark.parametrize('mode', ['edit', 'cancel'])
+@pytest.mark.parametrize('mode', ['edit', 'cancel', 'trash'])
 def test_miniapp_change_commits_notice_and_replay_cannot_duplicate(mode):
     async def run():
         engine, factory = await fixture()
@@ -183,7 +183,8 @@ def test_repeated_move_back_to_same_date_gets_a_new_notice():
     asyncio.run(run())
 
 
-def test_notice_failure_rolls_back_booking_change(monkeypatch):
+@pytest.mark.parametrize('mode', ['cancel', 'trash'])
+def test_notice_failure_rolls_back_booking_change(monkeypatch, mode):
     from app.services import booking_notices
     monkeypatch.setattr(booking_notices, 'queue_photographer_change',
                         AsyncMock(side_effect=RuntimeError('synthetic queue failure')))
@@ -194,7 +195,7 @@ def test_notice_failure_rolls_back_booking_change(monkeypatch):
             revision = await current_revision(factory, bid)
             api = SimpleNamespace(engine=engine, today=lambda: date(2026, 9, 21),
                                   body=AsyncMock(side_effect=lambda request: request.body))
-            body = {'mode': 'cancel', 'revision': revision, 'reason': 'По просьбе гостя'}
+            body = {'mode': mode, 'revision': revision, 'reason': 'По просьбе гостя'}
             with pytest.raises(RuntimeError, match='synthetic queue failure'):
                 await BookingManagement(api).manage(Request({'id': 1, 'roles': ['MANAGER']}, body, bid))
             assert await current_revision(factory, bid) == revision

@@ -156,6 +156,52 @@ export function canReplaceOperationFile(row){
  return Boolean(row?.status==='error'&&([400,413].includes(row.errorStatus)||duplicateSelectedRejection(row)||duplicateReceiptRejection(row))&&
   ['shoot_photo','delivery_photo','sale_selected','booking_receipt','sale_receipt'].includes(row.kind));
 }
+// This exact validation rolls back before recording the idempotency key. A
+// deliberate new selection may replace its stale reference, never an uncertain
+// send or an already accepted photo, receipt, count or completion operation.
+export function canReplaceDiskSelection(row){
+ return Boolean(row?.kind==='sale_disk_selected'&&row.status==='error'&&row.errorStatus===409&&!row.result&&
+  row.error==='Папка съёмки изменилась. Откройте её и выберите фотографии заново.');
+}
+export async function replaceDiskSelection(key,photo,draftId){
+ if(running||queueRepairing)throw new Error('Дождитесь завершения текущей отправки, затем выберите кадр заново.');
+ queueRepairing=true;let committed=false;
+ try{
+  const actor=userId,generation=operationsGeneration,saleGeneration=salesGeneration;
+  if(!Number.isSafeInteger(draftId)||draftId<=0||!photo||typeof photo.path!=='string'||!photo.path||
+   typeof photo.revision!=='string'||!photo.revision)throw new Error('Откройте обновлённую папку и выберите один кадр заново.');
+  let failure=null;
+  try{await localAction('operations','readwrite',store=>{
+   const request=store.get(key);
+   const abort=error=>{failure=error;store.transaction.abort();};
+   const correct=(row,start)=>{
+    try{
+     if(!actor||actor!==userId||generation!==operationsGeneration||saleGeneration!==salesGeneration||
+      !row||row.userId!==actor||!canReplaceDiskSelection(row)||(row.generation||'')!==generation||
+      (row.salesGeneration||'')!==saleGeneration)
+      throw new Error('Этот кадр нельзя заменять: проверьте результат исходной отправки и обновите продажу.');
+     const original=row.data?.draft;
+     if(original?.id!==draftId&&!(original?.key&&start?.key===original.key&&start.userId===actor&&
+      start.kind==='sale_start'&&start.status==='synced'&&start.result?.draftId===draftId&&
+      (start.generation||'')===generation&&(start.salesGeneration||'')===saleGeneration))
+      throw new Error('Откройте исходную продажу этого кадра.');
+     if(photo.revision===row.data?.revision)throw new Error('Откройте обновлённую папку и выберите один кадр заново.');
+     // Read eligibility and write the replacement in one IndexedDB transaction:
+     // another tab's acknowledged/syncing result cannot be overwritten in between.
+     store.put({...row,data:{...row.data,path:photo.path,revision:photo.revision},
+      status:'local',error:'',errorStatus:0,retryAt:0});
+    }catch(error){abort(error);}
+   };
+   request.onsuccess=()=>{
+    const row=request.result;
+    if(row?.data?.draft?.key){const start=store.get(row.data.draft.key);start.onsuccess=()=>correct(row,start.result);}
+    else correct(row,null);
+   };
+   return request;
+  });}catch(error){throw failure||error;}
+  committed=true;changed();
+ }finally{queueRepairing=false;if(committed||rerunRequested)void flushOutbox();}
+}
 export async function replaceOperationFile(key,file){
  const row=await localAction('operations','readonly',s=>s.get(key));
  if(!row||row.userId!==userId||!canReplaceOperationFile(row))throw new Error('Этот файл нельзя заменять: дождитесь результата отправки или повторите исходный файл.');

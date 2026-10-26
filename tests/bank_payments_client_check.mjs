@@ -6,6 +6,7 @@ const source=fs.readFileSync('app/webapp/js/bank-payments.js','utf8').replace(/^
 const listeners={},calls=[],status={textContent:''},button={disabled:false},files=Array.from({length:20},(_,index)=>({name:`frame-${index}.jpg`}));
 const sale={dataset:{pendingKeys:'["sale-start","sale-photo20"]'},elements:{total:{value:'150'},sold:{value:'20'},selected:{files}}};
 const bankForm={id:'bankPaymentForm',dataset:{},values:{purpose:'PURCHASE',amount:''},querySelector:selector=>selector==='button'?button:status};
+const panel={};bankForm.closest=()=>panel;
 const booking={id:7,hotelId:1,sales:[{id:11}],draft:null,paidAmount:'1000',salesAmount:'8000'};
 const queued=[{key:'sale-start',status:'synced',result:{draftId:9}},{key:'sale-photo20',status:'synced',result:{saleId:11,draftId:9}}];
 let quoteCalls=0;
@@ -17,7 +18,7 @@ const context=vm.createContext({Number,JSON,Error,Set,rows:queued,sale,b:booking
  outboxRows:async()=>queued,
  api:async(path,options)=>{calls.push({path,options});if(path.startsWith('/workflow'))return {bookings:[booking],tariffs:[]};const error=new Error('Сеть временно недоступна.');error.status=503;throw error;},
  window:{addEventListener(){}},
- document:{addEventListener:(name,fn)=>{listeners[name]=fn;},querySelector:selector=>selector==='#workflowSale'?sale:null},
+ document:{addEventListener:(name,fn)=>{listeners[name]=fn;},querySelector:selector=>selector==='#workflowSale'?sale:selector==='#bankPanel'?panel:null},
 });
 vm.runInContext(source,context);
 let payload=vm.runInContext("bankPaymentPayload(sale,b,settingsFixture,{purpose:'PURCHASE',amount:'',requestKey:'test-key'},rows)",context);

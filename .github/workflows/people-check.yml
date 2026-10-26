@@ -18,7 +18,7 @@ jobs:
           node-version: '22'
       - run: node --check app/people_ui/people.js
       - run: pip install playwright
-      - run: python -m playwright install --with-deps chromium
+      - run: python -m playwright install chromium
       - run: python tests/people_browser_check.py
       - uses: actions/upload-artifact@v4
         if: always()

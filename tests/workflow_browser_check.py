@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from playwright.async_api import async_playwright
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from test_miniapp_release import TOKEN, signed
 from test_workflow_services import booking_data, fixture
 from work_calls_browser_check import wait_async
@@ -47,7 +47,14 @@ from app.workflow import Workflow
 
 async def main():
     temporary = tempfile.TemporaryDirectory(prefix='photo-boss-offline-')
-    engine, factory = await fixture('sqlite+aiosqlite:///' + str(Path(temporary.name) / 'workflow.db'))
+    engine, factory = await fixture('sqlite+aiosqlite:///' + str(Path(temporary.name) / 'workflow.db') + '?timeout=15')
+    # This disposable file serves browser requests alongside expiry polling.
+    # SQLite's rollback journal makes readers block writer commits (and then
+    # other readers), unlike production PostgreSQL. WAL keeps those real
+    # concurrent requests independent; failures still propagate to assertions.
+    async with engine.connect() as conn:
+        assert (await conn.scalar(text('PRAGMA journal_mode=WAL'))).lower() == 'wal'
+        await conn.commit()
     async with factory() as session:
         booking = await create_booking_record(session, await session.get(User, 1), booking_data())
         booking.photographer_id = 2
@@ -407,7 +414,15 @@ async def main():
                         await form.locator('..').locator('summary').click()
                         await form.locator('..').get_by_role('button', name='Посмотреть фото').click()
                         await form.locator('..').get_by_alt_text('Фото отметки смены').wait_for()
-                        value = await panel.evaluate("async purpose=>{const {api}=await import('/app/js/api.js');return (await api('/attendance/pending')).items.find(r=>r.purpose===purpose).offline_claimed_at.slice(0,16);}", purpose)
+                        # datetime-local uses the browser's timezone. Keeping
+                        # UTC digits while stripping the offset invents a later
+                        # (possibly future) time in non-UTC browser contexts.
+                        value = await panel.evaluate("""async purpose=>{
+                            const {api}=await import('/app/js/api.js');
+                            const claimed=(await api('/attendance/pending')).items.find(r=>r.purpose===purpose).offline_claimed_at;
+                            const time=new Date(claimed);
+                            return new Date(time.getTime()-time.getTimezoneOffset()*60000).toISOString().slice(0,19);
+                        }""", purpose)
                         await form.locator('[name=verifiedAt]').fill(value)
                         await form.locator('[name=note]').fill('Checked photo and shift time')
                         await form.locator('button[type=submit],button:not([type])').click()

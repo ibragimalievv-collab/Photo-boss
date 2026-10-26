@@ -33,7 +33,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: pip install -r requirements-dev.txt playwright==1.51.0
-      - run: python -m playwright install --with-deps chromium
+      - run: python -m playwright install chromium
       - name: Parser, permissions, preservation and rollback regression
         run: |
           ruff check app tests

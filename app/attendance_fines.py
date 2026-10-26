@@ -226,10 +226,14 @@ async def sweep(api, now):
 
 async def fine_loop(api):
     from .operations_guard import operation_lease
+    from .transaction_retry import retry_transaction
     while True:
         try:
             async with operation_lease(api.engine):
-                await sweep(api, datetime.now(timezone.utc))
+                now = datetime.now(timezone.utc)
+                # sweep opens a new transaction on every attempt; payroll and
+                # notice changes roll back together before an immediate retry.
+                await retry_transaction(lambda now=now: sweep(api, now))
         except asyncio.CancelledError:
             raise
         except Exception:
