@@ -15,6 +15,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from .gallery_folders import directory_chain, selected_folder, storage_folder
 from .miniapp_security import AccessError
 from .models import (
     Booking,
@@ -30,13 +31,13 @@ from .models import (
     Sale,
     Shooting,
     User,
+    UserRole,
     utc_now,
 )
 from .services.booking_access import booking_scope, can_access_booking
 from .services.core import audit
 from .services.photo_storage import image_format
 from .yandex_disk import (
-    ROOT,
     YandexDisk,
     YandexDiskError,
     configured_from_env,
@@ -209,17 +210,23 @@ class Delivery:
                 data.get('selected', False), hashlib.sha256(raw).hexdigest())
 
     @staticmethod
-    def photo_context(booking, client):
+    def photo_context(booking, client, hotel, photographer):
         return (booking.id, booking.client_id, booking.shoot_date.isoformat(),
-                str(booking.shoot_time), client.name if client else 'Гость')
+                str(booking.shoot_time), client.name if client else None,
+                booking.hotel_id, hotel.name if hotel else None,
+                booking.photographer_id, photographer.name if photographer else None, booking.room)
 
     @staticmethod
-    def photo_folders(booking, client):
-        guest = re.sub(r'[^A-Za-zА-Яа-яЁё0-9 ._()#-]', '_', (client.name if client else 'Гость'))[:60].strip(' .') or 'Гость'
-        stamp = f"{booking.shoot_date.isoformat()}_{str(booking.shoot_time)[:5].replace(':','-')}_{guest.replace(' ', '_')}"
-        booking_folder = ROOT + f'/delivery/booking-{booking.id}'
-        folder = booking_folder + '/' + stamp
-        return booking_folder, folder, folder + '/Все фото', folder + '/Выбранные'
+    def photo_folders(booking, client, hotel, photographer):
+        folder = storage_folder(booking, client.name if client else None,
+                                hotel.name if hotel else None, photographer.name if photographer else None)
+        return folder, folder + '/Все фото', folder + '/Выбранные'
+
+    async def photo_location(self, session, booking, client):
+        hotel = await session.get(Hotel, booking.hotel_id) if booking.hotel_id else None
+        photographer = await session.get(User, booking.photographer_id) if booking.photographer_id else None
+        return (self.photo_context(booking, client, hotel, photographer),
+                self.photo_folders(booking, client, hotel, photographer))
 
     @staticmethod
     async def verify_photo(raw):
@@ -262,8 +269,7 @@ class Delivery:
                 DeliveryPhoto.sha256 == digest, DeliveryPhoto.upload_set == photo_set)) if g else None
             old_path = old.disk_path if old else None
             client = await session.get(Client, b.client_id)
-            context = self.photo_context(b, client)
-            booking_folder, folder, all_folder, selected_folder = self.photo_folders(b, client)
+            context, (folder, all_folder, chosen_folder) = await self.photo_location(session, b, client)
         await self.verify_photo(raw)
         token, client_id = configured_from_env()
         if not token:
@@ -277,13 +283,13 @@ class Delivery:
             except YandexDiskError as exc:
                 if 'HTTP 404' not in str(exc) and 'не совпадает' not in str(exc):
                     raise
-        for directory in (ROOT, ROOT + '/delivery', booking_folder, folder, all_folder, selected_folder):
+        for directory in (*directory_chain(folder), all_folder, chosen_folder):
             await storage.ensure_dir(directory)
-        path = (selected_folder if photo_set == 'SELECTED' else all_folder) + f'/{digest}.{ext}'
+        path = (chosen_folder if photo_set == 'SELECTED' else all_folder) + f'/{digest}.{ext}'
         await storage.upload_bytes(path, raw, content_type=mime)
         selected = photo_set == 'SELECTED' or data.get('selected', False)
         if selected and photo_set == 'ALL':
-            await storage.upload_bytes(selected_folder + f'/{digest}.{ext}', raw, content_type=mime)
+            await storage.upload_bytes(chosen_folder + f'/{digest}.{ext}', raw, content_type=mime)
         return prepared | {'path': path}
 
     async def apply(self, session, actor, kind, data, raw=None, *, prepared=None):
@@ -321,7 +327,8 @@ class Delivery:
         old = await session.scalar(select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id, DeliveryPhoto.sha256 == digest, DeliveryPhoto.upload_set == photo_set))
         if prepared is not None:
             client = await session.get(Client, b.client_id)
-            if prepared['context'] != self.photo_context(b, client):
+            context, _folders = await self.photo_location(session, b, client)
+            if prepared['context'] != context:
                 raise AccessError('Данные съёмки изменились. Повторите загрузку.', 409)
             path = prepared['path']
             if old:
@@ -348,14 +355,14 @@ class Delivery:
                 if 'HTTP 404' not in str(exc) and 'не совпадает' not in str(exc):
                     raise
         client = await session.get(Client, b.client_id)
-        booking_folder, folder, all_folder, selected_folder = self.photo_folders(b, client)
-        for directory in (ROOT, ROOT + '/delivery', booking_folder, folder, all_folder, selected_folder):
+        _context, (folder, all_folder, chosen_folder) = await self.photo_location(session, b, client)
+        for directory in (*directory_chain(folder), all_folder, chosen_folder):
             await storage.ensure_dir(directory)
-        path = (selected_folder if photo_set == 'SELECTED' else all_folder) + f'/{digest}.{ext}'
+        path = (chosen_folder if photo_set == 'SELECTED' else all_folder) + f'/{digest}.{ext}'
         await storage.upload_bytes(path, raw, content_type=mime)
         selected = photo_set == 'SELECTED' or data.get('selected', False)
         if selected and photo_set == 'ALL':
-            await storage.upload_bytes(selected_folder + f'/{digest}.{ext}', raw, content_type=mime)
+            await storage.upload_bytes(chosen_folder + f'/{digest}.{ext}', raw, content_type=mime)
         if old:
             # A DB duplicate can refer to an account that has been disconnected.
             # Re-upload the provided original to the current Disk before success.
@@ -390,16 +397,15 @@ class Delivery:
                 raise AccessError('Яндекс Диск недоступен.', 503)
             storage = YandexDisk(token, client_id)
             raw = await self.bytes(p)
-            client = await session.get(Client, b.client_id)
-            guest = re.sub(r'[^A-Za-zА-Яа-яЁё0-9 ._()#-]', '_', (client.name if client else 'Гость'))[:60].strip(' .') or 'Гость'
-            stamp = f"{b.shoot_date.isoformat()}_{str(b.shoot_time)[:5].replace(':','-')}_{guest.replace(' ', '_')}"
-            booking_folder = ROOT + f'/delivery/booking-{b.id}'
-            folder = booking_folder + '/' + stamp
-            selected_folder = folder + '/Выбранные'
-            for directory in (ROOT, ROOT + '/delivery', booking_folder, folder, selected_folder):
+            try:
+                chosen_folder = selected_folder(p.disk_path, b.id)
+            except ValueError as exc:
+                raise AccessError('Расположение исходного фото не подтверждено. Загрузите его повторно.', 409) from exc
+            folder = chosen_folder.rsplit('/', 1)[0]
+            for directory in (*directory_chain(folder), chosen_folder):
                 await storage.ensure_dir(directory)
             ext, mime = image_format(raw)
-            selected_path = selected_folder + f'/{p.sha256}.{ext}'
+            selected_path = chosen_folder + f'/{p.sha256}.{ext}'
             if body['selected']:
                 await storage.upload_bytes(selected_path, raw, content_type=mime)
             else:
@@ -414,17 +420,59 @@ class Delivery:
             return web.json_response({'photoId': p.id, 'selected': p.selected})
 
     async def staff_photo(self, request):
-        a = request['miniapp_actor']
         async with AsyncSession(self.api.engine) as session:
+            a = await self.download_actor(session, request)
             b = await self.booking(session, a, request.match_info['booking'])
             p = await session.get(DeliveryPhoto, int(request.match_info['photo']))
             g = await session.get(DeliveryGallery, p.gallery_id) if p else None
             if not g or g.booking_id != b.id:
                 raise AccessError('Фото не найдено.', 404)
-            raw = await self.bytes(p)
-            if request.query.get('preview')=='1':
-                raw = await asyncio.to_thread(self.preview, raw)
-            return web.Response(body=raw, content_type=image_format(raw)[1])
+        # Provider I/O and image decoding must never retain a database lease.
+        raw = await self.bytes(p)
+        if request.query.get('preview') == '1':
+            raw = await asyncio.to_thread(self.preview, raw)
+        await self.authorize_staff_download(request, [p])
+        return web.Response(body=raw, content_type=image_format(raw)[1])
+
+    async def download_actor(self, session, request):
+        actor = request['miniapp_actor']
+        person = await session.get(User, actor['id'])
+        roles = (await session.scalars(select(UserRole.role).where(UserRole.user_id == actor['id']))).all()
+        if not person or not person.active or not roles:
+            raise AccessError('Рабочий доступ отключён.', 403)
+        return actor | {'roles': roles}
+
+    @staticmethod
+    def download_snapshot(photo):
+        return photo.id, photo.gallery_id, photo.disk_path, photo.sha256, photo.byte_size
+
+    async def authorize_staff_download(self, request, files):
+        async with AsyncSession(self.api.engine) as session:
+            actor = await self.download_actor(session, request)
+            booking = await self.booking(session, actor, request.match_info['booking'])
+            current = (await session.scalars(select(DeliveryPhoto).join(DeliveryGallery,
+                DeliveryGallery.id == DeliveryPhoto.gallery_id).where(
+                DeliveryGallery.booking_id == booking.id,
+                DeliveryPhoto.id.in_([p.id for p in files])))).all()
+            if {self.download_snapshot(p) for p in files} != {self.download_snapshot(p) for p in current}:
+                raise AccessError('Фотографии изменились. Повторите скачивание.', 409)
+
+    @staticmethod
+    def direct_photo_allowed(gallery, photo):
+        return bool(photo and photo.gallery_id == gallery.id and (
+            photo.upload_set == 'ALL' if gallery.delivery_mode == 'ALL'
+            else photo.selected or photo.upload_set == 'SELECTED'))
+
+    async def authorize_public_download(self, request, files, *, direct=False):
+        async with AsyncSession(self.api.engine) as session:
+            gallery = await self.public_gallery(request, session)
+            query = select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == gallery.id) if direct else self.client_photos_query(gallery)
+            current = (await session.scalars(query.where(
+                DeliveryPhoto.id.in_([p.id for p in files])))).all()
+            if direct:
+                current = [p for p in current if self.direct_photo_allowed(gallery, p)]
+            if {self.download_snapshot(p) for p in files} != {self.download_snapshot(p) for p in current}:
+                raise web.HTTPNotFound(text='Фотографии больше не доступны для скачивания.')
 
     async def bytes(self, photo):
         token, client_id = configured_from_env()
@@ -511,20 +559,23 @@ class Delivery:
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
             g = await self.public_gallery(request, session)
             p = await session.get(DeliveryPhoto, int(request.match_info['photo']))
-            if not p or p.gallery_id != g.id or (g.delivery_mode == 'SELECTED' and not p.selected and p.upload_set != 'SELECTED') or (g.delivery_mode == 'ALL' and p.upload_set != 'ALL'):
+            if not self.direct_photo_allowed(g, p):
                 raise web.HTTPNotFound()
-            raw = await self.bytes(p)
-            download = request.query.get('download') == '1'
-            if download:
-                from .gallery_workspace import bump_counter
+        raw = await self.bytes(p)
+        if request.query.get('preview') == '1':
+            raw = await asyncio.to_thread(self.preview, raw)
+        await self.authorize_public_download(request, [p], direct=True)
+        download = request.query.get('download') == '1'
+        if download:
+            from .gallery_workspace import bump_counter
+            async with AsyncSession(self.api.engine) as session:
+                g = await self.public_gallery(request, session)
                 if not g.downloaded_at:
                     g.downloaded_at = utc_now()
                 await bump_counter(session, g.id, 'downloads')
                 await session.commit()
-            if request.query.get('preview') == '1':
-                raw = await asyncio.to_thread(self.preview, raw)
-            headers = {'Content-Disposition': f'attachment; filename="photo-{p.id}.{image_format(raw)[0]}"'} if download else {}
-            return web.Response(body=raw, content_type=image_format(raw)[1], headers=headers)
+        headers = {'Content-Disposition': f'attachment; filename="photo-{p.id}.{image_format(raw)[0]}"'} if download else {}
+        return web.Response(body=raw, content_type=image_format(raw)[1], headers=headers)
 
     async def archive(self, request):
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
@@ -535,20 +586,28 @@ class Delivery:
                 raise web.HTTPBadRequest(text='Альбом недоступен для скачивания целиком.')
             from .gallery_workspace import archive_selection, bump_counter
             files = archive_selection(request, files)
-            response = await self.stream_archive(request, files)
+        response = await self.stream_archive(request, files,
+            authorize=lambda: self.authorize_public_download(request, files))
+        async with AsyncSession(self.api.engine) as session:
+            g = await session.get(DeliveryGallery, g.id)
+            if not g:
+                return response
             if not g.downloaded_at:
                 g.downloaded_at = utc_now()
             await bump_counter(session, g.id, 'downloads')
             await session.commit()
             return response
 
-    async def stream_archive(self, request, files):
+    async def stream_archive(self, request, files, *, authorize=None):
         async with request.app['delivery_archive_slot']:
             with tempfile.TemporaryFile() as output:
                 with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED) as archive:
                     for p in files:
                         raw = await self.bytes(p)
                         await asyncio.to_thread(archive.writestr, archive_filename(p), raw)
+                        del raw
+                if authorize is not None:
+                    await authorize()
                 output.seek(0)
                 response = web.StreamResponse(headers={'Content-Type':'application/zip',
                     'Content-Disposition':'attachment; filename="Photo-Boss-Album.zip"',
@@ -651,6 +710,8 @@ class Delivery:
 
 
 def install_delivery(app, api):
+    from .delivery_downloads import install_download_admission
+    install_download_admission(app)
     service = Delivery(api)
     app['delivery'] = service
     app['delivery_archive_slot'] = asyncio.Semaphore(1)

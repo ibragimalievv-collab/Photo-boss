@@ -47,3 +47,25 @@ body.gallery-mode .workspace{margin-left:0!important;padding:0}
  .pb-gallery-ui .gallery-back-label{display:none}
 }
 .pb-gallery-ui .pill:not(.active),.pb-gallery-ui .round:not(.on){color:#000}
+
+.pb-gallery-ui .folder-breadcrumbs{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:20px 0 14px;min-width:0;color:#77818d}
+.pb-gallery-ui .folder-breadcrumbs button{border:0;background:none;padding:5px 3px;color:#1685e5;overflow-wrap:anywhere;text-align:left}
+.pb-gallery-ui .folder-breadcrumbs [aria-current=location]{color:#202a35;font-weight:700}
+.pb-gallery-ui .folder-heading{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:0 0 16px}
+.pb-gallery-ui .folder-heading h2{font-size:19px;font-weight:700;margin:0}
+.pb-gallery-ui .folder-heading p{font-size:12px;margin:5px 0 0}
+.pb-gallery-ui .gallery-folders{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+.pb-gallery-ui .gallery-folder{display:flex;gap:14px;align-items:center;min-width:0;width:100%;border:1px solid #e4e9ef;border-radius:12px;background:white;padding:20px 16px;text-align:left;color:#202a35;min-height:98px}
+.pb-gallery-ui .gallery-folder:hover{border-color:#1685e5;background:#fafdff}
+.pb-gallery-ui .gallery-folder:focus-visible{outline:2px solid #1685e5;outline-offset:2px}
+.pb-gallery-ui .gallery-folder>span:nth-child(2){min-width:0;flex:1}
+.pb-gallery-ui .gallery-folder strong{display:block;overflow-wrap:anywhere;font-size:15px}
+.pb-gallery-ui .gallery-folder small{display:block;margin-top:7px;color:#77818d;font-size:12px}
+.pb-gallery-ui .folder-symbol{color:#e8b356;background:#fff6df;border-radius:8px;padding:10px;font-size:22px;line-height:1}
+.pb-gallery-ui .project-folder-path{color:#557895}
+.pb-gallery-ui .project>span:not(.thumb){min-width:0;flex:1;overflow-wrap:anywhere}
+.pb-gallery-ui .project>.thumb{flex-shrink:0}
+.pb-gallery-ui .row .project{padding-right:14px}
+.pb-gallery-ui .card .meta{display:block}
+.pb-gallery-ui .card>button>b{display:block}
+@media(max-width:850px){.pb-gallery-ui .gallery-folders{grid-template-columns:1fr}.pb-gallery-ui .folder-breadcrumbs{font-size:12px}.pb-gallery-ui .gallery-folder{min-height:86px;padding:15px}.pb-gallery-ui .folder-heading{align-items:start}.pb-gallery-ui .folder-heading .ghost{white-space:nowrap}}

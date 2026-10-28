@@ -39,6 +39,7 @@ jobs:
           python tests/attendance_postgres_check.py
           python tests/operations_postgres_check.py
           python tests/booking_concurrency_postgres_check.py
+          python tests/delivery_download_postgres_check.py
           python tests/app_postgres_audit.py
 
   render-runtime:
@@ -122,6 +123,7 @@ jobs:
           node tests/install_client_check.mjs
           node tests/notifications_client_check.mjs
           node tests/disk_folder_client_check.mjs
+          node tests/gallery_folders_client_check.mjs
           node tests/disk_folder_recovery_check.mjs
           node tests/sale_disk_client_check.mjs
           node tests/hotel_fixed_price_client_check.mjs

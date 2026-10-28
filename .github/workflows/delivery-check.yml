@@ -86,6 +86,15 @@ jobs:
         run: |
           python tests/delivery_sets_browser_check.py
           python tests/galleries_browser_check.py
+          python - <<'PY'
+          import os
+          import pathlib
+          import subprocess
+          import playwright
+          module = pathlib.Path(playwright.__file__).parent / 'driver/package/index.mjs'
+          subprocess.run(['node', 'tests/gallery_folders_browser.mjs'],
+                         check=True, env=dict(os.environ, PLAYWRIGHT_MODULE=str(module)))
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:

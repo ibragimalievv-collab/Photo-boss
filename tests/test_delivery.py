@@ -29,6 +29,7 @@ from app.models import (
     HotelEmployee,
     Package,
     User,
+    UserRole,
     utc_now,
 )
 
@@ -49,6 +50,8 @@ async def setup(monkeypatch):
         session.add_all([User(id=i,tg_id=i,name=f'User {i}') for i in ACTORS])
         session.add_all([Client(id=1,name='Guest'),Hotel(id=1,name='Hotel'),Package(id=1,name='Package',price_per_photo=400)])
         await session.flush()
+        session.add_all([UserRole(user_id=uid, role=role)
+            for uid, actor in ACTORS.items() for role in actor['roles']])
         session.add(HotelEmployee(user_id=4, hotel_id=1))
         session.add(Booking(id=1,hotel_id=1,client_id=1,package_id=1,room='200',manager_id=5,photographer_id=2,shoot_date=utc_now().date(),shoot_time=time(12),status='ASSIGNED'))
         await session.commit()
@@ -156,7 +159,7 @@ def test_upload_is_deduplicated_rechecks_assignment_and_keeps_originals_separate
                 await session.commit()
                 again=await svc.apply(session,ACTORS[2],'delivery_photo',{'booking':1,'filename':'renamed.png'},image())
                 assert first['photoId']==again['photoId'] and again['duplicate']
-                assert len(uploaded)==1 and '/delivery/booking-1/' in uploaded[0]
+                assert len(uploaded)==1 and '/Hotel#1/' in uploaded[0] and '_booking-1/Все фото/' in uploaded[0]
                 assert await session.scalar(select(func.count(DeliveryPhoto.id)))==1
                 delivery.YandexDisk.metadata.side_effect = delivery.YandexDiskError('Yandex.Disk HTTP 404')
                 restored=await svc.apply(session,ACTORS[2],'delivery_photo',{'booking':1,'filename':'restore.png'},image())
