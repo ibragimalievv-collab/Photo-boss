@@ -6,7 +6,8 @@ let userId=null,operationsGeneration='',salesGeneration='',running=false,timer=n
 // sale chain and of attendance events. All workers retain the same durable keys.
 const workers=new Set(),requestedWorkers=new Set();
 const shiftKinds=new Set(['attendance','break_start','break_end','checklist','shift_report']);
-const operationWorker=row=>row.kind==='booking'?'booking':shiftKinds.has(row.kind)?'attendance':'media';
+const operationWorker=row=>row.kind==='booking'?'booking':shiftKinds.has(row.kind)?'attendance':isBankGate(row)?'bank':'media';
+const isBankGate=row=>['booking_bank_payment','sale_bank_payment'].includes(row.kind);
 const scheduleRetry=delay=>{
  const wait=Math.min(2147483647,Math.max(1000,delay)),due=Date.now()+wait;
  // Keep the earliest wake-up: a later blocked row must not postpone an earlier one.
@@ -262,12 +263,53 @@ export async function syncOutboxNow(){
  }
  changed();return flushOutbox();
 }
+// A bank gate is a local queue stage, not a business operation. Persist the
+// resolved immutable request before sending, then recover its bill by the same
+// key after a lost response. Pending/test/declined bills cannot release files.
+async function syncBankGate(row,active){
+ const fail=(message,status=409)=>{const error=new Error(message);error.status=status;throw error;};
+ const sameActor=()=>active()&&row.userId===userId&&(row.salesGeneration||'')===salesGeneration;
+ if(!sameActor())fail('Данные продаж или аккаунт изменились. Обновите приложение.');
+ if(!row.bankPayload){
+  let bookingId=row.data.booking?.id,sourceDraftId=null;
+  const reference=row.kind==='booking_bank_payment'?row.data.booking:row.data.draft;
+  if(reference?.key){
+   const dependency=await localAction('operations','readonly',store=>store.get(reference.key));
+   if(!sameActor())return null;
+   if(!dependency||dependency.userId!==row.userId||dependency.status!=='synced'){
+    row.status='local';row.retryAt=Date.now()+1000;await update(row);scheduleRetry(1000);return null;
+   }
+   if(row.kind==='booking_bank_payment')bookingId=dependency.result?.bookingId;
+   else sourceDraftId=dependency.result?.draftId;
+  }else if(row.kind==='sale_bank_payment')sourceDraftId=reference?.id;
+  if(!Number.isSafeInteger(bookingId)||bookingId<1||(row.kind==='sale_bank_payment'&&(!Number.isSafeInteger(sourceDraftId)||sourceDraftId<1)))fail('Сначала дождитесь подтверждения записи и черновика продажи.');
+  row.bankPayload={bookingId,total:0,sold:0,tariffId:null,amount:null,...row.data.payment,
+   ...(sourceDraftId?{sourceDraftId}:{}),purpose:row.kind==='booking_bank_payment'?'DEPOSIT':'PURCHASE',requestKey:row.key,
+   ...(row.kind==='sale_bank_payment'?{allowZeroDue:true}:{})};
+  if(!await update(row)||!sameActor())return null;
+ }
+ const bill=row.result?.id?await api(`/bank-payments/${row.result.id}/status`,{method:'POST',body:{},timeoutMs:20000}):
+  await api('/bank-payments',{method:'POST',body:row.bankPayload,timeoutMs:20000});
+ if(!sameActor())return null;
+ if(bill?.status==='NO_PAYMENT_REQUIRED'&&row.kind==='sale_bank_payment'&&bill.allowZeroDue===true&&bill.amount==='0.00'&&
+  bill.testMode===false&&bill.bookingId===row.bankPayload.bookingId&&bill.sourceDraftId===row.bankPayload.sourceDraftId)return bill;
+ if(!bill||!Number.isSafeInteger(bill.id)||bill.id<1||bill.bookingId!==row.bankPayload.bookingId||
+  (row.result?.id&&row.result.id!==bill.id))fail('Ответ банка не совпал с записью. Проверьте состояние счёта.');
+ row.result=bill;
+ // Save the bill identity before showing QR or scheduling another status call.
+ if(!await update(row)||!sameActor())return null;
+ if(bill.status==='PAID'&&bill.testMode===false)return bill;
+ if(bill.status==='TEST_PAID'||(bill.status==='PAID'&&bill.testMode!==false))fail('Тестовая оплата: реальные поступления и продажа не подтверждены. Фотографии сохранены в очереди.');
+ if(!['CREATING','PENDING'].includes(bill.status))fail(`Оплата не подтверждена (${bill.status}). Проверьте счёт перед продолжением.`);
+ row.status='local';row.error='';row.errorStatus=0;row.retryAt=Date.now()+10000;
+ await update(row);changed();scheduleRetry(10000);return null;
+}
 export async function flushOutbox(){
  if(!userId)return {state:'no-account'};
  if(!navigator.onLine)return {state:'offline'};
  if(queueRepairing){rerunRequested=true;return {state:'running'};}
  rerunRequested=false;
- const results=await Promise.all(['booking','attendance','media'].map(flushOutboxWorker));
+ const results=await Promise.all(['booking','attendance','bank','media'].map(flushOutboxWorker));
  const state=results.some(row=>row.state==='running')?'running':results.some(row=>row.state==='backoff')?'backoff':'done';
  return {state,completed:results.reduce((total,row)=>total+(row.completed||0),0),failed:results.reduce((total,row)=>total+(row.failed||0),0),temporary:results.reduce((total,row)=>total+(row.temporary||0),0)};
 }
@@ -290,13 +332,19 @@ async function flushOutboxWorker(worker){
    if(worker==='attendance'&&blockedAttendance.has(item.date))continue;
    // Booking now has a separate worker. Its receipt must still wait for the
    // exact original booking acknowledgement, rather than racing it into a 424.
-   if(item.kind==='booking_receipt'&&item.data?.booking?.key){
+   if(['booking_receipt','booking_bank_payment'].includes(item.kind)&&item.data?.booking?.key){
     const booking=await localAction('operations','readonly',store=>store.get(item.data.booking.key));
     if(!active())break;
     if(booking?.userId!==actor||booking.status!=='synced'||!booking.result?.bookingId)continue;
    }
    if(item.resumeByKey){const repair=await localAction('operations','readonly',store=>store.get(item.resumeByKey));if(repair?.status!=='synced')continue;}
    const sale=saleChain(item);
+   // The bank worker owns its wait without holding the media worker. Every
+   // later sale stage still waits for the same durable gate in IndexedDB.
+   if(item.kind.startsWith('sale_')&&item.kind!=='sale_start'){
+    const chain=await outboxRows(),gate=chain.find(step=>step.kind==='sale_bank_payment'&&saleChain(step)===sale);
+    if(gate&&gate.key!==item.key&&gate.status!=='synced')continue;
+   }
    if(sale&&blockedSales.has(sale))continue;
    const previous=sale?saleSteps.get(sale)||[]:[];
    if(sale&&!saleSteps.has(sale))saleSteps.set(sale,previous);
@@ -319,6 +367,12 @@ async function flushOutboxWorker(worker){
    row.status='syncing';if(!await update(row))break;changed();
    try{
     if(!active())break;
+    if(isBankGate(row)){
+     const result=await syncBankGate(row,active);
+     if(!active())break;
+     if(!result){if(sale)blockedSales.add(sale);continue;}
+     row.result=result;
+    }else{
     const operation={actorId:row.userId,key:row.key,kind:row.kind,date:row.date,data:row.data,...(row.generation!==undefined?{generation:row.generation}:{}),...((row.kind.startsWith('sale_')||row.kind==='booking')&&row.salesGeneration?{salesGeneration:row.salesGeneration}:{})};
     let body=operation,path='/operations/sync';
     if(row.blob){
@@ -331,6 +385,7 @@ async function flushOutboxWorker(worker){
     // Disk selections also transfer original bytes server-side despite using
     // JSON. Keep their existing media allowance; only booking is a short call.
     row.result=await api(path,{method:'POST',body,timeoutMs:worker==='booking'?20000:180000});
+    }
     if(!active())break;
     row.status='synced';row.error='';row.errorStatus=0;row.retryAt=0;row.blob=null;
     summary.completed++;
@@ -357,7 +412,9 @@ async function flushOutboxWorker(worker){
    }
    await update(row);changed();if(row.resumeCompleteKey)await resumeRepairedCompletion(row);
    if(worker==='attendance')blockedAttendance.delete(row.date);
-   if(row.kind==='booking')void flushOutboxWorker('media');
+   if(row.kind==='booking'){void flushOutboxWorker('media');void flushOutboxWorker('bank');}
+   if(row.kind==='sale_start')void flushOutboxWorker('bank');
+   if(row.kind==='sale_bank_payment')void flushOutboxWorker('media');
   }
  }finally{workers.delete(worker);running=workers.size>0;changed();if(userId&&(!active()||requestedWorkers.has(worker)))void flushOutboxWorker(worker);}
  return summary;

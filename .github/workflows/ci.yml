@@ -114,6 +114,9 @@ jobs:
           node tests/attendance_recovery_check.mjs
           node tests/attendance_review_route_check.mjs
           node tests/bank_payments_client_check.mjs
+          node tests/bank_payment_polling_check.mjs
+          node tests/bank_connection_check.mjs
+          node tests/automatic_bank_payment_check.mjs
           node tests/outbox_recovery_check.mjs
           node tests/workflow_form_recovery_check.mjs
           node tests/install_client_check.mjs
@@ -202,6 +205,7 @@ jobs:
         run: |
           python tests/pricing_approval_browser_check.py
           python tests/hotel_pricing_browser_check.py
+          python tests/sber_qr_browser_check.py
       - name: Verify cold offline start and replay of sales with photos
         env:
           WORKFLOW_TEST_CERT: /tmp/photo-boss-test-cert.pem

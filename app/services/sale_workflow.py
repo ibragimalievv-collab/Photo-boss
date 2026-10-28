@@ -218,6 +218,11 @@ async def set_sale_counts(session, actor, draft, total, sold, *, tariff_id=None,
     booking = await session.get(Booking, draft.booking_id)
     await validate_remaining_photos(session, booking, total, sold)
     from .pricing import sale_quote
+    recorded = json.loads(draft.pricing_snapshot) if draft.pricing_snapshot else {}
+    if recorded.get('_bankQuote') and (recorded.get('sold') != sold or recorded.get('total') != total):
+        raise ValueError('Количество кадров закреплено в банковском счёте. Проверьте оплату перед изменением продажи.')
+    if recorded.get('_bankQuote') and discount_id not in (None, recorded.get('discountId')):
+        raise ValueError('Скидка уже закреплена в банковском счёте.')
     quote = await sale_quote(session, booking, sold, total, tariff_id, draft.pricing_snapshot,
                              discount_id=discount_id, album_id=album_id, album_quantity=album_quantity)
     amount = money(quote['amount'])
@@ -293,6 +298,10 @@ async def complete_sale(session, actor, draft_id, *, verified_references=None):
     # be approved after counts were entered. Never charge the same deposit twice.
     previous, paid, _ = await payment_totals(session, booking.id)
     amount = max(money(previous) + money(quote['amount']) - money(paid), Decimal(0))
+    if quote.get('_bankQuote') and not draft.receipt_file_id and amount > 0:
+        # A refund may arrive after counts were accepted while originals were
+        # uploading. Recheck the locked ledger before creating sale/payroll.
+        raise ValueError('Оплата по банковскому счёту больше не покрывает покупку. Проверьте поступление перед завершением продажи.')
     draft.expected_amount = amount or None
     # expected_amount is the still-unpaid part after approved deposits; the sale itself
     # must always use sold_photos * package price.
