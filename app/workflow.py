@@ -11,7 +11,7 @@ from aiohttp import web
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .bank_payments import configured as bank_configured
+from .bank_payments import payment_settings
 from .miniapp_security import AccessError
 from .models import (
     BankPayment,
@@ -289,7 +289,8 @@ class Workflow:
                         'price': str(money(album.price))} for album in albums],
             'canApproveDiscount': bool({'OWNER', 'ADMIN'} & set(a['roles'])),
             'canAuditDisk': 'OWNER' in a['roles'],
-            'bankConfigured': bank_configured(),
+            'canCheckBankConnection': 'OWNER' in a['roles'],
+            **payment_settings(),
             'packages': [{'id': p.id, 'name': p.name, 'price': prices[p.id]} for p in packages if p.active],
             'canBook': bool({'OWNER', 'ADMIN', 'MANAGER'} & set(a['roles'])),
             'date': str(self.api.today()), 'actorId': a['id']})
