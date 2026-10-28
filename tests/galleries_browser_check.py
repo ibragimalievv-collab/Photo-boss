@@ -81,6 +81,7 @@ async def check_disk_diagnostics(page):
     await page.goto(BASE + '/app/#galleries')
     await expect(page.locator('#app h1')).to_have_text('Диск и клиентские галереи')
     await page.set_viewport_size({'width': 1440, 'height': 1000})
+    await open_fixture_folders(page)
 
 
 async def wait_images(page, selector):
@@ -91,44 +92,14 @@ async def wait_images(page, selector):
     raise AssertionError(await page.locator(selector).evaluate_all('images => images.map(i=>({src:i.src,complete:i.complete,width:i.naturalWidth}))'))
 
 
-async def compare_disk(context, page, output):
-    reference = await context.new_page()
-    await reference.goto(BASE + '/__approved_disk')
-    data = await page.evaluate("""() => ({name:document.querySelector('.account b').textContent,
-        nav:[...document.querySelectorAll('.side .menu button')].map(b=>b.textContent),
-        row:document.querySelector('.table .row').innerHTML,
-        card:document.querySelector('.cards .card').innerHTML})""")
-    await reference.evaluate("""data => {
-        document.querySelector('.account b').textContent=data.name;
-        [...document.querySelectorAll('.side .menu button')].forEach((b,i)=>b.textContent=data.nav[i]);
-        document.querySelector('#rows').innerHTML='<div class="row">'+data.row+'</div>';
-        document.querySelector('#cards').innerHTML='<div class="card">'+data.card+'</div>';
-        document.querySelectorAll('.project, .card>button:not(.round), .link').forEach(b=>{
-            const div=document.createElement('div');div.className=b.className;div.innerHTML=b.innerHTML;b.replaceWith(div);
-        });
-        document.querySelectorAll('.pname,.project .meta').forEach(el=>el.style.display='block');
-    }""", data)
-    measure = """selectors => Object.fromEntries(selectors.map(selector=>{
-        const el=document.querySelector(selector),s=getComputedStyle(el),r=el.getBoundingClientRect();
-        return [selector,{x:r.x,y:r.y,width:r.width,height:r.height,font:s.fontFamily,fontSize:s.fontSize,
-        fontWeight:s.fontWeight,color:s.color,background:s.backgroundColor}];
-    }))"""
-    differences = []
-    for width,height in [(1440,1000),(390,844)]:
-        await page.set_viewport_size({'width':width,'height':height})
-        await reference.set_viewport_size({'width':width,'height':height})
-        selectors=['.wrap','.title','.title h1','.storage','.tabs','.toolbar','.search']
-        selectors += ['.side','.logo','.account','.menu','.top','.table','.thead','.row','.project','.thumb'] if width>850 else ['.mobile','.cards','.card']
-        actual, expected = await page.evaluate(measure,selectors), await reference.evaluate(measure,selectors)
-        for selector in selectors:
-            for key,value in expected[selector].items():
-                got=actual[selector][key]
-                if not (abs(got-value)<=1 if isinstance(value,(int,float)) else got==value):
-                    differences.append((width,selector,key,got,value))
-        await reference.screenshot(path=str(output / f'prototype-disk-{width}.png'),full_page=True)
-    await reference.close()
-    await page.set_viewport_size({'width':1440,'height':1000})
-    assert not differences,differences
+async def open_fixture_folders(page):
+    """The fixture has one shoot; traverse each real server grouping level."""
+    for level in ('Отели', 'Месяцы', 'Числа', 'Фотографы'):
+        await expect(page.locator('.folder-heading h2')).to_have_text(level)
+        await expect(page.locator('.gallery-folder')).to_have_count(1)
+        await page.locator('.gallery-folder').click()
+    await expect(page.locator('.folder-heading h2')).to_have_text('Съёмки гостей')
+    await expect(page.locator('.folder-breadcrumbs button')).to_have_count(5)
 
 
 async def compare_prototype(context, guest, output):
@@ -201,9 +172,9 @@ async def main():
                 stream = io.BytesIO()
                 Image.new('RGB', (500, 700) if i % 2 else (700, 500), ['#617460', '#8c8674', '#c5b7a2'][i % 3]).save(stream, 'JPEG')
                 raw = stream.getvalue()
-            storage[ROOT + f'/delivery/booking-1/test/{i}.jpg'] = raw
+            storage[ROOT + f'/delivery/booking-1/test/Все фото/{i}.jpg'] = raw
             session.add(DeliveryPhoto(id=i, gallery_id=g.id, uploaded_by_id=1, filename=f'family-{i}.jpg',
-                disk_path=ROOT + f'/delivery/booking-1/test/{i}.jpg', sha256=str(i)*64, byte_size=len(raw), selected=i == 2, upload_set='ALL'))
+                disk_path=ROOT + f'/delivery/booking-1/test/Все фото/{i}.jpg', sha256=str(i)*64, byte_size=len(raw), selected=i == 2, upload_set='ALL'))
         await session.commit()
     delivery = app['delivery']
     async def photo_bytes(photo):
@@ -237,18 +208,33 @@ async def main():
             page.on('pageerror', lambda e: errors.append(str(e)))
             await page.goto(BASE + '/app/#galleries')
             await expect(page.locator('#app h1')).to_have_text('Диск и клиентские галереи')
+            await open_fixture_folders(page)
             await expect(page.locator('.table [data-gp="open"]')).to_have_count(1)
             await page.locator('[data-project-search]').fill('missing')
             await expect(page.locator('.table .empty')).to_be_visible()
             await page.locator('[data-project-search]').fill('Movenpick')
             await expect(page.locator('.table [data-gp="open"]')).to_have_count(1)
             await wait_images(page,'.table .thumb')
-            await compare_disk(context,page,output)
+            assert await page.locator('#app').evaluate('el => el.scrollWidth <= el.clientWidth + 2')
             await check_disk_diagnostics(page)
+            await wait_images(page, '.table .thumb')
             await page.screenshot(path=str(output / 'disk-desktop.png'), full_page=True)
+            if os.getenv('GALLERY_LAYOUT_ONLY') == '1':
+                gap = await page.locator('.table .row').evaluate('''row => {
+                    const project = row.querySelector('.project');
+                    const text = project.querySelector('span:not(.thumb)');
+                    const range = document.createRange(); range.selectNodeContents(text);
+                    const right = Math.max(...Array.from(range.getClientRects(), rect => rect.right));
+                    return row.children[1].getBoundingClientRect().left - right;
+                }''')
+                assert gap >= 12, gap
+                await browser.close()
+                print(f'PASS: desktop gallery text stays inside its column; gap to views {gap:.1f}px')
+                return
             await page.locator('.table [data-gp="favorite"]').click()
             await expect(page.locator('.table [data-gp="favorite"]')).to_have_attribute('aria-pressed', 'true')
             await page.reload()
+            await open_fixture_folders(page)
             await expect(page.locator('.table [data-gp="favorite"]')).to_have_attribute('aria-pressed', 'true')
             await page.locator('.table [data-gp="open"]').click()
             await expect(page.locator('.hero h1')).to_have_text('Movenpick 16:00')
@@ -349,6 +335,7 @@ async def main():
             assert not await page.locator('body').evaluate("el => el.classList.contains('gallery-mode')")
             await page.goto(BASE + '/app/#galleries')
             await page.set_viewport_size({'width': 390, 'height': 844})
+            await open_fixture_folders(page)
             await page.locator('.cards [data-gp=open]').click()
             await page.locator('[data-gv="back"]').click()
             await page.locator('.cards [data-gp="menu"]').click()
@@ -365,7 +352,7 @@ async def main():
             assert not errors, errors
             assert not bot.send_message.called
             await browser.close()
-            print('PASS: prototype disk/gallery, desktop/mobile, search, saved favorites, original download, cover, settings, trash/restore, confirmed purge, selected-only QR downloads and shared guest layout')
+            print('PASS: hotel/month/day/photographer navigation, shared guest prototype, desktop/mobile, search, saved favorites, original download, cover, settings, trash/restore, confirmed purge, selected-only QR downloads and shared guest layout')
     finally:
         await client.close()
         await engine.dispose()

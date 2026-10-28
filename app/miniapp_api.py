@@ -1068,7 +1068,7 @@ class MiniApp:
                    "js/realtime-training.js", "js/voice-training.js", "js/booking-control.js", "js/form-state.js", "js/galleries.js", "js/gallery-view.js", "js/gallery-client.js", "css/galleries.css", "js/development.js", "js/academy-coach.js", "js/academy-mentor.js", "js/booking-diagnostic.js", "js/outbox.js", "js/workday.js", "js/feedback.js", "js/team.js", "js/insights.js", "js/api.js", "js/telegram.js", "js/academy.js", "js/practice.js", "assets/icon.svg", "assets/studio.jpg",
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg", "assets/academy/exposure.svg", "assets/academy/window-light.svg", "assets/academy/perspective.svg", "assets/academy/group-depth.svg"}
-        allowed.update({'js/sale-files.js', 'js/schedule-import.js'})
+        allowed.update({'js/sale-files.js', 'js/schedule-import.js', 'js/gallery-folders.js'})
         allowed.update({'js/attendance-fines.js', 'js/hotel-points.js', 'js/storage-audit.js', 'js/notifications.js', 'js/lunch.js', 'js/hotel-pricing.js', 'js/bank-payments.js', 'js/disk-folder-audit.js', 'js/sale-disk.js'})
         if name not in allowed:
             raise web.HTTPNotFound()

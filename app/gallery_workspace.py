@@ -9,6 +9,7 @@ from aiohttp import ClientError, web
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .gallery_folders import booking_storage_root, folder_path
 from .miniapp_security import AccessError, require_owner
 from .models import (
     Booking,
@@ -66,8 +67,9 @@ class GalleryWorkspace:
                 func.sum(DeliveryPhoto.byte_size).label('bytes'), func.min(DeliveryPhoto.id).label('first')).group_by(
                 DeliveryPhoto.gallery_id).subquery()
             records = (await session.execute(select(Booking, Client.name, Hotel.name, DeliveryGallery,
-                stats.c.count, stats.c.bytes, stats.c.first).outerjoin(Client, Client.id == Booking.client_id)
+                stats.c.count, stats.c.bytes, stats.c.first, User.name).outerjoin(Client, Client.id == Booking.client_id)
                 .outerjoin(Hotel, Hotel.id == Booking.hotel_id)
+                .outerjoin(User, User.id == Booking.photographer_id)
                 .outerjoin(DeliveryGallery, DeliveryGallery.booking_id == Booking.id)
                 .outerjoin(stats, stats.c.gallery_id == DeliveryGallery.id)
                 .where(booking_scope(actor['id'], actor['roles'], photos=True))
@@ -86,7 +88,7 @@ class GalleryWorkspace:
                 .join(DeliveryGallery, DeliveryGallery.id == DeliveryPhoto.gallery_id)
                 .where(DeliveryPhoto.id.in_([pid for pid in requested_covers if pid])))).all())
             items = []
-            for b, client_name, hotel_name, g, count, size, first in records:
+            for b, client_name, hotel_name, g, count, size, first, photographer_name in records:
                 meta = values.get(f'gallery:meta:{b.id}', {})
                 if meta.get('purged'):
                     continue
@@ -94,7 +96,10 @@ class GalleryWorkspace:
                 if (cover, b.id) not in valid_covers:
                     cover = first
                 items.append({'id': b.id, 'title': g.title if g else f'{hotel_name or "Съёмка"} {str(b.shoot_time)[:5]}',
-                    'client': client_name or '', 'hotel': hotel_name or '',
+                    'client': client_name or '', 'hotel': hotel_name or '', 'hotelId': b.hotel_id,
+                    'photographer': photographer_name or '', 'photographerId': b.photographer_id,
+                    'room': b.room or '', 'guestCount': b.guest_count,
+                    'folderPath': folder_path(b, hotel_name, photographer_name),
                     'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5], 'photoCount': count or 0, 'bytes': size or 0,
                     'createdAt': g.created_at.isoformat() if g else str(b.shoot_date),
                     'expiresAt': g.expires_at.isoformat() if g and g.expires_at else None,
@@ -115,7 +120,7 @@ class GalleryWorkspace:
         body = await self.api.body(request)
         if body != {'confirm': True} or type(body.get('confirm')) is not bool:
             raise AccessError('Подтвердите безвозвратное удаление фотографий.', 400)
-        from .yandex_disk import ROOT, YandexDisk, YandexDiskError, configured_from_env
+        from .yandex_disk import YandexDisk, YandexDiskError, configured_from_env
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
             b = await self.delivery.booking(session, actor, request.match_info['booking'], edit=True)
             meta = await read_setting(session, f'gallery:meta:{b.id}', {})
@@ -128,15 +133,17 @@ class GalleryWorkspace:
                 files = (await session.scalars(select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id))).all()
                 # Only this booking's delivery folder; no other originals, bookings or sales.
                 if files:
-                    folder = ROOT + f'/delivery/booking-{b.id}'
-                    if any(not p.disk_path.startswith(folder + '/') for p in files):
-                        raise AccessError('Есть фотографии в старом хранилище. Автоматическая очистка недоступна.', 409)
+                    try:
+                        folders = sorted({booking_storage_root(p.disk_path, b.id) for p in files})
+                    except ValueError as exc:
+                        raise AccessError('Есть фотографии в старом хранилище. Автоматическая очистка недоступна.', 409) from exc
                     token, client_id = configured_from_env()
                     if not token:
                         raise AccessError('Яндекс.Диск недоступен. Проект остаётся в корзине.', 503)
                     disk = YandexDisk(token, client_id)
                     try:
-                        await disk.delete_confirmed(folder)
+                        for folder in folders:
+                            await disk.delete_confirmed(folder)
                     except (YandexDiskError, ClientError, TimeoutError) as exc:
                         raise AccessError('Удаление на Яндекс.Диске ещё не подтверждено. Повторите очистку.', 503) from exc
                 await session.execute(delete(DeliveryPhoto).where(DeliveryPhoto.gallery_id == g.id))
@@ -278,14 +285,16 @@ class GalleryWorkspace:
 
     async def staff_archive(self, request):
         async with AsyncSession(self.api.engine) as session:
-            b = await self.delivery.booking(session, request['miniapp_actor'], request.match_info['booking'])
+            actor = await self.delivery.download_actor(session, request)
+            b = await self.delivery.booking(session, actor, request.match_info['booking'])
             g = await session.scalar(select(DeliveryGallery).where(DeliveryGallery.booking_id == b.id))
             files = (await session.scalars(select(DeliveryPhoto).where(
                 DeliveryPhoto.gallery_id == g.id).order_by(DeliveryPhoto.id))).all() if g else []
             files = archive_selection(request, files)
             if not files:
                 raise web.HTTPBadRequest(text='В галерее пока нет фотографий.')
-            return await self.delivery.stream_archive(request, files)
+        return await self.delivery.stream_archive(request, files,
+            authorize=lambda: self.delivery.authorize_staff_download(request, files))
 
     def document(self, gallery, files, meta):
         base = '/g/' + gallery.access_token
