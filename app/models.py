@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     Time,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -363,6 +364,9 @@ class SaleDraftPhoto(Base):
     storage_path: Mapped[str] = mapped_column(String(500), unique=True)
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     byte_size: Mapped[int] = mapped_column(Integer)
+    delivery_photo_id: Mapped[int | None] = mapped_column(
+        ForeignKey('delivery_photos.id', ondelete='SET NULL'), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
     __table_args__ = (
         UniqueConstraint(
@@ -972,6 +976,7 @@ class DeliveryGallery(Base):
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     published: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_publish: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     delivery_mode: Mapped[str] = mapped_column(String(20), default='ALL')
     created_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
     opened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -991,6 +996,8 @@ class DeliveryPhoto(Base):
     byte_size: Mapped[int] = mapped_column(Integer)
     selected: Mapped[bool] = mapped_column(Boolean, default=False)
     upload_set: Mapped[str] = mapped_column(String(20), default='ALL', server_default='ALL')
+    origin: Mapped[str] = mapped_column(String(16), default='UPLOAD', server_default='UPLOAD')
+    storage_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     __table_args__ = (UniqueConstraint('gallery_id', 'sha256', 'upload_set', name='uq_delivery_photo_set_digest'),)
 

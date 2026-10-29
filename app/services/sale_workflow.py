@@ -294,6 +294,10 @@ async def complete_sale(session, actor, draft_id, *, verified_references=None):
     from .pricing import sale_quote
     quote = await sale_quote(session, booking, draft.sold_photos, draft.declared_photo_count,
                              saved=draft.pricing_snapshot)
+    booking_quote = json.loads(booking.pricing_snapshot or '{}')
+    inline_no_manager = booking_quote.get('inlineSale') is True and booking_quote.get('managerCommissionEligible') is False
+    if booking_quote.get('inlineSale') is True:
+        quote |= {'inlineSale': True, 'managerCommissionEligible': not inline_no_manager}
     # Recheck approved payments while holding the booking lock. A deposit may
     # be approved after counts were entered. Never charge the same deposit twice.
     previous, paid, _ = await payment_totals(session, booking.id)
@@ -358,7 +362,9 @@ async def complete_sale(session, actor, draft_id, *, verified_references=None):
             analysis=json.loads(draft.receipt_analysis or '{}'), expected=amount,
             event_key=f'receipt-review:draft:{draft.id}:expected:{money(amount)}')
 
-    if manager is not None:
+    if inline_no_manager:
+        sale.manager_percent_applied = '0'
+    elif manager is not None:
         # Personal agreed terms override the global default, including an
         # explicit zero rate. Freeze the applied rate on this sale so future
         # changes cannot rewrite its historical commission.
@@ -404,6 +410,8 @@ async def complete_sale(session, actor, draft_id, *, verified_references=None):
         ),
     )
     await refresh_payment_statuses(session, booking.id)
+    from .sale_gallery import link_draft
+    await link_draft(session, draft)
     from ..push_notifications import queue_sale_created
     await queue_sale_created(session, sale, booking)
     await session.flush()

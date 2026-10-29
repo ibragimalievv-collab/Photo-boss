@@ -82,8 +82,11 @@ async def main():
                         form = page.locator('#workflowSale')
                         tariff = await form.locator('[name=tariffId] option').evaluate_all(
                             "options=>options.find(option=>option.textContent.includes('400')).value")
+                        await form.locator('.sale-details').evaluate('el=>el.open=true')
                         await form.locator('[name=tariffId]').select_option(tariff)
-                        await form.locator('[name=total]').fill('150')
+                        # Simulate the retained count from an older client; known totals
+                        # are summaries in the new UI, not manual fields.
+                        await form.locator('[name=total]').evaluate("el=>el.value='150'")
                         await form.locator('[name=sold]').fill('1')
                         await form.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/coast.jpg')
                         await form.locator('[name=selected]').set_input_files('app/webapp/assets/academy/family.jpg')
@@ -164,12 +167,13 @@ async def main():
                         await expect(form.locator('[name=tariffId] option').filter(has_text='400')).to_have_count(1)
                         tariff = await form.locator('[name=tariffId] option').evaluate_all(
                             "options=>options.find(option=>option.textContent.includes('400')).value")
+                        await form.locator('.sale-details').evaluate('el=>el.open=true')
                         await form.locator('[name=tariffId]').select_option(tariff)
                         await form.locator('[name=sold]').fill('1')
                         await form.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/coast.jpg')
                         await form.locator('[name=selected]').set_input_files('app/webapp/assets/academy/evening.jpg')
                         await expect(form.locator('[name=tariffId]')).to_have_value(tariff)
-                        await form.get_by_role('button', name='Добавить допродажу').click()
+                        await form.get_by_role('button', name='Сохранить продажу').click()
                         replacement = page.locator('#workflowQueue [data-workflow-replace]')
                         try:
                             await expect(replacement).to_be_visible(timeout=20000)

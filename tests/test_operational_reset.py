@@ -260,6 +260,66 @@ def test_legacy_archive_restores_after_new_empty_discount_dependency_is_added(mo
     asyncio.run(run())
 
 
+def test_legacy_archive_restores_with_safe_new_sale_gallery_defaults(monkeypatch):
+    async def run():
+        from app import operational_reset
+        engine = await fixture()
+        original_pack = operational_reset._pack
+        added = {'delivery_galleries': {'auto_publish'},
+                 'delivery_photos': {'origin', 'storage_identity'},
+                 'sale_draft_photos': {'delivery_photo_id'}}
+        def legacy_pack(table, rows):
+            block = original_pack(table, rows)
+            columns = [c for c in block['columns'] if c not in added.get(table.name, set())]
+            indexes = [block['columns'].index(c) for c in columns]
+            return {'columns': columns, 'rows': [[row[i] for i in indexes] for row in block['rows']]}
+        try:
+            with monkeypatch.context() as context:
+                context.setattr(operational_reset, '_pack', legacy_pack)
+                await reset(engine, 'reset-request-0001', 1)
+            result = await restore(engine, 'reset-request-0001', 1)
+            assert not result['replayed']
+            async with engine.connect() as conn:
+                assert not await conn.scalar(text('SELECT auto_publish FROM delivery_galleries WHERE id=17'))
+                assert (await conn.execute(text('SELECT origin,storage_identity FROM delivery_photos'))).one() == ('UPLOAD', None)
+                assert await conn.scalar(text('SELECT delivery_photo_id FROM sale_draft_photos')) is None
+                assert await conn.scalar(text('SELECT amount FROM sales WHERE id=15')) == 800.25
+                assert await conn.scalar(text('SELECT storage_path FROM sale_draft_photos')) == '/selected/13/a.jpg'
+                assert not (await conn.exec_driver_sql('PRAGMA foreign_key_check')).all()
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
+def test_additive_restore_does_not_ignore_unknown_columns_or_nondefault_lineage():
+    from app.operational_reset import _encode, _restored_blocks_match
+    archived = {'delivery_photos': {'columns': ['id'], 'rows': [[_encode(1)]]}}
+    for column, value in [('origin', 'SALE'), ('storage_identity', 'unexpected'), ('unknown', None)]:
+        current = {'delivery_photos': {'columns': ['id', column], 'rows': [[_encode(1), _encode(value)]]}}
+        assert not _restored_blocks_match(current, archived)
+
+
+def test_reset_restore_preserves_sale_gallery_lineage_and_publication_policy():
+    async def run():
+        engine = await fixture()
+        try:
+            async with engine.begin() as conn:
+                pid = await conn.scalar(text('SELECT id FROM delivery_photos'))
+                await conn.execute(text("UPDATE delivery_photos SET origin='SALE',storage_identity='fixture-identity'"))
+                await conn.execute(text('UPDATE delivery_galleries SET auto_publish=TRUE'))
+                await conn.execute(text('UPDATE sale_draft_photos SET delivery_photo_id=:pid'), {'pid': pid})
+            await reset(engine, 'reset-request-0001', 1)
+            await restore(engine, 'reset-request-0001', 1)
+            async with engine.connect() as conn:
+                assert await conn.scalar(text('SELECT delivery_photo_id FROM sale_draft_photos')) == pid
+                assert await conn.scalar(text('SELECT auto_publish FROM delivery_galleries'))
+                assert (await conn.execute(text('SELECT origin,storage_identity FROM delivery_photos'))).one() == ('SALE', 'fixture-identity')
+                assert not (await conn.exec_driver_sql('PRAGMA foreign_key_check')).all()
+        finally:
+            await engine.dispose()
+    asyncio.run(run())
+
+
 def test_archive_is_immutable_and_unauthorized_or_stale_preview_cannot_reset():
     async def run():
         engine = await fixture()

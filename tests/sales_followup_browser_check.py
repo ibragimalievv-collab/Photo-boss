@@ -70,10 +70,11 @@ async def run(url):
                     await page.locator(f'[data-workflow="sale-history"][data-booking="{bid}"]').click()
                     form = page.locator('#workflowSale')
                     await expect(form.locator('[name=total]')).to_have_value('10')
-                    assert await form.locator('[name=total]').get_attribute('readonly') is not None
+                    assert await form.locator('[name=total]').get_attribute('type') == 'hidden'
                     await expect(page.get_by_role('heading', name='История покупок')).to_be_visible()
                     tariff = await form.locator('[name=tariffId] option').evaluate_all(
                         "options=>options.find(option=>option.textContent.includes('400')).value")
+                    await form.locator('.sale-details').evaluate('el=>el.open=true')
                     await form.locator('[name=tariffId]').select_option(tariff)
                     await form.locator('[name=sold]').fill('3')
                     await form.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/coast.jpg')
@@ -82,7 +83,7 @@ async def run(url):
                         'app/webapp/assets/academy/couple.jpg',
                         'app/webapp/assets/academy/evening.jpg',
                     ])
-                    await form.get_by_role('button', name='Добавить допродажу').click()
+                    await form.get_by_role('button', name='Сохранить продажу').click()
                     replacement = page.locator('#workflowQueue [data-workflow-replace]')
                     await expect(replacement).to_be_visible()
                     duplicate_key = await replacement.get_attribute('data-workflow-replace')
@@ -115,7 +116,7 @@ async def run(url):
                         assert await session.scalar(select(func.count(OperationRequest.id))) == operation_count
                     await form.get_by_role('button', name='Начать новую операцию').click()
                     await expect(page.get_by_role('heading', name='История покупок')).to_be_visible()
-                    await expect(page.locator('#workflowSale')).to_contain_text('Дополнительно продано кадров')
+                    await expect(page.locator('#workflowSale')).to_contain_text('Количество покупки — исправить')
                     assert not errors, errors
                     output = Path('/tmp/photo-boss-calls-qa'); output.mkdir(exist_ok=True, parents=True)
                     await page.screenshot(path=str(output/'sales-followup-mobile.png'), full_page=True)

@@ -184,12 +184,16 @@ async def select_photo(session, actor, booking, draft, data, *, prepared=None):
         old.telegram_file_id = old.storage_path = file_id
         old.byte_size = prepared['bytes']
         await session.flush()
+        from .services.sale_gallery import link_photo
+        await link_photo(session, draft, old, verified=True)
         await audit(session, actor, 'sale_disk_photo_relinked', 'sale_draft', draft.id, f'photo={old.id};same_checksum')
         return {'photoId': old.id, 'duplicate': True, 'storageVerified': True}
     photo = SaleDraftPhoto(draft_id=draft.id, telegram_file_id=file_id,
         telegram_unique_id='disk-selected:' + digest, storage_path=file_id, sha256=digest, byte_size=prepared['bytes'])
     session.add(photo)
     await session.flush()
+    from .services.sale_gallery import link_photo
+    await link_photo(session, draft, photo, verified=True)
     await audit(session, actor, 'sale_disk_photo_selected', 'sale_draft', draft.id, f'photo={photo.id};bytes={prepared["bytes"]}')
     return {'photoId': photo.id, 'storageVerified': True}
 

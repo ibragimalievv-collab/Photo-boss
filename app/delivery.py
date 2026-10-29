@@ -37,6 +37,7 @@ from .models import (
 from .services.booking_access import booking_scope, can_access_booking
 from .services.core import audit
 from .services.photo_storage import image_format
+from .services.sale_gallery import effective_published, guest_photo_clause
 from .yandex_disk import (
     YandexDisk,
     YandexDiskError,
@@ -114,14 +115,15 @@ class Delivery:
     def client_photos_query(gallery):
         query = select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == gallery.id)
         if gallery.delivery_mode == 'ALL':
-            return query.where(DeliveryPhoto.upload_set == 'ALL')
+            return query.where(or_(DeliveryPhoto.upload_set == 'ALL', DeliveryPhoto.origin == 'SALE'),
+                               guest_photo_clause())
         direct = aliased(DeliveryPhoto)
         uploaded_separately = select(direct.id).where(
             direct.gallery_id == DeliveryPhoto.gallery_id,
             direct.sha256 == DeliveryPhoto.sha256,
-            direct.upload_set == 'SELECTED').exists().correlate(DeliveryPhoto)
+            direct.upload_set == 'SELECTED', guest_photo_clause(direct)).exists().correlate(DeliveryPhoto)
         return query.where(or_(DeliveryPhoto.upload_set == 'SELECTED',
-            and_(DeliveryPhoto.selected.is_(True), ~uploaded_separately)))
+            and_(DeliveryPhoto.selected.is_(True), ~uploaded_separately)), guest_photo_clause())
 
     async def describe(self, session, actor, b):
         g = await session.scalar(select(DeliveryGallery).where(DeliveryGallery.booking_id == b.id))
@@ -129,7 +131,8 @@ class Delivery:
         user = await session.get(User, b.photographer_id) if b.photographer_id else None
         base = f'/api/miniapp/delivery/{b.id}'
         result = {'bookingId': b.id, 'photographer': user.name if user else None, 'canEdit': can_edit(actor, b),
-                  'title': g.title if g else 'Ваши фотографии', 'published': bool(g and g.published),
+                  'title': g.title if g else 'Ваши фотографии',
+                  'published': await effective_published(session, g) if g else False,
                   'deliveryMode': (g.delivery_mode if g else 'ALL'),
                   'passwordEnabled': bool(g and g.password_hash), 'expiresAt': g.expires_at.isoformat() if g and g.expires_at else None,
                   'openedAt': g.opened_at.isoformat() if g and g.opened_at else None,
@@ -187,6 +190,7 @@ class Delivery:
                 if type(body['published']) is not bool:
                     raise AccessError('Неверный статус галереи.', 400)
                 g.published = body['published']
+                g.auto_publish = False
             from .gallery_workspace import read_setting
             meta = await read_setting(session, f'gallery:meta:{b.id}', {})
             if g.published and meta.get('trashed'):
@@ -460,13 +464,14 @@ class Delivery:
     @staticmethod
     def direct_photo_allowed(gallery, photo):
         return bool(photo and photo.gallery_id == gallery.id and (
-            photo.upload_set == 'ALL' if gallery.delivery_mode == 'ALL'
+            photo.upload_set == 'ALL' or photo.origin == 'SALE' if gallery.delivery_mode == 'ALL'
             else photo.selected or photo.upload_set == 'SELECTED'))
 
     async def authorize_public_download(self, request, files, *, direct=False):
         async with AsyncSession(self.api.engine) as session:
             gallery = await self.public_gallery(request, session)
             query = select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == gallery.id) if direct else self.client_photos_query(gallery)
+            query = query.where(guest_photo_clause())
             current = (await session.scalars(query.where(
                 DeliveryPhoto.id.in_([p.id for p in files])))).all()
             if direct:
@@ -475,6 +480,14 @@ class Delivery:
                 raise web.HTTPNotFound(text='Фотографии больше не доступны для скачивания.')
 
     async def bytes(self, photo):
+        if photo.origin == 'SALE' and not photo.disk_path.startswith('app:'):
+            from types import SimpleNamespace
+
+            from .services.sale_gallery import verify_original
+            async with self.download_slots:
+                return await verify_original(self.api.engine, self.api.bot, SimpleNamespace(
+                    storage_path=photo.disk_path, telegram_file_id=photo.disk_path,
+                    byte_size=photo.byte_size, sha256=photo.sha256))
         token, client_id = configured_from_env()
         if not token:
             raise YandexDiskError('Storage unavailable')
@@ -486,7 +499,7 @@ class Delivery:
         if not re.fullmatch(r'[A-Za-z0-9_-]{32}', token):
             raise web.HTTPNotFound()
         g = await session.scalar(select(DeliveryGallery).where(DeliveryGallery.access_token == token))
-        if not g or not g.published or (g.expires_at and g.expires_at <= utc_now()):
+        if not g or not await effective_published(session, g) or (g.expires_at and g.expires_at <= utc_now()):
             raise web.HTTPNotFound(text='Галерея недоступна или срок доступа истёк.')
         if unlocked and g.password_hash:
             cookie = request.cookies.get('pb_gallery_' + str(g.id), '')
@@ -558,7 +571,8 @@ class Delivery:
     async def client_photo(self, request):
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
             g = await self.public_gallery(request, session)
-            p = await session.get(DeliveryPhoto, int(request.match_info['photo']))
+            p = await session.scalar(select(DeliveryPhoto).where(
+                DeliveryPhoto.id == int(request.match_info['photo']), guest_photo_clause()))
             if not self.direct_photo_allowed(g, p):
                 raise web.HTTPNotFound()
         raw = await self.bytes(p)

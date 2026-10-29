@@ -61,8 +61,9 @@ def booking_storage_root(path, booking_id):
     prefix = ROOT + '/delivery/'
     if path.startswith(prefix):
         parts = path[len(prefix):].split('/')
-        if (len(parts) == 7 and parts[4].endswith(f'_booking-{booking_id}')
-                and parts[5] in {'Все фото', 'Выбранные'}):
+        if (len(parts) in {7, 8} and parts[4].endswith(f'_booking-{booking_id}')
+                and parts[5] in {'Все фото', 'Выбранные'}
+                and (len(parts) == 7 or re.fullmatch(r'Продажа-[1-9][0-9]*', parts[6]))):
             return prefix + '/'.join(parts[:5])
     raise ValueError('Photo is outside this booking delivery folder')
 

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 def operation_diagnostic(body, *, result=None, error=None):
     """Log only known operation fields; never file bytes, names or request keys."""
-    kinds = {'sale_start', 'sale_receipt', 'sale_counts', 'sale_selected', 'sale_disk_selected', 'sale_complete',
+    kinds = {'sale_start', 'sale_start_inline', 'sale_receipt', 'sale_counts', 'sale_selected', 'sale_disk_selected', 'sale_complete',
              'shoot_photo', 'shoot_complete', 'shoot_retry', 'booking', 'booking_receipt', 'break_start', 'break_end', 'attendance'}
     if not isinstance(body, dict) or not isinstance(body.get('kind'), str) or body['kind'] not in kinds:
         return
@@ -205,7 +205,7 @@ class Workday:
         # durable). A deadlock victim must start a fresh transaction; rechecking
         # the original key preserves exactly-once acknowledgements/commissions.
         retryable = {'booking', 'checklist', 'shift_report', 'break_start', 'break_end',
-                     'sale_start', 'sale_counts', 'photo_edit', 'shoot_retry', 'delivery_handoff'}
+                     'sale_start', 'sale_start_inline', 'sale_counts', 'photo_edit', 'shoot_retry', 'delivery_handoff'}
         if kind in retryable or prepared_media is not None or attendance_file is not None:
             from .transaction_retry import retry_transaction
             return await retry_transaction(transaction)
@@ -229,7 +229,15 @@ class Workday:
         old=await self.api.rows(conn,'SELECT payload_hash,result FROM operation_requests WHERE user_id=:uid AND request_key=:key',uid=a['id'],key=body['key'])
         if old:
             if old[0]['payload_hash']!=digest: raise AccessError('Ключ уже использован для других данных.',409)
-            return roles, None, parsed(old[0]['result'])
+            result = parsed(old[0]['result'])
+            if body['kind'].startswith('sale_') and result.get('saleId'):
+                from sqlalchemy.ext.asyncio import AsyncSession
+
+                from .models import User
+                from .services.sale_gallery import annotate_result
+                async with AsyncSession(bind=conn) as session:
+                    result = await annotate_result(session, await session.get(User, a['id']), roles, result)
+            return roles, None, result
         day=self.api.day(body['date'])
         if not self.api.today()-timedelta(days=7)<=day<=self.api.today(): raise AccessError('Дата требует ручной проверки; операция не применена.',409)
         return roles, day, None
@@ -312,6 +320,8 @@ class Workday:
 
 def install_workday(app,api):
     service=Workday(api)
+    from .sale_gallery_api import install_sale_gallery
+    install_sale_gallery(app, api)
     from .push_notifications import install_push
     install_push(app, api)
     from .hotel_pricing import HotelPricing

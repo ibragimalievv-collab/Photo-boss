@@ -40,6 +40,7 @@ jobs:
           python tests/operations_postgres_check.py
           python tests/booking_concurrency_postgres_check.py
           python tests/delivery_download_postgres_check.py
+          PB_PROVIDER_DIAG=1 PB_PROVIDER_FAKE=1 PB_PROVIDER_DATABASE_URL="$UPDATE_POSTGRES_TEST_URL" python tests/sale_gallery_provider_check.py
           python tests/app_postgres_audit.py
 
   render-runtime:
@@ -132,6 +133,7 @@ jobs:
           node tests/academy_mentor_client_check.mjs
           node tests/practice_original_client_check.mjs
           node tests/sale_files_check.mjs
+          node tests/one_click_sale_state_check.mjs
           node tests/outbox_receipt_isolation_check.mjs
           node tests/folder_sequential_upload_check.mjs
           node tests/miniapp_launch_auth_check.mjs
@@ -200,6 +202,9 @@ jobs:
           python tests/voice_training_layout_browser_check.py
       - name: Verify new mobile screens and offline replay
         run: python tests/update_browser_check.py
+
+      - name: Verify one-action sale, partial-photo retry and independent next sale
+        run: python tests/one_click_sale_browser_check.py
 
       - name: Verify sale notifications and attendance exceptions
         run: python tests/notifications_fines_browser_check.py

@@ -8,7 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from delivery_photo_migration_fixture import check_delivery_photo_set_upgrade
+from delivery_photo_migration_fixture import (
+    check_delivery_photo_set_upgrade,
+    check_fresh_sale_lineage,
+)
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -43,6 +46,17 @@ async def check_delivery_photo_migration(url):
             await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
             await check_delivery_photo_set_upgrade(conn)
         print('PostgreSQL delivery sets: legacy preserved, same digest in two folders, per-folder deduplication: PASS')
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await engine.dispose()
+    schema = 'pb_sale_fresh_test_' + uuid.uuid4().hex
+    engine = create_async_engine(url, connect_args={'server_settings': {'search_path': schema}})
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+            await check_fresh_sale_lineage(conn)
+        print('PostgreSQL fresh sale lineage: old-column restore defaults closed, delete unlinks source: PASS')
     finally:
         async with engine.begin() as conn:
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))

@@ -115,6 +115,20 @@ def _delivery_photo_sets(connection):
         raise RuntimeError('Unsupported database for delivery-photo upload-set migration')
 
 
+async def prepare_delivery_photos(connection):
+    """Upgrade a legacy table before create_all can add an incoming lineage FK."""
+    tables = await connection.run_sync(lambda conn: set(inspect(conn).get_table_names()))
+    if 'delivery_photos' not in tables:
+        return
+    await add_columns(connection, 'delivery_photos', {
+        'selected': 'BOOLEAN NOT NULL DEFAULT FALSE',
+        'upload_set': "VARCHAR(20) NOT NULL DEFAULT 'ALL'",
+        'origin': "VARCHAR(16) NOT NULL DEFAULT 'UPLOAD'",
+        'storage_identity': 'VARCHAR(64)',
+    })
+    await connection.run_sync(_delivery_photo_sets)
+
+
 async def upgrade(connection):
     tables = await connection.run_sync(lambda conn: set(inspect(conn).get_table_names()))
     if 'hotels' in tables:
@@ -124,13 +138,19 @@ async def upgrade(connection):
     if 'shoot_development_reviews' in tables:
         await add_columns(connection,'shoot_development_reviews',{'summary_parts':"TEXT NOT NULL DEFAULT '[]'"})
     if 'delivery_galleries' in tables:
-        await add_columns(connection, 'delivery_galleries', {'delivery_mode': "VARCHAR(20) NOT NULL DEFAULT 'ALL'"})
-    if 'delivery_photos' in tables:
-        await add_columns(connection, 'delivery_photos', {
-            'selected': 'BOOLEAN NOT NULL DEFAULT FALSE',
-            'upload_set': "VARCHAR(20) NOT NULL DEFAULT 'ALL'",
+        await add_columns(connection, 'delivery_galleries', {
+            'delivery_mode': "VARCHAR(20) NOT NULL DEFAULT 'ALL'",
+            'auto_publish': 'BOOLEAN NOT NULL DEFAULT FALSE',
         })
-        await connection.run_sync(_delivery_photo_sets)
+    await prepare_delivery_photos(connection)
+    # Historical SQLite delivery tables may require their unique-set rebuild.
+    # Only add the incoming lineage FK after that rebuild has completed.
+    if {'sale_draft_photos', 'delivery_photos'} <= tables:
+        await add_columns(connection, 'sale_draft_photos', {
+            'delivery_photo_id': 'INTEGER REFERENCES delivery_photos(id) ON DELETE SET NULL',
+        })
+        await connection.execute(text('CREATE INDEX IF NOT EXISTS ix_sale_draft_photos_delivery_photo_id '
+                                      'ON sale_draft_photos(delivery_photo_id)'))
     if 'sales' in tables:
         await add_columns(connection, 'sales', {'pricing_snapshot': 'TEXT'})
         await add_columns(connection,'sales',{'manager_percent_applied':'VARCHAR(60)',
