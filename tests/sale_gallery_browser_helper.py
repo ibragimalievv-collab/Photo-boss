@@ -35,10 +35,11 @@ def local_tls():
 
 
 class BrowserSales:
-    def __init__(self, base, signed_init, require, profile, expected_date):
+    def __init__(self, base, signed_init, require, profile, expected_date, *, partial_preflight=None):
         self.base, self.signed_init, self.require, self.profile = base, signed_init, require, profile
         self.playwright = self.browser = None
         self.expected_date = expected_date
+        self.partial_preflight = partial_preflight
         self.contexts, self.pages, self.rows = {}, {}, {}
         self.page_errors = []
         self.concurrent_ready = 0
@@ -118,11 +119,30 @@ class BrowserSales:
             {"name": "selected.png", "mimeType": "image/png", "buffer": raw} for raw in selected])
         await expect(form.locator("[name=sold]")).to_have_value(str(len(selected)))
         await expect(form.locator("[name=total]")).to_have_value(str(len(selected)) if booking_id is None else "3")
+        button = form.get_by_role("button", name="Сохранить продажу", exact=True)
+        await expect(button).to_have_count(1)
+        if self.partial_preflight is not None and n == 0:
+            self.report["last_ui_step"] = "partial_deposit_reject_without_new_receipt"
+            await button.click()
+            self.report["save_clicks"] += 1
+            await expect(page.locator("#toast")).to_contain_text("Прикрепите чек продажи на остаток к оплате")
+            await expect(button).to_be_enabled()
+            queue = await page.evaluate("async()=>await (await import('/app/js/outbox.js')).outboxRows()")
+            self.require(not queue and not await form.get_attribute("data-pending-keys"),
+                         "partial_deposit_preflight_does_not_enqueue")
+            retained = await form.locator("[name=selected]").evaluate("""async element=>
+              Promise.all([...element.files].map(async file=>{
+                const bytes=await file.arrayBuffer(),sha=await crypto.subtle.digest('SHA-256',bytes);
+                return [...new Uint8Array(sha)].map(n=>n.toString(16).padStart(2,'0')).join('');
+              }))""")
+            self.require(retained == [hashlib.sha256(raw).hexdigest() for raw in selected],
+                         "partial_deposit_preflight_preserves_selected_files")
+            await self.partial_preflight()
+            self.report["partial_deposit_no_receipt_preflight"] = True
+            self.report["selected_files_preserved_after_preflight"] = len(retained)
         await form.locator("[name=receipt]").set_input_files(
             {"name": "receipt.png", "mimeType": "image/png", "buffer": receipt})
         self.require(await form.locator("[data-sale-client-link]").count() == 0, "ui_no_guest_link_before_save")
-        button = form.get_by_role("button", name="Сохранить продажу", exact=True)
-        await expect(button).to_have_count(1)
         if self.profile == "concurrent":
             self.concurrent_ready += 1
             if self.concurrent_ready == 2:

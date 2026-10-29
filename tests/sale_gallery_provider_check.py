@@ -69,7 +69,9 @@ async def run():
     fake = os.environ.get("PB_PROVIDER_FAKE") == "1"
     browser_mode = os.environ.get("PB_PROVIDER_BROWSER") == "1"
     browser_case = os.environ.get("PB_PROVIDER_CASE", "desktop")
+    partial_deposit = os.environ.get("PB_PROVIDER_PARTIAL_DEPOSIT") == "1"
     require(not browser_mode or browser_case in {"desktop", "mobile-recovery", "concurrent"}, "unknown_browser_case")
+    require(not partial_deposit or (browser_mode and browser_case == "desktop"), "partial_deposit_requires_desktop_browser")
     database_url = os.environ.get("PB_PROVIDER_DATABASE_URL") or os.environ.get("DATABASE_URL")
     require(database_url, "database_environment_required")
     require(fake or bool(os.environ.get("YANDEX_DISK_TOKEN", "").strip()), "provider_environment_required")
@@ -172,11 +174,13 @@ async def run():
             DeliveryPhoto,
             Hotel,
             HotelEmployee,
+            OperationRequest,
             Package,
             PayrollEntry,
             Photo,
             Receipt,
             Sale,
+            SaleDraft,
             SaleDraftPhoto,
             Shooting,
             User,
@@ -335,6 +339,13 @@ async def run():
                 await session.flush()
                 session.add_all(Photo(shooting_id=shooting.id, file_id=f"synthetic-full-{n}-{i}") for i in range(3))
                 bookings.append(booking.id)
+            if partial_deposit:
+                deposit_hash = hashlib.sha256(b"synthetic-approved-deposit-fixture").hexdigest()
+                session.add(Receipt(booking_id=bookings[0], uploaded_by_id=3, purpose="DEPOSIT",
+                    file_id="fixture:synthetic-approved-deposit", file_unique_id="fixture:synthetic-approved-deposit",
+                    image_sha256=deposit_hash, approved_image_hash=deposit_hash,
+                    expected_amount=400, verified_amount=400, status="APPROVED",
+                    reviewed_by_id=1, reviewed_at=utc_now(), analysis=json.dumps({"status": "synthetic_fixture"})))
             await session.commit()
         async with engine.begin() as connection:
             for table in ("users", "clients", "hotels", "packages"):
@@ -361,9 +372,16 @@ async def run():
             await client.server.start_server(**server_options)
         await client.start_server()
         if browser_mode:
+            async def partial_preflight():
+                async with db.Session() as session:
+                    for model in (OperationRequest, SaleDraft, Sale, SaleDraftPhoto):
+                        require(await session.scalar(select(func.count(model.id))) == 0,
+                                "partial_deposit_no_server_operations_before_receipt")
+                report["checks"].append("partial_deposit_preflight_before_any_server_operations")
             base = str(client.make_url("/")).rstrip("/")
             os.environ["WEBHOOK_BASE_URL"] = base
-            browser_driver = BrowserSales(base, signed(3, token), require, browser_case, str(today))
+            browser_driver = BrowserSales(base, signed(3, token), require, browser_case, str(today),
+                                           partial_preflight=partial_preflight if partial_deposit else None)
             await browser_driver.start()
         request_count = 0
         browser_rows = {}
@@ -504,8 +522,15 @@ async def run():
             # receipt mutation + production payment allocator in this schema;
             # do not invoke Telegram callbacks or send any review messages.
             async with db.Session() as session:
-                receipt = await session.scalar(select(Receipt).where(Receipt.booking_id == booking_id))
+                receipt = await session.scalar(select(Receipt).where(Receipt.booking_id == booking_id,
+                                                                     Receipt.purpose == "PAYMENT"))
                 require(receipt.status == "PENDING", "synthetic_receipt_pending")
+                if partial_deposit and n == 0:
+                    partial_sale = await session.get(Sale, finished["saleId"])
+                    require(receipt.expected_amount == 400 and partial_sale.amount == 800
+                            and partial_sale.payment_status == "PARTIAL", "partial_deposit_payment_due_is_400")
+                    report["partial_deposit"] = {"approved_deposit": 400, "sale_amount": 800,
+                                                 "payment_receipt_expected": 400, "receipt_purpose": "PAYMENT"}
                 receipt.status, receipt.verified_amount = "APPROVED", receipt.expected_amount
                 receipt.reviewed_by_id, receipt.reviewed_at = 1, utc_now()
                 receipt.approved_image_hash = receipt.image_sha256
@@ -596,7 +621,7 @@ async def run():
                         "all_engines_sentinel")
         counts = await identities()
         expected_photos = sum(len(selected) for selected in selections)
-        require(len(counts["sales"]) == 2 and len(counts["receipts"]) == 2
+        require(len(counts["sales"]) == 2 and len(counts["receipts"]) == (3 if partial_deposit else 2)
                 and len(counts["sale_draft_photos"]) == expected_photos and len(counts["delivery_photos"]) == expected_photos,
                 "final_synthetic_counts")
         report.update(ok=True, http_requests=served["requests"], engines=len(engines),

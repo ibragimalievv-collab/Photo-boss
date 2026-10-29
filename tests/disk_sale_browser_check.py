@@ -23,6 +23,13 @@ from app.models import PayrollEntry, Sale, SaleDraft, SaleDraftPhoto, Setting
 from app.services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
 
 
+async def reveal_disk_source(form):
+    for selector in ('.sale-details', '.sale-extra-source'):
+        details = form.locator(selector)
+        if not await details.evaluate('element=>element.open'):
+            await details.locator(':scope > summary').click()
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix='disk-sale-browser-') as folder, MonkeyPatch.context() as monkey:
         engine,factory,_,request,_,disk,did = await prepared(monkey,'sqlite+aiosqlite:///'+folder+'/test.db')
@@ -79,6 +86,7 @@ async def main():
                     await page.locator('#workflowSalePick').select_option(str(bid))
                     await page.get_by_role('button',name='Продолжить продажу как владелец',exact=True).click()
                     form=page.locator('#workflowSale')
+                    await reveal_disk_source(form)
                     for label in ['Загрузить с устройства','Прикрепить ссылку','Выбрать на Яндекс.Диске']:
                         await expect(form.get_by_role('radio',name=label,exact=True)).to_be_visible()
                     await form.get_by_role('radio',name='Прикрепить ссылку',exact=True).check()
@@ -95,6 +103,7 @@ async def main():
                     await expect(form.get_by_role('link',name='Открыть Яндекс.Диск',exact=True)).to_be_visible()
                     await form.get_by_role('button',name='Повторить открытие',exact=True).click(timeout=5000)
                     await page.reload()
+                    await reveal_disk_source(form)
                     await expect(form.get_by_role('radio',name='Выбрать на Яндекс.Диске',exact=True)).to_be_checked()
                     await expect(form.get_by_role('button',name='📁 Hotel',exact=True)).to_be_visible()
                     assert len(context.pages)==1,'Form recovery must not open a new Disk window'
@@ -132,7 +141,7 @@ async def main():
                     await expect(form.locator('[data-disk-photo="disk:/Hotel/a.jpg"]')).to_be_checked()
                     await expect(form.locator('[data-sale-disk-folders]')).to_be_empty()
                     await expect(form.locator('[data-sale-disk-selection]')).to_contain_text('Выбрано на Диске: 2')
-                    await form.get_by_role('button',name='Сохранить продажу и фотографии',exact=True).click()
+                    await form.get_by_role('button',name='Сохранить продажу',exact=True).click()
                     await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.kind==='sale_disk_selected'&&r.status==='local'&&r.error);}")
                     await page.get_by_role('button',name='Синхронизировать сейчас',exact=True).click()
                     await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.kind==='sale_complete'&&r.status==='synced');}")

@@ -388,7 +388,11 @@ async function submitWorkflow(form){
    if(!data.bankConfigured)throw new Error('Оплата по QR пока не настроена. Выберите другой способ оплаты.');
    add('sale_bank_payment',{draft,booking:b.inline?draft:{id:b.id},payment:Object.fromEntries(Object.entries(counts).filter(([key])=>!['draft','price'].includes(key)))});
   }else if(receipt)add('sale_receipt',{draft},receipt);
-  else if((!d||d.status==='AWAITING_RECEIPT')&&Number(b.paidAmount||0)<=0)throw new Error('Прикрепите чек продажи или выберите оплату по QR.');
+  else if(!d||d.status==='AWAITING_RECEIPT'){
+   const quote=updatePricePreview(form,b,data.tariffs);
+   if(!quote||!Number.isFinite(quote.due))throw new Error('Проверьте сумму продажи и остаток к оплате.');
+   if(quote.due>0)throw new Error('Прикрепите чек продажи на остаток к оплате или выберите оплату по QR.');
+  }
   if(!d||d.status!=='AWAITING_SELECTED'||total!==Number(d.total)||sold!==Number(d.sold))add('sale_counts',counts);
   for(const photo of photos)add('sale_selected',{draft},photo);
   for(const photo of diskPhotos)add('sale_disk_selected',{draft,...photo});

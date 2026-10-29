@@ -58,8 +58,9 @@ def png(color):
 
 async def scenario(browser, viewport, label, output):
     ledger, drafts, sales, calls, attempts = {}, {}, {}, [], {}
-    paid, unverified = set(), set()
-    contexts = {bid: 'Гость с одинаковым именем' for bid in (7, 8, 9)}
+    paid, unverified = {6}, set()
+    credits = {6: '1200.00', 7: '400.00'}
+    contexts = {bid: 'Гость с одинаковым именем' for bid in (6, 7, 8, 9)}
     faults = {'temporary': False, 'lost': False, 'inline_rejected': False}
     inline_price = {'value': '400.00'}
 
@@ -85,7 +86,7 @@ async def scenario(browser, viewport, label, output):
                 'canUpload': False, 'files': [], 'receipts': [], 'bankPayments': [],
                 'sales': [{'id': sale['id'], 'photos': sale['sold'], 'amount': sale['amount']}] if sale else [],
                 'soldTotal': sale['sold'] if sale else 0, 'salesAmount': sale['amount'] if sale else '0',
-                'paidAmount': sale['amount'] if bid in paid and sale else '0', 'gallery': gallery(bid),
+                'paidAmount': sale['amount'] if bid in paid and sale else credits.get(bid, '0'), 'gallery': gallery(bid),
                 'draft': {'id': draft['id'], 'mine': True, 'status': draft['status'],
                     'selected': len(draft['photos']), 'sold': draft.get('sold'), 'total': draft.get('total'),
                     'receiptStored': draft.get('receipt', False)} if draft and not sale else None})
@@ -131,7 +132,7 @@ async def scenario(browser, viewport, label, output):
                 assert original
                 draft['receipt'], draft['status'] = True, 'AWAITING_COUNTS'
             elif kind == 'sale_counts':
-                assert draft.get('receipt'), 'Counts bypassed receipt'
+                assert draft.get('receipt') or float(credits.get(bid, 0)) >= 400*data['sold'], 'Counts bypassed receipt or fully approved credit'
                 draft.update(total=data['total'], sold=data['sold'], status='AWAITING_SELECTED')
             elif kind == 'sale_selected':
                 assert draft.get('sold'), 'File bypassed counts'
@@ -201,6 +202,17 @@ async def scenario(browser, viewport, label, output):
         await expect(form.locator('[name=sold]')).to_have_value('3')
         await expect(form.locator('[name=total]')).to_have_value('3')
         await expect(form.locator('[data-operation-progress]')).to_contain_text('Файлы ещё не переданы')
+        # An approved partial deposit cannot replace the missing receipt for
+        # the balance. Rejection happens before a single operation is queued.
+        await page.evaluate("window.partialDepositForm=document.querySelector('#workflowSale')")
+        await form.get_by_role('button', name='Сохранить продажу', exact=True).click()
+        await expect(page.locator('#errors')).to_contain_text('Прикрепите чек продажи на остаток к оплате')
+        assert not calls and not drafts and not sales
+        assert await page.evaluate("async()=> (await (await import('/app/js/outbox.js')).outboxRows()).length") == 0
+        assert await form.locator('[name=selected]').evaluate('el=>el.files.length') == 3
+        assert await page.evaluate("document.querySelector('#workflowSale')===window.partialDepositForm")
+        assert not await form.get_attribute('data-pending-keys')
+        await expect(form.get_by_role('button', name='Сохранить продажу', exact=True)).to_be_enabled()
         await form.locator('[name=receipt]').set_input_files({'name': 'receipt.png', 'mimeType': 'image/png', 'buffer': png('white')})
         await form.screenshot(path=str(output/f'{label}-minimal-existing.png'))
         await form.evaluate("form=>{for(let n=0;n<2;n++)form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));}")
@@ -309,6 +321,21 @@ async def scenario(browser, viewport, label, output):
         await expect(form.locator('[data-sale-client-link]')).to_be_visible()
         await form.locator('[data-workflow=gallery-qr]').click()
         await expect(form.locator('.sale-gallery-qr')).to_be_visible()
+        # Conversely, confirmed credit covering the entire quote permits a
+        # new purchase without a new receipt. It must still reach final ACK.
+        await page.locator('#workflowSalePick').select_option('6')
+        await form.locator('[name=selected]').set_input_files([
+            {'name': f'covered-{index}.png', 'mimeType': 'image/png', 'buffer': png(color)}
+            for index, color in enumerate(('maroon', 'lime', 'silver'))])
+        assert await form.locator('[name=receipt]').evaluate('el=>el.files.length') == 0
+        await form.get_by_role('button', name='Сохранить продажу', exact=True).click()
+        await expect(form.locator('[data-operation-progress]')).to_contain_text('сохранена сервером', timeout=15000)
+        covered_keys = json.loads(await form.get_attribute('data-pending-keys'))
+        covered_rows = await page.evaluate("async()=>await(await import('/app/js/outbox.js')).outboxRows()")
+        assert all(row['kind'] != 'sale_receipt' for row in covered_rows if row['key'] in covered_keys)
+        assert len(drafts[6]['photos']) == sales[6]['sold'] == 3
+        assert len(sales) == 5
+        await expect(form.locator('[data-sale-client-link]')).to_be_visible()
         # A fresh, independent inline form has no predecessor's pending keys.
         # Capture its normal 500-RUB quote after the earlier correction.
         await form.locator('[data-workflow=another-sale]').click()
@@ -322,10 +349,10 @@ async def scenario(browser, viewport, label, output):
         await expect(form.locator('#salePricePreview')).to_contain_text('500')
         await expect(form.locator('[name=total]')).to_have_attribute('type', 'hidden')
         await form.screenshot(path=str(output/f'{label}-minimal-new-guest.png'))
-        assert len(sales) == 4, 'Choosing files alone cannot create the next sale'
+        assert len(sales) == 5, 'Choosing files alone cannot create the next sale'
         assert not errors, errors
         assert await page.locator('#errors').inner_text() == ''
-        return {'sales': len(sales), 'first_photos': len(drafts[7]['photos']),
+        return {'sales': len(sales), 'partial_deposit_preflight': True, 'fully_covered_no_receipt': True, 'first_photos': len(drafts[7]['photos']),
                 'third_file_attempts': sum(call['filename'] == 'three.png' for call in calls),
                 'inline_start_attempts': sum(call['kind'] == 'sale_start_inline' for call in calls),
                 'paused_file_attempts': sum(call['filename'] == 'paused.png' for call in calls)}

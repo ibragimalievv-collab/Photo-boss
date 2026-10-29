@@ -70,3 +70,48 @@ assert.equal(controls.receipt.disabled,true,'The original queued receipt remains
 assert.equal(submit.textContent,'Сохранить исправленную запись');
 assert.equal(parts.get('[data-workflow="repair-booking"]').hidden,true);
 console.log('PASS: rejected booking shows an edit action, re-enables its data fields, and preserves the queued receipt');
+
+// Receipt preflight uses the same real quote as the visible total: confirmed
+// money is allocated across previous sales, packages, discounts and albums.
+const pricingSource=fs.readFileSync(new URL('../app/webapp/js/hotel-pricing.js',import.meta.url),'utf8')
+ .replace(/^import .*;\n/gm,'').replaceAll('export ','');
+const balanceCases=[
+ {name:'partial deposit',paid:'400',sold:3,total:10,due:800},
+ {name:'fully covered purchase',paid:'1200',sold:3,total:10,due:0},
+ {name:'credit already used by previous purchase',paid:'1000',previous:'800',sold:1,total:10,due:200},
+ {name:'remaining approved credit',paid:'1200',previous:'800',sold:1,total:10,due:0},
+ {name:'package purchase',paid:'400',sold:3,total:10,tariff:'7',due:800},
+ {name:'whole shoot approved discount',paid:'400',sold:3,total:3,discount:'9',due:200},
+ {name:'discount plus two albums',paid:'400',sold:3,total:3,discount:'9',album:'5',albumQuantity:'2',due:1200},
+ {name:'fully covered discount and albums',paid:'1600',sold:3,total:3,discount:'9',album:'5',albumQuantity:'2',due:0},
+ {name:'existing draft still needs receipt',paid:'400',sold:3,total:10,draft:{status:'AWAITING_RECEIPT'},due:800},
+ {name:'unknown quote cannot bypass receipt',paid:'99999',sold:3,total:10,tariff:'999',due:null},
+];
+for(const example of balanceCases){
+ const queued=[],files=Array.from({length:example.sold},(_,i)=>({name:`original-${i}.jpg`,type:'image/jpeg',size:1234}));
+ const values={sold:String(example.sold),total:String(example.total),tariffId:example.tariff||'1',discountId:example.discount||'',albumId:example.album||'',albumQuantity:example.albumQuantity||'1',paymentMethod:'receipt'};
+ const candidate={id:'workflowSale',isConnected:true,dataset:{draftScope:'7'},classList:{contains:()=>false},setAttribute(){},removeAttribute(){},querySelector:()=>null,
+  values,elements:{...Object.fromEntries(Object.entries(values).map(([key,value])=>[key,{value}])),selected:{files},receipt:{files:[]}}};
+ const booking={id:7,hotelId:1,price:'400.00',pricing:{tariffId:1,kind:'UNIT',price:'400.00'},paidAmount:example.paid,salesAmount:example.previous||'0',draft:example.draft||null,
+  discountApprovals:[{id:9,status:'APPROVED',total:3,unitPrice:'400.00'}]};
+ const catalogue={actorId:42,bookings:[booking],tariffs:[{id:7,hotelId:1,kind:'PACKAGE',price:'1200.00',photoCount:3}],albums:[{id:5,hotelId:1,price:'500.00'}]};
+ let key=0;
+ const ctx=vm.createContext({FormData:FD,Date,Number,JSON,Error,Set,candidate,catalogue,checkSaleFiles:async()=>{},captureForm(){},todayKey:()=> '2026-10-29',
+  crypto:{randomUUID:()=>`balance-${++key}`},window:{addEventListener(){}},document:{addEventListener(){},querySelector:()=>null,querySelectorAll:()=>[]},
+  enqueueBatch:async batch=>queued.push(...batch),outboxRows:async()=>queued});
+ vm.runInContext(pricingSource+'\n'+source,ctx);
+ vm.runInContext('data=catalogue;state=catalogue;selected=7;',ctx);
+ const quote=vm.runInContext('updatePricePreview(candidate,data.bookings[0],data.tariffs)',ctx);
+ assert.equal(quote?.due??null,example.due,example.name);
+ if(example.due===0){
+  await vm.runInContext('workflowSubmit(candidate)',ctx);
+  assert.ok(queued.some(row=>row.kind==='sale_complete'),example.name);
+  assert.ok(!queued.some(row=>row.kind==='sale_receipt'),'fully covered quote needs no new receipt');
+ }else{
+  await assert.rejects(vm.runInContext('workflowSubmit(candidate)',ctx),example.due===null?/Проверьте сумму продажи/:/Прикрепите чек продажи на остаток к оплате/);
+  assert.equal(queued.length,0,example.name+' must fail before enqueue');
+  assert.equal(candidate.elements.selected.files,files,'preflight preserves chosen originals');
+  assert.equal(candidate.dataset.pendingKeys,undefined);
+ }
+}
+console.log('PASS: receipt preflight uses real outstanding balance across prior purchases, approved credit, packages, discounts and albums; full coverage alone permits no new receipt');
