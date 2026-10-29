@@ -164,6 +164,7 @@ async def run():
         from aiohttp import FormData, TCPConnector, web
         from aiohttp.test_utils import TestClient, TestServer
         from PIL import Image
+        from sale_gallery_provider_cleanup import delete_diagnostic_uuid_directory
 
         from app import db, gallery_folders, workflow, yandex_disk
         from app.miniapp_api import install_miniapp
@@ -642,6 +643,7 @@ async def run():
         if isinstance(exc, CheckFailed):
             report["error_check"] = str(exc)
     finally:
+        report["audit_ok"] = report["ok"]
         if browser_driver is not None:
             try:
                 await browser_driver.close()
@@ -656,7 +658,8 @@ async def run():
                 report["cleanup"]["http_closed"] = False
         if storage is not None and provider_cleanup_allowed:
             try:
-                await storage.delete_confirmed(prefix)
+                report["provider_cleanup"] = await delete_diagnostic_uuid_directory(storage, prefix,
+                    expected_uuid=uid, provider_error_type=yandex_disk.YandexDiskError)
                 report["cleanup"]["provider_uuid_directory_removed"] = True
             except Exception as exc:
                 report["cleanup"]["provider_uuid_directory_removed"] = False

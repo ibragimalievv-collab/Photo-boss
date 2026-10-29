@@ -1116,3 +1116,34 @@ class OperationalResetRestore(Base):
     owner_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     generation: Mapped[str] = mapped_column(String(36), unique=True)
+
+
+class GuestSMSPreference(Base):
+    """Explicit consent for one confirmed appointment; legacy bookings opt out."""
+    __tablename__ = 'guest_sms_preferences'
+    booking_id: Mapped[int] = mapped_column(ForeignKey('bookings.id', ondelete='CASCADE'), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default='false')
+    consent: Mapped[bool] = mapped_column(Boolean, default=False, server_default='false')
+    lead_minutes: Mapped[int] = mapped_column(Integer, default=60)
+    timezone: Mapped[str] = mapped_column(String(80))
+    confirmed_for: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class GuestSMSJob(Base):
+    """No phone/body snapshot: recheck current booking/contact before dispatch."""
+    __tablename__ = 'guest_sms_jobs'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    booking_id: Mapped[int] = mapped_column(ForeignKey('bookings.id', ondelete='CASCADE'), index=True)
+    event_key: Mapped[str] = mapped_column(String(64), unique=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    appointment_at: Mapped[datetime] = mapped_column(DateTime)
+    due_at: Mapped[datetime] = mapped_column(DateTime)
+    next_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    state: Mapped[str] = mapped_column(String(24), default='scheduled', index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    safe_retry: Mapped[bool] = mapped_column(Boolean, default=False)
+    provider_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)

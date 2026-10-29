@@ -40,6 +40,7 @@ jobs:
           python tests/operations_postgres_check.py
           python tests/booking_concurrency_postgres_check.py
           python tests/delivery_download_postgres_check.py
+          python tests/notification_feed_postgres_check.py
           PB_PROVIDER_DIAG=1 PB_PROVIDER_FAKE=1 PB_PROVIDER_DATABASE_URL="$UPDATE_POSTGRES_TEST_URL" python tests/sale_gallery_provider_check.py
           python tests/app_postgres_audit.py
 
@@ -206,8 +207,10 @@ jobs:
       - name: Verify one-action sale, partial-photo retry and independent next sale
         run: python tests/one_click_sale_browser_check.py
 
-      - name: Verify sale notifications and attendance exceptions
-        run: python tests/notifications_fines_browser_check.py
+      - name: Verify notification center, reminders and attendance exceptions
+        run: |
+          python tests/notifications_fines_browser_check.py
+          python tests/notification_center_browser_check.py
       - name: Verify mobile discount approval, album and deposit calculation
         run: |
           python tests/pricing_approval_browser_check.py

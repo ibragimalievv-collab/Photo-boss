@@ -50,6 +50,11 @@ async def fixture():
                   shoot_date=date(2026, 10, 16), shoot_time=time(12, 13, 14, 500),
                   package_id=1, manager_id=1, photographer_id=2, status='COMPLETED')
         await conn.exec_driver_sql("UPDATE bookings SET legacy_extra='legacy-value' WHERE id=10")
+        sms_at = datetime(2026, 10, 16, 9, 13, tzinfo=UTC).replace(tzinfo=None)
+        await put('guest_sms_preferences', booking_id=10, enabled=True, consent=True,
+                  lead_minutes=60, timezone='Europe/Moscow', confirmed_for=sms_at)
+        await put('guest_sms_jobs', booking_id=10, event_key='f' * 64, fingerprint='f' * 64,
+                  appointment_at=sms_at, due_at=sms_at, next_at=sms_at, state='scheduled')
         await put('shootings', id=11, booking_id=10)
         await put('photos', id=12, shooting_id=11, file_id='original-file')
         await put('photo_storage', photo_id=12, shooting_id=11, telegram_file_id='original-file',

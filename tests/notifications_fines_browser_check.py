@@ -75,9 +75,10 @@ async def reminder_browser_flow(browser, client, factory, owner_page, errors):
             await page.goto(BASE+'/app/#more')
             await page.wait_for_function("Number(document.querySelector('[data-notice-count]')?.textContent)>=1")
             await page.locator('[data-action=app-notifications]').click()
-            card = page.locator(f'[data-notice-read="{notice_id}"]')
+            card = page.locator(f'[data-notice-id="{notice_id}"]')
             await card.wait_for(state='visible')
             await card.scroll_into_view_if_needed()
+            await card.locator('summary').click()
             details = await card.inner_text()
             for value in ('Скоро съёмка', 'Гость:', '20.10.2026 в 13:00', 'Hotel', 'reminder-205',
                           'Нет подключённого устройства'):
@@ -88,9 +89,10 @@ async def reminder_browser_flow(browser, client, factory, owner_page, errors):
             await page.reload()
             await page.wait_for_function("Number(document.querySelector('[data-notice-count]')?.textContent)>=1")
             await page.locator('[data-action=app-notifications]').click()
-            card = page.locator(f'[data-notice-read="{notice_id}"]')
+            card = page.locator(f'[data-notice-id="{notice_id}"]')
             await card.wait_for(state='visible')
             await card.scroll_into_view_if_needed()
+            await card.locator('summary').click()
             assert 'Время напоминания истекло; новые push не отправляются' in await card.inner_text()
             assert 'reminder-205' in await card.inner_text()
             assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')

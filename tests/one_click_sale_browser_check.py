@@ -317,7 +317,7 @@ async def scenario(browser, viewport, label, output):
         assert sum(call['filename'] == 'walk-in-a.png' for call in calls) == 1
         assert sum(call['filename'] == 'walk-in-b.png' for call in calls) == 1
         paid.add(10)
-        await form.locator('[data-workflow=gallery-status]').click()
+        await page.clock.fast_forward(6000)
         await expect(form.locator('[data-sale-client-link]')).to_be_visible()
         await form.locator('[data-workflow=gallery-qr]').click()
         await expect(form.locator('.sale-gallery-qr')).to_be_visible()
