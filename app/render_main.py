@@ -33,7 +33,7 @@ from .yandex_disk import install_yandex_disk, storage_recovery_loop
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.51-single-save-gallery"
+RELEASE = "miniapp-3.52-workspace-notifications"
 
 
 async def app_redirect(request):
@@ -169,6 +169,8 @@ async def on_startup(app):
     app['assignment_notification_task'] = asyncio.create_task(assignment_loop(engine, bot))
     from .services.booking_reminders import booking_reminder_loop
     app['booking_reminder_task'] = asyncio.create_task(booking_reminder_loop(engine))
+    from .services.guest_sms import guest_sms_loop
+    app['guest_sms_task'] = asyncio.create_task(guest_sms_loop(engine, service=app.get('guest_sms')))
     from .push_notifications import log_push_state, push_loop
     await log_push_state(engine)
     app['push_notification_task'] = asyncio.create_task(push_loop(engine))
@@ -190,7 +192,7 @@ async def on_startup(app):
 async def on_cleanup(app):
     clear_ready_file()
     app["ready"] = False
-    for key in ("owner_telegram_task", "disk_folder_audit_task", "booking_reminder_task", "attendance_fine_task", "push_notification_task", "bank_payment_task", "realtime_probe_task", "operations_task", "storage_task", "storage_recovery_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task", "assignment_notification_task"):
+    for key in ("guest_sms_task", "owner_telegram_task", "disk_folder_audit_task", "booking_reminder_task", "attendance_fine_task", "push_notification_task", "bank_payment_task", "realtime_probe_task", "operations_task", "storage_task", "storage_recovery_task", "storage_inventory_task", "chat_cleanup_task", "academy_review_task", "development_task", "assignment_notification_task"):
         task = app.get(key)
         if task:
             task.cancel()

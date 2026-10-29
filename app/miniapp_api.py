@@ -1124,6 +1124,8 @@ def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/M
     install_development(app, miniapp)
     from .booking_management import install_booking_management
     install_booking_management(app, miniapp)
+    from .guest_sms_api import install_guest_sms
+    install_guest_sms(app, miniapp)
     from .storage_inventory import install_inventory
     install_inventory(app, miniapp)
     from .booking_control import install_booking_control

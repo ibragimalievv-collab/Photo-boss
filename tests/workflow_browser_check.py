@@ -213,6 +213,27 @@ async def main():
                         return rows.filter(r=>['sale_counts','sale_selected','sale_complete'].includes(r.kind))
                             .every(r=>r.status==='local'&&!r.error);
                     }"""), 'Receipt failure must wait without permanently rejecting the dependent sale stages'
+                    # A temporary route error must not detach the active outbox.
+                    # Retry loads the route again without boot/reload; the same
+                    # pending selected original and operation identities survive.
+                    queue_before_route_error = await page.evaluate("async()=>await(await import('/app/js/outbox.js')).outboxRows()")
+                    me_calls = []
+                    page.on('request', lambda request: me_calls.append(request.url) if '/api/miniapp/me' in request.url else None)
+                    async def temporary_finance_error(route):
+                        await route.fulfill(status=503, content_type='application/json', body='{"error":"Synthetic temporary route failure"}')
+                    await context.route('**/api/miniapp/finance?*', temporary_finance_error)
+                    await page.evaluate("location.hash='#finance'")
+                    await page.get_by_role('button', name='Повторить', exact=True).wait_for()
+                    after_route_error = await page.evaluate("async()=>await(await import('/app/js/outbox.js')).outboxRows()")
+                    assert [row['key'] for row in after_route_error] == [row['key'] for row in queue_before_route_error]
+                    assert any(row['kind'] == 'sale_selected' and row['hasBlob'] for row in after_route_error)
+                    await context.unroute('**/api/miniapp/finance?*', temporary_finance_error)
+                    await page.get_by_role('button', name='Повторить', exact=True).click()
+                    await wait_async(page, "()=>['Мои деньги','Касса и начисления'].includes(document.querySelector('#app h1')?.textContent)")
+                    assert not me_calls, 'Temporary route retry must not require boot or reauthentication'
+                    await page.evaluate("location.hash='#workflow'")
+                    await page.get_by_role('heading', name='Рабочие операции', exact=True).wait_for()
+                    assert await page.locator('#workflowQueue').locator('article').count() == len(queue_before_route_error)
                     # Reproduce a previously saved 3.20 queue: the old client
                     # already received wrong-stage 409s after its receipt failed.
                     await page.evaluate("""async()=>{
@@ -438,7 +459,34 @@ async def main():
                         assert (await session.scalar(select(ShiftCheckOut))).status == 'FINISHED'
                     assert not errors, errors
                     await panel.screenshot(path=str(output/'offline-attendance-review-mobile.png'), full_page=True)
-                    print('PASS: cold offline start, receipt503 isolation and legacy409 recovery, lost response replay, single sale/commission, offline camera shifts and owner review, no API cache')
+                    # Confirmed authentication/access failures still suspend
+                    # the account context without deleting stored photo bytes.
+                    for auth_status in (401, 403):
+                        await page.evaluate("""async status=>{
+                            const {localAction}=await import('/app/js/localstore.js');
+                            await localAction('operations','readwrite',store=>store.put({key:'auth-block-'+status,userId:1,kind:'shoot_photo',date:'2026-10-29',data:{shooting:{id:999}},filename:'held.jpg',blob:new Blob(['synthetic retained photo'],{type:'image/jpeg'}),status:'error',errorStatus:403,error:'Synthetic held operation',createdAt:Date.now(),order:999}));
+                        }""", auth_status)
+                        assert any(row['key'] == f'auth-block-{auth_status}' for row in await page.evaluate("async()=>await(await import('/app/js/outbox.js')).outboxRows()"))
+                        def make_auth_error(status):
+                            async def handler(route):
+                                await route.fulfill(status=status, content_type='application/json', body='{"error":"Synthetic access failure"}')
+                            return handler
+                        auth_finance_error = make_auth_error(auth_status)
+                        await context.route('**/api/miniapp/finance?*', auth_finance_error)
+                        await page.evaluate("location.hash='#finance'")
+                        await wait_async(page, "async()=> (await(await import('/app/js/outbox.js')).outboxRows()).length===0")
+                        retained = await page.evaluate("""async status=>{
+                            const {localAction}=await import('/app/js/localstore.js');
+                            const row=await localAction('operations','readonly',store=>store.get('auth-block-'+status));return row?.blob?.text();
+                        }""", auth_status)
+                        assert retained == 'synthetic retained photo'
+                        await context.unroute('**/api/miniapp/finance?*', auth_finance_error)
+                        if auth_status == 401:
+                            await page.reload()
+                            await wait_async(page, "async()=> (await(await import('/app/js/outbox.js')).outboxRows()).length>0")
+                            await page.evaluate("location.hash='#workflow'")
+                            await page.get_by_role('heading', name='Рабочие операции', exact=True).wait_for()
+                    print('PASS: cold offline start, receipt503 isolation and legacy409 recovery, lost response replay, single sale/commission, offline camera shifts and owner review, temporary503 route retry keeps same photo queue without boot, auth401403 suspend context without deleting bytes, no API cache')
                 finally:
                     await browser.close()
     finally:

@@ -6,12 +6,11 @@ import json
 import logging
 import os
 from datetime import UTC, date, datetime, timedelta
-from types import SimpleNamespace
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 from aiohttp import web
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,14 +63,18 @@ def validate_subscription(value):
 
 
 async def queue_notice(session, user_id, *, kind, event_key, url='/app/#home', message='Новое рабочее событие в Photo Boss.', payload=None):
-    existing = await session.scalar(select(Notification.id).where(Notification.user_id == user_id, Notification.event_key == event_key))
-    if existing:
-        return existing
-    row = Notification(user_id=user_id, text=message, kind=kind, event_key=event_key,
-                       payload=json.dumps({'url': url, **(payload or {})}), sent=False)
-    session.add(row)
-    await session.flush()
-    return row.id
+    # The database owns event identity. Concurrent producers must not roll back
+    # a sale/booking transaction just because another producer queued its event.
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    insert = {'postgresql': pg_insert, 'sqlite': sqlite_insert}[session.get_bind().dialect.name]
+    result = await session.scalar(insert(Notification).values(user_id=user_id, text=message,
+        kind=kind, event_key=event_key, payload=json.dumps({'url': url, **(payload or {})}), sent=False)
+        .on_conflict_do_nothing(index_elements=['user_id', 'event_key']).returning(Notification.id))
+    if result is not None:
+        return result
+    return await session.scalar(select(Notification.id).where(
+        Notification.user_id == user_id, Notification.event_key == event_key))
 
 
 async def queue_for_telegram_id(engine, tg_id, *, kind='chat', message='Новое сообщение в Photo Boss.', url='/app/#home'):
@@ -349,6 +352,8 @@ def payload_for(notice):
         details = json.loads(notice.payload or '{}')
     except (TypeError, ValueError):
         details = {}
+    if not isinstance(details, dict):
+        details = {}
     if notice.kind == 'operational_alert':
         titles['operational_alert'] = 'Проверьте продажу'
         urls['operational_alert'] = '/app/#finance'
@@ -484,7 +489,7 @@ async def log_push_state(engine):
              'app' if app_channel() else 'telegram', configured(), devices, pending)
 
 
-async def push_delivery_state(session, notice, *, active_devices):
+async def push_delivery_state(session, notice, *, active_devices, deliveries=None, earliest_subscription=...):
     """Report provider state without claiming that a phone displayed the alert."""
     deadline = reminder_deadline(notice)
     if deadline and current_utc() >= deadline:
@@ -493,13 +498,14 @@ async def push_delivery_state(session, notice, *, active_devices):
         return 'OFF'
     if not active_devices:
         return 'NO_DEVICE'
-    rows = list(await session.scalars(select(PushDelivery).where(
+    rows = deliveries if deliveries is not None else list(await session.scalars(select(PushDelivery).where(
         PushDelivery.notification_id == notice.id)))
     states = {row.status for row in rows}
     if not rows:
-        subscribed_before = await session.scalar(select(PushSubscription.id).where(
-            PushSubscription.user_id == notice.user_id, PushSubscription.active.is_(True),
-            PushSubscription.created_at <= notice.created_at).limit(1))
+        subscribed_before = (earliest_subscription is not None and earliest_subscription <= notice.created_at
+            if earliest_subscription is not ... else await session.scalar(select(PushSubscription.id).where(
+                PushSubscription.user_id == notice.user_id, PushSubscription.active.is_(True),
+                PushSubscription.created_at <= notice.created_at).limit(1)))
         # New installations do not receive historical alerts; do not promise a retry.
         return 'PENDING' if subscribed_before else 'HISTORY_ONLY'
     if 'PENDING' in states:
@@ -524,51 +530,75 @@ class AppPush:
         roles = set(await session.scalars(select(UserRole.role).where(UserRole.user_id == user.id))) if user else set()
         if not user or not user.active or not roles & ROLES:
             raise AccessError('Рабочий доступ отключён.', 403)
+        session.info['push_roles'] = roles
         return user
 
     async def status(self, request):
-        from .models import OwnerTelegramDelivery
+        from .models import Booking, Client, Hotel, OwnerTelegramDelivery
+        from .notification_feed import details, page_parameters, visibility
         from .owner_telegram import OWNER_KEY, START_KEY
+        limit, before = page_parameters(request)
         async with AsyncSession(self.api.engine) as session:
             actor = await self.actor(session, request)
-            owner_eligible = actor.tg_id > 0 and bool(await session.scalar(
-                select(UserRole.id).where(UserRole.user_id == actor.id, UserRole.role == 'OWNER')))
+            visible = await visibility(session, actor, session.info['push_roles'])
+            owner_eligible = actor.tg_id > 0 and 'OWNER' in session.info['push_roles']
             preference = await session.get(Setting, OWNER_KEY+str(actor.id)) if owner_eligible else None
             owner_copy = bool(preference)
             mirror_start = await session.get(Setting, START_KEY) if owner_copy else None
-            rows = list(await session.scalars(select(Notification).where(Notification.user_id == actor.id,
-                Notification.kind.in_(KINDS), Notification.resolved_at.is_(None)).order_by(Notification.id.desc()).limit(30)))
-            active_devices = await session.scalar(select(func.count(PushSubscription.id)).where(
-                PushSubscription.user_id == actor.id, PushSubscription.active.is_(True)))
+            query = select(Notification).where(visible)
+            if before is not None:
+                query = query.where(Notification.id < before)
+            rows = list(await session.scalars(query.order_by(Notification.id.desc()).limit(limit+1)))
+            more, rows = len(rows) > limit, rows[:limit]
+            unread = await session.scalar(select(func.count(Notification.id)).where(
+                visible, Notification.acknowledged_at.is_(None)))
+            active_devices, earliest_subscription = (await session.execute(select(
+                func.count(PushSubscription.id), func.min(PushSubscription.created_at)).where(
+                PushSubscription.user_id == actor.id, PushSubscription.active.is_(True)))).one()
+            ids = [n.id for n in rows]
+            deliveries = {}
+            for delivery in await session.scalars(select(PushDelivery).where(PushDelivery.notification_id.in_(ids))):
+                deliveries.setdefault(delivery.notification_id, []).append(delivery)
+            copies = {copy.notification_id: copy for copy in await session.scalars(select(OwnerTelegramDelivery).where(
+                OwnerTelegramDelivery.notification_id.in_(ids)))} if owner_copy else {}
+            # Keep related objects in the identity map: description enrichment
+            # is a fixed number of queries for a page, never one per notice.
+            booking_ids = [notice_booking_id(n) for n in rows]
+            bookings = {b.id: b for b in await session.scalars(select(Booking).where(
+                Booking.id.in_([bid for bid in booking_ids if bid is not None])))}
+            hotels = list(await session.scalars(select(Hotel).where(Hotel.id.in_({b.hotel_id for b in bookings.values()}))))
+            clients = list(await session.scalars(select(Client).where(Client.id.in_({b.client_id for b in bookings.values()}))))
             items = []
             for notice in rows:
-                if not await eligible(session, notice, SimpleNamespace(active=True, user_id=actor.id), include_read=True):
-                    continue
-                payload = json.loads(notice.payload or '{}')
+                payload = details(notice.payload)
                 description = payload.get('description') or notice.text
                 bid = notice_booking_id(notice)
                 if bid and notice.kind in {'booking_assignment', 'booking_reminder', 'sale_ready', 'sale_created', 'reminder'}:
-                    from .models import Booking
-                    booking = await session.get(Booking, bid)
+                    booking = bookings.get(bid)
                     if booking:
                         description = await booking_description(session, booking)
-                copy = await session.get(OwnerTelegramDelivery, notice.id) if owner_copy else None
+                copy = copies.get(notice.id)
                 telegram_state = (copy.status if copy else 'PENDING' if mirror_start and
                     notice.created_at >= max(datetime.fromisoformat(mirror_start.value),
                         datetime.fromisoformat(preference.value)) else 'HISTORY_ONLY') if owner_copy else None
                 items.append({'id': notice.id, 'title': payload_for(notice)['title'],
-                    'kind': notice.kind,
+                    'kind': notice.kind, 'eventKey': notice.event_key, 'priority': notice.priority,
                     'description': description,
                     'url': payload_for(notice)['url'], 'read': bool(notice.acknowledged_at),
                     'createdAt': notice.created_at.isoformat()+'Z',
-                    'pushState': await push_delivery_state(session, notice, active_devices=active_devices),
+                    'pushState': await push_delivery_state(session, notice, active_devices=active_devices,
+                        deliveries=deliveries.get(notice.id, []), earliest_subscription=earliest_subscription),
                     'ownerTelegramState': telegram_state})
+            # Strong references above intentionally last through all descriptions.
+            _related = hotels, clients
             return web.json_response({'configured': configured(), 'channel': 'app' if app_channel() else 'telegram',
                 'ownerTelegram': owner_copy and app_channel(),
                 'canConfigureOwnerTelegram': owner_eligible,
                 'activeDevices': active_devices,
                 'publicKey': os.getenv('WEB_PUSH_PUBLIC_KEY') if configured() else None,
-                'items': items}, headers={'Cache-Control':'no-store'})
+                'items': items, 'unreadCount': unread, 'hasMore': more,
+                'olderCursor': str(rows[-1].id) if more else None,
+                'latestId': rows[0].id if rows and before is None else None}, headers={'Cache-Control':'no-store'})
 
     async def subscribe(self, request):
         if not configured():
@@ -609,6 +639,7 @@ class AppPush:
         return web.json_response({'ok': True})
 
     async def read(self, request):
+        from .notification_feed import visibility
         from .people import positive_id
         body = await self.api.body(request)
         if set(body) != {'id'}:
@@ -616,12 +647,31 @@ class AppPush:
         nid = positive_id(body['id'])
         async with AsyncSession(self.api.engine) as session:
             actor = await self.actor(session, request)
-            notice = await session.get(Notification, nid, with_for_update=True)
-            if not notice or notice.user_id != actor.id or notice.kind not in KINDS:
+            visible = await visibility(session, actor, session.info['push_roles'])
+            notice = await session.scalar(select(Notification).where(Notification.id == nid, visible).with_for_update())
+            if not notice:
                 raise AccessError('Уведомление не найдено.', 404)
             notice.acknowledged_at = notice.acknowledged_at or utc_now()
+            await session.flush()
+            unread = await session.scalar(select(func.count(Notification.id)).where(visible, Notification.acknowledged_at.is_(None)))
             await session.commit()
-        return web.json_response({'ok': True})
+        return web.json_response({'ok': True, 'unreadCount': unread}, headers={'Cache-Control': 'no-store'})
+
+    async def read_all(self, request):
+        from .notification_feed import visibility
+        body = await self.api.body(request)
+        if (set(body) != {'throughId'} or type(body['throughId']) is not int
+                or not 0 < body['throughId'] < 2**63):
+            raise AccessError('Укажите последний просмотренный номер уведомления.', 400)
+        async with AsyncSession(self.api.engine) as session:
+            actor = await self.actor(session, request)
+            visible = await visibility(session, actor, session.info['push_roles'])
+            await session.execute(update(Notification).where(visible,
+                Notification.id <= body['throughId'], Notification.acknowledged_at.is_(None))
+                .values(acknowledged_at=utc_now()).execution_options(synchronize_session=False))
+            unread = await session.scalar(select(func.count(Notification.id)).where(visible, Notification.acknowledged_at.is_(None)))
+            await session.commit()
+        return web.json_response({'ok': True, 'unreadCount': unread}, headers={'Cache-Control': 'no-store'})
 
     async def unsubscribe(self, request):
         body = await self.api.body(request)
@@ -656,4 +706,5 @@ def install_push(app, api):
     app.router.add_post('/api/miniapp/push/unsubscribe', service.unsubscribe)
     app.router.add_post('/api/miniapp/push/test', service.test)
     app.router.add_post('/api/miniapp/push/read', service.read)
+    app.router.add_post('/api/miniapp/push/read-all', service.read_all)
     app.router.add_post('/api/miniapp/push/owner-telegram', service.owner_telegram)

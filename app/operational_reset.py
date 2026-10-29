@@ -23,6 +23,7 @@ RESTORE_TABLE = 'operational_reset_restores'
 _UNSET = object()
 # Child-before-parent order; explicit deletes also capture rows hidden by CASCADE.
 DELETE_TABLES = (
+    'guest_sms_jobs', 'guest_sms_preferences',
     'bank_payments', 'work_breaks',
     'guest_feedback', 'bank_reconciliations', 'delivery_booking_responses',
     'delivery_reminders', 'delivery_claims', 'delivery_photos', 'delivery_galleries',
