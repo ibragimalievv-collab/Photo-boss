@@ -119,7 +119,7 @@ async def main():
                         await form.locator('[name=selected]').set_input_files([
                             'app/webapp/assets/academy/family.jpg', 'app/webapp/assets/academy/child.jpg',
                             'app/webapp/assets/academy/couple.jpg'])
-                        await form.get_by_role('button', name='Сохранить продажу и фотографии', exact=True).click()
+                        await form.get_by_role('button', name='Сохранить продажу', exact=True).click()
                         await expect(form.locator('[data-operation-progress]')).to_contain_text('сохранена сервером', timeout=30000)
                         async with factory() as session:
                             sales = list(await session.scalars(select(Sale)))

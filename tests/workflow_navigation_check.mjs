@@ -3,12 +3,14 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source=fs.readFileSync('app/webapp/js/workflow.js','utf8').replace(/^import .*;\n/gm,'').replaceAll('export ','');
+const fileSource=fs.readFileSync('app/webapp/js/sale-files.js','utf8');
+const {saleSaveState}=await import('data:text/javascript;base64,'+Buffer.from(fileSource).toString('base64'));
 const deferred=()=>{let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};};
 const response=(selected=7)=>({actorId:42,bookings:[7,8].map(id=>({id,status:'READY_FOR_SALE',price:'400',paidAmount:'400',sales:[],totalFrames:10,marker:selected})),tariffs:[]});
 function harness(){
  const windowListeners={},documentListeners={},enqueued=[],requests=[],app={innerHTML:'workflow'},location={hash:'#workflow'};
  let respond=async()=>response(),rows=async()=>[],validate=async()=>{},mounted=null,replaced=null;
- const context=vm.createContext({Number,JSON,Error,Set,Map,Date,Intl,setTimeout,clearTimeout,location,
+ const context=vm.createContext({rejectedInlineSale:()=>null,saleSaveState,Number,JSON,Error,Set,Map,Date,Intl,setTimeout,clearTimeout,location,
   navigator:{onLine:true},sessionStorage:{getItem(){return null;},setItem(){}},URL:{revokeObjectURL(){}},
   FormData:class{constructor(form){this.values=form.values;}get(key){return this.values[key];}},
   crypto:{randomUUID:()=>`key-${enqueued.length}-${requests.length}`},
@@ -26,7 +28,7 @@ function harness(){
  context.initial=response();vm.runInContext('data=initial;selected=7;',context);
  function form(id=7){
   const files=[{type:'image/jpeg',name:'original.jpg',size:1234}],receipt=[{type:'image/jpeg',name:'receipt.jpg',size:123}];
-  mounted={id:'workflowSale',isConnected:true,dataset:{draftScope:String(id)},classList:{contains:()=>false},
+  mounted={setAttribute(){},removeAttribute(){},id:'workflowSale',isConnected:true,dataset:{draftScope:String(id)},classList:{contains:()=>false},
    values:{total:'10',sold:'1'},elements:{selected:{files},receipt:{files:receipt}}};
   return mounted;
  }
@@ -121,7 +123,7 @@ for(const signal of ['hashchange','pagehide','replaceState']){
  form.querySelectorAll=()=>diskControls;
  form.querySelector=selector=>selector==='button[type="submit"],button:not([type])'?submit:parts.get(selector)||null;
  form.append=node=>{if('operationProgress' in node.dataset)parts.set('[data-operation-progress]',node);if('salePhotoProgress' in node.dataset)parts.set('[data-sale-photo-progress]',node);};
- h.context.document.querySelectorAll=()=>[form];h.context.document.createElement=()=>({dataset:{},setAttribute(){}});
+ h.context.document.querySelectorAll=()=>[form];h.context.document.createElement=()=>({dataset:{},setAttribute(){},append(){},remove(){}});
  h.context.saleQueueRepairable=()=>false;h.context.rejectedBooking=()=>null;
  h.context.progressRows=[{key:'start',kind:'sale_start',status:'synced'},
   {key:'disk-A',kind:'sale_disk_selected',status:'error',replaceable:true,error:'Папка изменилась'},

@@ -49,8 +49,9 @@ def user_lock_clause(conn):
 async def init_db():
     import_module(".models", package=__package__)
     async with engine.begin() as connection:
+        from .schema_updates import prepare_delivery_photos, upgrade
+        await prepare_delivery_photos(connection)
         await connection.run_sync(Base.metadata.create_all)
-        from .schema_updates import upgrade
         await upgrade(connection)
         # Hotel requested by the owner. Idempotent across restarts and deployments.
         # Reuse an existing spelling/case variant rather than creating duplicates.

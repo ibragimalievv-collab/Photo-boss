@@ -23,6 +23,11 @@ from .models import (
 )
 from .services.booking_access import booking_scope
 from .services.core import audit
+from .services.sale_gallery import (
+    blocked_gallery_ids,
+    effective_published,
+    paid_gallery_ids,
+)
 
 
 async def read_setting(session, key, default=None):
@@ -88,6 +93,9 @@ class GalleryWorkspace:
                 .join(DeliveryGallery, DeliveryGallery.id == DeliveryPhoto.gallery_id)
                 .where(DeliveryPhoto.id.in_([pid for pid in requested_covers if pid])))).all())
             items = []
+            galleries = [record[3] for record in records if record[3]]
+            paid_ids = await paid_gallery_ids(session, [g.id for g in galleries])
+            blocked_ids = await blocked_gallery_ids(session, galleries)
             for b, client_name, hotel_name, g, count, size, first, photographer_name in records:
                 meta = values.get(f'gallery:meta:{b.id}', {})
                 if meta.get('purged'):
@@ -103,10 +111,12 @@ class GalleryWorkspace:
                     'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5], 'photoCount': count or 0, 'bytes': size or 0,
                     'createdAt': g.created_at.isoformat() if g else str(b.shoot_date),
                     'expiresAt': g.expires_at.isoformat() if g and g.expires_at else None,
-                    'published': bool(g and g.published), 'trashed': bool(meta.get('trashed')),
+                    'published': await effective_published(session, g, paid_ids, blocked_ids) if g else False,
+                    'trashed': bool(meta.get('trashed')),
                     'favorite': values.get(f'gallery:project-fav:{actor["id"]}:{b.id}', False),
                     'coverId': cover, 'coverUrl': f'/delivery/{b.id}/photos/{cover}?preview=1' if cover else None,
-                    'clientUrl': self.delivery.origin() + '/g/' + g.access_token if g and g.published else None,
+                    'clientUrl': self.delivery.origin() + '/g/' + g.access_token
+                        if g and await effective_published(session, g, paid_ids, blocked_ids) else None,
                     'views': values.get(f'gallery:views:{g.id}', 0) if g else 0,
                     'downloads': values.get(f'gallery:downloads:{g.id}', 0) if g else 0})
             return web.json_response({'items': items, 'storage': {'bytes': sum(x['bytes'] for x in items)},

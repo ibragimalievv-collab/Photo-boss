@@ -5,7 +5,9 @@ module never commits independently of that receipt of the operation.
 """
 import hashlib
 import json
+from datetime import datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from aiohttp import web
 from sqlalchemy import func, select
@@ -68,7 +70,7 @@ from .yandex_disk import (
     validate_saved,
 )
 
-KINDS = frozenset({'booking', 'sale_start', 'sale_counts', 'sale_complete', 'sale_receipt',
+KINDS = frozenset({'booking', 'sale_start', 'sale_start_inline', 'sale_counts', 'sale_complete', 'sale_receipt',
                    'sale_selected', 'sale_disk_selected', 'booking_receipt', 'shoot_photo', 'shoot_complete', 'shoot_retry', 'photo_edit', 'delivery_photo', 'delivery_handoff'})
 MEDIA_KINDS = frozenset({'sale_receipt', 'sale_selected', 'booking_receipt', 'shoot_photo', 'delivery_photo'})
 PREPARED_MEDIA_KINDS = MEDIA_KINDS | {'sale_disk_selected', 'sale_complete'}
@@ -141,6 +143,7 @@ async def target(session, actor, value, field):
 class Workflow:
     def __init__(self, api):
         self.api = api
+        self.tz = getattr(api, 'tz', ZoneInfo('Europe/Moscow'))
 
     async def receipt_image(self, request):
         return await self._receipt_image(request, draft=False)
@@ -193,6 +196,8 @@ class Workflow:
                     bookings.insert(0, chosen)
             packages = (await session.scalars(select(Package))).all()
             prices = {p.id: str(money(p.price_per_photo)) for p in packages}
+            assigned_photographers = {u.id: u for u in await session.scalars(select(User).where(
+                User.id.in_({b.photographer_id for b in bookings if b.photographer_id})))}
             rows = []
             for b in bookings:
                 from .services.pricing import snapshot, unit_price
@@ -226,6 +231,9 @@ class Workflow:
                     'totalFrames': max([original_count or 0, draft.declared_photo_count or 0 if draft else 0] + [sale.declared_photo_count or 0 for sale in purchases])}
                 rows.append({**history, 'receipts': [receipt_state(receipt) for receipt in receipts], 'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
                     'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': effective_price,
+                    'photographerId': b.photographer_id,
+                    'photographer': (assigned_photographers[b.photographer_id].name
+                                     if b.photographer_id in assigned_photographers else None),
                     'pricing': snapshot(b.pricing_snapshot),
                     'discountApprovals': [public_approval(discount) for discount in discounts],
                     'declaredDeposit': str(money(b.deposit)),
@@ -281,7 +289,17 @@ class Workflow:
                         pass
                 hotel_rows.append({'id': hotel.id, 'name': hotel.name,
                     'fixedUnitTariffId': fixed.id if fixed else None, 'unitPrice': display_price})
+            from .launch_policy import app_url
+            from .services.sale_gallery import gallery_results
+            galleries = await gallery_results(session, [row['id'] for row in rows],
+                                               app_url().split('/app/', 1)[0])
+            for row in rows:
+                row['gallery'] = galleries[row['id']]
+            from .services.inline_sale import options
+            inline_sale = await options(session, a['id'], set(a['roles']))
+            inline_sale['time'] = datetime.now(self.tz).strftime('%H:%M')
         return web.json_response({'bookings': rows, 'hotels': hotel_rows,
+            'inlineSale': inline_sale,
             'tariffs': [{'id': t.id, 'hotelId': t.hotel_id, 'name': t.name, 'kind': t.kind,
                         'price': str(money(t.price)), 'photoCount': t.photo_count} for t in tariffs],
             'canConfigurePricing': bool({'OWNER', 'ADMIN'} & set(a['roles'])),
@@ -337,7 +355,11 @@ class Workflow:
             return await save_private_media(actor.id, raw)
 
     async def save_selected(self, draft, raw):
-        return await self.save_disk_original(f'/sales/draft-{draft.id}/selected', raw)
+        from .services.sale_gallery import storage_location
+        async with AsyncSession(self.api.engine) as session:
+            booking = await session.get(Booking, draft.booking_id)
+            folder, _context = await storage_location(session, booking, draft.id)
+        return await self.save_disk_original(folder[len(ROOT):], raw)
 
     async def save_disk_original(self, folder, raw):
         token, client_id = configured_from_env()
@@ -403,6 +425,8 @@ class Workflow:
                     if kind == 'sale_receipt' and draft.status != 'AWAITING_RECEIPT':
                         raise AccessError('Этот черновик продажи уже закрыт.', 409)
                     if kind == 'sale_selected':
+                        from .services.sale_gallery import storage_location
+                        _folder, prepared['gallery_context'] = await storage_location(session, booking, did)
                         digest = hashlib.sha256(raw).hexdigest()
                         old = await session.scalar(select(SaleDraftPhoto).where(
                             SaleDraftPhoto.draft_id == did, SaleDraftPhoto.sha256 == digest))
@@ -528,6 +552,9 @@ class Workflow:
                     result = await self.shoot(session, actor, roles, kind, data, raw, prepared_media=prepared_media)
                 await session.flush()
                 # Bound to the outer transaction; no independent financial commit.
+                if kind.startswith('sale_'):
+                    from .services.sale_gallery import annotate_result
+                    result = await annotate_result(session, actor, roles, result)
                 return result
         except AccessError:
             raise
@@ -542,7 +569,12 @@ class Workflow:
             raise AccessError('Яндекс.Диск временно недоступен. Вложение сохранено локально.', 503) from exc
 
     async def sale(self, session, actor, roles, kind, data, raw, *, prepared_media=None):
-        if kind == 'sale_start':
+        if kind == 'sale_start_inline':
+            from .services.inline_sale import create
+            fields(data, 'guest price tariffId' if 'tariffId' in data else 'guest price')
+            draft = await create(session, actor, roles, data['guest'], now=datetime.combine(
+                self.api.today(), datetime.now(self.tz).time().replace(tzinfo=None)))
+        elif kind == 'sale_start':
             fields(data, 'booking price tariffId' if 'tariffId' in data else 'booking price')
             bid = await target(session, actor, data['booking'], 'bookingId')
             draft = await start_sale_draft(session, actor, roles, bid)
@@ -566,8 +598,8 @@ class Workflow:
             from .services.pricing import unit_price
             # A hotel's new rate cannot replace the immutable booking rate.
             # Package purchases remain explicit; counted drafts retain their snapshot.
-            explicit_tariff = kind in {'sale_start', 'sale_counts'} and data.get('tariffId') is not None
-            if kind == 'sale_start' and explicit_tariff:
+            explicit_tariff = kind in {'sale_start', 'sale_start_inline', 'sale_counts'} and data.get('tariffId') is not None
+            if kind in {'sale_start', 'sale_start_inline'} and explicit_tariff:
                 from .models import HotelTariff
                 from .services.pricing import snapshot
                 fixed = snapshot(booking.pricing_snapshot) or {}
@@ -622,6 +654,11 @@ class Workflow:
                 result |= {'saleId': complete.sale.id, 'amount': str(complete.sale_amount),
                            'soldPhotos': complete.sale.sold_photos, 'paymentStatus': complete.sale.payment_status}
         elif kind == 'sale_selected':
+            from .services.sale_gallery import link_photo, storage_location
+            if prepared_media is not None and 'gallery_context' in prepared_media:
+                _folder, context = await storage_location(session, booking, draft.id)
+                if prepared_media['gallery_context'] != context:
+                    raise AccessError('Данные съёмки изменились во время загрузки. Повторите сохранение.', 409)
             digest = hashlib.sha256(raw).hexdigest()
             duplicate = await session.scalar(select(SaleDraftPhoto).where(SaleDraftPhoto.draft_id == draft.id, SaleDraftPhoto.sha256 == digest))
             if draft.status == 'COMPLETED' and duplicate:
@@ -633,6 +670,7 @@ class Workflow:
                 path = prepared_media['path'] if prepared_media is not None else await self.save_selected(draft, raw)
                 duplicate.storage_path = path
                 duplicate.telegram_file_id = path
+                await link_photo(session, draft, duplicate, verified=True)
                 return result | {'photoId': duplicate.id, 'duplicate': True, 'storageVerified': True,
                     'selectedPhotos': await selected_count(session, draft.id),
                     'declaredSold': draft.sold_photos, 'declaredTotal': draft.declared_photo_count,
@@ -649,6 +687,7 @@ class Workflow:
                                   storage_path=path, sha256=digest, byte_size=len(raw))
             session.add(photo)
             await session.flush()
+            await link_photo(session, draft, photo, verified=True)
             result['photoId'] = photo.id
             # The user already submitted the full sale. Finish on the server
             # with the last confirmed original, even if the browser closes

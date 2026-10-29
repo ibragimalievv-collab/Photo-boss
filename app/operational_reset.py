@@ -104,6 +104,31 @@ def _unpack(block):
             for row in block['rows']]
 
 
+def _restored_blocks_match(current, archived):
+    """Compare all archived cells; only reviewed new lineage defaults may differ."""
+    safe_defaults = {'delivery_galleries': {'auto_publish': False},
+                     'delivery_photos': {'origin': 'UPLOAD', 'storage_identity': None},
+                     'sale_draft_photos': {'delivery_photo_id': None}}
+    normalized = {}
+    for name, block in current.items():
+        previous = archived.get(name)
+        if previous is None:
+            if block['rows']:
+                return False
+            continue
+        added = set(block['columns']) - set(previous['columns'])
+        allowed = safe_defaults.get(name, {})
+        if not added.issubset(allowed) or not set(previous['columns']).issubset(block['columns']):
+            return False
+        for row in _unpack(block):
+            if any(row[column] != allowed[column] for column in added):
+                return False
+        indexes = [block['columns'].index(column) for column in previous['columns']]
+        normalized[name] = {'columns': previous['columns'],
+                            'rows': [[row[index] for index in indexes] for row in block['rows']]}
+    return normalized == archived
+
+
 async def install_archive_guards(conn):
     """Database-enforced append-only archives, including direct/raw SQL writes."""
     tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
@@ -429,9 +454,8 @@ async def restore(engine, request_id, owner_id):
             verified = await _snapshot(conn, tables)
             # A reviewed dependency added after an old archive may be empty.
             # Keep comparing every archived block and any newly present row.
-            verified_deleted = {name: block for name, block in verified['deleted'].items()
-                                if name in document['deleted'] or block['rows']}
-            if verified_deleted != document['deleted'] or verified['detached_academy_reviews'] != document['detached_academy_reviews']:
+            if (not _restored_blocks_match(verified['deleted'], document['deleted'])
+                    or verified['detached_academy_reviews'] != document['detached_academy_reviews']):
                 raise ResetError('Restored values do not match the verified archive; transaction rolled back')
             generation, now = str(uuid4()), datetime.now(UTC).replace(tzinfo=None)
             # A fresh generation blocks packets queued during the cleared epoch;

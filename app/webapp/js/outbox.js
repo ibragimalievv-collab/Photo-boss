@@ -63,9 +63,46 @@ export async function repairBookingQueue(keys,data){
   committed=true;changed();
  }finally{queueRepairing=false;if(committed||rerunRequested)void flushOutbox();}
 }
+const INLINE_VALIDATION_ERRORS=new Set([
+ 'Проверьте данные новой продажи.','Нет доступа к продаже в этом отеле.',
+ 'Отель больше не доступен. Обновите данные.','Выберите действующего фотографа этого отеля.',
+ 'Укажите имя гостя, корректные дату и время съёмки.','Пакет больше не доступен. Обновите данные.',
+ 'Выберите пакет или настройте фиксированную цену кадра в отеле.','Отель недоступен.',
+ 'Цена пакета изменилась. Обновите данные и проверьте продажу.','Тариф недоступен в этом отеле.',
+ 'В отеле не настроена фиксированная цена кадра. Попросите владельца или администратора выбрать цену в тарифах отеля.',
+]);
+export function rejectedInlineSale(rows){
+ const start=rows[0];
+ return Boolean(rows.length>1&&rows.every(Boolean)&&start.kind==='sale_start_inline'&&start.status==='error'&&
+  start.errorStatus===409&&!start.result&&INLINE_VALIDATION_ERRORS.has(start.error)&&
+  rows.slice(1).every(row=>row.kind.startsWith('sale_')&&row.data?.draft?.key===start.key&&
+   row.status==='local'&&!row.result&&(!row.errorStatus||row.errorStatus===424)))?start:null;
+}
+export async function repairInlineSaleQueue(keys,startData){
+ if(running||queueRepairing)throw new Error('Дождитесь завершения текущей отправки, затем исправьте продажу.');
+ queueRepairing=true;let committed=false;
+ try{
+  const actor=userId,all=await outboxRows(),rows=keys.map(key=>all.find(row=>row.key===key)),rejected=rejectedInlineSale(rows);
+  if(!actor||!rejected||(rejected.generation||'')!==operationsGeneration||(rejected.salesGeneration||'')!==salesGeneration)
+   throw new Error('Исправление недоступно. Проверьте результат прежней отправки.');
+  const saved=[];
+  for(const row of rows){const fresh=await localAction('operations','readonly',store=>store.get(row.key));if(!fresh||fresh.userId!==actor)throw new Error('Состояние отправки изменилось.');saved.push(fresh);}
+  if(!rejectedInlineSale(saved))throw new Error('Состояние продажи изменилось. Обновите данные.');
+  saved[0].data=startData;
+  for(const [index,row] of saved.entries()){
+   row.status='local';row.error='';row.errorStatus=0;row.retryAt=0;row.saleTransientFailures=0;row.autoRetryPaused=false;
+   if(index&&['sale_counts','sale_complete'].includes(row.kind))row.data={...row.data,price:startData.price,...(row.kind==='sale_counts'?{tariffId:startData.tariffId||null}: {})};
+   if(row.kind==='sale_bank_payment')row.data={...row.data,payment:{...row.data.payment,tariffId:startData.tariffId||null}};
+  }
+  if(actor!==userId||running)throw new Error('Аккаунт или отправка изменились.');
+  if(!await writeOperations(saved))throw new Error('Рабочие данные обнулены. Обновите приложение.');
+  committed=true;changed();
+ }finally{queueRepairing=false;if(committed||rerunRequested)void flushOutbox();}
+}
 // A sale's receipt, counts, selected photos and completion share one draft key.
 // Their server-side stages must stay ordered while unrelated files keep moving.
-const saleChain=row=>row.kind==='sale_start'?row.key:row.kind?.startsWith('sale_')?(row.data?.draft?.key||(row.data?.draft?.id?'draft:'+row.data.draft.id:null)):null;
+const isSaleStart=row=>['sale_start','sale_start_inline'].includes(row?.kind);
+const saleChain=row=>isSaleStart(row)?row.key:row.kind?.startsWith('sale_')?(row.data?.draft?.key||(row.data?.draft?.id?'draft:'+row.data.draft.id:null)):null;
 const countCompletionError=row=>row?.kind==='sale_complete'&&row.status==='error'&&row.errorStatus===409&&(
  /^Сначала загрузите все выбранные фотографии: \d+\/\d+\.$/.test(row.error||'')||
  /^Загружено \d+ выбранных кадров, а продано указано \d+\. Исправьте количество кадров в этой продаже\.$/.test(row.error||'')||
@@ -84,10 +121,10 @@ export function rejectedSaleCounts(rows){
 export function saleQueueRepairable(rows){
  const completions=rows.filter(row=>row?.kind==='sale_complete'),complete=completions[0];
  const rejected=rejectedSaleCounts(rows);
- if(rejected)return Boolean(completions.length===1&&rows.some(row=>row.kind==='sale_start'&&row.result?.draftId)&&
+ if(rejected)return Boolean(completions.length===1&&rows.some(row=>isSaleStart(row)&&row.result?.draftId)&&
   rows.every(row=>saleChain(row)===saleChain(rejected)));
  return Boolean(rows.length>1&&rows.every(Boolean)&&completions.length===1&&countCompletionError(complete)&&
-  rows.some(row=>row.kind==='sale_start'&&row.result?.draftId)&&rows.every(row=>row===complete||row.status==='synced')&&
+  rows.some(row=>isSaleStart(row)&&row.result?.draftId)&&rows.every(row=>row===complete||row.status==='synced')&&
   (!complete.resumeByKey||rows.some(row=>row.key===complete.resumeByKey&&row.status==='synced')));
 }
 export async function repairSaleQueue(keys,{draftId,total,sold,price},files=[],diskPhotos=[]){
@@ -95,7 +132,7 @@ export async function repairSaleQueue(keys,{draftId,total,sold,price},files=[],d
  queueRepairing=true;let committed=false;
  try{
  const actor=userId,all=await outboxRows(),rows=keys.map(key=>all.find(row=>row.key===key));
- const complete=rows.find(row=>row?.kind==='sale_complete'),start=rows.find(row=>row?.kind==='sale_start');
+ const complete=rows.find(row=>row?.kind==='sale_complete'),start=rows.find(row=>isSaleStart(row));
  if(!actor||!saleQueueRepairable(rows)||start.result.draftId!==draftId||!Number.isInteger(total)||!Number.isInteger(sold)||sold<1||sold>total||total>10000)
   throw new Error('Исправление недоступно: сначала дождитесь результата всех фото и чека.');
  const rejected=rejectedSaleCounts(rows);
@@ -134,7 +171,7 @@ function legacySaleDependency(row,previous){
  const stageError=row.kind==='sale_counts'?row.error==='Черновик продажи уже закрыт.':row.kind==='sale_selected'?row.error==='Сначала сохраните чек и количество кадров.':row.kind==='sale_complete'&&(row.error==='Продажа уже завершена или отменена.'||/^Сначала загрузите все выбранные фотографии: \d+\/\d+\.$/.test(row.error||''));
  // Old clients sent later sale stages after a receipt/photo failed. Recheck
  // only those exact failures once their original local predecessors succeeded.
- return Boolean(required&&stageError&&previous.some(step=>step.kind==='sale_start')&&previous.some(step=>step.kind===required)&&previous.every(step=>step.status==='synced'));
+ return Boolean(required&&stageError&&previous.some(step=>isSaleStart(step))&&previous.some(step=>step.kind===required)&&previous.every(step=>step.status==='synced'));
 }
 export function setOutboxUser(id,generation='',saleGeneration=''){userId=id;salesGeneration=typeof saleGeneration==='string'?saleGeneration:'';operationsGeneration=typeof generation==='string'?generation:'';if(id)authEpoch=Math.max(Date.now(),authEpoch+1);return flushOutbox();}
 export async function outboxRows(){
@@ -189,7 +226,7 @@ export async function replaceDiskSelection(key,photo,draftId){
       throw new Error('Этот кадр нельзя заменять: проверьте результат исходной отправки и обновите продажу.');
      const original=row.data?.draft;
      if(original?.id!==draftId&&!(original?.key&&start?.key===original.key&&start.userId===actor&&
-      start.kind==='sale_start'&&start.status==='synced'&&start.result?.draftId===draftId&&
+      isSaleStart(start)&&start.status==='synced'&&start.result?.draftId===draftId&&
       (start.generation||'')===generation&&(start.salesGeneration||'')===saleGeneration))
       throw new Error('Откройте исходную продажу этого кадра.');
      if(photo.revision===row.data?.revision)throw new Error('Откройте обновлённую папку и выберите один кадр заново.');
@@ -247,7 +284,7 @@ export async function enqueueFilesOneByOne(files,operationFor,onProgress=()=>{})
  return {done:total,total};
 }
 
-export async function retryOperation(key){const rows=await outboxRows();if(!rows.some(r=>r.key===key))return;const row=await localAction('operations','readonly',s=>s.get(key));if(!row||row.userId!==userId)return;row.status='local';row.error='';if(row.errorStatus!==429)row.retryAt=0;await update(row);for(const item of rows){if(item.errorStatus===424){const pending=await localAction('operations','readonly',s=>s.get(item.key));if(!pending||pending.userId!==userId)continue;pending.status='local';pending.error='';pending.retryAt=0;await update(pending);}}changed();return flushOutbox();}
+export async function retryOperation(key){const rows=await outboxRows();if(!rows.some(r=>r.key===key))return;const row=await localAction('operations','readonly',s=>s.get(key));if(!row||row.userId!==userId)return;row.status='local';row.error='';if(!isBankGate(row)&&row.kind.startsWith('sale_')){row.saleTransientFailures=0;row.autoRetryPaused=false;}if(row.errorStatus!==429)row.retryAt=0;await update(row);for(const item of rows){if(item.errorStatus===424){const pending=await localAction('operations','readonly',s=>s.get(item.key));if(!pending||pending.userId!==userId)continue;pending.status='local';pending.error='';pending.retryAt=0;await update(pending);}}changed();return flushOutbox();}
 // Explicit user retry may bypass our local network-failure cooldown, never a
 // server Retry-After or a permanent access/validation error. Keep original keys
 // and bytes so a lost successful response is recovered idempotently.
@@ -259,7 +296,7 @@ export async function syncOutboxNow(){
   const row=await localAction('operations','readonly',s=>s.get(item.key));
   if(actor!==userId)break;
   if(!row||row.userId!==actor||row.status!=='local'||row.errorStatus===429)continue;
-  row.retryAt=0;await update(row);
+  row.retryAt=0;if(!isBankGate(row)&&row.kind.startsWith('sale_')){row.saleTransientFailures=0;row.autoRetryPaused=false;}await update(row);
  }
  changed();return flushOutbox();
 }
@@ -280,7 +317,7 @@ async function syncBankGate(row,active){
     row.status='local';row.retryAt=Date.now()+1000;await update(row);scheduleRetry(1000);return null;
    }
    if(row.kind==='booking_bank_payment')bookingId=dependency.result?.bookingId;
-   else sourceDraftId=dependency.result?.draftId;
+   else{sourceDraftId=dependency.result?.draftId;bookingId=bookingId||dependency.result?.bookingId;}
   }else if(row.kind==='sale_bank_payment')sourceDraftId=reference?.id;
   if(!Number.isSafeInteger(bookingId)||bookingId<1||(row.kind==='sale_bank_payment'&&(!Number.isSafeInteger(sourceDraftId)||sourceDraftId<1)))fail('Сначала дождитесь подтверждения записи и черновика продажи.');
   row.bankPayload={bookingId,total:0,sold:0,tariffId:null,amount:null,...row.data.payment,
@@ -341,7 +378,7 @@ async function flushOutboxWorker(worker){
    const sale=saleChain(item);
    // The bank worker owns its wait without holding the media worker. Every
    // later sale stage still waits for the same durable gate in IndexedDB.
-   if(item.kind.startsWith('sale_')&&item.kind!=='sale_start'){
+   if(item.kind.startsWith('sale_')&&!isSaleStart(item)){
     const chain=await outboxRows(),gate=chain.find(step=>step.kind==='sale_bank_payment'&&saleChain(step)===sale);
     if(gate&&gate.key!==item.key&&gate.status!=='synced')continue;
    }
@@ -388,6 +425,7 @@ async function flushOutboxWorker(worker){
     }
     if(!active())break;
     row.status='synced';row.error='';row.errorStatus=0;row.retryAt=0;row.blob=null;
+    if(sale&&!isBankGate(row)){row.saleTransientFailures=0;row.autoRetryPaused=false;}
     summary.completed++;
    }catch(e){
     if(!active())break;
@@ -395,14 +433,19 @@ async function flushOutboxWorker(worker){
     // Missing dependencies and receipt failures must not strand independent shoot photos.
     // Keep their blobs on this device and retry without marking a dependent sale as failed.
     const temporary=!e.status||e.status>=500||[408,424,429].includes(e.status);
+    const limitedSale=temporary&&sale&&!isBankGate(row);
+    if(limitedSale)row.saleTransientFailures=(row.saleTransientFailures||0)+1;
+    const paused=limitedSale&&row.saleTransientFailures>3;
     row.status=temporary?'local':'error';
     row.error=e.message;row.errorStatus=e.status||0;
-    row.retryAt=temporary?Date.now()+Math.max(30000,e.status===429?e.retryAfterMs||0:0):0;
+    const backoff=limitedSale?[30000,60000,120000][Math.min(2,row.saleTransientFailures-1)]:30000;
+    row.retryAt=temporary?Date.now()+Math.max(backoff,e.status===429?e.retryAfterMs||0:0):0;
+    if(paused){row.status='error';row.autoRetryPaused=true;if(e.status!==429)row.retryAt=0;row.lastTransientError=e.message;row.error='Передача приостановлена после временных сбоев. Фото сохранены на устройстве. Нажмите «Продолжить отправку».';}
     await update(row);changed();
     if(temporary){
      summary.temporary++;
-     scheduleRetry(Math.max(30000,row.retryAt-Date.now()));
-     if(e.status===424||e.status>=500||['booking_receipt','sale_receipt'].includes(row.kind))continue;
+     if(!paused)scheduleRetry(Math.max(backoff,row.retryAt-Date.now()));
+     if(sale||e.status===424||e.status>=500||['booking_receipt','sale_receipt'].includes(row.kind))continue;
      break;
     }
     summary.failed++;
@@ -413,7 +456,7 @@ async function flushOutboxWorker(worker){
    await update(row);changed();if(row.resumeCompleteKey)await resumeRepairedCompletion(row);
    if(worker==='attendance')blockedAttendance.delete(row.date);
    if(row.kind==='booking'){void flushOutboxWorker('media');void flushOutboxWorker('bank');}
-   if(row.kind==='sale_start')void flushOutboxWorker('bank');
+   if(isSaleStart(row))void flushOutboxWorker('bank');
    if(row.kind==='sale_bank_payment')void flushOutboxWorker('media');
   }
  }finally{workers.delete(worker);running=workers.size>0;changed();if(userId&&(!active()||requestedWorkers.has(worker)))void flushOutboxWorker(worker);}

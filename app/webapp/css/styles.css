@@ -103,3 +103,14 @@
 .schedule-text-panel fieldset{min-width:0;border:0;margin:0;padding:0}
 .schedule-text-panel textarea,.schedule-text-panel select{min-width:0;max-width:100%;box-sizing:border-box}
 .schedule-text-panel [data-import-preview] .panel{overflow-wrap:anywhere}
+/* One sale action owns the durable photo queue and its server confirmation. */
+.sale-save-form{gap:14px;max-width:760px}
+.sale-context{display:flex;flex-direction:column;gap:5px;grid-column:1/-1;padding:14px 16px;border-radius:14px;background:var(--panel2,#edf1f7)}
+.sale-context span,.sale-field-help{font-size:13px;line-height:1.5;color:var(--muted,#64748b)}
+.sale-save-status,.sale-gallery-result{grid-column:1/-1;padding:16px;border:1px solid var(--line,#dbe1e8);border-radius:14px;line-height:1.55;overflow-wrap:anywhere}
+.sale-save-status p{margin:8px 0 0}.sale-extra-source{grid-column:1/-1}.sale-extra-source summary{cursor:pointer;padding:8px 0}
+.sale-save-button{grid-column:1/-1;min-height:48px}.sale-field-help{grid-column:1/-1;margin:0}
+.sale-gallery-result{display:grid;gap:12px}.sale-gallery-result .row{flex-wrap:wrap}.sale-gallery-result input{min-width:0;width:100%}
+.sale-gallery-qr{display:block;width:220px;max-width:100%;height:auto;margin:0 auto}
+
+.sale-details>summary{cursor:pointer;padding:8px 0}.sale-details[open]>.field,.sale-details[open]>div,.sale-details[open]>details{margin-top:12px}.sale-details [data-sale-pricing-controls]{display:grid;gap:12px}

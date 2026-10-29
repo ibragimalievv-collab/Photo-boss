@@ -22,6 +22,56 @@ function fixture(api){
  return {rows,calls,handlers,timers,context,add,setNow:value=>{now=value;},run:code=>vm.runInContext(code,context)};
 }
 
+// A lost selected-file response belongs to that sale's chain. Another sale
+// must still save while the first original key and bytes await their retry.
+{
+ let lost=true;
+ const f=fixture(async op=>{if(op.key==='lost-selected'&&lost)throw new Error('Response lost after storage accepted');return {photoId:51,saleId:91};});
+ f.add('first-start',{kind:'sale_start',status:'synced',blob:null,result:{draftId:7}});
+ f.add('confirmed-photo-1',{kind:'sale_selected',status:'synced',blob:null,data:{draft:{key:'first-start'}},result:{photoId:49}});
+ f.add('confirmed-photo-2',{kind:'sale_selected',status:'synced',blob:null,data:{draft:{key:'first-start'}},result:{photoId:50}});
+ f.add('lost-selected',{kind:'sale_selected',data:{draft:{key:'first-start'}}});
+ f.add('first-complete',{kind:'sale_complete',blob:null,data:{draft:{key:'first-start'}}});
+ f.add('independent-start',{kind:'sale_start',blob:null,data:{booking:{id:8}}});
+ await f.run('flushOutbox()');
+ assert.equal(f.rows.get('lost-selected').status,'local');
+ assert.equal(await f.rows.get('lost-selected').blob.text(),'original');
+ assert.equal(f.rows.get('first-complete').status,'local');
+ assert.equal(f.rows.get('independent-start').status,'synced','next sale is independent of a previous file timeout');
+ lost=false;f.setNow(130001);await f.run('flushOutbox()');
+ assert.equal(f.calls.filter(key=>key==='lost-selected').length,2,'the retry preserves the original idempotency key');
+ assert.equal(f.rows.get('first-complete').status,'synced');
+ assert.equal(f.calls.includes('confirmed-photo-1'),false);
+ assert.equal(f.calls.includes('confirmed-photo-2'),false,'two accepted originals are never uploaded again');
+ assert.equal(f.rows.size,6,'recovery does not create another sale plan');
+}
+
+// A definitive, known inline validation rollback may correct that same start,
+// preserving downstream keys and bytes. Unknown/uncertain ACKs are immutable.
+{
+ const f=fixture(async op=>({bookingId:70,draftId:71,photoId:72,saleId:73}));
+ f.add('inline-rejected',{kind:'sale_start_inline',blob:null,status:'error',errorStatus:409,error:'Выберите действующего фотографа этого отеля.',data:{guest:{name:'Одинаковый гость',hotelId:1,photographerId:9},price:'400'}});
+ f.add('inline-receipt',{kind:'sale_receipt',data:{draft:{key:'inline-rejected'}}});
+ f.add('inline-counts',{kind:'sale_counts',blob:null,data:{draft:{key:'inline-rejected'},total:1,sold:1,price:'400',tariffId:1}});
+ f.add('inline-photo',{kind:'sale_selected',data:{draft:{key:'inline-rejected'}}});
+ f.add('inline-complete',{kind:'sale_complete',blob:null,data:{draft:{key:'inline-rejected'},price:'400'}});
+ assert.equal(Boolean(f.run('rejectedInlineSale([...rows.values()])')),true);
+ const original=f.rows.get('inline-photo').blob;
+ f.run('repairData={guest:{name:"Одинаковый гость",hotelId:1,photographerId:2},price:"500",tariffId:2};');
+ await f.run('repairInlineSaleQueue([...rows.keys()],repairData)');await settle();
+ assert.equal(f.rows.size,5);assert.equal(f.rows.get('inline-rejected').data.guest.photographerId,2);
+ assert.equal(f.rows.get('inline-counts').data.price,'500');assert.equal(f.rows.get('inline-counts').data.tariffId,2);
+ assert.equal(await original.text(),'original');assert.equal(f.rows.get('inline-complete').status,'synced');
+ assert.deepEqual(f.calls,['inline-rejected','inline-receipt','inline-counts','inline-photo','inline-complete']);
+ for(const override of [{error:'Неизвестный отказ'},{errorStatus:503},{result:{bookingId:70}},{status:'local'}]){
+  const start={key:'s',kind:'sale_start_inline',status:'error',errorStatus:409,error:'Выберите действующего фотографа этого отеля.',...override};
+  f.context.candidate=[start,{kind:'sale_selected',data:{draft:{key:'s'}},status:'local'}];
+  assert.equal(f.run('rejectedInlineSale(candidate)'),null);
+ }
+ f.context.candidate=[{key:'s',kind:'sale_start_inline',status:'error',errorStatus:409,error:'Выберите действующего фотографа этого отеля.'},{kind:'sale_selected',data:{draft:{key:'s'}},status:'synced',result:{photoId:2}}];
+ assert.equal(f.run('rejectedInlineSale(candidate)'),null,'a dependent ACK forbids changing the start');
+}
+
 // A rate-limited receipt is not a global queue lock, including later passes.
 {
  const f=fixture(async()=>({ok:true}));
@@ -29,6 +79,32 @@ function fixture(api){
  const result=await f.run('flushOutbox()');
  assert.equal(result.completed,1);assert.deepEqual(f.calls,['independent-photo']);
  assert.equal(f.rows.get('receipt').status,'local');assert.ok(f.rows.get('receipt').blob);
+}
+// Sale retries are finite: original attempt plus three automatic retries,
+// increasing delays, then an explicit continuation of the exact same row.
+{
+ let failing=true;
+ const f=fixture(async op=>{if(op.key==='paused-sale-file'&&failing){const e=new Error('Synthetic storage timeout');e.status=503;throw e;}return {photoId:8};});
+ f.add('paused-start',{kind:'sale_start',status:'synced',blob:null,result:{draftId:7}});
+ f.add('paused-sale-file',{kind:'sale_selected',data:{draft:{key:'paused-start'}}});
+ await f.run('flushOutbox()');assert.equal(f.rows.get('paused-sale-file').retryAt,130000);
+ f.setNow(130001);await f.run('flushOutbox()');assert.equal(f.rows.get('paused-sale-file').retryAt,190001);
+ f.setNow(190002);await f.run('flushOutbox()');assert.equal(f.rows.get('paused-sale-file').retryAt,310002);
+ f.setNow(310003);await f.run('flushOutbox()');
+ assert.equal(f.rows.get('paused-sale-file').autoRetryPaused,true);
+ assert.equal(f.rows.get('paused-sale-file').status,'error');
+ assert.match(f.rows.get('paused-sale-file').error,/Передача приостановлена/);
+ assert.equal(await f.rows.get('paused-sale-file').blob.text(),'original');
+ f.add('sale-after-paused-file',{kind:'sale_start',blob:null,data:{booking:{id:8}}});
+ f.setNow(999999);await f.run('flushOutbox()');await f.run('flushOutbox()');
+ assert.equal(f.calls.filter(key=>key==='paused-sale-file').length,4,'foreground passes cannot restart an exhausted automatic retry cycle');
+ assert.equal(f.rows.get('sale-after-paused-file').status,'synced');
+ failing=false;await f.run('retryOperation("paused-sale-file")');
+ assert.equal(f.rows.get('paused-sale-file').status,'synced');
+ assert.equal(f.rows.get('paused-sale-file').saleTransientFailures,0);
+ assert.equal(f.rows.get('paused-sale-file').autoRetryPaused,false);
+ assert.equal(f.calls.filter(key=>key==='paused-sale-file').length,5);
+ assert.equal(f.rows.size,3,'manual continuation keeps all original identities');
 }
 // One server failure or denied old operation must not strand other bookings.
 {

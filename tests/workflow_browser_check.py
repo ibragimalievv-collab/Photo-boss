@@ -165,6 +165,7 @@ async def main():
                     sale = page.locator('#workflowSale')
                     tariff = await sale.locator('[name=tariffId] option').evaluate_all(
                         "options=>options.find(option=>option.textContent.includes('400')).value")
+                    await sale.locator('.sale-details').evaluate('el=>el.open=true')
                     await sale.locator('[name=tariffId]').select_option(tariff)
                     await sale.locator('[name=total]').fill('150')
                     await sale.locator('[name=sold]').fill('1')
@@ -308,6 +309,7 @@ async def main():
                     repair_form = page.locator('#workflowSale')
                     tariff = await repair_form.locator('[name=tariffId] option').evaluate_all(
                         "options=>options.find(option=>option.textContent.includes('400')).value")
+                    await repair_form.locator('.sale-details').evaluate('el=>el.open=true')
                     await repair_form.locator('[name=tariffId]').select_option(tariff)
                     await repair_form.locator('[name=total]').fill('150')
                     await repair_form.locator('[name=sold]').fill('2')
