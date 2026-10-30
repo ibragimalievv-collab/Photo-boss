@@ -62,7 +62,7 @@ async def main():
             session.add(gallery)
             await session.flush()
             session.add(DeliveryPhoto(id=1, gallery_id=1, uploaded_by_id=1, filename='synthetic.png',
-                disk_path='app:/PhotoBoss/delivery/booking-1/synthetic.png', sha256='a' * 64,
+                disk_path='app:/PhotoBoss/delivery/booking-1/Все фото/synthetic.png', sha256='a' * 64,
                 byte_size=len(image()), upload_set='ALL'))
             await session.commit()
         bot = SimpleNamespace(token=TOKEN, send_message=AsyncMock())
@@ -104,6 +104,37 @@ async def main():
             release.set()
             assert all(response.status == 200 for response in await asyncio.gather(*pending))
             assert (await client.get(path)).status == 200
+        # The staff selection mutation previously held FOR UPDATE and a pooled
+        # connection through Disk I/O. Repeat the same operation while it stalls.
+        from app import delivery as delivery_module
+        entered_selection = asyncio.Event()
+        release.clear()
+        async def selection_bytes(_photo):
+            entered_selection.set()
+            await release.wait()
+            return image()
+        storage = SimpleNamespace(ensure_dir=AsyncMock(), upload_bytes=AsyncMock(), delete=AsyncMock())
+        async with AsyncSession(engine) as session:
+            (await session.get(DeliveryGallery, 1)).delivery_mode = 'SELECTED'
+            await session.commit()
+        with (patch.object(delivery, 'bytes', selection_bytes),
+              patch.object(delivery_module, 'configured_from_env', lambda: ('fixture-token', 'fixture-client')),
+              patch.object(delivery_module, 'YandexDisk', lambda *_: storage),
+              patch.object(render_main, 'engine', engine)):
+            path='/api/miniapp/delivery/1/photos/1/selected'
+            headers={'X-Telegram-Init-Data': signed(1)}
+            pending=[asyncio.create_task(client.post(path,headers=headers,json={'selected':True}))]
+            await asyncio.wait_for(entered_selection.wait(),5)
+            assert engine.pool.checkedout()==0
+            pending.append(asyncio.create_task(client.post(path,headers=headers,json={'selected':True})))
+            await asyncio.sleep(.1)
+            assert (await asyncio.wait_for(client.get('/health'),2)).status==200
+            assert (await asyncio.wait_for(client.get('/api/miniapp/me',headers=headers),2)).status==200
+            release.set()
+            replies=await asyncio.wait_for(asyncio.gather(*pending),5)
+            assert all(r.status==200 for r in replies),[await r.text() for r in replies]
+            assert storage.upload_bytes.await_count==1
+        print('PASS PostgreSQL: slow selection and concurrent replay retain zero pooled slots; health/login available; one upload')
         assert bot.send_message.await_count == 0
         print('PASS PostgreSQL: 8 slow albums retain zero pooled leases; health and authenticated reads stay 200 with a 2-connection pool; excess download gets retryable 503 and recovery succeeds')
     finally:

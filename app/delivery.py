@@ -386,16 +386,24 @@ class Delivery:
         body = await self.api.body(request)
         if set(body) != {'selected'} or type(body['selected']) is not bool:
             raise AccessError('Некорректный выбор фотографии.', 400)
-        async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
-            b = await self.booking(session, actor, request.match_info['booking'], edit=True)
-            p = await session.get(DeliveryPhoto, int(request.match_info['photo']))
-            g = await session.get(DeliveryGallery, p.gallery_id) if p else None
-            if not g or g.booking_id != b.id:
-                raise AccessError('Фото не найдено.', 404)
-            if p.upload_set == 'SELECTED':
-                raise AccessError('Фотография загружена отдельно в папку «Выбранные».', 409)
-            if p.selected == body['selected']:
-                return web.json_response({'photoId': p.id, 'selected': p.selected})
+        from .gallery_selection_guard import selection_guard
+        async with selection_guard(self.api.engine, int(request.match_info['booking'])):
+            async def current(session):
+                live_actor = await self.download_actor(session, request)
+                booking = await self.booking(session, live_actor, request.match_info['booking'], edit=True)
+                photo = await session.get(DeliveryPhoto, int(request.match_info['photo']))
+                gallery = await session.get(DeliveryGallery, photo.gallery_id) if photo else None
+                if not gallery or gallery.booking_id != booking.id:
+                    raise AccessError('Фото не найдено.', 404)
+                if photo.upload_set == 'SELECTED':
+                    raise AccessError('Фотография загружена отдельно в папку «Выбранные».', 409)
+                return booking, photo, gallery
+
+            async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
+                b, p, g = await current(session)
+                if p.selected == body['selected']:
+                    return web.json_response({'photoId': p.id, 'selected': p.selected})
+                original = (p.disk_path, p.sha256)
             token, client_id = configured_from_env()
             if not token:
                 raise AccessError('Яндекс Диск недоступен.', 503)
@@ -405,6 +413,14 @@ class Delivery:
                 chosen_folder = selected_folder(p.disk_path, b.id)
             except ValueError as exc:
                 raise AccessError('Расположение исходного фото не подтверждено. Загрузите его повторно.', 409) from exc
+            # Revalidate before provider writes, after the potentially slow read.
+            async with AsyncSession(self.api.engine) as session:
+                b, latest, g = await current(session)
+                if (latest.disk_path, latest.sha256) != original:
+                    raise AccessError('Фотография изменилась. Обновите галерею.', 409)
+                independent = await session.scalar(select(DeliveryPhoto.id).where(
+                    DeliveryPhoto.gallery_id == g.id, DeliveryPhoto.sha256 == p.sha256,
+                    DeliveryPhoto.upload_set == 'SELECTED').limit(1))
             folder = chosen_folder.rsplit('/', 1)[0]
             for directory in (*directory_chain(folder), chosen_folder):
                 await storage.ensure_dir(directory)
@@ -412,16 +428,17 @@ class Delivery:
             selected_path = chosen_folder + f'/{p.sha256}.{ext}'
             if body['selected']:
                 await storage.upload_bytes(selected_path, raw, content_type=mime)
-            else:
-                independent = await session.scalar(select(DeliveryPhoto.id).where(
-                    DeliveryPhoto.gallery_id == g.id, DeliveryPhoto.sha256 == p.sha256,
-                    DeliveryPhoto.upload_set == 'SELECTED').limit(1))
-                if not independent:
-                    await storage.delete(selected_path)
-            p.selected = body['selected']
-            await audit(session, await session.get(User, actor['id']), 'delivery_photo_selected', 'booking', b.id)
-            await session.commit()
-            return web.json_response({'photoId': p.id, 'selected': p.selected})
+            elif not independent:
+                await storage.delete(selected_path)
+            # Never acknowledge a DB change based on stale permissions/metadata.
+            async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
+                b, p, g = await current(session)
+                if (p.disk_path, p.sha256) != original:
+                    raise AccessError('Фотография изменилась. Обновите галерею.', 409)
+                p.selected = body['selected']
+                await audit(session, await session.get(User, actor['id']), 'delivery_photo_selected', 'booking', b.id)
+                await session.commit()
+                return web.json_response({'photoId': p.id, 'selected': p.selected})
 
     async def staff_photo(self, request):
         async with AsyncSession(self.api.engine) as session:

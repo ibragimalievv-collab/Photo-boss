@@ -130,3 +130,58 @@ def test_download_admission_rejects_excess_while_gallery_reads_remain_available(
             await engine.dispose()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("revoke", [False, True])
+def test_selection_releases_pool_during_storage_and_rechecks_role(monkeypatch, revoke):
+    async def run():
+        from sqlalchemy import event
+
+        from app import delivery as module
+        engine, delivery, client, _ = await setup(monkeypatch)
+        entered, release = asyncio.Event(), asyncio.Event()
+        held = set()
+        event.listen(engine.sync_engine, 'checkout', lambda _db, record, _proxy: held.add(id(record)))
+        event.listen(engine.sync_engine, 'checkin', lambda _db, record: held.discard(id(record)))
+        async def slow_bytes(_photo):
+            entered.set()
+            await release.wait()
+            return image()
+        from unittest.mock import AsyncMock
+        storage = AsyncMock()
+        monkeypatch.setattr(module, 'configured_from_env', lambda: ('fixture-only', 'fixture-client'))
+        monkeypatch.setattr(module, 'YandexDisk', lambda *_: storage)
+        monkeypatch.setattr(delivery, 'bytes', slow_bytes)
+        pending = None
+        try:
+            _token, pid = await album(engine, delivery)
+            async with AsyncSession(engine) as session:
+                photo = await session.get(DeliveryPhoto, pid)
+                photo.disk_path = 'app:/PhotoBoss/delivery/booking-1/Все фото/photo.png'
+                await session.commit()
+            pending = asyncio.create_task(client.post(f'/api/miniapp/delivery/1/photos/{pid}/selected',
+                headers={'X-Test-Actor': '2'}, json={'selected': True}))
+            await asyncio.wait_for(entered.wait(), 2)
+            assert not held, 'Storage waits must not hold a pooled connection'
+            if revoke:
+                async with AsyncSession(engine) as session:
+                    await session.execute(delete(UserRole).where(UserRole.user_id == 2))
+                    await session.commit()
+            release.set()
+            response = await pending
+            assert response.status in (403, 404) if revoke else response.status == 200, await response.text()
+            async with AsyncSession(engine) as session:
+                assert (await session.get(DeliveryPhoto, pid)).selected is (not revoke)
+            if revoke:
+                storage.upload_bytes.assert_not_awaited()
+            else:
+                again=await client.post(f'/api/miniapp/delivery/1/photos/{pid}/selected',headers={'X-Test-Actor':'2'},json={'selected':True})
+                assert again.status==200
+                assert storage.upload_bytes.await_count==1
+        finally:
+            release.set()
+            if pending:
+                await asyncio.gather(pending, return_exceptions=True)
+            await client.close()
+            await engine.dispose()
+    asyncio.run(run())
