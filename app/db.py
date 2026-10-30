@@ -48,7 +48,13 @@ def user_lock_clause(conn):
 
 async def init_db():
     import_module(".models", package=__package__)
-    async with engine.begin() as connection:
+    # A second Render instance starts while the old process still serves users.
+    # Never queue unbounded DDL locks behind its transactions: PostgreSQL queues
+    # subsequent ordinary readers behind waiting ACCESS EXCLUSIVE requests.
+    async with asyncio.timeout(90), engine.begin() as connection:
+        if connection.dialect.name == 'postgresql':
+            await connection.execute(text("SET LOCAL lock_timeout = '2000ms'"))
+            await connection.execute(text("SET LOCAL statement_timeout = '30000ms'"))
         from .schema_updates import prepare_delivery_photos, upgrade
         await prepare_delivery_photos(connection)
         await connection.run_sync(Base.metadata.create_all)
