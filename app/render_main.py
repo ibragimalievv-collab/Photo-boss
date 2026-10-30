@@ -33,7 +33,7 @@ from .yandex_disk import install_yandex_disk, storage_recovery_loop
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.52-workspace-notifications"
+RELEASE = "miniapp-3.53-gallery-selection-pool"
 
 
 async def app_redirect(request):
