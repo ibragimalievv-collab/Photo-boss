@@ -1,12 +1,5 @@
 """Scenario regressions: no network, candidate messages or paid AI calls."""
-import ast
-from pathlib import Path
-
-source = ast.parse((Path(__file__).parents[1] / "app/avito_hr.py").read_text())
-parts = [node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "reply"]
-ns = {"INTRO": "Здравствуйте!"}
-exec(compile(ast.Module(body=parts, type_ignores=[]), "reply", "exec"), ns)
-reply = ns["reply"]
+from app.avito_hr import reply
 
 def history(text):
     return [{"type": "text", "direction": "out", "created": 1, "content": {"text": text}}]
