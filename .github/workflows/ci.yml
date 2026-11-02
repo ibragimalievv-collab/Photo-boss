@@ -183,6 +183,8 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements-dev.txt playwright==1.51.0
       - run: python -m playwright install chromium
+      - name: Verify Avito HR console without external messages
+        run: python tests/avito_hr_console_browser_check.py
       - name: Verify correction of a rejected mobile booking
         run: python tests/booking_recovery_browser_check.py
       - name: Verify camera-only attendance in temporary no-GPS mode
@@ -261,4 +263,5 @@ jobs:
       - name: Show test relay diagnostics on failure
         if: failure()
         run: tail -120 /tmp/photoboss-coturn*.log
+
 
