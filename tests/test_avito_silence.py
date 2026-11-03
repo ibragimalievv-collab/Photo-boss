@@ -32,4 +32,12 @@ def test_owner_confirmed_facts_and_phone_stage():
     assert respond('Можно с собакой?', 'PHOTOGRAPHER', terms=facts).answer == ''
     history = [{'type': 'text', 'direction': 'out', 'created': 1, 'content': {'text': facts['pay']}}]
     turn = respond('Условия подходят. Как пройти собеседование?', 'PHOTOGRAPHER', history, facts)
-    assert 'номер телефона' in turn.answer and 'время' not in turn.answer
+    assert 'номер телефона' in turn.answer and 'В какой день' not in turn.answer
+
+
+def test_interview_requests_use_existing_phone_and_no_24_hours():
+    history = [{'type': 'text', 'direction': 'in', 'created': 1, 'content': {'text': '+79990000000'}}]
+    turn = respond('Можно записаться на собеседование?', 'MANAGER', history, TERMS)
+    assert turn.answer == '' and turn.escalate and turn.profile['phone'] == '+79990000000'
+    turn = respond('Можно на собеседование?', 'MANAGER', terms=TERMS)
+    assert 'В ближайшее время' in turn.answer and '24' not in turn.answer

@@ -257,19 +257,25 @@ def respond(value, role, history=(), terms=None, *, active=None, profile_state=N
     last_out = next((normal(message_text(m)) for m in reversed(ordered(history)) if m.get('direction') == 'out'), '')
     interested = bool(re.search(r'хочу.*(?:собеседован|связаться|поговорить)|интересно.*(?:дальше|общение)|готов.*(?:общаться|собеседован)', clean))
     interested = interested or clean in {'да', 'давайте', 'согласен', 'согласна'} and 'связи' in last_out
-    phone = re.search(r'(?<!\d)(?:\+?7|8)[\d ()-]{9,18}(?!\d)', value)
+    phone_pattern = r'(?<!\d)(?:\+?7|8)[\d ()-]{9,18}(?!\d)'
+    phone = re.search(phone_pattern, value)
+    for message in ordered(history):
+        if message.get('direction') == 'in':
+            found = re.search(phone_pattern, message_text(message))
+            if found:
+                profile['phone'] = found.group(0)
     asked_phone = 'номер телефона' in last_out
-    if phone and asked_phone:
+    interview_request = 'собеседован' in clean
+    if phone:
         profile['phone'] = phone.group(0)
+    if profile.get('phone') and (interview_request or interested or asked_phone):
         return Turn('', True, profile, 'READY')
-    if interested and history and not profile.get('phone'):
-        return Turn('Собеседование проводит руководитель. Оставьте, пожалуйста, номер телефона для связи.', False, profile)
+    if interview_request or interested and history:
+        return Turn('Оставьте, пожалуйста, номер телефона. В ближайшее время с вами свяжутся, чтобы договориться о собеседовании. Если с вами не свяжутся, напишите, пожалуйста, нам в чат.', False, profile)
     topics = r'во сколько|рабоч|ваканси|работ|оклад|зарплат|доход|процент|оплат|заработ|выплат|график|смен|жиль|жиле|прожив|проезд|обуч|опыт|наставник|обязанност|камер|фотоаппарат|ноутбук|оборудован|договор|оформлен|бонус|преми|собеседован|адрес|отел|компенсац'
     question = is_question(value) or bool(re.search(r'можно|актуаль|открыта|расскажите|подскажите', clean))
     if not question or not re.search(topics, clean):
         return Turn('', False, profile)
-    if 'собеседован' in clean:
-        return Turn('Собеседование проводит руководитель. Оставьте, пожалуйста, номер телефона для связи.', False, profile)
     facts = validate_terms(terms or {})
     patterns = {
         'pay': r'оклад|зарплат|доход|процент|оплат|заработ|платите',
