@@ -41,3 +41,11 @@ def test_interview_requests_use_existing_phone_and_no_24_hours():
     assert turn.answer == '' and turn.escalate and turn.profile['phone'] == '+79990000000'
     turn = respond('Можно на собеседование?', 'MANAGER', terms=TERMS)
     assert 'В ближайшее время' in turn.answer and '24' not in turn.answer
+
+
+def test_short_pay_night_and_unknown_pet_questions():
+    facts = dict(TERMS, schedule='График 3/1. Ночных смен нет.')
+    assert '15%' in respond('Сколько платите?', 'MANAGER', terms=facts).answer
+    assert 'Ночных смен нет' in respond('Ночью тоже нужно работать?', 'MANAGER', terms=facts).answer
+    turn = respond('Можно поселиться с собакой?', 'MANAGER', terms=facts)
+    assert turn.answer == '' and turn.escalate
