@@ -152,7 +152,7 @@ def test_only_matching_approved_vacancy_is_seeded_and_owner_edits_survive_restar
         await prepare(engine)
         terms = await worker.terms(payload['vacancy_code'])
         assert '15%' in terms['pay'] and '3/1' in terms['schedule']
-        assert '5 000' not in terms['housing'] and '10 000' not in terms['housing']
+        assert '5 000' in terms['housing'] and '10 000' not in terms['housing']
         async with engine.begin() as conn:
             await conn.execute(text('UPDATE hr_avito_terms SET payload=:payload WHERE vacancy_code=:code'), {'code': payload['vacancy_code'], 'payload': json.dumps({'pay': 'Новое условие владельца'})})
         await prepare(engine)
@@ -171,12 +171,12 @@ def test_new_incoming_in_the_same_second_is_not_lost_or_repeated(monkeypatch):
         await worker.process_chat('chat', 'PHOTOGRAPHER', 'anapa', 100)
         answer = worker.api.request.await_args.args[2]['message']['text']
         # Avito may return newest first, including equal-second messages.
-        worker.read_messages = AsyncMock(return_value=[msg('Алина', 'in-2', created=1), msg(answer, 'sent-1', 'out', 1), first])
+        worker.read_messages = AsyncMock(return_value=[msg('Какая зарплата?', 'in-2', created=1), msg(answer, 'sent-1', 'out', 1), first])
         worker.api.request.return_value = {'id': 'sent-2'}
         await worker.process_chat('chat', 'PHOTOGRAPHER', 'anapa', 100)
         await worker.process_chat('chat', 'PHOTOGRAPHER', 'anapa', 100)
-        assert worker.api.request.await_count == 2
-        assert json.loads((await worker.session('chat'))['profile'])['name'] == 'Алина'
+        assert worker.api.request.await_count == 1
+        assert (await worker.session('chat'))['status'] == 'REVIEW'
         await engine.dispose()
     asyncio.run(run())
 

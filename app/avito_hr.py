@@ -268,7 +268,7 @@ async def publish(engine, payloads):
     print("AVITO_PUBLICATION_RESULTS", json.dumps([dict(r) for r in rows], ensure_ascii=False))
 
 
-DIALOGUE_VERSION = "vacancy-profile-v6"
+DIALOGUE_VERSION = "confirmed-questions-v7"
 
 
 def reply(value, role, history=(), terms=None):
@@ -463,9 +463,7 @@ class Worker:
                 (m.get("content") or {}).get("flow_id") == "job" and
                 any(word in (m.get("content") or {}).get("text", "").lower()
                     for word in ("откликнул", "посмотрел ваш телефон")))) for m in messages):
-            key = "welcome:" + chat
-            turn = respond('Здравствуйте', role, messages, await self.terms(code), active=True)
-            answer, escalate = turn.answer, turn.escalate
+            return
         else:
             return
         await self.save_session(chat, role, code, item_id, turn, messages)
@@ -480,7 +478,10 @@ class Worker:
             return
         if not answer:
             async with self.engine.begin() as conn:
-                await conn.execute(text("INSERT INTO hr_avito_outbox(event_key,chat_id,response,state) VALUES (:key,:chat,'','stopped') ON CONFLICT(event_key) DO NOTHING"), {"key": key, "chat": chat})
+                if turn.status == 'STOPPED':
+                    await conn.execute(text("INSERT INTO hr_avito_outbox(event_key,chat_id,response,state) VALUES (:key,:chat,'','stopped') ON CONFLICT(event_key) DO NOTHING"), {"key": key, "chat": chat})
+                for message in pending:
+                    await conn.execute(text('INSERT INTO hr_avito_inbox(chat_id,message_id) VALUES (:chat,:mid) ON CONFLICT DO NOTHING'), {'chat': chat, 'mid': str(message['id'])})
             return
         # Re-read immediately before reserving the turn: a human or newer input
         # must not be overwritten by a reply generated from stale history.
