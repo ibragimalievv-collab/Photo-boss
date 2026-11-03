@@ -12,9 +12,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 from aiohttp import web
 from sqlalchemy import text
+
+from .avito_dialogue import message_text, ordered, respond, validate_terms
 
 log = logging.getLogger(__name__)
 
@@ -137,6 +140,18 @@ DDL = [
     """CREATE TABLE IF NOT EXISTS hr_avito_escalations (
         event_key TEXT PRIMARY KEY, chat_id TEXT NOT NULL, reason TEXT NOT NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
+    """CREATE TABLE IF NOT EXISTS hr_avito_terms (
+        vacancy_code TEXT PRIMARY KEY, payload TEXT NOT NULL DEFAULT '{}',
+        revision INTEGER NOT NULL DEFAULT 0, confirmed INTEGER NOT NULL DEFAULT 0)""",
+    """CREATE TABLE IF NOT EXISTS hr_avito_sessions (
+        chat_id TEXT PRIMARY KEY, item_id BIGINT, vacancy_code TEXT NOT NULL DEFAULT '',
+        role TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ACTIVE',
+        profile TEXT NOT NULL DEFAULT '{}', transcript TEXT NOT NULL DEFAULT '[]',
+        ignored_outgoing TEXT NOT NULL DEFAULT '[]',
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
+    """CREATE TABLE IF NOT EXISTS hr_avito_inbox (
+        chat_id TEXT NOT NULL, message_id TEXT NOT NULL,
+        PRIMARY KEY(chat_id,message_id))""",
 ]
 
 
@@ -145,6 +160,25 @@ async def prepare(engine):
         for statement in DDL:
             await conn.execute(text(statement))
         await conn.execute(text("INSERT INTO hr_avito_control VALUES (1,0,'') ON CONFLICT (id) DO NOTHING"))
+        # Reuse only facts tied to the exact already-published approval payload.
+        # Never seed another vacancy or overwrite an owner's newer settings.
+        root = Path(__file__).parent
+        seeds_path = root / 'avito_hr_terms_20261020.json'
+        payloads_path = root / 'avito_vacancies_20261020.json'
+        if seeds_path.is_file() and payloads_path.is_file():
+            payloads = {p['vacancy_code']: p for p in json.loads(payloads_path.read_text())}
+            for seed in json.loads(seeds_path.read_text()):
+                code = seed['vacancy_code']
+                source = payloads.get(code)
+                if source is None:
+                    continue
+                digest = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+                await conn.execute(text('''INSERT INTO hr_avito_terms(vacancy_code,payload,revision,confirmed)
+                    SELECT code,:payload,1,1 FROM hr_avito_vacancies
+                    WHERE code=:code AND payload_hash=:hash AND status='activated'
+                    ON CONFLICT(vacancy_code) DO NOTHING'''),
+                    {'code': code, 'hash': digest,
+                     'payload': json.dumps(validate_terms(seed['terms']), ensure_ascii=False)})
 
 
 def duplicate(item, payload):
@@ -234,92 +268,13 @@ async def publish(engine, payloads):
     print("AVITO_PUBLICATION_RESULTS", json.dumps([dict(r) for r in rows], ensure_ascii=False))
 
 
-INTRO = "Здравствуйте! Я автоматический HR-помощник «Фотобосс»."
-DIALOGUE_VERSION = "all-dialogues-v4"
+DIALOGUE_VERSION = "confirmed-questions-v7"
 
 
-def reply(value, role, history=()):
-    """Bounded topic recognition with conversation context; unknowns go to owner."""
-    import re
-    value = value.lower().replace("ё", "е").strip()
-    previous = [m for m in sorted(history, key=lambda m: int(m.get("created", 0)))
-                if m.get("type") == "text"]
-    outbound = [(m.get("content") or {}).get("text", "") for m in previous if m.get("direction") == "out"]
-    last = outbound[-1].lower().replace("ё", "е") if outbound else ""
-    first = not outbound
-    prefix = INTRO + " " if first else ""
-    if any(w in value for w in ("не пишите", "не писать", "не беспокойте", "не интересно", "неинтересно", "не подходит", "отказываюсь", "неактуально", "не актуально", "больше не ищу")):
-        return "", False
-    if "?" not in value and any(w in value for w in ("скину", "пришлю", "отправлю")) and (
-            any(w in value for w in ("портфолио", "пример", "работ")) or "портфолио" in last or "примеры" in last):
-        return prefix + "Хорошо, буду ждать примеры работ.", False
-    if value in {"нет", "нет спасибо", "нет, спасибо"} and any(w in last for w in ("вас интересует", "вам интересн", "актуальна", "подходит")):
-        return "", False
-    answers = []
-    def has(*words):
-        return any(word in value for word in words)
-    # Concrete questions are handled before greetings, even on the first contact.
-    if has("зарплат", "доход", "процент", "оплат", "заработ", "платите", "сколько получ") or (has("сколько", "приблизит", "примерно") and has("месяц", "день", "смен") and any(w in last for w in ("15%", "оплата", "доход", "заработ"))):
-        answers.append("Оплата — 15% от продаж, есть бонусы.")
-        if has("фикс", "гарант", "в месяц", "за месяц", "в день", "за день", "средн", "сколько можно", "приблизит", "примерно"):
-            answers.append("Фиксированную сумму не гарантируем; подтвержденного среднего заработка у меня нет.")
-    if has("выплат", "расчет", "расчёт", "когда плат", "как часто плат") or (has("когда", "как часто") and "выплат" in last):
-        answers.append("Выплаты еженедельно.")
-    if has("бонус", "преми") and not any("есть бонусы" in a for a in answers):
-        answers.append("Есть бонусы; правила и суммы уточню у владельца." if has("сколько", "как", "сумм", "расчет") else "Да, есть бонусы.")
-    if has("жиль", "жиле", "жили", "прожив", "квартир", "жить", "общежит") or (has("компенсац") and not has("проезд", "билет", "дорог")):
-        answers.append("Жильё предоставляем, компания оплачивает 50%. Сейчас стоимость — 10 000 ₽ в месяц: 5 000 ₽ оплачивает компания, 5 000 ₽ — сотрудник.")
-    if has("общежит"):
-        answers.append("Тип жилья уточню у владельца.")
-    if has("проезд", "билет", "переезд", "дорог"):
-        answers.append("Проезд компенсируется после приезда и минимум месяца работы; сумму согласует владелец.")
-    if has("график", "выходн", "рабочие дни", "3/1", "3 на 1"):
-        answers.append("График — 3/1: три рабочих дня, один выходной.")
-    if has("час", "во сколько", "длительность смен", "начало смен", "конец смен", "ночн"):
-        answers.append("Наличие ночных смен уточню у владельца." if has("ночн") else "Точные часы смен уточню у владельца.")
-    if has("где", "адрес", "отел", "место работ", "каком город", "витязево", "анап"):
-        answers.append("Работа есть в Анапе и Витязево; конкретное место согласуем с владельцем до выхода.")
-    if has("обуч", "опыт", "наставник", "науч", "нович"):
-        if has("сколько", "долго", "срок"):
-            answers.append("Точный срок обучения уточню у владельца.")
-        else:
-            answers.append("Можно без опыта: обучение с нуля и помощь наставника." if role == "PHOTOGRAPHER" else "Можно без опыта: обучаем общению с гостями и записи на фотосъемки.")
-    if has("обязанност", "что делать", "что надо делать", "чем заним", "что нужно дел") or (has("как это происходит") and any("Менеджер общается" in old or "Фотограф снимает" in old for old in outbound)):
-        answers.append("Фотограф снимает гостей; работе с камерой и съемке обучаем." if role == "PHOTOGRAPHER" else "Менеджер общается с гостями, рассказывает о фотосъемках и записывает желающих.")
-    ready = bool(re.search(r"(?:готов[аы]?|могу|хочу)\s+(?:выйти|начать|приступить)", value))
-    unknown = has("договор", "оформлен", "документ", "налог", "штраф", "питан", "форм", "камера своя", "оборудован", "возраст", "гражданств", "виза")
-    needs_owner = unknown or ready or any("уточню" in a for a in answers)
-    if ready:
-        answers.append("Передам владельцу вашу готовность, чтобы согласовать выход.")
-    if unknown:
-        answers.append("Этот вопрос уточню у владельца и вернусь с ответом.")
-    if answers:
-        # One relevant invitation; never repeat a question already asked in history.
-        question = ""
-        if not needs_owner and len(answers) == 1:
-            if "15%" in answers[0]:
-                question = "Подходит такой формат оплаты?"
-            elif "Можно без опыта" in answers[0]:
-                question = "Что хотели бы узнать об обучении?"
-            elif "Менеджер общается" in answers[0] or "Фотограф снимает" in answers[0]:
-                question = "Вам интересны такие задачи?"
-        if question and not any(question in old for old in outbound):
-            answers.append(question)
-        return prefix + " ".join(dict.fromkeys(answers)), needs_owner
-    clean = re.sub(r"[^а-яa-z ]", "", re.sub(r"\\s+", " ", value)).strip()
-    if any(w in clean for w in ("заинтересовала", "интересует вакансия")):
-        clean = "интересует вакансия"
-    if clean in {"здравствуйте", "здравствуй", "добрый день", "добрый вечер", "привет", "интересует вакансия", "заинтересовала ваша вакансия", "менеджер", "фотограф", "актуально", "вакансия актуальна"}:
-        if first:
-            title = "фотографом" if role == "PHOTOGRAPHER" else "менеджером по записи"
-            return prefix + f"Вас интересует работа {title}?", False
-        return "Вакансия актуальна. Что хотели бы узнать о работе?", False
-    if clean in {"спасибо", "понятно", "хорошо", "ок", "да", "интересно"}:
-        if "вас интересует работа" in last:
-            return "Что хотели бы узнать о работе?", False
-        return "Если появятся вопросы по работе, пишите.", False
-    # Never fabricate details or infer a sensitive eligibility decision.
-    return prefix + "Уточню ваш вопрос у владельца и вернусь с ответом.", True
+def reply(value, role, history=(), terms=None):
+    """Compatibility entry point for integrations using the previous helper."""
+    turn = respond(value, role, history, terms)
+    return turn.answer, turn.escalate
 
 
 class Worker:
@@ -328,28 +283,78 @@ class Worker:
         self.ready = False
         self.last_check = None
         self.last_probe = None
+        self.configured = True
+
+    async def session(self, chat):
+        async with self.engine.connect() as conn:
+            row = (await conn.execute(text('SELECT * FROM hr_avito_sessions WHERE chat_id=:chat'),
+                                      {'chat': chat})).mappings().first()
+        return dict(row) if row else None
+
+    async def terms(self, code):
+        async with self.engine.connect() as conn:
+            payload = await conn.scalar(text('SELECT payload FROM hr_avito_terms WHERE vacancy_code=:code AND confirmed=1'), {'code': code})
+        return json.loads(payload) if payload else {}
+
+    async def save_session(self, chat, role, code, item_id, turn, messages):
+        # Never overwrite a manager's durable pause with an in-flight bot turn.
+        transcript = [{'id': str(m.get('id', '')), 'direction': m.get('direction'),
+                       'type': m.get('type'), 'created': m.get('created'),
+                       'text': message_text(m)[:4000]} for m in ordered(messages)[-200:]]
+        async with self.engine.begin() as conn:
+            await conn.execute(text('''INSERT INTO hr_avito_sessions
+                (chat_id,item_id,vacancy_code,role,status,profile,transcript)
+                VALUES (:chat,:item,:code,:role,:status,:profile,:transcript)
+                ON CONFLICT(chat_id) DO UPDATE SET item_id=excluded.item_id,
+                vacancy_code=excluded.vacancy_code,role=excluded.role,
+                status=CASE WHEN hr_avito_sessions.status IN ('HUMAN','STOPPED')
+                    THEN hr_avito_sessions.status ELSE excluded.status END,
+                profile=excluded.profile,transcript=excluded.transcript,updated_at=CURRENT_TIMESTAMP'''),
+                {'chat': chat, 'item': item_id, 'code': code, 'role': role, 'status': turn.status,
+                 'profile': json.dumps(turn.profile, ensure_ascii=False),
+                 'transcript': json.dumps(transcript, ensure_ascii=False)})
+
+    async def owner_notice(self, chat, status):
+        # App inbox only. Candidate details remain behind the HR role check.
+        event = 'avito-hr:' + hashlib.sha256((chat + ':' + status).encode()).hexdigest()
+        async with self.engine.begin() as conn:
+            await conn.execute(text('''INSERT INTO notifications
+                (user_id,text,sent,created_at,event_key,priority,kind,payload)
+                SELECT DISTINCT u.id,:text,FALSE,CURRENT_TIMESTAMP,:event,'info','service_status',:payload
+                FROM users u JOIN user_roles r ON r.user_id=u.id
+                WHERE u.active=TRUE AND r.role='OWNER'
+                ON CONFLICT(user_id,event_key) DO NOTHING'''),
+                {'text': 'Авито: анкета кандидата требует внимания. Откройте кабинет HR /app/hr-avito.html.',
+                 'event': event, 'payload': json.dumps({'url': '/app/hr-avito.html'})})
 
     async def pause(self, reason):
         async with self.engine.begin() as conn:
             await conn.execute(text("UPDATE hr_avito_control SET paused=1,reason=:reason WHERE id=1"), {"reason": reason})
 
-    async def send_once(self, key, chat, response):
+    async def send_once(self, key, chat, response, input_ids=()):
         if len(response) > 1000:
             raise ValueError("Response length")
         async with self.engine.begin() as conn:
+            lock = ' FOR UPDATE' if conn.dialect.name == 'postgresql' else ''
+            state = await conn.scalar(text('SELECT status FROM hr_avito_sessions WHERE chat_id=:chat' + lock), {'chat': chat})
+            if state in {'HUMAN', 'STOPPED'}:
+                return False
             inserted = (await conn.execute(text("INSERT INTO hr_avito_outbox(event_key,chat_id,response,state) VALUES (:key,:chat,:response,'uncertain') ON CONFLICT(event_key) DO NOTHING RETURNING event_key"), {"key": key, "chat": chat, "response": response})).scalar()
+            if inserted:
+                for mid in input_ids:
+                    await conn.execute(text('INSERT INTO hr_avito_inbox(chat_id,message_id) VALUES (:chat,:mid) ON CONFLICT(chat_id,message_id) DO NOTHING'), {'chat': chat, 'mid': str(mid)})
         if not inserted:
-            return
+            return False
         result = await self.api.request("POST", f"/messenger/v1/accounts/{self.uid}/chats/{urllib.parse.quote(chat, safe='')}/messages", {"type": "text", "message": {"text": response}})
         async with self.engine.begin() as conn:
             await conn.execute(text("UPDATE hr_avito_outbox SET state='sent',message_id=:mid WHERE event_key=:key"), {"mid": str(result["id"]), "key": key})
+        return True
 
     async def cycle(self):
         async with self.engine.connect() as conn:
             control = (await conn.execute(text("SELECT paused,reason FROM hr_avito_control WHERE id=1"))).mappings().one()
-            uncertain = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE state='uncertain'"))
         if control['paused']:
-            if control['reason'] not in {'URLError', 'TimeoutError', 'ConnectionError', 'http_500', 'http_502', 'http_503', 'http_504'} or uncertain:
+            if control['reason'] not in {'URLError', 'TimeoutError', 'ConnectionError', 'http_500', 'http_502', 'http_503', 'http_504'}:
                 return
             # Probe only: never replay a possibly delivered send. Credentials stay
             # server-side, and a failed probe leaves the durable pause untouched.
@@ -362,11 +367,11 @@ class Worker:
             log.info("Avito HR connection recovered after account probe")
         await refresh_publications(self.engine, self.api)
         async with self.engine.connect() as conn:
-            rows = (await conn.execute(text("SELECT item_id,role FROM hr_avito_vacancies WHERE item_id IS NOT NULL AND status='activated'"))).mappings().all()
+            rows = (await conn.execute(text("SELECT code,item_id,role FROM hr_avito_vacancies WHERE item_id IS NOT NULL AND status='activated'"))).mappings().all()
         if not rows:
             self.last_check = int(time.time())
             return
-        roles = {int(r["item_id"]): r["role"] for r in rows}
+        roles = {int(r["item_id"]): dict(r) for r in rows}
         self.uid = (await self.api.request("GET", "/core/v1/accounts/self"))["id"]
         # Messenger is the source of dialogue coverage: applications may contain
         # only a system event/call and no candidate-authored text.
@@ -384,7 +389,19 @@ class Worker:
                     continue
                 if item_id not in roles or not entry.get("id"):
                     continue
-                await self.process_chat(str(entry["id"]), roles[item_id])
+                vacancy = roles[item_id]
+                chat = str(entry['id'])
+                try:
+                    await self.process_chat(chat, vacancy['role'], vacancy['code'], item_id)
+                except (APIError, urllib.error.URLError, TimeoutError, ConnectionError):
+                    async with self.engine.connect() as conn:
+                        uncertain_send = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE chat_id=:chat AND state='uncertain'"), {'chat': chat})
+                    if not uncertain_send:
+                        raise
+                    log.warning('Avito chat held: delivery result unconfirmed')
+                    async with self.engine.begin() as conn:
+                        await conn.execute(text("UPDATE hr_avito_sessions SET status='REVIEW' WHERE chat_id=:chat AND status NOT IN ('HUMAN','STOPPED')"), {'chat': chat})
+                    await self.owner_notice(chat, 'REVIEW')
             if len(chats) < 100:
                 break
             offset += 100
@@ -400,7 +417,10 @@ class Worker:
                 return messages
             offset += 100
 
-    async def process_chat(self, chat, role):
+    async def process_chat(self, chat, role, code='', item_id=None):
+        session = await self.session(chat)
+        if session and session['status'] in {'HUMAN', 'STOPPED'}:
+            return
         async with self.engine.connect() as conn:
             blocked = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE chat_id=:chat AND state IN ('stopped','uncertain')"), {"chat": chat})
         if blocked:
@@ -409,8 +429,20 @@ class Worker:
         texts = [m for m in messages if m.get("type") == "text"]
         outgoing = [m for m in texts if m.get("direction") == "out"]
         incoming = [m for m in texts if m.get("direction") == "in"]
+        async with self.engine.connect() as conn:
+            known = set(await conn.scalars(text("SELECT message_id FROM hr_avito_outbox WHERE chat_id=:chat AND state='sent'"), {'chat': chat}))
+        ignored = set(json.loads(session['ignored_outgoing'])) if session else set()
+        if any(str(m.get('id')) not in known | ignored for m in outgoing):
+            turn = respond('', role, messages, await self.terms(code))
+            turn.status = 'HUMAN'
+            await self.save_session(chat, role, code, item_id, turn, messages)
+            await self.owner_notice(chat, 'HUMAN')
+            return
         latest_out = max((int(m.get("created", 0)) for m in outgoing), default=-1)
-        pending = sorted([m for m in incoming if int(m.get("created", 0)) > latest_out], key=lambda m: int(m.get("created", 0)))
+        async with self.engine.connect() as conn:
+            consumed = set(await conn.scalars(text('SELECT message_id FROM hr_avito_inbox WHERE chat_id=:chat'), {'chat': chat}))
+        pending = sorted([m for m in incoming if int(m.get("created", 0)) >= latest_out
+                          and str(m.get('id')) not in consumed], key=lambda m: int(m.get("created", 0)))
         if pending:
             newest = pending[-1]
             key = "in:" + chat + ":" + str(newest["id"])
@@ -421,35 +453,43 @@ class Worker:
             if processed:
                 return
             value = "\n".join((m.get("content") or {}).get("text", "") for m in pending)
-            answer, escalate = reply(value, role, messages)
+            pending_ids = {str(m['id']) for m in pending}
+            history = [m for m in messages if str(m.get('id')) not in pending_ids]
+            turn = respond(value, role, history, await self.terms(code), active=True,
+                           profile_state=json.loads(session['profile']) if session else None)
+            answer, escalate = turn.answer, turn.escalate
         elif not texts and any(m.get("direction") == "in" and (
                 m.get("type") == "appCall" or (m.get("type") == "system" and
                 (m.get("content") or {}).get("flow_id") == "job" and
                 any(word in (m.get("content") or {}).get("text", "").lower()
                     for word in ("откликнул", "посмотрел ваш телефон")))) for m in messages):
-            key = "welcome:" + chat
-            title = "фотографа" if role == "PHOTOGRAPHER" else "менеджера по записи"
-            answer, escalate = INTRO + f" Спасибо за отклик на вакансию {title}. Что хотели бы узнать о работе?", False
+            return
         else:
+            return
+        await self.save_session(chat, role, code, item_id, turn, messages)
+        if escalate:
+            # Persist the handoff before attempting delivery; a send error must
+            # not lose the candidate's request or the manager's card.
+            async with self.engine.begin() as conn:
+                await conn.execute(text("INSERT INTO hr_avito_escalations(event_key,chat_id,reason) VALUES (:key,:chat,'owner_review') ON CONFLICT(event_key) DO NOTHING"), {'key': key, 'chat': chat})
+            await self.owner_notice(chat, turn.status)
+        if turn.status == 'HUMAN':
+            # User asked for a person: no automated message races with takeover.
             return
         if not answer:
             async with self.engine.begin() as conn:
-                await conn.execute(text("INSERT INTO hr_avito_outbox(event_key,chat_id,response,state) VALUES (:key,:chat,'','stopped') ON CONFLICT(event_key) DO NOTHING"), {"key": key, "chat": chat})
+                if turn.status == 'STOPPED':
+                    await conn.execute(text("INSERT INTO hr_avito_outbox(event_key,chat_id,response,state) VALUES (:key,:chat,'','stopped') ON CONFLICT(event_key) DO NOTHING"), {"key": key, "chat": chat})
+                for message in pending:
+                    await conn.execute(text('INSERT INTO hr_avito_inbox(chat_id,message_id) VALUES (:chat,:mid) ON CONFLICT DO NOTHING'), {'chat': chat, 'mid': str(message['id'])})
             return
         # Re-read immediately before reserving the turn: a human or newer input
         # must not be overwritten by a reply generated from stale history.
         fresh = await self.read_messages(chat)
-        signature = lambda rows: {(str(m.get("id")), m.get("direction")) for m in rows if m.get("type") == "text"}
+        signature = lambda rows: {(str(m.get("id")), m.get("direction"), message_text(m)) for m in rows if m.get("type") == "text"}
         if signature(fresh) != signature(messages):
             return
-        await self.send_once(key, chat, answer)
-        async with self.engine.begin() as conn:
-            if escalate:
-                # Unknown questions are tracked per turn; they never suppress
-                # replies to later candidate messages, including known questions.
-                await conn.execute(text("INSERT INTO hr_avito_escalations(event_key,chat_id,reason) VALUES (:key,:chat,'owner_review') ON CONFLICT(event_key) DO NOTHING"), {"key": key, "chat": chat})
-            else:
-                await conn.execute(text("UPDATE hr_avito_escalations SET reason='resolved_dialogue' WHERE chat_id=:chat AND reason='human_takeover'"), {"chat": chat})
+        await self.send_once(key, chat, answer, [m['id'] for m in pending])
         await asyncio.sleep(1)
 
     async def run(self):
@@ -465,6 +505,8 @@ class Worker:
             await asyncio.sleep(60)
 
     async def health(self, request):
+        if not self.configured:
+            return web.json_response({'enabled': False, 'ready': False, 'reason': 'credentials_missing'})
         if not self.ready:
             return web.json_response({"enabled": True, "ready": False, "reason": "startup_failed"})
         async with self.engine.connect() as conn:
@@ -475,10 +517,13 @@ class Worker:
         return web.json_response({"enabled": True, "ready": self.ready, "paused": bool(control["paused"]), "reason": control["reason"], "managedVacancies": count, "lastCheck": self.last_check, "lastProbe": self.last_probe, "sent": sent, "ownerReview": escalations, "dialogueVersion": DIALOGUE_VERSION, "pollSeconds": 60})
 
 
-def install_avito_hr(app, engine):
-    if not all(os.getenv(k, "").strip() for k in ("AVITO_CLIENT_ID", "AVITO_CLIENT_SECRET")):
-        return None
+def install_avito_hr(app, engine, miniapp=None):
+    configured = all(os.getenv(k, "").strip() for k in ("AVITO_CLIENT_ID", "AVITO_CLIENT_SECRET"))
     worker = Worker(engine)
+    worker.configured = configured
+    if miniapp is not None:
+        from .avito_hr_console import install_console
+        install_console(app, miniapp, worker, configured)
     app.router.add_get("/health/avito", worker.health)
 
     async def lifetime(_app):
@@ -486,6 +531,9 @@ def install_avito_hr(app, engine):
             await prepare(engine)
         except Exception as exc:  # noqa: BLE001 - startup failure must be reported without crashing app startup
             log.error("Avito HR startup failed (%s)", type(exc).__name__)
+            yield
+            return
+        if not configured:
             yield
             return
         worker.ready = True
@@ -499,4 +547,5 @@ def install_avito_hr(app, engine):
             worker.ready = False
     app.cleanup_ctx.append(lifetime)
     return worker
+
 
