@@ -4,7 +4,7 @@ const node = document.querySelector('#hr-content');
 const status = document.querySelector('#hr-status');
 const labels = {title:'Название вакансии',duties:'Обязанности',pay:'Оплата',payout:'Сроки выплат',
   schedule:'График и часы',location:'Место работы',housing:'Жильё',travel:'Проезд',
-  training:'Обучение и опыт',equipment:'Оборудование',contract:'Оформление',bonuses:'Бонусы'};
+  training:'Обучение и опыт',equipment:'Оборудование',contract:'Оформление',bonuses:'Бонусы',meals:'Питание',start:'Начало работы',seasonality:'Сезонность',workplace:'Характер работы',requirements:'Навыки',portfolio:'Портфолио'};
 const states = {ACTIVE:'Общается ассистент',REVIEW:'Нужен ответ менеджера',READY:'Готов к следующему шагу',
   HUMAN:'Переписка у менеджера',STOPPED:'Кандидат отказался от общения'};
 let data;

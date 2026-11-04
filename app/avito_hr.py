@@ -179,6 +179,21 @@ async def prepare(engine):
                     ON CONFLICT(vacancy_code) DO NOTHING'''),
                     {'code': code, 'hash': digest,
                      'payload': json.dumps(validate_terms(seed['terms']), ensure_ascii=False)})
+                previous_path = root / 'avito_hr_terms_previous.json'
+                if previous_path.is_file():
+                    previous = next((p['terms'] for p in json.loads(previous_path.read_text())
+                                     if p['vacancy_code'] == code), None)
+                    if previous is not None:
+                        # Compare semantic JSON, preserving every subsequent owner edit
+                        # and revoked confirmation. Increment revision for console clients.
+                        row = (await conn.execute(text('SELECT payload,revision,confirmed FROM hr_avito_terms WHERE vacancy_code=:code'), {'code': code})).mappings().first()
+                        legacy_fields = set(previous) | {'contract'}
+                        expected = {k: previous.get(k, '') for k in legacy_fields}
+                        if row and row['confirmed'] == 1 and json.loads(row['payload']) == expected:
+                            await conn.execute(text("UPDATE hr_avito_terms SET payload=:payload,revision=revision+1 WHERE vacancy_code=:code AND revision=:revision AND confirmed=1 AND payload=:old"),
+                                {'code': code, 'revision': row['revision'], 'old': row['payload'],
+                                 'payload': json.dumps(validate_terms(seed['terms']), ensure_ascii=False)})
+
 
 
 def duplicate(item, payload):
@@ -268,7 +283,7 @@ async def publish(engine, payloads):
     print("AVITO_PUBLICATION_RESULTS", json.dumps([dict(r) for r in rows], ensure_ascii=False))
 
 
-DIALOGUE_VERSION = "confirmed-questions-v7"
+DIALOGUE_VERSION = "contextual-facts-v8"
 
 
 def reply(value, role, history=(), terms=None):
@@ -283,6 +298,7 @@ class Worker:
         self.ready = False
         self.last_check = None
         self.last_probe = None
+        self.dialogue_audit = {}
         self.configured = True
 
     async def session(self, chat):
@@ -375,6 +391,7 @@ class Worker:
         self.uid = (await self.api.request("GET", "/core/v1/accounts/self"))["id"]
         # Messenger is the source of dialogue coverage: applications may contain
         # only a system event/call and no candidate-authored text.
+        audit = {str(item): {'chats': 0, 'lastIncoming': 0, 'lastOutgoing': 0} for item in roles}
         offset = 0
         while True:
             query = urllib.parse.urlencode({"item_ids": ",".join(map(str, roles)),
@@ -392,7 +409,18 @@ class Worker:
                 vacancy = roles[item_id]
                 chat = str(entry['id'])
                 try:
-                    await self.process_chat(chat, vacancy['role'], vacancy['code'], item_id)
+                    # Read-only coverage includes manually handled/stopped chats;
+                    # no status changes, mark-read calls or duplicate GETs.
+                    messages = await self.read_messages(chat)
+                    summary = audit[str(item_id)]
+                    summary['chats'] += 1
+                    for message in messages:
+                        if message.get('type') != 'text':
+                            continue
+                        field = {'in': 'lastIncoming', 'out': 'lastOutgoing'}.get(message.get('direction'))
+                        if field:
+                            summary[field] = max(summary[field], int(message.get('created') or 0))
+                    await self.process_chat(chat, vacancy['role'], vacancy['code'], item_id, messages=messages)
                 except (APIError, urllib.error.URLError, TimeoutError, ConnectionError):
                     async with self.engine.connect() as conn:
                         uncertain_send = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE chat_id=:chat AND state='uncertain'"), {'chat': chat})
@@ -405,6 +433,7 @@ class Worker:
             if len(chats) < 100:
                 break
             offset += 100
+        self.dialogue_audit = audit
         self.last_check = int(time.time())
 
     async def read_messages(self, chat):
@@ -417,7 +446,7 @@ class Worker:
                 return messages
             offset += 100
 
-    async def process_chat(self, chat, role, code='', item_id=None):
+    async def process_chat(self, chat, role, code='', item_id=None, *, messages=None):
         session = await self.session(chat)
         if session and session['status'] in {'HUMAN', 'STOPPED'}:
             return
@@ -425,7 +454,8 @@ class Worker:
             blocked = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE chat_id=:chat AND state IN ('stopped','uncertain')"), {"chat": chat})
         if blocked:
             return
-        messages = await self.read_messages(chat)
+        if messages is None:
+            messages = await self.read_messages(chat)
         texts = [m for m in messages if m.get("type") == "text"]
         outgoing = [m for m in texts if m.get("direction") == "out"]
         incoming = [m for m in texts if m.get("direction") == "in"]
@@ -514,7 +544,12 @@ class Worker:
             count = await conn.scalar(text("SELECT count(*) FROM hr_avito_vacancies WHERE status='activated'"))
             escalations = await conn.scalar(text("SELECT count(*) FROM hr_avito_escalations WHERE reason NOT LIKE 'resolved%'"))
             sent = await conn.scalar(text("SELECT count(*) FROM hr_avito_outbox WHERE state='sent'"))
-        return web.json_response({"enabled": True, "ready": self.ready, "paused": bool(control["paused"]), "reason": control["reason"], "managedVacancies": count, "lastCheck": self.last_check, "lastProbe": self.last_probe, "sent": sent, "ownerReview": escalations, "dialogueVersion": DIALOGUE_VERSION, "pollSeconds": 60})
+        async with self.engine.connect() as conn:
+            terms_rows = (await conn.execute(text("SELECT t.payload,t.revision,t.confirmed FROM hr_avito_terms t JOIN hr_avito_vacancies v ON v.code=t.vacancy_code WHERE v.status='activated' ORDER BY v.item_id"))).mappings().all()
+        terms_checks = [{'revision': r['revision'], 'confirmed': bool(r['confirmed']),
+                         'sha256': hashlib.sha256(json.dumps(json.loads(r['payload']), sort_keys=True, ensure_ascii=False).encode()).hexdigest()}
+                        for r in terms_rows]
+        return web.json_response({"dialogueAudit": self.dialogue_audit, "termsChecks": terms_checks, "enabled": True, "ready": self.ready, "paused": bool(control["paused"]), "reason": control["reason"], "managedVacancies": count, "lastCheck": self.last_check, "lastProbe": self.last_probe, "sent": sent, "ownerReview": escalations, "dialogueVersion": DIALOGUE_VERSION, "pollSeconds": 60})
 
 
 def install_avito_hr(app, engine, miniapp=None):
