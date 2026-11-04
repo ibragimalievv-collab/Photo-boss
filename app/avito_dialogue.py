@@ -254,7 +254,7 @@ def respond(value, role, history=(), terms=None, *, active=None, profile_state=N
     if re.fullmatch(r'(здравствуйте|здравствуй|привет|добрый день|добрый вечер)[.! ]*', clean):
         return Turn('Здравствуйте!' if not history else '', False, profile)
     last_out = next((normal(message_text(m)) for m in reversed(ordered(history)) if m.get('direction') == 'out'), '')
-    interested = bool(re.search(r'хочу.*(?:собеседован|связаться|поговорить)|интересно.*(?:дальше|общение)|готов.*(?:общаться|собеседован)', clean))
+    interested = bool(re.search(r'хочу.*(?:собеседован|связаться|поговорить|работать)|интересно.*(?:дальше|общение)|готов.*(?:общаться|собеседован)|условия подходят|все устраивает|как устроиться', clean))
     interested = interested or clean in {'да', 'давайте', 'согласен', 'согласна'} and 'связи' in last_out
     phone_pattern = r'(?<!\d)(?:\+?7|8)[\d ()-]{9,18}(?!\d)'
     phone = re.search(phone_pattern, value)

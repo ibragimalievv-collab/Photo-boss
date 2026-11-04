@@ -99,3 +99,11 @@ def test_cycle_audits_human_chats_read_only(monkeypatch):
         assert all(call.args[0] == 'GET' for call in worker.api.request.await_args_list)
         await engine.dispose()
     asyncio.run(run())
+
+
+def test_acceptance_moves_to_interview_and_paid_training_is_not_confused():
+    result = respond('Условия подходят, хочу работать', 'MANAGER', history(MANAGER['pay']), MANAGER)
+    assert 'номер телефона' in result.answer
+    result = respond('Обучение платное?', 'MANAGER', terms=MANAGER)
+    assert not result.answer and result.escalate
+    assert 'записывает гостей' in respond('Что делать', 'MANAGER', terms=MANAGER).answer

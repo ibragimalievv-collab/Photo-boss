@@ -9,7 +9,7 @@ from .avito_dialogue import message_text, normal, ordered
 
 TOPICS = {
     'pay': r'оклад|зарплат|доход|процент|оплат|заработ|платите|сколько.*получ|сдельн|фиксирован|минимал.*выплат',
-    'payout': r'выплат|когда плат|как часто плат|перв.*(?:деньг|зарплат)',
+    'payout': r'выплат|когда плат|как часто плат|раз в месяц|каждую неделю|по четверг|перв.*(?:деньг|зарплат)',
     'schedule': r'график|смен|рабочий день|час|во сколько|ноч|выходн|неполн|подработ|совмещ|после 20|задерж|переработ|обед',
     'housing': r'жиль|жиле|прожив|комнат|сосед|засел|общежит',
     'travel': r'проезд|билет|дорог|компенсац',
@@ -20,7 +20,7 @@ TOPICS = {
     'contract': r'договор|оформлен|документ|самозанят|трудоустр',
     'bonuses': r'бонус|преми',
     'meals': r'питан|кормят|еда|покушать',
-    'start': r'когда.*(?:начинать|приступать|нужно выйти)|начал.*работ',
+    'start': r'когда.*(?:начинать|приступать|нужно выйти|можно выйти)|начал.*работ',
     'seasonality': r'сезон|круглогод|круглый год|минимальн.*срок|срок.*работ',
     'workplace': r'ходить|на ногах|сидяч|подвижн|на улице|в помещени|где.*съем|мор[ея]',
     'requirements': r'навык|требован.*менедж|коммуникаб',
@@ -65,7 +65,7 @@ def compose(value, role, history, facts, profile, active, turn):
         elif context:
             return turn('', True, profile, 'REVIEW')
     substantive = '?' in value or bool(re.search(
-        r'како|сколько|когда|почему|расскаж|подскаж|объясн|где|можно|нуж|надо|актуаль|выдают|платите|кормят|предоставля|интересу|есть', query))
+        r'како|сколько|когда|почему|расскаж|подскаж|объясн|где|что делать|чем заним|можно|нуж|надо|актуаль|выдают|платите|кормят|предоставля|интересу|есть', query))
     if not substantive:
         return turn('', False, profile)
     vacancy_question = bool(re.search(r'ваканси|что за работа|условия работ', query))
@@ -83,7 +83,7 @@ def compose(value, role, history, facts, profile, active, turn):
         fact = facts.get(field, '')
         detail = re.search(r'сколько|сумм|стоим|срок|когда|долго|формул|рассчит', query)
         unsupported = (field in {'travel', 'bonuses'} and bool(detail))
-        unsupported |= field == 'training' and bool(re.search(r'сколько.*(?:дн|обуч)|долго|длится|срок|бесплатн|платить за обуч', query))
+        unsupported |= field == 'training' and bool(re.search(r'сколько.*(?:дн|обуч)|долго|длится|срок|бесплатн|платить за обуч|\bплатн', query))
         unsupported |= field == 'housing' and bool(re.search(r'коммуналь|залог|неполн.*месяц|сво[еем].*жиль|одному|кошка|собак', query))
         unsupported |= field == 'equipment' and role == 'PHOTOGRAPHER' and bool(re.search(r'подойдет.*(?:камера|canon|nikon|sony)|любая камера|како.*объектив|программ', query))
         unsupported |= field == 'seasonality' and bool(re.search(r'минимальн.*срок|на месяц|на неделю', query))
