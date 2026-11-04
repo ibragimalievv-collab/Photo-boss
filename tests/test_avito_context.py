@@ -106,4 +106,6 @@ def test_acceptance_moves_to_interview_and_paid_training_is_not_confused():
     assert 'номер телефона' in result.answer
     result = respond('Обучение платное?', 'MANAGER', terms=MANAGER)
     assert not result.answer and result.escalate
+    assert '15%' not in respond('Когда первая зарплата?', 'MANAGER', terms=MANAGER).answer
+    assert '15%' not in respond('Оплата обучения предусмотрена?', 'MANAGER', terms=MANAGER).answer
     assert 'записывает гостей' in respond('Что делать', 'MANAGER', terms=MANAGER).answer

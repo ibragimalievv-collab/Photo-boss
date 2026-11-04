@@ -56,6 +56,8 @@ def selected_sentences(fact, query, field):
 def compose(value, role, history, facts, profile, active, turn):
     query = normal(value)
     fields = [f for f, pattern in TOPICS.items() if re.search(pattern, query)]
+    if 'pay' in fields and (('payout' in fields and not re.search(r'сколько|процент|оклад|размер|сумм', query)) or ('training' in fields and re.search(r'оплат.*обуч|обуч.*опла', query))):
+        fields.remove('pay')
     last = next((normal(message_text(m)) for m in reversed(ordered(history)) if m.get('direction') == 'out'), '')
     elliptical = bool(re.fullmatch(r'(а |и |тогда )?(сколько|когда|как часто|почему|как это|это обязательно|а можно без него)[?!. ]*', query))
     if not fields and elliptical:
