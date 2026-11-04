@@ -14,7 +14,8 @@ FIELDS = {
     'accepted': 'Подходят ли вам эти условия?',
 }
 TERM_FIELDS = ('title', 'duties', 'pay', 'payout', 'schedule', 'location',
-               'housing', 'travel', 'training', 'equipment', 'contract', 'bonuses')
+               'housing', 'travel', 'training', 'equipment', 'contract', 'bonuses', 'meals', 'start', 'seasonality', 'workplace',
+               'requirements', 'portfolio')
 LABELS = {'name': 'Имя', 'city': 'Город', 'experience': 'Опыт', 'start': 'Готовность к выходу',
           'accepted': 'Условия', 'portfolio': 'Портфолио', 'interview': 'Время собеседования'}
 
@@ -250,8 +251,6 @@ def respond(value, role, history=(), terms=None, *, active=None, profile_state=N
         return Turn('', True, profile, 'HUMAN')
     ready = bool(re.search(r'\b(?:готов[аы]?|могу|смогу)\s+(?:выйти|приступить|начать работу)\b', clean))
     conditional = bool(re.search(r'\bесли\b|не готов|не могу|не смогу', clean))
-    if ready and not conditional:
-        return Turn('', True, profile, 'READY')
     if re.fullmatch(r'(здравствуйте|здравствуй|привет|добрый день|добрый вечер)[.! ]*', clean):
         return Turn('Здравствуйте!' if not history else '', False, profile)
     last_out = next((normal(message_text(m)) for m in reversed(ordered(history)) if m.get('direction') == 'out'), '')
@@ -272,44 +271,11 @@ def respond(value, role, history=(), terms=None, *, active=None, profile_state=N
         return Turn('', True, profile, 'READY')
     if interview_request or interested and history:
         return Turn('Оставьте, пожалуйста, номер телефона. В ближайшее время с вами свяжутся, чтобы договориться о собеседовании. Если с вами не свяжутся, напишите, пожалуйста, нам в чат.', False, profile)
-    topics = r'плат|ноч|собак|кошк|животн|во сколько|рабоч|ваканси|работ|оклад|зарплат|доход|процент|оплат|заработ|выплат|график|смен|жиль|жиле|прожив|проезд|обуч|опыт|наставник|обязанност|камер|фотоаппарат|ноутбук|оборудован|договор|оформлен|бонус|преми|собеседован|адрес|отел|компенсац'
-    question = is_question(value) or bool(re.search(r'можно|актуаль|открыта|расскажите|подскажите', clean))
-    if not question or not re.search(topics, clean):
-        return Turn('', False, profile)
-    facts = validate_terms(terms or {})
-    patterns = {
-        'pay': r'оклад|зарплат|доход|процент|оплат|заработ|платите',
-        'payout': r'выплат|когда плат|как часто плат',
-        'schedule': r'график|смен|рабочий день|час|во сколько|ноч',
-        'housing': r'жиль|жиле|прожив|комнат',
-        'travel': r'проезд|билет|компенсац.*дорог',
-        'equipment': r'камер|ноутбук|фотоаппарат|техник|оборудован',
-        'training': r'обуч|опыт|наставник',
-        'duties': r'обязанност|чем заним|что делать',
-        'location': r'адрес|где.*работ|место работ',
-        'contract': r'договор|оформлен|документ',
-        'bonuses': r'бонус|преми',
-    }
-    if re.search(r'собак|кошк|животн|ребен|питан|возраст|гражданств|штраф', clean):
-        return Turn('', True, profile, 'REVIEW')
-    answers, unknown = [], False
-    for field, pattern in patterns.items():
-        if not re.search(pattern, clean):
-            continue
-        fact = facts[field]
-        detail = re.search(r'сколько|сумм|стоим|срок|когда|долго|как рассчитыв', clean)
-        if not fact or (field in {'travel','bonuses'} and detail) or (field == 'training' and re.search(r'сколько|долго|срок', clean)):
-            unknown = True
-        else:
-            answers.append(fact)
-    if re.search(r'вакансия.*(?:открыт|актуаль)', clean):
-        if active is True:
-            answers.append('Вакансия актуальна.')
-        else:
-            unknown = True
-    if unknown or not answers:
-        return Turn('', True, profile, 'REVIEW')
-    return Turn(' '.join(dict.fromkeys(answers))[:1000], False, profile)
+    from .avito_answers import compose
+    result = compose(value, role, history, validate_terms(terms or {}), profile, active, Turn)
+    if ready and not conditional:
+        result.escalate, result.status = True, 'READY'
+    return result
 
 
 def finish(prefix, answers, missing, profile, status='ACTIVE'):
