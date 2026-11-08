@@ -310,6 +310,10 @@ async def main():
                     assert await field.is_enabled()
                     assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                     await page.locator('[data-quick-booking-close]').click()  # the unsent guest stays in the closed form
+                    # Closing the shortcut dialog returns to the screen it was opened from (home);
+                    # let that navigation finish before opening another screen.
+                    await wait_async(page, "()=>location.hash==='#home'")
+                    await page.locator('#app .home-review-heading h1').wait_for()
                     # Open the first sale the way its links do; a concurrent refresh can no
                     # longer outrun a hand-drawn view.
                     await page.evaluate("location.hash='#workflow?booking=1'")
