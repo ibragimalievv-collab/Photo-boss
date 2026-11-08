@@ -71,7 +71,7 @@ from .yandex_disk import (
 )
 
 KINDS = frozenset({'booking', 'sale_start', 'sale_start_inline', 'sale_counts', 'sale_complete', 'sale_receipt',
-                   'sale_selected', 'sale_disk_selected', 'sale_gallery_selected', 'booking_receipt', 'shoot_photo', 'shoot_complete', 'shoot_retry', 'photo_edit', 'delivery_photo', 'delivery_handoff', 'gallery_reserve_photo'})
+                   'sale_selected', 'sale_disk_selected', 'sale_gallery_selected', 'booking_receipt', 'shoot_photo', 'shoot_photo_link', 'shoot_complete', 'shoot_retry', 'photo_edit', 'delivery_photo', 'delivery_handoff', 'gallery_reserve_photo'})
 MEDIA_KINDS = frozenset({'sale_receipt', 'sale_selected', 'booking_receipt', 'shoot_photo', 'delivery_photo', 'gallery_reserve_photo'})
 PREPARED_MEDIA_KINDS = MEDIA_KINDS | {'sale_disk_selected', 'sale_gallery_selected', 'sale_complete'}
 
@@ -101,6 +101,31 @@ def media_identity(kind, data, raw):
 def fields(data, expected):
     if set(data) != set(expected.split()):
         raise AccessError('Некорректные поля рабочей операции.', 400)
+
+
+SHA256_HEX = frozenset('0123456789abcdef')
+
+
+def original_name(value):
+    """Camera file name for display only; never used as a storage path."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise AccessError('Некорректное имя файла.', 400)
+    name = value.replace('\\', '/').rsplit('/', 1)[-1]
+    name = ''.join(ch for ch in name if ch.isprintable()).strip()
+    return name[:255] or None
+
+
+def shoot_fields(kind, data):
+    """Full-shoot operations accept an optional camera file name."""
+    expected = 'shooting sha256' if kind == 'shoot_photo_link' else 'shooting'
+    fields(data, expected + (' filename' if 'filename' in data else ''))
+    if kind == 'shoot_photo_link':
+        digest = data['sha256']
+        if not isinstance(digest, str) or len(digest) != 64 or not set(digest) <= SHA256_HEX:
+            raise AccessError('Некорректная контрольная сумма кадра.', 400)
+    original_name(data.get('filename'))
 
 
 def receipt_analysis(value):
@@ -155,6 +180,31 @@ class Workflow:
     def __init__(self, api):
         self.api = api
         self.tz = getattr(api, 'tz', ZoneInfo('Europe/Moscow'))
+
+    async def photo_hashes(self, request):
+        """Checksums already on the server for one shoot, so a re-selected
+        folder sends only missing files and reuses guest-selected originals."""
+        a = request['miniapp_actor']
+        try:
+            sid = int(request.match_info['id'])
+        except (KeyError, ValueError):
+            raise AccessError('Съёмка не найдена.', 404) from None
+        from .disk_sale_media import FILE_PREFIX
+        async with AsyncSession(self.api.engine) as session:
+            shooting = await session.get(Shooting, sid)
+            booking = await session.get(Booking, shooting.booking_id) if shooting else None
+            if booking is None or not await can_access_booking(session, a['id'], set(a['roles']), booking, photos=True):
+                raise AccessError('Нет доступа к съёмке.', 403)
+            stored = (await session.scalars(select(PhotoStorage.sha256).where(
+                PhotoStorage.shooting_id == sid, PhotoStorage.sha256.is_not(None)))).all()
+            selected = (await session.scalars(select(SaleDraftPhoto.sha256).join(
+                SaleDraft, SaleDraft.id == SaleDraftPhoto.draft_id).where(
+                SaleDraft.booking_id == booking.id,
+                ~SaleDraftPhoto.storage_path.like(FILE_PREFIX + '%')))).all()
+        return web.json_response({'shootingId': sid, 'stored': sorted(set(stored)),
+                                  'selected': sorted(set(selected) - set(stored)),
+                                  'open': shooting.status == 'READY_FOR_SALE' and not shooting.full_upload_completed_at},
+                                 headers={'Cache-Control': 'no-store'})
 
     async def receipt_image(self, request):
         return await self._receipt_image(request, draft=False)
@@ -264,6 +314,8 @@ class Workflow:
                     SaleDraft.status.in_(['AWAITING_RECEIPT', 'AWAITING_COUNTS', 'AWAITING_SELECTED'])).order_by(SaleDraft.id.desc()).limit(1))
                 shoot = await session.scalar(select(Shooting).where(Shooting.booking_id == b.id))
                 files = (await session.scalars(select(PhotoStorage).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoStorage.id))).all() if shoot else []
+                names = dict((await session.execute(select(Photo.id, Photo.original_name).where(
+                    Photo.shooting_id == shoot.id, Photo.original_name.is_not(None)))).all()) if shoot else {}
                 edits = (await session.scalars(select(PhotoEdit).join(PhotoStorage, PhotoStorage.photo_id == PhotoEdit.photo_id).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoEdit.id))).all() if shoot else []
                 purchases = (await session.scalars(select(Sale).where(Sale.booking_id == b.id).order_by(Sale.id))).all()
                 receipts = (await session.scalars(select(Receipt).where(Receipt.booking_id == b.id).order_by(Receipt.id))).all()
@@ -285,7 +337,7 @@ class Workflow:
                     'salesAmount': str(total), 'paidAmount': str(paid), 'dueAmount': str(due),
                     'creditAmount': str(money(max(Decimal(0), paid - total))),
                     'totalFrames': max([original_count or 0, draft.declared_photo_count or 0 if draft else 0] + [sale.declared_photo_count or 0 for sale in purchases])}
-                rows.append({**history, 'receipts': [receipt_state(receipt) for receipt in receipts], 'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
+                rows.append({**history, 'receipts': [receipt_state(receipt) for receipt in receipts], 'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'name': names.get(f.photo_id), 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
                     'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': effective_price,
                     'photographerId': b.photographer_id,
                     'photographer': (assigned_photographers[b.photographer_id].name
@@ -542,7 +594,7 @@ class Workflow:
                         raise AccessError('Дополнительная оплата не требуется.', 409)
                     prepared['target'] = bid
                 else:
-                    fields(data, 'shooting')
+                    shoot_fields(kind, data)
                     sid = await target(session, actor, data['shooting'], 'shootingId')
                     shooting = await session.get(Shooting, sid)
                     booking = await session.get(Booking, shooting.booking_id) if shooting else None
@@ -841,8 +893,53 @@ class Workflow:
         await audit(session, actor, 'receipt_uploaded', 'receipt', receipt.id)
         return {'bookingId': bid, 'receiptId': receipt.id, 'receipt': receipt_state(receipt)}
 
+    async def link_selected_original(self, session, actor, booking, shooting, data):
+        """Count a guest-selected original in the full shoot without a second upload.
+
+        The selected original of this same booking is already stored and
+        checksum-verified on Disk. Reuse that exact file; never another guest's.
+        """
+        sid, digest = shooting.id, data['sha256']
+        name = original_name(data.get('filename'))
+        existing = await session.scalar(select(PhotoStorage).where(
+            PhotoStorage.shooting_id == sid, PhotoStorage.sha256 == digest).limit(1))
+        if existing is not None:
+            photo = await session.get(Photo, existing.photo_id)
+            if name and photo is not None and not photo.original_name:
+                photo.original_name = name
+            return {'shootingId': sid, 'photoId': existing.photo_id, 'duplicate': True,
+                    'storageStatus': existing.status, 'linked': True}
+        if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
+            raise AccessError('Загрузка новых кадров уже закрыта или ещё недоступна.', 409)
+        from .disk_sale_media import FILE_PREFIX
+        selected = await session.scalar(select(SaleDraftPhoto).join(
+            SaleDraft, SaleDraft.id == SaleDraftPhoto.draft_id).where(
+            SaleDraft.booking_id == booking.id, SaleDraftPhoto.sha256 == digest,
+            ~SaleDraftPhoto.storage_path.like(FILE_PREFIX + '%')).order_by(SaleDraftPhoto.id).limit(1))
+        if selected is None:
+            # The browser falls back to a normal upload of this file.
+            raise AccessError('Кадр не найден среди выбранных. Загрузите файл обычным способом.', 409)
+        path = selected.storage_path
+        photo = Photo(shooting_id=sid, file_id=path, original_name=name)
+        session.add(photo)
+        await session.flush()
+        storage, _ = await ensure_photo_storage(session, photo_id=photo.id, shooting_id=sid,
+            file_id=path, file_unique_id='web-sha256:' + digest, source_kind='DOCUMENT')
+        storage.telegram_file_id = storage.disk_path = path
+        storage.sha256, storage.byte_size = digest, selected.byte_size
+        storage.status, storage.attempts, storage.last_error = 'STORED', 0, None
+        storage.stored_at = storage.updated_at = utc_now()
+        storage.started_at = None
+        await audit(session, actor, 'shoot_photo_uploaded', 'shooting', sid,
+                    f'linked_selected_original; sale_draft_photo={selected.id}')
+        return {'shootingId': sid, 'photoId': photo.id, 'duplicate': False,
+                'storageStatus': 'STORED', 'storageVerified': True, 'linked': True}
+
     async def shoot(self, session, actor, roles, kind, data, raw, *, prepared_media=None):
-        fields(data, 'shooting')
+        if kind in {'shoot_photo', 'shoot_photo_link'}:
+            shoot_fields(kind, data)
+        else:
+            fields(data, 'shooting')
         sid = await target(session, actor, data['shooting'], 'shootingId')
         if prepared_media is not None and prepared_media['target'] != sid:
             raise AccessError('Съёмка изменилась. Повторите отправку.', 409)
@@ -857,6 +954,8 @@ class Workflow:
             await audit(session, actor, 'shoot_storage_recovery', 'shooting', sid,
                         json.dumps(recovery))
             return {'shootingId': sid, **recovery}
+        if kind == 'shoot_photo_link':
+            return await self.link_selected_original(session, actor, booking, shooting, data)
         if kind == 'shoot_photo':
             from .services.media_files import direct_disk_mode
             digest = hashlib.sha256(raw).hexdigest()
@@ -875,6 +974,7 @@ class Workflow:
                     storage, _ = await ensure_photo_storage(session, photo_id=photo.id, shooting_id=sid,
                         file_id=path, file_unique_id='web-sha256:' + digest, source_kind='DOCUMENT')
                 photo.file_id = storage.telegram_file_id = storage.disk_path = path
+                photo.original_name = original_name(data.get('filename')) or photo.original_name
                 storage.sha256, storage.byte_size = digest, len(raw)
                 storage.status, storage.attempts, storage.last_error = 'STORED', 0, None
                 storage.stored_at = storage.updated_at = utc_now()
@@ -894,7 +994,7 @@ class Workflow:
             if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
                 raise AccessError('Загрузка новых кадров уже закрыта или ещё недоступна.', 409)
             file_id, unique_id = prepared_media['file'] if prepared_media is not None else await self.save_telegram(actor, raw)
-            photo = Photo(shooting_id=sid, file_id=file_id)
+            photo = Photo(shooting_id=sid, file_id=file_id, original_name=original_name(data.get('filename')))
             session.add(photo)
             await session.flush()
             storage, _ = await ensure_photo_storage(session, photo_id=photo.id, shooting_id=sid,

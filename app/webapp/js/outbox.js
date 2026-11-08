@@ -7,7 +7,15 @@ let userId=null,operationsGeneration='',salesGeneration='',running=false,timer=n
 // sale chain and of attendance events. All workers retain the same durable keys.
 const workers=new Set(),requestedWorkers=new Set();
 const shiftKinds=new Set(['attendance','break_start','break_end','checklist','shift_report']);
-const operationWorker=row=>row.kind==='booking'?'booking':shiftKinds.has(row.kind)?'attendance':isBankGate(row)?'bank':'media';
+// Full-shoot originals are independent of each other and of sale chains, so
+// they use their own lanes and upload in parallel. Everything else keeps the
+// original single media worker and its strict ordering.
+export const SHOOT_LANES=3;
+const shootKinds=new Set(['shoot_photo','shoot_photo_link']);
+const shootLane=key=>{let h=0;for(const ch of String(key))h=(h*31+ch.charCodeAt(0))>>>0;return 'shoot'+(h%SHOOT_LANES);};
+const operationWorker=row=>row.kind==='booking'?'booking':shiftKinds.has(row.kind)?'attendance':isBankGate(row)?'bank':shootKinds.has(row.kind)?shootLane(row.key):'media';
+const allWorkers=['booking','attendance','bank','media',...Array.from({length:SHOOT_LANES},(_,i)=>'shoot'+i)];
+const shootingOf=row=>row?.data?.shooting?.id;
 const isBankGate=row=>['booking_bank_payment','sale_bank_payment'].includes(row.kind);
 const scheduleRetry=delay=>{
  const wait=Math.min(2147483647,Math.max(1000,delay)),due=Date.now()+wait;
@@ -356,6 +364,87 @@ export async function replaceOperationFile(key,file){
  row.blob=row.kind==='booking_receipt'?await file.arrayBuffer():file;row.blobType=file.type||'';row.filename=file.name||row.filename;row.status='local';row.error='';row.errorStatus=0;row.retryAt=0;
  await update(row);changed();return flushOutbox();
 }
+// Full-shoot folder upload: hash locally, skip originals the server already
+// has, reuse guest-selected originals without sending bytes again, and keep
+// up to SHOOT_LANES files moving at once. One bad file never stops the rest;
+// only shoot-wide problems (access, closed upload, offline) pause the batch.
+const FILE_ERRORS=new Set([400,413,415]);
+const LINK_FALLBACK='Кадр не найден среди выбранных. Загрузите файл обычным способом.';
+async function sha256Hex(file){
+ const digest=await crypto.subtle.digest('SHA-256',await file.arrayBuffer());
+ return Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');
+}
+export async function enqueueShootFiles(files,shootingId,onProgress=()=>{},{concurrency=SHOOT_LANES,date}={}){
+ const actor=userId,generation=operationsGeneration,total=files.length,started=Date.now();
+ if(!actor)throw new Error('Войдите в свой аккаунт Photo Boss.');
+ if(!total)throw new Error('В выбранной папке нет подходящих фотографий.');
+ const alive=()=>actor===userId&&generation===operationsGeneration;
+ const known=await api(`/shootings/${Number(shootingId)}/photo-hashes`,{allowSnapshot:false});
+ if(!alive())throw new Error('Рабочие данные или аккаунт изменились. Выберите папку снова.');
+ if(known&&known.open===false)throw new Error('Загрузка этой съёмки уже закрыта.');
+ const stored=new Set(known?.stored||[]),selected=new Set(known?.selected||[]);
+ const stats={total,done:0,uploaded:0,linked:0,skipped:0,failed:[],inFlight:0,bytesDone:0,bytesQueued:0};
+ const flying=new Map();let index=0,stopError=null,transientSince=0;
+ const report=(state,name='')=>{
+  const elapsed=(Date.now()-started)/1000,rate=elapsed>2&&stats.bytesDone?stats.bytesDone/elapsed:0;
+  const remainingBytes=files.slice(index).reduce((sum,f)=>sum+f.size,0)+stats.bytesQueued;
+  onProgress({...stats,failed:[...stats.failed],state,name,etaSeconds:rate?Math.round(remainingBytes/rate):null});
+ };
+ const enqueue=async(file,digest,link)=>{
+  const data={shooting:{id:Number(shootingId)},filename:file.name||'',...(link?{sha256:digest}:{})};
+  const [row]=await enqueueBatch([{kind:link?'shoot_photo_link':'shoot_photo',date,data,...(link?{}:{blob:file})}]);
+  flying.set(row.key,{file,digest,link});stats.inFlight=flying.size;if(!link)stats.bytesQueued+=file.size;
+ };
+ while(index<total||flying.size){
+  if(!alive())throw new Error('Рабочие данные или аккаунт изменились. Выберите папку снова: уже принятые кадры повторно не отправятся.');
+  while(!stopError&&index<total&&flying.size<concurrency){
+   const file=files[index++];
+   let digest;
+   try{digest=await sha256Hex(file);}catch{stats.failed.push({name:file.name,error:'Не удалось прочитать файл на устройстве.'});stats.done++;report('failed',file.name);continue;}
+   if(stored.has(digest)){stats.skipped++;stats.done++;report('skipped',file.name);continue;}
+   stored.add(digest);
+   await enqueue(file,digest,selected.has(digest));
+   report('sending',file.name);
+  }
+  if(!flying.size)break;
+  await new Promise(done=>setTimeout(done,350));
+  let transient=0;
+  for(const [key,item] of [...flying]){
+   const row=await localAction('operations','readonly',s=>s.get(key));
+   if(!row){flying.delete(key);stats.failed.push({name:item.file.name,error:'Кадр пропал из очереди.'});stats.done++;continue;}
+   if(row.status==='synced'){
+    flying.delete(key);stats.done++;
+    if(item.link)stats.linked++;else{stats.uploaded++;stats.bytesDone+=item.file.size;stats.bytesQueued-=item.file.size;}
+    report('synced',item.file.name);continue;
+   }
+   if(row.status==='error'){
+    flying.delete(key);
+    if(!item.link)stats.bytesQueued-=item.file.size;
+    if(item.link&&row.errorStatus===409&&row.error===LINK_FALLBACK){
+     // The selected original is not reusable (for example, it came from a
+     // linked Disk folder). Send this file normally instead.
+     await removeLocalOperation(key);await enqueue(item.file,item.digest,false);continue;
+    }
+    if(FILE_ERRORS.has(row.errorStatus)){stats.failed.push({name:item.file.name,error:row.error||'Файл не принят.'});stats.done++;report('failed',item.file.name);continue;}
+    stopError=stopError||row.error||'Загрузка остановлена сервером.';
+    stats.failed.push({name:item.file.name,error:row.error||'Не удалось передать файл.'});stats.done++;continue;
+   }
+   if(row.status==='local'&&row.error)transient++;
+  }
+  stats.inFlight=flying.size;
+  if(!navigator.onLine){report('offline');throw new Error(`Нет сети. Принято ${stats.uploaded+stats.linked} из ${total}; начатые кадры сохранены на устройстве и догрузятся сами. Чтобы отправить остальные, выберите папку снова, когда появится сеть.`);}
+  if(transient&&transient===flying.size){
+   transientSince=transientSince||Date.now();
+   if(Date.now()-transientSince>90000){report('paused');throw new Error(`Сервер временно не отвечает. Принято ${stats.uploaded+stats.linked} из ${total}; начатые кадры догрузятся сами. Остальные отправьте позже, выбрав папку снова — уже принятые не отправятся повторно.`);}
+  }else transientSince=0;
+ }
+ report(stopError?'stopped':'done');
+ if(stopError)throw new Error(`${stopError} Принято ${stats.uploaded+stats.linked} из ${total}.`);
+ return {...stats,failed:[...stats.failed]};
+}
+async function removeLocalOperation(key){
+ await localAction('operations','readwrite',store=>store.delete(key));changed();
+}
 // Store one original locally, send it, and wait for confirmation before loading
 // the next file into IndexedDB. This bounds browser storage for large folders.
 export async function enqueueFilesOneByOne(files,operationFor,onProgress=()=>{}){
@@ -451,7 +540,7 @@ export async function flushOutbox(){
  if(!navigator.onLine)return {state:'offline'};
  if(queueRepairing){rerunRequested=true;return {state:'running'};}
  rerunRequested=false;
- const results=await Promise.all(['booking','attendance','bank','media'].map(flushOutboxWorker));
+ const results=await Promise.all(allWorkers.map(flushOutboxWorker));
  const state=results.some(row=>row.state==='running')?'running':results.some(row=>row.state==='backoff')?'backoff':'done';
  return {state,completed:results.reduce((total,row)=>total+(row.completed||0),0),failed:results.reduce((total,row)=>total+(row.failed||0),0),temporary:results.reduce((total,row)=>total+(row.temporary||0),0)};
 }
@@ -481,6 +570,19 @@ async function flushOutboxWorker(worker){
     if(booking?.userId!==actor||booking.status!=='synced'||!booking.result?.bookingId)continue;
    }
    if(item.resumeByKey){const repair=await localAction('operations','readonly',store=>store.get(item.resumeByKey));if(repair?.status!=='synced')continue;}
+   // Photos now upload in parallel lanes. Close the shoot only after every
+   // queued original of that shoot has been accepted by the server.
+   if(item.kind==='shoot_complete'){
+    const shooting=shootingOf(item),rows=await outboxRows();
+    if(!active())break;
+    const waiting=rows.filter(other=>shootKinds.has(other.kind)&&shootingOf(other)===shooting&&other.status!=='synced'&&(other.generation||'')===generation);
+    if(waiting.length){
+     // Recheck while originals are still moving; a failed original instead
+     // waits for the photographer's explicit retry, which flushes again.
+     if(waiting.some(other=>['local','syncing'].includes(other.status)))scheduleRetry(2000);
+     continue;
+    }
+   }
    const sale=saleChain(item);
    // The bank worker owns its wait without holding the media worker. Every
    // later sale stage still waits for the same durable gate in IndexedDB.

@@ -113,6 +113,7 @@ jobs:
           node --check app/work_chat_ui/camera.js
           node --check app/webapp/js/practice.js
           for file in app/webapp/js/*.js; do node --check "$file"; done
+          node tests/shoot_parallel_upload_check.mjs
           node tests/lunch_recovery_check.mjs
           node tests/attendance_reset_check.mjs
           node tests/attendance_recovery_check.mjs

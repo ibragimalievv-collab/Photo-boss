@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 def operation_diagnostic(body, *, result=None, error=None):
     """Log only known operation fields; never file bytes, names or request keys."""
     kinds = {'sale_start', 'sale_start_inline', 'sale_receipt', 'sale_counts', 'sale_selected', 'sale_disk_selected', 'sale_complete',
-             'shoot_photo', 'shoot_complete', 'shoot_retry', 'booking', 'booking_receipt', 'break_start', 'break_end', 'attendance'}
+             'shoot_photo', 'shoot_photo_link', 'shoot_complete', 'shoot_retry', 'booking', 'booking_receipt', 'break_start', 'break_end', 'attendance'}
     if not isinstance(body, dict) or not isinstance(body.get('kind'), str) or body['kind'] not in kinds:
         return
     detail = {'kind': body['kind']}
@@ -232,7 +232,7 @@ class Workday:
         # durable). A deadlock victim must start a fresh transaction; rechecking
         # the original key preserves exactly-once acknowledgements/commissions.
         retryable = {'booking', 'checklist', 'shift_report', 'break_start', 'break_end',
-                     'sale_start', 'sale_start_inline', 'sale_counts', 'photo_edit', 'shoot_retry', 'delivery_handoff'}
+                     'sale_start', 'sale_start_inline', 'sale_counts', 'photo_edit', 'shoot_retry', 'shoot_photo_link', 'delivery_handoff'}
         if kind in retryable or prepared_media is not None or attendance_file is not None:
             from .transaction_retry import retry_transaction
             return await retry_transaction(transaction)
@@ -377,6 +377,7 @@ def install_workday(app,api):
     from .workflow import Workflow
     app.router.add_get('/api/miniapp/photos/{photo}/image', PhotoFiles(api).image)
     app.router.add_get('/api/miniapp/receipts/{id}/image', Workflow(api).receipt_image)
+    app.router.add_get(r'/api/miniapp/shootings/{id:\d+}/photo-hashes', Workflow(api).photo_hashes)
     app.router.add_post('/api/miniapp/receipts/{id}/retry', Workflow(api).receipt_retry)
     app.router.add_get('/api/miniapp/sale-drafts/{id}/receipt/image', Workflow(api).draft_receipt_image)
     for method,path,handler in [('GET','/workflow',Workflow(api).listing),('GET','/workday',service.state),('PUT','/workday/checklist',service.configure),('POST','/operations/sync',service.operation),('POST','/operations/media',service.media),('POST','/sales/{id}/feedback-link',service.feedback_link)]:

@@ -269,6 +269,8 @@ class Photo(Base):
         ForeignKey("shootings.id", ondelete="CASCADE")
     )
     file_id: Mapped[str] = mapped_column(String(300))
+    # Camera file name as chosen by the photographer (DSC_0123.jpg). Display only.
+    original_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
