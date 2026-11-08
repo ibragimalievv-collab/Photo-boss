@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from aiohttp import web
 from sqlalchemy import text
 
+from .shift_hours import OPEN_END, WORK_START
 from .miniapp_security import (
     AccessError,
     parse_shift,
@@ -219,6 +220,9 @@ class ScheduleImport:
                     start=moment(current[0]["start_at"]).astimezone(self.api.tz).strftime("%H:%M"),
                     end=moment(current[0]["end_at"]).astimezone(self.api.tz).strftime("%H:%M"))
             config.update(defaults)
+            if entry["role"] != "OFF":
+                # Everyone works from 09:00 until the last sale.
+                config.update(start=WORK_START, end=OPEN_END)
             required = ("hotelId",) if entry["role"] == "OFF" else ("hotelId", "start", "end")
             needs.update(k for k in required if not config.get(k))
             days.append({"userId": uid, **entry, "hotelId": config.get("hotelId"),

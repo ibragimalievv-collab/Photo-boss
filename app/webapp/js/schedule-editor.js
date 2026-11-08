@@ -1,5 +1,5 @@
 import {scheduleTextEditor} from './schedule-import.js';
-import {esc,addDays,dateLabel,ROLE_NAMES} from './domain.js';
+import {esc,addDays,dateLabel,ROLE_NAMES,WORK_START,OPEN_END} from './domain.js';
 
 const field=(label,input)=>`<label class="field"><span>${label}</span>${input}</label>`;
 let hotels=[],employees=[],minimum='',team=false;
@@ -41,18 +41,24 @@ function rosterInfo(data){
  const unavailable=data.unavailableEmployees||[];
  return `<section class="panel panel-pad"><p class="small" role="status">Доступно сотрудников: ${employees.length}. Список получен с сервера.</p><details><summary>Не видите нужного сотрудника?</summary><p class="small">В график входят активные фотографы и менеджеры по записи. Привязка к отелю и наличие других смен не скрывают сотрудника.</p>${unavailable.length?`<ul class="small">${unavailable.map(e=>`<li>${esc(employeeLabel(e))}: ${e.reason==='inactive'?'в архиве — восстановите сотрудника':'назначьте роль «Фотограф» или «Менеджер по записи»'}.</li>`).join('')}</ul>`:'<p class="small">Все зарегистрированные сотрудники с рабочей ролью доступны.</p>'}<button class="btn ghost" type="button" data-action="people">Сотрудники и роли</button></details></section>`;
 }
-function slotMarkup({hotelId=hotels[0]?.id,date=minimum,start='09:00',end='19:00',userId=employees[0]?.id}={}){
- return `<fieldset class="shift-slot panel panel-pad"><legend>${esc(dateLabel(date,{weekday:'short',day:'numeric',month:'short'}))}</legend><div class="form-row">${team?field('Сотрудник',`<select class="input" data-slot="userId" required>${employeeOptions(userId)}</select>`):''}${field('Дата',`<input type="date" class="input" data-slot="date" value="${esc(date)}" min="${minimum}" required>`)}${field('Отель',`<select class="input" data-slot="hotelId" required>${hotelOptions(hotelId)}</select>`)}</div><div class="form-row">${field('Начало · Москва',`<input type="time" class="input" data-slot="start" value="${esc(start)}" required>`)}${field('Окончание · Москва',`<input type="time" class="input" data-slot="end" value="${esc(end)}" required>`)}</div><button class="btn small ghost" type="button" data-action="remove-shift-slot">Удалить смену</button></fieldset>`;
+function slotMarkup({hotelId=hotels[0]?.id,date=minimum,userId=employees[0]?.id}={}){
+ return `<fieldset class="shift-slot panel panel-pad"><legend>${esc(dateLabel(date,{weekday:'short',day:'numeric',month:'short'}))}</legend><div class="form-row">${team?field('Сотрудник',`<select class="input" data-slot="userId" required>${employeeOptions(userId)}</select>`):''}${field('Дата',`<input type="date" class="input" data-slot="date" value="${esc(date)}" min="${minimum}" required>`)}${field('Отель',`<select class="input" data-slot="hotelId" required>${hotelOptions(hotelId)}</select>`)}</div><input type="hidden" data-slot="start" value="${WORK_START}"><input type="hidden" data-slot="end" value="${OPEN_END}"><p class="small muted">С 09:00 до последней продажи.</p><button class="btn small ghost" type="button" data-action="remove-shift-slot">Удалить смену</button></fieldset>`;
 }
 export function scheduleEditor(data,day,today,group=false){
  hotels=data.hotels||[];employees=data.employees||[];team=group;minimum=today;day=day<today?today:day;
  const roster=rosterInfo(data);
  if(!employees.length||!hotels.length)return `${roster}<p>${!hotels.length?'Добавьте активный отель. ':''}${!employees.length?'Восстановите сотрудника из архива или назначьте ему рабочую роль.':''}</p><button class="btn primary" type="button" data-action="people">Открыть сотрудников</button>`;
- return `${roster}${team?'':scheduleTextEditor(data)}<form id="shiftForm" class="form-grid" data-team="${team}">${team?'<p class="small">Выберите сотрудников для шаблона. Уже добавленные смены других сотрудников сохранятся. Поиск не снимает выбранных сотрудников.</p>':''}${rosterPicker()}<div class="form-row">${field('С даты',`<input type="date" class="input" name="from" value="${day}" min="${today}" required>`)}${field('По дату',`<input type="date" class="input" name="to" value="${day}" min="${today}" required>`)}</div><div class="row wrap">${[['1','Пн'],['2','Вт'],['3','Ср'],['4','Чт'],['5','Пт'],['6','Сб'],['0','Вс']].map(([n,label])=>`<label><input type="checkbox" name="weekday" value="${n}" checked> ${label}</label>`).join('')}</div><details><summary>Шаблон для выбранных дней</summary><div class="form-grid section">${field('Отель по шаблону',`<select class="input" name="templateHotel">${hotelOptions()}</select>`)}<div class="form-row">${field('Начало','<input type="time" name="templateStart" class="input" value="09:00" required>')}${field('Окончание','<input type="time" name="templateEnd" class="input" value="19:00" required>')}</div><button class="btn ghost" type="button" data-action="fill-shift-days">Заполнить период по шаблону</button><button class="btn ghost" type="button" data-action="append-shift-days">Добавить ещё один шаблон к периоду</button></div></details><p class="small">До 31 дня. В каждой смене можно изменить отель и время. Для второго отеля в тот же день добавь ещё одну смену.</p><div id="shiftSlots" class="stack">${team?'':slotMarkup({date:day})}</div><button class="btn ghost" type="button" data-action="add-shift-slot">Добавить смену</button><p id="formError" class="form-error" hidden></p><button class="btn primary" type="submit">Сохранить весь график</button></form>`;
+ return `${roster}${team?'':scheduleTextEditor(data)}<form id="shiftForm" class="form-grid" data-team="${team}">${team?'<p class="small">Выберите сотрудников для шаблона. Уже добавленные смены других сотрудников сохранятся. Поиск не снимает выбранных сотрудников.</p>':''}${rosterPicker()}<div class="form-row">${field('С даты',`<input type="date" class="input" name="from" value="${day}" min="${today}" required>`)}${field('По дату',`<input type="date" class="input" name="to" value="${day}" min="${today}" required>`)}</div><div class="row wrap">${[['1','Пн'],['2','Вт'],['3','Ср'],['4','Чт'],['5','Пт'],['6','Сб'],['0','Вс']].map(([n,label])=>`<label><input type="checkbox" name="weekday" value="${n}" checked> ${label}</label>`).join('')}</div><details open><summary>Отель для выбранных дней</summary><div class="form-grid section">${field('Отель по шаблону',`<select class="input" name="templateHotel">${hotelOptions()}</select>`)}<input type="hidden" name="templateStart" value="${WORK_START}"><input type="hidden" name="templateEnd" value="${OPEN_END}"><button class="btn ghost" type="button" data-action="fill-shift-days">Заполнить период этим отелем</button><button class="btn ghost" type="button" data-action="append-shift-days">Поставить этот отель на выбранные дни</button><p class="small">«Поставить» добавляет дни к списку; если день уже есть, у него меняется отель.</p></div></details><p class="small">До 31 дня. Все работают с 9:00 до последней продажи — часы указывать не нужно, смену сотрудник закрывает в приложении. В один день — один отель; его можно изменить в каждой смене.</p><div id="shiftSlots" class="stack">${team?'':slotMarkup({date:day})}</div><button class="btn ghost" type="button" data-action="add-shift-slot">Добавить смену</button><p id="formError" class="form-error" hidden></p><button class="btn primary" type="submit">Сохранить весь график</button></form>`;
 }
 
 export function scheduleEditorAction(name,button){
  const form=document.querySelector('#shiftForm'),host=form?.querySelector('#shiftSlots');if(!host)return false;
+ const handled=scheduleSlotsAction(name,button,form,host);
+ // A change to the list answers the last save error; do not leave it on screen.
+ if(handled){const error=form.querySelector('#formError');if(error)error.hidden=true;}
+ return handled;
+}
+function scheduleSlotsAction(name,button,form,host){
  if(['select-roster-visible','clear-roster-visible'].includes(name)){
   for(const row of form.querySelectorAll('[data-roster-person]:not([hidden])'))row.querySelector('input').checked=name==='select-roster-visible';
   filterRoster(form);return true;
@@ -71,9 +77,15 @@ export function scheduleEditorAction(name,button){
  if(!from||!to||from<minimum||from>to||(Date.parse(to)-Date.parse(from))/86400000>30||!days.length)throw new Error('Выбери даты в пределах 31 дня и хотя бы один день недели.');
  const slots=[];for(let date=from;date<=to;date=addDays(date,1))if(days.includes(new Date(date+'T12:00:00Z').getUTCDay()))for(const userId of selected)slots.push({...slot,date,userId});
  if(!slots.length)throw new Error('В выбранном периоде нет выбранных дней недели.');
- const retained=name==='fill-shift-days'?Array.from(host.children).filter(row=>team&&!selected.includes(row.querySelector('[data-slot=userId]').value)):Array.from(host.children);
+ // One hotel per day: "fill" replaces the selected people's rows, "append"
+ // adds days and replaces a day that is already listed for the same person.
+ const owner=row=>team?row.querySelector('[data-slot=userId]').value:'';
+ const fresh=new Set(slots.map(s=>`${s.userId??''}|${s.date}`));
+ const retained=Array.from(host.children).filter(row=>name==='fill-shift-days'
+  ?team&&!selected.includes(owner(row))
+  :!fresh.has(`${owner(row)}|${row.querySelector('[data-slot=date]').value}`));
  if(slots.length+retained.length>maximum)throw new Error(`В одном сохранении — не более ${maximum} смен.`);
- if(name==='fill-shift-days')for(const row of Array.from(host.children))if(!retained.includes(row))row.remove();
+ for(const row of Array.from(host.children))if(!retained.includes(row))row.remove();
  host.insertAdjacentHTML('beforeend',slots.map(slotMarkup).join(''));return true;
 }
 
@@ -83,8 +95,12 @@ export function schedulePayload(form){
  const sorted=slots.slice().sort((a,b)=>(a.userId||'').localeCompare(b.userId||'')||a.date.localeCompare(b.date)||a.start.localeCompare(b.start));
  if((Math.max(...slots.map(s=>Date.parse(s.date)))-Math.min(...slots.map(s=>Date.parse(s.date))))/86400000>30)throw new Error('Выбери период не более 31 дня.');
  for(let i=0;i<sorted.length;i++){
-  const slot=sorted[i];if(slot.start>=slot.end)throw new Error(`Проверь время смены ${slot.date}: окончание должно быть позже начала.`);
-  if(i&&sorted[i-1].userId===slot.userId&&sorted[i-1].date===slot.date&&sorted[i-1].end>slot.start)throw new Error(`Смены ${slot.date} пересекаются по времени.`);
+  const slot=sorted[i],day=dateLabel(slot.date,{weekday:'short',day:'numeric',month:'short'});
+  if(slot.start>=slot.end)throw new Error(`Проверь смену ${day}: окончание должно быть позже начала.`);
+  if(i&&sorted[i-1].userId===slot.userId&&sorted[i-1].date===slot.date&&sorted[i-1].end>slot.start){
+   const person=employees.find(e=>String(e.id)===String(slot.userId))?.name;
+   throw new Error(`${person?`У ${person} н`:'Н'}а ${day} уже есть смена: в один день — один отель. Удалите лишнюю.`);
+  }
  }
  return form.dataset.team==='true'?{shifts:slots}:{userId:form.elements.userId.value,slots};
 }

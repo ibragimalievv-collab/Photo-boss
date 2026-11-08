@@ -15,6 +15,7 @@ from sqlalchemy import text
 from .db import user_lock_clause
 from .hotel_points import context_key, read_json, review_required, revision, save_json
 from .miniapp_security import AccessError, utc_bounds
+from .shift_hours import OPEN_END, is_open_end
 
 logger = logging.getLogger(__name__)
 RULES_KEY = 'attendance:fines:rules'
@@ -83,6 +84,8 @@ async def notify_charge(api, conn, key, old, value):
     label = ('Нет отметки прихода по графику' if value['kind'] == 'late' and not value['observedAt']
              else LABELS[value['kind']] if value['kind'] != 'late' else 'Опоздание')
     local_time = lambda raw: utc(raw).astimezone(api.tz).strftime('%d.%m.%Y %H:%M') if raw else 'Нет отметки; требуется проверка'
+    planned = (f'до последней продажи (закрыть смену до {OPEN_END})'
+               if open_end_charge(api, value) else local_time(value['expectedAt']))
     async with AsyncSession(bind=conn, expire_on_commit=False) as session:
         worker = await session.get(User, uid)
         if worker is None:
@@ -90,7 +93,7 @@ async def notify_charge(api, conn, key, old, value):
         description = (f'{"Начисление изменено" if old is not None else label}.\n'
                        f'Сотрудник: {worker.name}\nДата смены: {day:%d.%m.%Y}\n'
                        f'Отель: {", ".join(row["name"] for row in hotels) or "нет плана смены"}\n'
-                       f'По графику: {local_time(value["expectedAt"])}\n'
+                       f'По графику: {planned}\n'
                        f'Отметка: {local_time(value["observedAt"])}\n'
                        f'Начисление: {Decimal(str(value["amount"])):.2f} ₽')
         if old is not None:
@@ -165,6 +168,12 @@ async def record_charge(api, conn, uid, day, kind, detected, when, expected, now
                           json.dumps({'date': str(day), 'kind': kind, 'before': old, 'after': value}, ensure_ascii=False))
 
 
+def open_end_charge(api, value):
+    """A leaving-related charge of a shift that runs until the last sale."""
+    return bool(value.get('kind') != 'late' and value.get('expectedAt')
+                and is_open_end(utc(value['expectedAt']).astimezone(api.tz)))
+
+
 async def reconcile_day(api, conn, uid, day, now):
     """Caller holds the user's row lock; every day/kind owns one ledger entry."""
     since = await api.rows(conn, 'SELECT value FROM settings WHERE key=:key', key=SINCE_KEY)
@@ -198,7 +207,12 @@ async def reconcile_day(api, conn, uid, day, now):
     late = arrived > expected_start if arrived else bool(plans and now > expected_start)
     await record_charge(api, conn, uid, day, 'late', late, arrived, expected_start, now, rule=policy['lateAmount'])
     if expected_end:
-        await record_charge(api, conn, uid, day, 'early', bool(left and left < expected_end), left, expected_end, now, rule=policy['earlyAmount'])
+        # A shift "until the last sale" has no planned leaving time, so it can
+        # never be left early. The charge is still re-evaluated (not skipped) so
+        # a plan changed to an open end clears a stale early charge, exactly as
+        # every other kind follows the current plan; overrides are preserved.
+        early = bool(left and left < expected_end) and not is_open_end(expected_end.astimezone(api.tz))
+        await record_charge(api, conn, uid, day, 'early', early, left, expected_end, now, rule=policy['earlyAmount'])
         await record_charge(api, conn, uid, day, 'missing_end', bool(not left and now > expected_end), left, expected_end, now, rule=policy['missingEndAmount'])
     if starts:
         charge = await read_json(api, conn, fine_key(uid, day, 'late'))
@@ -261,7 +275,8 @@ class AttendanceFines:
                 if not await Attendance(self.api).day_in_scope(conn, actor, value['userId'], day):
                     continue
                 user = await self.api.rows(conn, 'SELECT name FROM users WHERE id=:uid', uid=value['userId'])
-                items.append(value | {'name': user[0]['name'] if user else 'Сотрудник', 'revision': revision(value)})
+                items.append(value | {'name': user[0]['name'] if user else 'Сотрудник', 'revision': revision(value),
+                                      'openEnd': open_end_charge(self.api, value)})
                 if len(items) >= 200:
                     break
             policy = await rules(self.api, conn)

@@ -280,3 +280,53 @@ def test_late_arrival_with_unchanged_amount_suppresses_stale_missing_arrival_pus
         finally:
             await engine.dispose()
     asyncio.run(run())
+
+
+def test_shift_until_last_sale_has_no_early_leave_but_must_still_be_closed():
+    """09:00-23:59 local is the open-end rule: leaving after the last sale is
+    never "early", a stale early charge is cleared when the plan becomes
+    open-ended, and a shift left unclosed is charged only after 23:59."""
+    async def run():
+        engine,factory,api=await prepare()
+        try:
+            async with factory() as s:
+                s.add_all([ShiftCheckIn(user_id=1,shift_date=DAY,status='PENDING_REVIEW',
+                    offline_claimed_at=dbtime(2026,9,22,5,55),location_received_at=dbtime(2026,9,22,5,55)),
+                    ShiftCheckOut(user_id=1,shift_date=DAY,status='PENDING_REVIEW',
+                    offline_claimed_at=dbtime(2026,9,22,14),location_received_at=dbtime(2026,9,22,14))])
+                await s.commit()
+            evening=datetime(2026,9,22,16,tzinfo=timezone.utc)
+            async with engine.begin() as conn:
+                await save_json(conn,'attendance:fines:rules',{'lateAmount':500,'earlyAmount':300,'missingEndAmount':200})
+                # Old explicit plan 09:00-18:00: leaving at 17:00 is early.
+                await reconcile_day(api,conn,1,DAY,evening)
+            async with factory() as s:
+                assert [x.amount for x in await s.scalars(select(PayrollEntry))]==[-300]
+                shift=await s.scalar(select(Shift).where(Shift.user_id==1))
+                shift.end_at=dbtime(2026,9,22,20,59)   # 23:59 Moscow: until the last sale
+                await s.commit()
+            async with engine.begin() as conn:
+                for _ in range(2):await reconcile_day(api,conn,1,DAY,evening)
+                early=await read_json(api,conn,fine_key(1,DAY,'early'))
+                assert early['detected'] is False and early['amount']==0
+                assert await read_json(api,conn,fine_key(1,DAY,'missing_end')) is None
+            async with factory() as s:
+                assert [x.amount for x in await s.scalars(select(PayrollEntry))]==[0]
+
+            # Another photographer forgets to close the shift: nothing before
+            # 23:59 local, the missing-end charge only after it.
+            async with factory() as s:
+                s.add_all([User(id=4,tg_id=4,name='Photographer'),
+                    Shift(user_id=4,hotel_id=1,start_at=dbtime(2026,9,22,6),end_at=dbtime(2026,9,22,20,59),status='PLANNED'),
+                    ShiftCheckIn(user_id=4,shift_date=DAY,status='PENDING_REVIEW',
+                    offline_claimed_at=dbtime(2026,9,22,5,50),location_received_at=dbtime(2026,9,22,5,50))])
+                await s.commit()
+            async with engine.begin() as conn:
+                await reconcile_day(api,conn,4,DAY,datetime(2026,9,22,20,30,tzinfo=timezone.utc))
+                assert await read_json(api,conn,fine_key(4,DAY,'missing_end')) is None
+                await reconcile_day(api,conn,4,DAY,datetime(2026,9,22,21,30,tzinfo=timezone.utc))
+                assert (await read_json(api,conn,fine_key(4,DAY,'missing_end')))['amount']==200
+                assert await read_json(api,conn,fine_key(4,DAY,'early')) is None
+                assert await read_json(api,conn,fine_key(4,DAY,'late')) is None
+        finally:await engine.dispose()
+    asyncio.run(run())

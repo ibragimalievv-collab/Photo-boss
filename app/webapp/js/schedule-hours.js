@@ -1,5 +1,5 @@
 import {api} from './api.js';
-import {esc,dateLabel} from './domain.js';
+import {esc,dateLabel,shiftTime,WORK_START,OPEN_END} from './domain.js';
 
 let dialog=null,version=0;
 const close=()=>{dialog?.remove();dialog=null;};
@@ -15,19 +15,19 @@ export async function openScheduleHours(userId,day,me){
  const items=data.items.filter(s=>s.userId===userId&&s.status!=='CANCELLED'&&!s.planOnly&&!s.monthlyPlan&&typeof s.id==='number');
  const editable=s=>s.status==='PLANNED'&&s.attendance==='PLANNED'&&s.date>=me.today;
  dialog=document.createElement('dialog');dialog.className='month-day-dialog';
- const header=`<header><div><h2>${esc(person.name)}</h2><p>${esc(dateLabel(day))} · Москва</p></div><button type="button" class="icon-button" data-hours-close aria-label="Закрыть часы смены">×</button></header>`;
- const list=()=>items.length?items.map(s=>`<article class="panel panel-pad"><strong>${esc(s.start)}–${esc(s.end)}</strong><p>${esc(s.hotel)}</p>${editable(s)?`<div class="row wrap"><button type="button" class="btn ghost" data-hours-edit="${s.id}">Изменить</button><button type="button" class="btn ghost" data-hours-cancel="${s.id}">Отменить смену</button></div>`:'<p class="small">Фактические и прошедшие смены сохранены.</p>'}</article>`).join(''):'<p>Часы смены ещё не указаны.</p>';
+ const header=`<header><div><h2>${esc(person.name)}</h2><p>${esc(dateLabel(day))} · Москва</p></div><button type="button" class="icon-button" data-hours-close aria-label="Закрыть смену">×</button></header>`;
+ const list=()=>items.length?items.map(s=>`<article class="panel panel-pad"><strong>${esc(s.hotel)}</strong><p>${esc(shiftTime(s))} до последней продажи</p>${editable(s)?`<div class="row wrap"><button type="button" class="btn ghost" data-hours-edit="${s.id}">Изменить</button><button type="button" class="btn ghost" data-hours-cancel="${s.id}">Отменить смену</button></div>`:'<p class="small">Фактические и прошедшие смены сохранены.</p>'}</article>`).join(''):'<p>Смена на этот день не назначена.</p>';
  const field=(label,input)=>`<label class="field"><span>${label}</span>${input}</label>`;
  function render(shift){
   if(!dialog)return;
-  dialog.innerHTML=header+`<div class="stack" data-hours-body>${shift===undefined?list():''}${day>=me.today&&data.hotels.length?shift===undefined?'<button type="button" class="btn primary" data-hours-new>Добавить смену</button>':`<form class="stack" id="monthHoursForm">${field('Отель',`<select class="input" name="hotelId" required><option value="">Выберите отель</option>${data.hotels.map(h=>`<option value="${h.id}" ${h.id===shift?.hotelId?'selected':''}>${esc(h.name)}</option>`).join('')}</select>`)}${field('Дата',`<input class="input" name="date" type="date" value="${esc(shift?.date||day)}" min="${me.today}" required>`)}<div class="form-row">${field('Начало · Москва',`<input class="input" name="start" type="time" value="${esc(shift?.start||'')}" required>`)}${field('Окончание · Москва',`<input class="input" name="end" type="time" value="${esc(shift?.end||'')}" required>`)}</div><p class="small">Часы не меняют отметки о выходе и начисления. Сохранение часов отметит этот день рабочим в месячном графике.</p><button type="submit" class="btn primary">Сохранить часы</button><button type="button" class="btn ghost" data-hours-back>Вернуться к сменам</button></form>`:''}<p class="small" data-hours-status role="status"></p></div>`;
+  dialog.innerHTML=header+`<div class="stack" data-hours-body>${shift===undefined?list():''}${day>=me.today&&data.hotels.length?shift===undefined?'<button type="button" class="btn primary" data-hours-new>Добавить смену</button>':`<form class="stack" id="monthHoursForm">${field('Отель',`<select class="input" name="hotelId" required><option value="">Выберите отель</option>${data.hotels.map(h=>`<option value="${h.id}" ${h.id===shift?.hotelId?'selected':''}>${esc(h.name)}</option>`).join('')}</select>`)}${field('Дата',`<input class="input" name="date" type="date" value="${esc(shift?.date||day)}" min="${me.today}" required>`)}<input type="hidden" name="start" value="${WORK_START}"><input type="hidden" name="end" value="${OPEN_END}"><p class="small">С 09:00 до последней продажи — часы указывать не нужно. Сохранение отметит этот день рабочим в месячном графике.</p><button type="submit" class="btn primary">Сохранить часы</button><button type="button" class="btn ghost" data-hours-back>Вернуться к сменам</button></form>`:''}<p class="small" data-hours-status role="status"></p></div>`;
   dialog.querySelector('[data-hours-close]').onclick=dismiss;
   dialog.querySelector('[data-hours-new]')?.addEventListener('click',()=>render(null));
   dialog.querySelector('[data-hours-back]')?.addEventListener('click',()=>render());
   dialog.querySelectorAll('[data-hours-edit]').forEach(b=>b.onclick=()=>render(items.find(s=>s.id===Number(b.dataset.hoursEdit))));
   dialog.querySelectorAll('[data-hours-cancel]').forEach(b=>b.onclick=async()=>{
    const s=items.find(s=>s.id===Number(b.dataset.hoursCancel));
-   if(!confirm(`Отменить запланированную смену ${person.name} ${s.date}, ${s.start}–${s.end}? Отметки и история сохранятся.`))return;
+   if(!confirm(`Отменить запланированную смену ${person.name} ${s.date} (${s.hotel})? Отметки и история сохранятся.`))return;
    b.disabled=true;try{await api('/schedule/'+s.id,{method:'DELETE',body:{},allowSnapshot:false});if(ticket===version){close();document.dispatchEvent(new CustomEvent('pb-schedule-imported',{detail:{from:day,to:day}}));}}
    catch(error){if(b.isConnected){b.disabled=false;dialog.querySelector('[data-hours-status]').textContent=error.message;}}
   });

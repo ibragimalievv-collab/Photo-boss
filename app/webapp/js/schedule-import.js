@@ -1,5 +1,5 @@
 import {api as request} from './api.js';
-import {esc,ROLE_NAMES,dateLabel} from './domain.js';
+import {esc,ROLE_NAMES,dateLabel,shiftTime} from './domain.js';
 
 const names={MANAGER:'Менеджер',PHOTOGRAPHER:'Фотограф',OFF:'Выходной'};
 const field=(label,input)=>`<label class="field"><span>${label}</span>${input}</label>`;
@@ -11,11 +11,10 @@ export function scheduleTextEditor(data){
  <fieldset class="form-grid" data-import-fields>
  ${field('Сотрудник · один на весь график',`<select class="input" name="employee" required><option value="">Выберите сотрудника</option>${employees.map(e=>`<option value="${e.id}">${esc(e.name)} · №${e.id} · ${esc((e.roles||[]).map(r=>ROLE_NAMES[r]||r).join(' / '))}</option>`).join('')}</select>`)}
  ${field('График · даты с годом и рабочие роли',`<textarea name="scheduleText" class="input" rows="10" maxlength="16000" required placeholder="Период: 22.10.2026–24.10.2026&#10;22.10.2026 — менеджер.&#10;23.10.2026 — фотограф.&#10;24.10.2026 — выходной."></textarea>`)}
- <p class="small">До 31 дня, включая выходные. Вставьте только график, без задания для разработчика. Отель и часы берутся из сохранённого графика, когда их можно определить однозначно. Права сотрудника и факт работы не меняются.</p>
- <details data-import-defaults><summary>Общий отель и часы · если нужно уточнить</summary><div class="form-grid section">
+ <p class="small">До 31 дня, включая выходные. Вставьте только график, без задания для разработчика. Отель берётся из сохранённого графика, когда его можно определить однозначно; рабочий день — с 9:00 до последней продажи. Права сотрудника и факт работы не меняются.</p>
+ <details data-import-defaults><summary>Общий отель · если нужно уточнить</summary><div class="form-grid section">
  ${field('Отель для всего периода',`<select class="input" name="hotelId"><option value="">Использовать подтверждённые настройки</option>${hotels.map(h=>`<option value="${h.id}">${esc(h.name)}</option>`).join('')}</select>`)}
- <div class="form-row">${field('Начало · Москва','<input class="input" type="time" name="start">')}${field('Окончание · Москва','<input class="input" type="time" name="end">')}</div>
- <p class="small">Заполненные поля применятся ко всем рабочим дням периода. Пустые поля не подставляют время по умолчанию.</p></div></details>
+ <p class="small">Отель применится ко всем рабочим дням периода. Часы не нужны: все работают с 9:00 до последней продажи.</p></div></details>
  <button type="submit" class="btn ghost">Проверить график</button>
  <div data-import-preview class="stack" aria-live="polite"></div>
  <button type="button" class="btn primary" data-import-apply disabled hidden>Применить весь график</button>
@@ -25,7 +24,7 @@ export function scheduleTextEditor(data){
 }
 function payload(form){
  return {userId:Number(form.elements.employee.value),text:form.elements.scheduleText.value,
-  defaults:Object.fromEntries(['hotelId','start','end'].map(k=>[k,form.elements[k].value]).filter(([,v])=>v))};
+  defaults:Object.fromEntries(['hotelId'].map(k=>[k,form.elements[k].value]).filter(([,v])=>v))};
 }
 function message(form,text,error=false){
  const target=form.querySelector('[data-import-message]');target.textContent=text;target.className=error?'form-error':'small';
@@ -41,7 +40,7 @@ function showPreview(form,data){
  const c=data.counts;
  form.querySelector('[data-import-preview]').innerHTML=`<p><strong>${esc(data.employee.name)} · №${data.employee.id}</strong></p><p><strong>${summary(c)}</strong></p>
  ${(data.warnings||[]).map(w=>`<p class="notice">${esc(w)}</p>`).join('')}
- ${data.days.map(d=>`<div class="panel panel-pad"><strong>${esc(dateLabel(d.date))} — ${names[d.role]}</strong><p class="small">${esc(d.hotel||'Нужно выбрать отель')}${d.role==='OFF'?'':` · ${esc(d.start||'?')}–${esc(d.end||'?')}`}${d.factsPreserved?' · Только план; факт сохранится':''}</p></div>`).join('')}`;
+ ${data.days.map(d=>`<div class="panel panel-pad"><strong>${esc(dateLabel(d.date))} — ${names[d.role]}</strong><p class="small">${esc(d.hotel||'Нужно выбрать отель')}${d.role==='OFF'?'':` · ${esc(shiftTime(d))} до последней продажи`}${d.factsPreserved?' · Только план; факт сохранится':''}</p></div>`).join('')}`;
  const apply=form.querySelector('[data-import-apply]');
  apply.hidden=!data.canApply;apply.disabled=!data.canApply;
  if(data.needs.length){

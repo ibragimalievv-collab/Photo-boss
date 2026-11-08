@@ -102,15 +102,19 @@ class ScheduleTextImportTests(unittest.IsolatedAsyncioTestCase):
         assert sum(d['role'] == 'PHOTOGRAPHER' for d in calendar['items']) == 11
         assert all(d['userId'] == 3 for d in calendar['items'])
 
-    async def test_no_defaults_does_not_invent_hotel_or_hours(self):
+    async def test_no_defaults_does_not_invent_hotel_and_hours_are_fixed(self):
+        # Hours are a company rule (09:00 until the last sale), never asked;
+        # the hotel is still never invented.
         result = await self.preview({'userId': 3, 'text': SOURCE})
-        assert result['needs'] == ['end', 'hotelId', 'start'] and not result['canApply']
+        assert result['needs'] == ['hotelId'] and not result['canApply']
         assert not self.rows('SELECT * FROM shifts')
         assert not self.rows('SELECT * FROM settings')
         with self.fixture.engine.inner.begin() as conn:
             conn.execute(text('INSERT INTO hotel_employees VALUES (3,1)'))
         result = await self.preview({'userId': 3, 'text': SOURCE})
-        assert result['needs'] == ['end', 'start']
+        assert result['needs'] == [] and result['canApply']
+        assert all((d['start'], d['end']) == ('09:00', '23:59') for d in result['days'] if d['role'] != 'OFF')
+        assert all(d['start'] is None and d['end'] is None for d in result['days'] if d['role'] == 'OFF')
 
     async def test_duplicate_retry_same_key_and_new_key_no_duplicate_shifts(self):
         preview = await self.preview()
@@ -182,7 +186,9 @@ class ScheduleTextImportTests(unittest.IsolatedAsyncioTestCase):
         preview = await self.preview(body)
         assert preview['canApply']
         assert all(d['hotelId'] == 1 for d in preview['days'])
-        assert all(d['start'] == '09:00' and d['end'] == '19:00' for d in preview['days'] if d['role'] != 'OFF')
+        # The hotel comes from the confirmed template; the old 09:00-19:00 hours
+        # give way to the single rule: from 09:00 until the last sale.
+        assert all(d['start'] == '09:00' and d['end'] == '23:59' for d in preview['days'] if d['role'] != 'OFF')
         assert (await self.apply(body))[0] == 200
 
     async def test_startup_requires_unique_confirmed_employee_and_existing_settings(self):
