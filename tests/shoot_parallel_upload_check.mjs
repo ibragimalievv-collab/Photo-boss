@@ -39,13 +39,26 @@ function harness({stored=[],selected=[],reject={},linkMissing=new Set(),open=tru
 const photo=(name,text=name)=>Object.assign(new Blob([text],{type:'image/jpeg'}),{name});
 const run=(h,files,opts='{}')=>{h.context.files=files;h.context.events=[];return vm.runInContext(`enqueueShootFiles(files,7,e=>events.push(e),${opts})`,h.context);};
 
-// 1. Parallel, bounded to three lanes, every file sent once, names kept.
+// 0. Adaptive parallelism: grow while speed improves, back off on trouble.
 {
- const h=harness();const files=Array.from({length:9},(_,i)=>photo(`DSC_${i}.jpg`));
+ const h=harness();const next=(c,o)=>vm.runInContext(`nextConcurrency(${c},${JSON.stringify(o)})`,h.context);
+ assert.equal(next(3,{previousRate:0,rate:100,transient:false}),4,'first measurement probes one more lane');
+ assert.equal(next(4,{previousRate:100,rate:130,transient:false}),5,'faster: add a lane');
+ assert.equal(next(5,{previousRate:130,rate:132,transient:false}),5,'flat: keep');
+ assert.equal(next(5,{previousRate:130,rate:90,transient:false}),4,'slower: drop a lane');
+ assert.equal(next(3,{previousRate:100,rate:200,transient:true}),2,'server trouble: drop a lane');
+ assert.equal(next(6,{previousRate:100,rate:200,transient:false}),6,'never above six');
+ assert.equal(next(2,{previousRate:100,rate:10,transient:true}),2,'never below two');
+}
+// 1. Parallel and adaptive (2…6 lanes), every file sent once, names kept,
+//    and in-flight files always occupy distinct lanes.
+{
+ const h=harness();const files=Array.from({length:30},(_,i)=>photo(`DSC_${i}.jpg`));
  const result=await run(h,files);
- assert.equal(result.uploaded,9);assert.equal(result.failed.length,0);
- assert.ok(h.stats().maximum>1,'uploads should overlap');
- assert.ok(h.stats().maximum<=3,'never more than three at once');
+ assert.equal(result.uploaded,30);assert.equal(result.failed.length,0);
+ assert.ok(h.stats().maximum>3,'parallelism grows when the link is not saturated');
+ assert.ok(h.stats().maximum<=6,'never more than six at once');
+ assert.ok([...h.rows.values()].every(r=>Number.isInteger(r.lane)&&r.lane>=0&&r.lane<6));
  assert.deepEqual(h.calls.map(c=>c.name).sort(),files.map(f=>f.name).sort());
  assert.ok([...h.rows.values()].every(r=>r.status==='synced'&&r.data.filename.startsWith('DSC_')));
 }
@@ -59,6 +72,18 @@ const run=(h,files,opts='{}')=>{h.context.files=files;h.context.events=[];return
  assert.equal(result.linked,1);assert.equal(result.uploaded,1);
  const link=h.calls.find(c=>c.kind==='shoot_photo_link');
  assert.equal(link.name,'b.jpg');assert.equal(link.bytes,false,'selected original must not be re-sent');
+}
+// 2b. Phone-side reduction keeps the original checksum for resume; frames
+//     already stored as reduced copies are recognised by that checksum.
+{
+ const files=[photo('big1.jpg'),photo('big2.jpg')];
+ const probe=harness();const d1=await probe.digestOf(await files[0].arrayBuffer());
+ const h=harness({stored:[d1]});
+ const result=await run(h,files,'{compress:true}');
+ assert.equal(result.skipped,1);assert.equal(result.uploaded,1);
+ const row=[...h.rows.values()].find(r=>r.kind==='shoot_photo');
+ assert.equal(row.data.source_sha256,await probe.digestOf(await files[1].arrayBuffer()));
+ assert.equal(row.data.filename,'big2.jpg');
 }
 // 3. A file-specific rejection does not stop the rest; a missing selected link falls back to upload.
 {

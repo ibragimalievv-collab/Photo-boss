@@ -117,14 +117,20 @@ def original_name(value):
     return name[:255] or None
 
 
+def valid_sha256(value):
+    return isinstance(value, str) and len(value) == 64 and set(value) <= SHA256_HEX
+
+
 def shoot_fields(kind, data):
-    """Full-shoot operations accept an optional camera file name."""
+    """Full-shoot operations accept an optional camera file name and, for a
+    phone-reduced copy, the checksum of the camera original."""
     expected = 'shooting sha256' if kind == 'shoot_photo_link' else 'shooting'
-    fields(data, expected + (' filename' if 'filename' in data else ''))
-    if kind == 'shoot_photo_link':
-        digest = data['sha256']
-        if not isinstance(digest, str) or len(digest) != 64 or not set(digest) <= SHA256_HEX:
-            raise AccessError('Некорректная контрольная сумма кадра.', 400)
+    optional = ['filename'] + (['source_sha256'] if kind == 'shoot_photo' else [])
+    fields(data, expected + ''.join(' ' + key for key in optional if key in data))
+    if kind == 'shoot_photo_link' and not valid_sha256(data['sha256']):
+        raise AccessError('Некорректная контрольная сумма кадра.', 400)
+    if 'source_sha256' in data and not valid_sha256(data['source_sha256']):
+        raise AccessError('Некорректная контрольная сумма оригинала.', 400)
     original_name(data.get('filename'))
 
 
@@ -195,8 +201,10 @@ class Workflow:
             booking = await session.get(Booking, shooting.booking_id) if shooting else None
             if booking is None or not await can_access_booking(session, a['id'], set(a['roles']), booking, photos=True):
                 raise AccessError('Нет доступа к съёмке.', 403)
-            stored = (await session.scalars(select(PhotoStorage.sha256).where(
-                PhotoStorage.shooting_id == sid, PhotoStorage.sha256.is_not(None)))).all()
+            stored = set((await session.scalars(select(PhotoStorage.sha256).where(
+                PhotoStorage.shooting_id == sid, PhotoStorage.sha256.is_not(None)))).all())
+            stored |= set((await session.scalars(select(Photo.source_sha256).where(
+                Photo.shooting_id == sid, Photo.source_sha256.is_not(None)))).all())
             selected = (await session.scalars(select(SaleDraftPhoto.sha256).join(
                 SaleDraft, SaleDraft.id == SaleDraftPhoto.draft_id).where(
                 SaleDraft.booking_id == booking.id,
@@ -920,7 +928,7 @@ class Workflow:
             # The browser falls back to a normal upload of this file.
             raise AccessError('Кадр не найден среди выбранных. Загрузите файл обычным способом.', 409)
         path = selected.storage_path
-        photo = Photo(shooting_id=sid, file_id=path, original_name=name)
+        photo = Photo(shooting_id=sid, file_id=path, original_name=name, source_sha256=digest)
         session.add(photo)
         await session.flush()
         storage, _ = await ensure_photo_storage(session, photo_id=photo.id, shooting_id=sid,
@@ -975,6 +983,7 @@ class Workflow:
                         file_id=path, file_unique_id='web-sha256:' + digest, source_kind='DOCUMENT')
                 photo.file_id = storage.telegram_file_id = storage.disk_path = path
                 photo.original_name = original_name(data.get('filename')) or photo.original_name
+                photo.source_sha256 = data.get('source_sha256') or photo.source_sha256
                 storage.sha256, storage.byte_size = digest, len(raw)
                 storage.status, storage.attempts, storage.last_error = 'STORED', 0, None
                 storage.stored_at = storage.updated_at = utc_now()
@@ -994,7 +1003,8 @@ class Workflow:
             if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
                 raise AccessError('Загрузка новых кадров уже закрыта или ещё недоступна.', 409)
             file_id, unique_id = prepared_media['file'] if prepared_media is not None else await self.save_telegram(actor, raw)
-            photo = Photo(shooting_id=sid, file_id=file_id, original_name=original_name(data.get('filename')))
+            photo = Photo(shooting_id=sid, file_id=file_id, original_name=original_name(data.get('filename')),
+                          source_sha256=data.get('source_sha256'))
             session.add(photo)
             await session.flush()
             storage, _ = await ensure_photo_storage(session, photo_id=photo.id, shooting_id=sid,

@@ -10,10 +10,15 @@ const shiftKinds=new Set(['attendance','break_start','break_end','checklist','sh
 // Full-shoot originals are independent of each other and of sale chains, so
 // they use their own lanes and upload in parallel. Everything else keeps the
 // original single media worker and its strict ordering.
-export const SHOOT_LANES=3;
+// The folder uploader adapts how many lanes it actually uses (2…6) to the
+// measured speed; rows queued by the plain form spread over lanes by key.
+export const SHOOT_LANES=6;
 const shootKinds=new Set(['shoot_photo','shoot_photo_link']);
-const shootLane=key=>{let h=0;for(const ch of String(key))h=(h*31+ch.charCodeAt(0))>>>0;return 'shoot'+(h%SHOOT_LANES);};
-const operationWorker=row=>row.kind==='booking'?'booking':shiftKinds.has(row.kind)?'attendance':isBankGate(row)?'bank':shootKinds.has(row.kind)?shootLane(row.key):'media';
+const shootLane=row=>{
+ if(Number.isInteger(row.lane)&&row.lane>=0&&row.lane<SHOOT_LANES)return 'shoot'+row.lane;
+ let h=0;for(const ch of String(row.key))h=(h*31+ch.charCodeAt(0))>>>0;return 'shoot'+(h%SHOOT_LANES);
+};
+const operationWorker=row=>row.kind==='booking'?'booking':shiftKinds.has(row.kind)?'attendance':isBankGate(row)?'bank':shootKinds.has(row.kind)?shootLane(row):'media';
 const allWorkers=['booking','attendance','bank','media',...Array.from({length:SHOOT_LANES},(_,i)=>'shoot'+i)];
 const shootingOf=row=>row?.data?.shooting?.id;
 const isBankGate=row=>['booking_bank_payment','sale_bank_payment'].includes(row.kind);
@@ -290,7 +295,7 @@ export async function enqueueBatch(items){
    // backing files can also disappear between browser processes.
    blob=bytes;
   }
-  rows.push({key:item.key||crypto.randomUUID(),userId:actor,generation,salesGeneration:saleGeneration,kind:item.kind,date:item.date,data:item.data,blob,blobType,filename,status:'local',createdAt:at,order:i,...(item.kind==='sale_start_inline'&&item.merchantPreparation===true?{merchantPreparation:true}:{})});
+  rows.push({key:item.key||crypto.randomUUID(),userId:actor,generation,salesGeneration:saleGeneration,kind:item.kind,date:item.date,data:item.data,blob,blobType,filename,status:'local',createdAt:at,order:i,...(item.kind==='sale_start_inline'&&item.merchantPreparation===true?{merchantPreparation:true}:{}),...(shootKinds.has(item.kind)&&Number.isInteger(item.lane)?{lane:item.lane}:{})});
  }
  if(actor!==userId||generation!==operationsGeneration||saleGeneration!==salesGeneration)throw Error('Аккаунт или рабочий период изменился. Откройте форму заново.');
  if(!await writeOperations(rows,{add:true}))throw new Error('Рабочие данные обнулены. Обновите приложение перед продолжением.');
@@ -365,16 +370,66 @@ export async function replaceOperationFile(key,file){
  await update(row);changed();return flushOutbox();
 }
 // Full-shoot folder upload: hash locally, skip originals the server already
-// has, reuse guest-selected originals without sending bytes again, and keep
-// up to SHOOT_LANES files moving at once. One bad file never stops the rest;
+// has, reuse guest-selected originals without sending bytes again, optionally
+// shrink each frame on the phone, and adapt the number of parallel uploads
+// (2…6) to the speed actually measured. One bad file never stops the rest;
 // only shoot-wide problems (access, closed upload, offline) pause the batch.
 const FILE_ERRORS=new Set([400,413,415]);
 const LINK_FALLBACK='Кадр не найден среди выбранных. Загрузите файл обычным способом.';
-async function sha256Hex(file){
+export const FAST_MAX_SIDE=4000,FAST_QUALITY=0.9,FAST_MIN_BYTES=4*1024*1024;
+export async function sha256Hex(file){
  const digest=await crypto.subtle.digest('SHA-256',await file.arrayBuffer());
  return Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');
 }
-export async function enqueueShootFiles(files,shootingId,onProgress=()=>{},{concurrency=SHOOT_LANES,date}={}){
+async function decodeImage(file){
+ if(typeof createImageBitmap==='function'){
+  try{return await createImageBitmap(file,{imageOrientation:'from-image'});}catch{}
+ }
+ if(typeof Image!=='function'||typeof URL==='undefined')throw new Error('decode unavailable');
+ const url=URL.createObjectURL(file);
+ try{const img=new Image();img.src=url;await img.decode();return img;}finally{setTimeout(()=>URL.revokeObjectURL(url),0);}
+}
+// Shrink one frame for the full-shoot archive. Any failure keeps the original:
+// a slower upload is acceptable, a lost or broken frame is not.
+export async function compressImage(file,{maxSide=FAST_MAX_SIDE,quality=FAST_QUALITY,minBytes=FAST_MIN_BYTES}={}){
+ if(!file||!/^image\/(jpeg|png|webp)$/.test(file.type||'')||file.size<minBytes)return file;
+ let image=null;
+ try{
+  image=await decodeImage(file);
+  const w=image.width||image.naturalWidth,h=image.height||image.naturalHeight;
+  if(!w||!h)return file;
+  const scale=Math.min(1,maxSide/Math.max(w,h)),cw=Math.max(1,Math.round(w*scale)),ch=Math.max(1,Math.round(h*scale));
+  let blob;
+  if(typeof OffscreenCanvas==='function'){
+   const canvas=new OffscreenCanvas(cw,ch),ctx=canvas.getContext('2d');
+   ctx.imageSmoothingQuality='high';ctx.drawImage(image,0,0,cw,ch);
+   blob=await canvas.convertToBlob({type:'image/jpeg',quality});
+  }else{
+   const canvas=document.createElement('canvas');canvas.width=cw;canvas.height=ch;
+   const ctx=canvas.getContext('2d');ctx.imageSmoothingQuality='high';ctx.drawImage(image,0,0,cw,ch);
+   blob=await new Promise(done=>canvas.toBlob(done,'image/jpeg',quality));
+   canvas.width=canvas.height=0;
+  }
+  if(!blob||!blob.size||blob.size>=file.size)return file;
+  return new File([blob],(file.name||'photo').replace(/\.(png|webp)$/i,'.jpg'),{type:'image/jpeg',lastModified:file.lastModified||Date.now()});
+ }catch{return file;}
+ finally{try{image?.close?.();}catch{}}
+}
+// One frame ready for the queue: checksum of the camera original (for resume
+// and reuse) plus the bytes to send.
+export async function prepareShootFile(file,{compress=false}={}){
+ const digest=await sha256Hex(file);
+ const blob=compress?await compressImage(file):file;
+ return {digest,blob,compressed:blob!==file};
+}
+export function nextConcurrency(current,{previousRate,rate,transient},{min=2,max=SHOOT_LANES}={}){
+ if(transient)return Math.max(min,current-1);
+ if(!previousRate||!rate)return Math.min(max,current+1);
+ if(rate>previousRate*1.1)return Math.min(max,current+1);
+ if(rate<previousRate*0.85)return Math.max(min,current-1);
+ return current;
+}
+export async function enqueueShootFiles(files,shootingId,onProgress=()=>{},{concurrency=3,minConcurrency=2,maxConcurrency=SHOOT_LANES,compress=false,date}={}){
  const actor=userId,generation=operationsGeneration,total=files.length,started=Date.now();
  if(!actor)throw new Error('Войдите в свой аккаунт Photo Boss.');
  if(!total)throw new Error('В выбранной папке нет подходящих фотографий.');
@@ -383,38 +438,56 @@ export async function enqueueShootFiles(files,shootingId,onProgress=()=>{},{conc
  if(!alive())throw new Error('Рабочие данные или аккаунт изменились. Выберите папку снова.');
  if(known&&known.open===false)throw new Error('Загрузка этой съёмки уже закрыта.');
  const stored=new Set(known?.stored||[]),selected=new Set(known?.selected||[]);
- const stats={total,done:0,uploaded:0,linked:0,skipped:0,failed:[],inFlight:0,bytesDone:0,bytesQueued:0};
- const flying=new Map();let index=0,stopError=null,transientSince=0;
+ const stats={total,done:0,uploaded:0,linked:0,skipped:0,failed:[],inFlight:0,bytesDone:0,bytesQueued:0,bytesSent:0,savedBytes:0,lanes:concurrency};
+ const flying=new Map();let index=0,stopError=null,transientSince=0,limit=Math.max(minConcurrency,Math.min(maxConcurrency,concurrency));
+ // Speed window for adapting parallel uploads: bytes accepted per second.
+ let windowStart=Date.now(),windowBytes=0,windowDone=0,previousRate=0,windowTransient=false;
  const report=(state,name='')=>{
   const elapsed=(Date.now()-started)/1000,rate=elapsed>2&&stats.bytesDone?stats.bytesDone/elapsed:0;
-  const remainingBytes=files.slice(index).reduce((sum,f)=>sum+f.size,0)+stats.bytesQueued;
+  let remainingBytes=stats.bytesQueued;for(let i=index;i<total;i++)remainingBytes+=files[i].size;
+  stats.lanes=limit;
   onProgress({...stats,failed:[...stats.failed],state,name,etaSeconds:rate?Math.round(remainingBytes/rate):null});
  };
- const enqueue=async(file,digest,link)=>{
-  const data={shooting:{id:Number(shootingId)},filename:file.name||'',...(link?{sha256:digest}:{})};
-  const [row]=await enqueueBatch([{kind:link?'shoot_photo_link':'shoot_photo',date,data,...(link?{}:{blob:file})}]);
-  flying.set(row.key,{file,digest,link});stats.inFlight=flying.size;if(!link)stats.bytesQueued+=file.size;
+ const freeLane=()=>{const used=new Set([...flying.values()].map(item=>item.lane));for(let i=0;i<SHOOT_LANES;i++)if(!used.has(i))return i;return 0;};
+ const enqueue=async(file,digest,link,blob=file)=>{
+  const data={shooting:{id:Number(shootingId)},filename:file.name||'',...(link?{sha256:digest}:{source_sha256:digest})};
+  const lane=freeLane();
+  const [row]=await enqueueBatch([{kind:link?'shoot_photo_link':'shoot_photo',date,data,lane,...(link?{}:{blob})}]);
+  flying.set(row.key,{file,digest,link,lane,sent:link?0:blob.size});stats.inFlight=flying.size;if(!link)stats.bytesQueued+=file.size;
+ };
+ const adapt=()=>{
+  if(windowDone<Math.max(3,limit))return;
+  const seconds=Math.max(.5,(Date.now()-windowStart)/1000),rate=windowBytes/seconds;
+  const next=nextConcurrency(limit,{previousRate,rate,transient:windowTransient},{min:minConcurrency,max:maxConcurrency});
+  previousRate=next===limit?Math.max(previousRate,rate):rate;limit=next;
+  windowStart=Date.now();windowBytes=0;windowDone=0;windowTransient=false;
  };
  while(index<total||flying.size){
   if(!alive())throw new Error('Рабочие данные или аккаунт изменились. Выберите папку снова: уже принятые кадры повторно не отправятся.');
-  while(!stopError&&index<total&&flying.size<concurrency){
+  while(!stopError&&index<total&&flying.size<limit){
    const file=files[index++];
-   let digest;
-   try{digest=await sha256Hex(file);}catch{stats.failed.push({name:file.name,error:'Не удалось прочитать файл на устройстве.'});stats.done++;report('failed',file.name);continue;}
-   if(stored.has(digest)){stats.skipped++;stats.done++;report('skipped',file.name);continue;}
-   stored.add(digest);
-   await enqueue(file,digest,selected.has(digest));
+   let prepared;
+   try{
+    const digest=await sha256Hex(file);
+    if(stored.has(digest)){stats.skipped++;stats.done++;report('skipped',file.name);continue;}
+    stored.add(digest);
+    if(selected.has(digest)){await enqueue(file,digest,true);report('sending',file.name);continue;}
+    const blob=compress?await compressImage(file):file;
+    prepared={digest,blob};
+   }catch{stats.failed.push({name:file.name,error:'Не удалось прочитать файл на устройстве.'});stats.done++;report('failed',file.name);continue;}
+   if(prepared.blob!==file)stats.savedBytes+=file.size-prepared.blob.size;
+   await enqueue(file,prepared.digest,false,prepared.blob);
    report('sending',file.name);
   }
   if(!flying.size)break;
-  await new Promise(done=>setTimeout(done,350));
+  await new Promise(done=>setTimeout(done,250));
   let transient=0;
   for(const [key,item] of [...flying]){
    const row=await localAction('operations','readonly',s=>s.get(key));
    if(!row){flying.delete(key);stats.failed.push({name:item.file.name,error:'Кадр пропал из очереди.'});stats.done++;continue;}
    if(row.status==='synced'){
-    flying.delete(key);stats.done++;
-    if(item.link)stats.linked++;else{stats.uploaded++;stats.bytesDone+=item.file.size;stats.bytesQueued-=item.file.size;}
+    flying.delete(key);stats.done++;windowDone++;
+    if(item.link)stats.linked++;else{stats.uploaded++;stats.bytesDone+=item.file.size;stats.bytesQueued-=item.file.size;stats.bytesSent+=item.sent;windowBytes+=item.sent;}
     report('synced',item.file.name);continue;
    }
    if(row.status==='error'){
@@ -423,15 +496,18 @@ export async function enqueueShootFiles(files,shootingId,onProgress=()=>{},{conc
     if(item.link&&row.errorStatus===409&&row.error===LINK_FALLBACK){
      // The selected original is not reusable (for example, it came from a
      // linked Disk folder). Send this file normally instead.
-     await removeLocalOperation(key);await enqueue(item.file,item.digest,false);continue;
+     await removeLocalOperation(key);
+     const blob=compress?await compressImage(item.file):item.file;
+     await enqueue(item.file,item.digest,false,blob);continue;
     }
     if(FILE_ERRORS.has(row.errorStatus)){stats.failed.push({name:item.file.name,error:row.error||'Файл не принят.'});stats.done++;report('failed',item.file.name);continue;}
     stopError=stopError||row.error||'Загрузка остановлена сервером.';
     stats.failed.push({name:item.file.name,error:row.error||'Не удалось передать файл.'});stats.done++;continue;
    }
-   if(row.status==='local'&&row.error)transient++;
+   if(row.status==='local'&&row.error){transient++;windowTransient=true;}
   }
   stats.inFlight=flying.size;
+  adapt();
   if(!navigator.onLine){report('offline');throw new Error(`Нет сети. Принято ${stats.uploaded+stats.linked} из ${total}; начатые кадры сохранены на устройстве и догрузятся сами. Чтобы отправить остальные, выберите папку снова, когда появится сеть.`);}
   if(transient&&transient===flying.size){
    transientSince=transientSince||Date.now();

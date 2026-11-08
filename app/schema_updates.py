@@ -134,7 +134,8 @@ async def upgrade(connection):
     if 'hotels' in tables:
         await add_columns(connection, 'hotels', {'fixed_unit_tariff_id': 'INTEGER'})
     if 'photos' in tables:
-        await add_columns(connection, 'photos', {'original_name': 'VARCHAR(255)'})
+        await add_columns(connection, 'photos', {'original_name': 'VARCHAR(255)', 'source_sha256': 'VARCHAR(64)'})
+        await connection.execute(text('CREATE INDEX IF NOT EXISTS ix_photos_source_sha256 ON photos(source_sha256)'))
     if 'bookings' in tables:
         await add_columns(connection, 'bookings', {'pricing_snapshot': 'TEXT'})
     if 'shoot_development_reviews' in tables:

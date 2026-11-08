@@ -11,7 +11,7 @@ import {pricingView,tariffOptions,updatePricePreview,bookingPriceNote} from './h
 import {captureForm,captureForms,restoreForms,clearForm} from './form-state.js';
 import {api} from './api.js';
 import {esc,todayKey} from './domain.js';
-import {enqueueBatch,outboxRows,retryOperation,flushOutbox,syncOutboxNow,enqueueOperation,enqueueFilesOneByOne,enqueueShootFiles,replaceOperationFile,canReplaceOperationFile,canReplaceDiskSelection,replaceDiskSelection,saleQueueRepairable,repairSaleQueue,recoverSaleFromGallery,rejectedSaleCounts,rejectedBooking,repairBookingQueue,rejectedInlineSale,repairInlineSaleQueue} from './outbox.js';
+import {enqueueBatch,outboxRows,retryOperation,flushOutbox,syncOutboxNow,enqueueOperation,enqueueFilesOneByOne,enqueueShootFiles,prepareShootFile,replaceOperationFile,canReplaceOperationFile,canReplaceDiskSelection,replaceDiskSelection,saleQueueRepairable,repairSaleQueue,recoverSaleFromGallery,rejectedSaleCounts,rejectedBooking,repairBookingQueue,rejectedInlineSale,repairInlineSaleQueue} from './outbox.js';
 import {checkSaleFiles,saleSaveState} from './sale-files.js';
 let data=null,queue=[],selected=null,folderBusy=false,loadVersion=0,selectionVersion=0,queueRefreshVersion=0,bookingCorrection=null;
 let quickBooking=null;
@@ -378,7 +378,7 @@ export function workflowView({includeBooking=!quickBooking}={}){
  ${pricingView(data)}${diskFolderPanel(data)}${data.canBook&&includeBooking?`<details class="panel section"><summary>Новая бронь</summary><div id="bookingHistory" aria-label="Сохранённые на этом устройстве брони">${bookingHistoryView()}</div><form id="workflowBooking" class="form-grid">${field('Имя гостя',input('client_name','required minlength="2" maxlength="200"'))}${field('Телефон (необязательно)',input('client_phone','type="tel" maxlength="80"'))}${field('Отель',`<select class="input" name="hotel_id" required>${options(data.hotels)}</select>`)}<p id="bookingFixedPrice" class="notice">${esc(bookingPriceNote(data,data.hotels[0]?.id))}</p>${field('Комната',input('room','required maxlength="100"'))}${field('Гостей',input('guest_count','type="number" min="1" max="100" value="1" required'))}${field('Дата',input('shoot_date',`type="date" value="${todayKey()}" required`))}${field('Время',input('shoot_time','type="time" required'))}${field('Пакет',`<select class="input" name="package_id" required>${options(data.packages)}</select>`)}${field('Предоплата по записи, ₽',input('deposit','type="number" min="0" max="10000000" step="0.01" value="1000" required'))}<p>Обычно 1000 ₽; укажите другую сумму, если договорились иначе. Без подтверждения поступления эта сумма не уменьшает доплату.</p>${paymentChoice(true)}${field('Чек предоплаты (если внесена)',file('receipt',false,false))}<button class="btn primary">Сохранить бронь</button></form></details>`:''}
  <section class="panel section"><h2>Продажа и допродажа</h2><form id="workflowLookup" class="row"><label>Номер записи <input class="input" name="bookingId" type="number" min="1" required></label><button class="btn ghost" type="submit">Найти прежнюю съёмку</button></form><p>Цена одного кадра закреплена за записью и не меняется при продаже. Можно выбрать пакет этого отеля. Сумма продажи, подтверждённая предоплата и остаток показываются отдельно.</p><select class="input" id="workflowSalePick"><option value="">Выберите готовую съёмку</option>${data.inlineSale?.hotelIds?.length?'<option value="-1">Новый гость — без записи</option>':''}${saleSelectionOptions()}${ready.map(x=>`<option value="${x.id}" ${x.id===selected?'selected':''}>${esc(bookingTitle(x))}</option>`).join('')}</select><div id="workflowSelectedSaleSummary">${b?salesHistory(b)+draftProgress(b):''}</div>${b?(d&&!d.mine?`<p>Продажу оформляет ${esc(d.createdByName||'другой сотрудник')}. Сохранено выбранных кадров: ${d.selected||0} из ${d.sold||'—'}.</p>${data.canAuditDisk?`<p>Владелец может продолжить этот черновик. Чек, согласованная цена и принятые фотографии сохранятся; прежний сотрудник больше не сможет изменять эту продажу.</p><button type="button" class="btn primary" data-workflow="takeover-sale" data-booking="${b.id}">Продолжить продажу как владелец</button>`:''}`:saleFormView(b,d)):''}</section>
  <details class="panel section"><summary>Дополнительные банковские операции</summary>${bankConnectionPanel(data)}${bankPanel(b?.inline?null:b,data)}</details><section class="panel section" id="workflowSalesSummary">${salesOverview()}</section>
- <details class="panel section"><summary>Загрузить полную съёмку</summary>${upload.length?`<form id="workflowShoot" class="form-grid">${field('Съёмка',`<select class="input" name="booking">${options(upload)}</select>`)}${field('Фотографии',file('photos',true,false))}<label><input type="checkbox" name="finish"> Все кадры добавлены — завершить загрузку</label><p>Можно добавлять частями. Ставка фотографа фиксируется после завершения загрузки: от 150 кадров — 15%, меньше — 10%.</p><button class="btn primary">Сохранить фотографии</button></form><label class="field section"><span>Выбрать папку съёмки — отправка сразу, по 3 файла</span><input id="workflowShootFolder" class="input" type="file" accept="image/jpeg,image/png,image/webp" webkitdirectory multiple></label><p id="workflowFolderProgress" class="notice" role="status">Уже загруженные кадры и кадры, выбранные гостем, повторно не отправляются. Если загрузка прервалась, просто выберите ту же папку ещё раз.</p>`:'<p>Нет доступных съёмок для полной загрузки.</p>'}</details>
+ <details class="panel section"><summary>Загрузить полную съёмку</summary>${upload.length?`<form id="workflowShoot" class="form-grid">${field('Съёмка',`<select class="input" name="booking">${options(upload)}</select>`)}${field('Фотографии',file('photos',true,false))}<label><input type="checkbox" name="fastUpload" checked> Быстрая загрузка: уменьшить кадры всей съёмки до 4000 px на телефоне (в 3–5 раз быстрее). Кадры, выбранные гостем, уходят оригиналами.</label><label><input type="checkbox" name="finish"> Все кадры добавлены — завершить загрузку</label><p>Можно добавлять частями. Ставка фотографа фиксируется после завершения загрузки: от 150 кадров — 15%, меньше — 10%.</p><button class="btn primary">Сохранить фотографии</button></form><label class="field section"><span>Выбрать папку съёмки — отправка сразу, параллельно</span><input id="workflowShootFolder" class="input" type="file" accept="image/jpeg,image/png,image/webp" webkitdirectory multiple></label><p id="workflowFolderProgress" class="notice" role="status">Уже загруженные кадры и кадры, выбранные гостем, повторно не отправляются. Если загрузка прервалась, просто выберите ту же папку ещё раз.</p>`:'<p>Нет доступных съёмок для полной загрузки.</p>'}</details>
  <section class="panel section"><h2>Файлы на Яндекс.Диске</h2><button class="btn ghost" data-workflow="refresh">Обновить состояние файлов</button>${data.bookings.filter(b=>b.shootingId).map(b=>`<details data-storage-shooting="${b.shootingId}"><summary>${esc(bookingTitle(b))} · сохранено ${(b.files||[]).filter(f=>f.status==='STORED').length} из ${(b.files||[]).length}</summary>${(b.files||[]).map(f=>`<p>${f.name?esc(f.name):'Кадр №'+f.id}: ${esc(({STORED:'Сохранено на Диске',PENDING:'Ожидает сохранения',UPLOADING:'Сохраняется',FAILED:'Ошибка сохранения'})[f.status])} ${esc(f.error||'')}</p>`).join('')}${editView(b)}${b.canUpload?`<button class="btn ghost" data-workflow="retry-storage" data-shooting="${b.shootingId}">Восстановить сохранение на Диске</button>`:''}</details>`).join('')||'<p>Съёмок пока нет.</p>'}</section>
  <section class="section"><h2>Синхронизация</h2><button class="btn ghost" data-workflow="sync">Синхронизировать сейчас</button><div id="workflowSyncNote" class="notice" role="status">Отправка запускается автоматически при наличии сети. Нажмите кнопку для ручной проверки.</div><div id="workflowQueue">${queueView()}</div></section>`;
 }
@@ -389,8 +389,9 @@ export async function workflowFolderChange(input){
  const booking=data?.bookings.find(b=>b.id===Number(form?.elements.booking.value));
  if(!booking?.canUpload||!booking.shootingId)throw new Error('Выберите доступную съёмку.');
  const chosen=[...input.files];
- const files=chosen.filter(f=>(['image/jpeg','image/png','image/webp'].includes(f.type)||(!f.type&&/\.(jpe?g|png|webp)$/i.test(f.name)))&&f.size>0&&f.size<=20*1024*1024);
- if(!files.length)throw new Error('В папке нет JPEG, PNG или WebP до 20 МБ.');
+ const fast=Boolean(form.elements.fastUpload?.checked),maxBytes=(fast?80:20)*1024*1024;
+ const files=chosen.filter(f=>(['image/jpeg','image/png','image/webp'].includes(f.type)||(!f.type&&/\.(jpe?g|png|webp)$/i.test(f.name)))&&f.size>0&&f.size<=maxBytes);
+ if(!files.length)throw new Error(`В папке нет JPEG, PNG или WebP до ${fast?80:20} МБ.`);
  const note=document.querySelector('#workflowFolderProgress'),tell=value=>{if(note?.isConnected)note.textContent=value;};
  const skipped=chosen.length-files.length;
  folderBusy=true;input.disabled=true;
@@ -399,11 +400,12 @@ export async function workflowFolderChange(input){
   const result=await enqueueShootFiles(files,booking.shootingId,progress=>{
    const sent=progress.uploaded+progress.linked+progress.skipped;
    const eta=progress.etaSeconds==null?'':` · осталось ≈ ${progress.etaSeconds<90?Math.max(5,progress.etaSeconds)+' сек':Math.round(progress.etaSeconds/60)+' мин'}`;
-   tell(`Принято ${sent} из ${progress.total}${eta}.${progress.failed.length?` Не приняты: ${progress.failed.length}.`:''} Можно свернуть приложение — загрузка продолжится.`);
-  },{date:todayKey()});
+   tell(`Принято ${sent} из ${progress.total}${eta} · потоков: ${progress.lanes}.${progress.failed.length?` Не приняты: ${progress.failed.length}.`:''} Можно свернуть приложение — загрузка продолжится.`);
+  },{date:todayKey(),compress:fast});
   const parts=[`загружено ${result.uploaded}`];
   if(result.linked)parts.push(`из выбранных гостем без повторной отправки ${result.linked}`);
   if(result.skipped)parts.push(`уже были на сервере ${result.skipped}`);
+  if(result.savedBytes>1024*1024)parts.push(`сэкономлено ${Math.round(result.savedBytes/1024/1024)} МБ трафика`);
   tell(`Готово: ${parts.join(', ')}.${result.failed.length?` Не приняты ${result.failed.length}: ${result.failed.slice(0,5).map(f=>`«${f.name}» — ${f.error}`).join('; ')}${result.failed.length>5?'…':''}`:''} Статус «Сохранено на Диске» смотрите ниже.`);
  }finally{folderBusy=false;input.disabled=false;input.value='';}
 }
@@ -518,7 +520,11 @@ async function submitWorkflow(form){
   add('sale_complete',{draft,price:b.price});
  }else{
   const b=data.bookings.find(b=>b.id===Number(f.get('booking')));if(!b)throw new Error('Выберите съёмку.');
-  for(const photo of imageFiles(form,'photos'))add('shoot_photo',{shooting:{id:b.shootingId},filename:photo.name||''},photo);
+  const compress=Boolean(f.get('fastUpload'));
+  for(const photo of imageFiles(form,'photos',compress?80*1024*1024:20*1024*1024)){
+   const ready=await prepareShootFile(photo,{compress});
+   add('shoot_photo',{shooting:{id:b.shootingId},filename:photo.name||'',source_sha256:ready.digest},ready.blob);
+  }
   if(f.get('finish'))add('shoot_complete',{shooting:{id:b.shootingId}});
  }
  if(form.id==='workflowSale')saleFormBooking(form,actor);

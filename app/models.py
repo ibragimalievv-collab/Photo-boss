@@ -271,6 +271,9 @@ class Photo(Base):
     file_id: Mapped[str] = mapped_column(String(300))
     # Camera file name as chosen by the photographer (DSC_0123.jpg). Display only.
     original_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Checksum of the camera original when a smaller copy was uploaded, so a
+    # re-selected folder recognises frames already on the server.
+    source_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 

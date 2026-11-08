@@ -34,10 +34,13 @@ def test_shoot_fields_accept_optional_filename_and_strict_hash():
     shoot_fields('shoot_photo', {'shooting': {'id': 1}})
     shoot_fields('shoot_photo', {'shooting': {'id': 1}, 'filename': 'DSC_1.jpg'})
     shoot_fields('shoot_photo_link', {'shooting': {'id': 1}, 'sha256': 'a' * 64})
+    shoot_fields('shoot_photo', {'shooting': {'id': 1}, 'source_sha256': 'e' * 64})
     for kind, data in [('shoot_photo', {'shooting': {'id': 1}, 'other': 1}),
                        ('shoot_photo_link', {'shooting': {'id': 1}}),
                        ('shoot_photo_link', {'shooting': {'id': 1}, 'sha256': 'A' * 64}),
-                       ('shoot_photo_link', {'shooting': {'id': 1}, 'sha256': 'a' * 63})]:
+                       ('shoot_photo_link', {'shooting': {'id': 1}, 'sha256': 'a' * 63}),
+                       ('shoot_photo', {'shooting': {'id': 1}, 'source_sha256': 'nothex' * 8}),
+                       ('shoot_photo_link', {'shooting': {'id': 1}, 'sha256': 'a' * 64, 'source_sha256': 'a' * 64})]:
         try:
             shoot_fields(kind, data)
         except AccessError as exc:
@@ -71,10 +74,17 @@ def test_shoot_photo_stores_camera_file_name(tmp_path, monkeypatch):
             monkeypatch.setattr('app.services.media_files.direct_disk_mode', lambda *_: True)
             monkeypatch.setattr(Workflow, 'save_disk_original', lambda *_: _path('app:/shootings/x/a.jpg'))
             body['data']['filename'] = 'DSC_0123.JPG'
+            body['data']['source_sha256'] = 'f' * 64
             result = json.loads((await workday.execute(PHOTOGRAPHER, body, image())).text)
             async with factory() as session:
                 photo = await session.get(Photo, result['photoId'])
                 assert photo.original_name == 'DSC_0123.JPG'
+                assert photo.source_sha256 == 'f' * 64
+            from types import SimpleNamespace
+            class Req(dict):
+                match_info = {'id': str(body['data']['shooting']['id'])}
+            hashes = json.loads((await Workflow(workday.api).photo_hashes(Req(miniapp_actor=PHOTOGRAPHER))).text)
+            assert 'f' * 64 in hashes['stored'], 'reduced copy is recognised by its original checksum'
         finally:
             await engine.dispose()
     asyncio.run(run())
