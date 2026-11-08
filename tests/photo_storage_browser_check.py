@@ -113,6 +113,9 @@ async def main():
                     await context.set_offline(False)
                     await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.status==='local'&&r.error);}")
                     assert lost
+                    # Press «Синхронизировать сейчас» once nothing is in flight: a press during an
+                    # upload that fails afterwards leaves that file to its normal retry delay.
+                    await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return !(await m.outboxRows()).some(r=>r.status==='syncing');}")
                     await page.get_by_role('button',name='Синхронизировать сейчас').click()
                     try:
                         await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).every(r=>r.status==='synced');}")
