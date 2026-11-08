@@ -360,10 +360,12 @@ async def main():
             await page.locator('[data-menu="trash"]').click()
             await page.locator('[data-gp-mode="trash"]').click()
             await page.locator('[data-gp="purge"]').click()
-            await expect(page.locator('.modal')).to_contain_text('Восстановить их будет невозможно')
-            await page.locator('.modal [name="confirm"]').check()
+            # Only the open dialog counts: the closed project menu may still be in the DOM.
+            purge = page.locator('dialog.modal[open]')
+            await expect(purge).to_contain_text('Восстановить их будет невозможно')
+            await purge.locator('[name="confirm"]').check()
             with patch('app.yandex_disk.configured_from_env', return_value=('fake', 'fake')), patch.object(YandexDisk, 'delete_confirmed', new=AsyncMock()) as removed, patch.object(YandexDisk, '_json', new=AsyncMock(return_value={'total_space': 1000, 'used_space': 0})):
-                await page.locator('.modal [type=submit]').click()
+                await purge.locator('[type=submit]').click()
                 await expect(page.locator('.cards .card')).to_have_count(0)
                 removed.assert_awaited_with(ROOT + '/delivery/booking-1')
             assert (await client.get('/g/' + 'g'*32)).status == 404
