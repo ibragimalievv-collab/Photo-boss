@@ -26,6 +26,8 @@ export function homeSummaryView(data,permissions){
   title:`Продажа №${row.id} не завершена`,description:`${row.hotel} · ${row.client} · оформляет ${row.operator}.`});
  if(permissions.manageSchedule&&attention.pendingAttendance>0)alerts.push({tone:'warning',icon:'pin',route:'attendance',
   title:`${attention.pendingAttendance} ${plural(attention.pendingAttendance,['отметка','отметки','отметок'])} на проверке`,description:'Проверьте фотографии и время смены.'});
+ for(const row of attention.awaitingSale||[])alerts.push({tone:'warning',icon:'wallet',route:`shootings?booking=${row.id}`,
+  title:`Съёмка ${row.time} без продажи`,description:`${row.hotel} · ${row.client}. Оформите продажу или отметьте «Гость не купил».`});
  for(const row of attention.overdueBookings||[])alerts.push({tone:'warning',icon:'calendar',route:`shootings?booking=${row.id}`,
   title:`Не отмечен результат съёмки ${row.time}`,description:`${dateLabel(row.date,{day:'numeric',month:'short'})} · ${row.hotel} · ${row.client}.`});
  const f=data.finance||{},self=f.scope==='self',withholdings=f.deductions;

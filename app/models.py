@@ -242,6 +242,13 @@ class Booking(Base):
     status: Mapped[str] = mapped_column(String(40), default="NEW")
     cancellation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # "Гость не купил": an explicit outcome after a completed shoot. The booking
+    # keeps READY_FOR_SALE so a guest who returns can still buy; a later sale
+    # clears this mark.
+    no_sale_reason: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    no_sale_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    no_sale_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    no_sale_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 

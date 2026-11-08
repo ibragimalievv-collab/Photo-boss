@@ -108,7 +108,10 @@ ACTIONS = {
     'gallery_project_purged': 'Удалены фотографии проекта', 'gallery_defaults_changed': 'Изменены настройки галерей',
     'miniapp_photographer_assigned': 'Назначен фотограф', 'shooting_pickup': 'Фотограф принял съёмку',
     'shooting_start': 'Начата съёмка', 'shooting_finish': 'Завершена съёмка',
-    'shooting_ready': 'Съёмка подготовлена к продаже', 'academy_voice_turn': 'Сохранён голосовой ответ в тренировке',
+    'shooting_ready': 'Съёмка подготовлена к продаже',
+    'shooting_begin': 'Фотограф начал съёмку', 'shooting_complete': 'Съёмка завершена и готова к продаже',
+    'booking_no_sale': 'Отмечено: гость не купил', 'booking_no_sale_cleared': 'Снята отметка «гость не купил»',
+    'sale_draft_cancelled': 'Незавершённая продажа отменена', 'academy_voice_turn': 'Сохранён голосовой ответ в тренировке',
     'academy_realtime_start': 'Начат живой голосовой разговор с ИИ',
     'academy_realtime_finish': 'Сохранён разбор живого разговора с ИИ',
 }

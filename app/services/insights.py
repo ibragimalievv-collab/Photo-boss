@@ -98,6 +98,7 @@ async def period_data(api, conn, start, end):
                'average': int((Decimal(revenue) / len(sales)).quantize(Decimal(1), rounding=ROUND_HALF_UP)) if sales else 0,
                'sales': len(sales), 'shootings': len(shootings), 'bookings': len(bookings),
                'cancellations': sum(b['status'] in ('CANCELLED', 'REJECTED') for b in bookings),
+               'noSales': sum(bool(b.get('no_sale_at')) and b['status'] == 'READY_FOR_SALE' for b in bookings),
                'late': sum(bool(a['late']) for a in attendance), 'attendance': len(attendance),
                'employees': len({a['user_id'] for a in attendance}),
                'missed': sum(r['missed'] for r in discipline.values()),
@@ -105,7 +106,14 @@ async def period_data(api, conn, start, end):
                'pendingAttendance': sum(r['pending'] for r in discipline.values()),
                'receipts':len(bad_receipts),
                'receiptIssues': sum(r['status']=='REJECTED' or (bool(receipt_check(r)['findings']) and (r['status']=='PENDING' or parsed(r['analysis']).get('status')=='extracted')) for r in bad_receipts)}
+    from ..no_sale import REASONS
+    reasons = {}
+    for b in bookings:
+        if b.get('no_sale_at') and b['status'] == 'READY_FOR_SALE':
+            label = REASONS.get(b.get('no_sale_reason'), 'Причина не указана')
+            reasons[label] = reasons.get(label, 0) + 1
     return {'from': str(start), 'to': str(end), 'metrics': metrics, 'accrualsSeparated': True,
+            'noSaleReasons': [{'label': k, 'count': v} for k, v in sorted(reasons.items(), key=lambda x: -x[1])],
             'employees': sorted(employees.values(), key=lambda x: -x['revenue']), 'hotels': list(hotels.values()),
             'paidMovements':[{'id':r['id'],'category':r['category'],'amount':cents(r['amount']),'paidOn':str(r['paid_on']),'hotelId':r['hotel_id'],'employeeId':r['employee_id'],'note':r['note'],'status':r['status'],'voidReason':r['void_reason']} for r in paid[:200]],
             'paidMovementCount':len(paid),

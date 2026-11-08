@@ -234,6 +234,45 @@ class YandexDisk:
         metadata = await self.metadata(path)
         validate_saved(metadata, payload)
         return metadata
+    async def copy(self, source: str, path: str, *, size: int, sha256: str, wait_seconds=10.0):
+        """Server-side copy inside the app folder, confirmed by size and SHA-256.
+
+        No bytes pass through Photo Boss. An existing identical target is
+        accepted; a different file at the target is never overwritten.
+        """
+        source, path = safe_path(source), safe_path(path)
+
+        def same(metadata):
+            return (isinstance(metadata, dict) and metadata.get('type') == 'file'
+                    and metadata.get('size') == size and metadata.get('sha256') == sha256)
+        try:
+            if same(await self.metadata(path)):
+                return path
+            raise YandexDiskError('На месте копии уже находится другой файл.', code='integrity')
+        except YandexDiskError as exc:
+            if 'HTTP 404' not in str(exc):
+                raise
+        await self._json('POST', '/resources/copy', params={'from': source, 'path': path, 'overwrite': 'false'},
+                         ok=(201, 202))
+        # Copies inside one Disk usually finish at once; a 202 completes shortly.
+        deadline = asyncio.get_running_loop().time() + wait_seconds
+        while True:
+            try:
+                metadata = await self.metadata(path)
+                if same(metadata):
+                    return path
+                if metadata.get('type') == 'file' and metadata.get('size') == size and not metadata.get('sha256'):
+                    pass  # checksum not computed yet
+                elif metadata.get('type') == 'file':
+                    raise YandexDiskError('Копия кадра не совпадает с оригиналом.', code='integrity')
+            except YandexDiskError as exc:
+                if 'HTTP 404' not in str(exc):
+                    raise
+            if asyncio.get_running_loop().time() >= deadline:
+                raise YandexDiskError('Копирование кадра на Яндекс.Диске ещё не подтверждено. Повторите позже.',
+                                      code='copy_pending')
+            await asyncio.sleep(0.5)
+
     async def download_bytes(self, path: str, *, max_bytes=20 * 1024 * 1024):
         return await self._download_bytes(safe_path(path), max_bytes=max_bytes)
 

@@ -205,8 +205,8 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                 "CREATE TABLE hotel_employees(user_id INTEGER,hotel_id INTEGER)",
                 "CREATE TABLE clients(id INTEGER PRIMARY KEY,name TEXT)",
                 "CREATE TABLE packages(id INTEGER PRIMARY KEY,name TEXT)",
-                "CREATE TABLE bookings(id INTEGER PRIMARY KEY,room TEXT,shoot_date DATE,shoot_time TEXT,status TEXT,photographer_id INTEGER,manager_id INTEGER,hotel_id INTEGER,client_id INTEGER,package_id INTEGER)",
-                "CREATE TABLE shootings(id INTEGER PRIMARY KEY,booking_id INTEGER,status TEXT,accepted_at DATETIME,started_at DATETIME,completed_at DATETIME,ready_for_sale_at DATETIME)",
+                "CREATE TABLE bookings(id INTEGER PRIMARY KEY,room TEXT,shoot_date DATE,shoot_time TEXT,status TEXT,photographer_id INTEGER,manager_id INTEGER,hotel_id INTEGER,client_id INTEGER,package_id INTEGER,no_sale_reason TEXT,no_sale_note TEXT,no_sale_at DATETIME,no_sale_by_id INTEGER)",
+                "CREATE TABLE shootings(id INTEGER PRIMARY KEY,booking_id INTEGER,status TEXT,accepted_at DATETIME,started_at DATETIME,completed_at DATETIME,ready_for_sale_at DATETIME,full_upload_completed_at DATETIME)",
                 "CREATE TABLE photos(id INTEGER PRIMARY KEY,shooting_id INTEGER)",
                 "CREATE TABLE sales(id INTEGER PRIMARY KEY,manager_payroll_entry_id INTEGER,booking_id INTEGER,credited_user_id INTEGER,commission_role TEXT,amount NUMERIC,commission NUMERIC,payment_status TEXT,created_at DATETIME)",
                 "CREATE TABLE payroll_entries(id INTEGER PRIMARY KEY,user_id INTEGER,kind TEXT,amount NUMERIC,created_at DATETIME)",
@@ -237,7 +237,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
             connection.execute(text("INSERT INTO hotels VALUES (1,'Test hotel',TRUE),(2,'Other hotel',TRUE)"))
             connection.execute(text("INSERT INTO clients VALUES (1,'Own guest'),(2,'Other guest')"))
             connection.execute(text("INSERT INTO packages VALUES (1,'Family')"))
-            connection.execute(text("INSERT INTO bookings VALUES (1,'101',:day,'10:00','ASSIGNED',3,4,1,1,1),(2,'201',:day,'11:00','ASSIGNED',5,4,2,2,1)"), {"day": self.service.today()})
+            connection.execute(text("INSERT INTO bookings(id,room,shoot_date,shoot_time,status,photographer_id,manager_id,hotel_id,client_id,package_id) VALUES (1,'101',:day,'10:00','ASSIGNED',3,4,1,1,1),(2,'201',:day,'11:00','ASSIGNED',5,4,2,2,1)"), {"day": self.service.today()})
             connection.execute(text("INSERT INTO shootings(id,booking_id,status) VALUES (1,1,'ASSIGNED'),(2,2,'ASSIGNED')"))
             connection.execute(text("INSERT INTO sales VALUES (1,NULL,1,3,'PHOTOGRAPHER',21000,3150,'PAID',:now),(2,NULL,2,5,'PHOTOGRAPHER',26000,3900,'UNPAID',:now)"), {"now": now})
             connection.execute(text("INSERT INTO payroll_entries VALUES (1,3,'Премия',1000,:now),(2,5,'Премия',1500,:now)"), {"now": now})
@@ -352,6 +352,29 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
             rows = conn.execute(text(
                 "SELECT action FROM audit_logs WHERE entity='shooting' ORDER BY id")).scalars().all()
         assert rows == ["shooting_pickup", "shooting_start", "shooting_finish", "shooting_ready"]
+
+    async def test_two_step_shooting_flow_fills_every_timestamp_once(self):
+        status, body, _ = await self.call("/bookings/1/shooting/begin", uid=1003, method="POST", body={})
+        assert status == 200 and body["status"] == "SHOOTING"
+        assert (await self.call("/bookings/1/shooting/begin", uid=1003, method="POST", body={}))[0] == 409
+        status, body, _ = await self.call("/bookings/1/shooting/complete", uid=1003, method="POST", body={})
+        assert status == 200 and body["status"] == "READY_FOR_SALE"
+        assert (await self.call("/bookings/1/shooting/complete", uid=1003, method="POST", body={}))[0] == 409
+        with self.engine.inner.connect() as conn:
+            stamps = conn.execute(text("SELECT accepted_at,started_at,completed_at,ready_for_sale_at FROM shootings WHERE id=1")).one()
+            assert all(stamps)
+            assert conn.execute(text("SELECT status FROM bookings WHERE id=1")).scalar() == "READY_FOR_SALE"
+            actions = conn.execute(text("SELECT action FROM audit_logs WHERE entity='shooting' ORDER BY id")).scalars().all()
+        assert actions == ["shooting_begin", "shooting_complete"]
+        # An older client may still take the shoot first; begin keeps that time.
+        assert (await self.call("/bookings/2/shooting/pickup", uid=1005, method="POST", body={}))[0] == 200
+        with self.engine.inner.connect() as conn:
+            accepted = conn.execute(text("SELECT accepted_at FROM shootings WHERE id=2")).scalar()
+        assert (await self.call("/bookings/2/shooting/begin", uid=1005, method="POST", body={}))[0] == 200
+        with self.engine.inner.connect() as conn:
+            assert conn.execute(text("SELECT accepted_at FROM shootings WHERE id=2")).scalar() == accepted
+        # Someone else's shoot stays protected in the two-step flow as well.
+        assert (await self.call("/bookings/2/shooting/complete", uid=1003, method="POST", body={}))[0] == 403
 
     async def test_shooting_actions_block_other_users_and_wrong_order(self):
         assert (await self.call("/bookings/1/shooting/start", uid=1003, method="POST"))[0] == 409

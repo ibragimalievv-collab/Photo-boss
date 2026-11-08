@@ -138,6 +138,10 @@ async def upgrade(connection):
         await connection.execute(text('CREATE INDEX IF NOT EXISTS ix_photos_source_sha256 ON photos(source_sha256)'))
     if 'bookings' in tables:
         await add_columns(connection, 'bookings', {'pricing_snapshot': 'TEXT'})
+        await add_columns(connection, 'bookings', {
+            'no_sale_reason': 'VARCHAR(30)', 'no_sale_note': 'TEXT', 'no_sale_at': 'TIMESTAMP',
+            'no_sale_by_id': 'INTEGER REFERENCES users(id)',
+        })
     if 'shoot_development_reviews' in tables:
         await add_columns(connection,'shoot_development_reviews',{'summary_parts':"TEXT NOT NULL DEFAULT '[]'"})
     if 'delivery_galleries' in tables:

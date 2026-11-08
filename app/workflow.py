@@ -73,7 +73,8 @@ from .yandex_disk import (
 KINDS = frozenset({'booking', 'sale_start', 'sale_start_inline', 'sale_counts', 'sale_complete', 'sale_receipt',
                    'sale_selected', 'sale_disk_selected', 'sale_gallery_selected', 'booking_receipt', 'shoot_photo', 'shoot_photo_link', 'shoot_complete', 'shoot_retry', 'photo_edit', 'delivery_photo', 'delivery_handoff', 'gallery_reserve_photo'})
 MEDIA_KINDS = frozenset({'sale_receipt', 'sale_selected', 'booking_receipt', 'shoot_photo', 'delivery_photo', 'gallery_reserve_photo'})
-PREPARED_MEDIA_KINDS = MEDIA_KINDS | {'sale_disk_selected', 'sale_gallery_selected', 'sale_complete'}
+PREPARED_MEDIA_KINDS = MEDIA_KINDS | {'sale_disk_selected', 'sale_gallery_selected', 'sale_complete', 'shoot_photo_link'}
+LINK_FALLBACK = 'Кадр не найден среди выбранных. Загрузите файл обычным способом.'
 
 
 def validate_media(kind, raw):
@@ -132,6 +133,14 @@ def shoot_fields(kind, data):
     if 'source_sha256' in data and not valid_sha256(data['source_sha256']):
         raise AccessError('Некорректная контрольная сумма оригинала.', 400)
     original_name(data.get('filename'))
+
+
+async def selected_original(session, booking_id, digest):
+    """A guest-selected original of this booking stored in the app folder."""
+    return await session.scalar(select(SaleDraftPhoto).join(
+        SaleDraft, SaleDraft.id == SaleDraftPhoto.draft_id).where(
+        SaleDraft.booking_id == booking_id, SaleDraftPhoto.sha256 == digest,
+        SaleDraftPhoto.storage_path.like(ROOT + '/%')).order_by(SaleDraftPhoto.id).limit(1))
 
 
 def receipt_analysis(value):
@@ -195,7 +204,6 @@ class Workflow:
             sid = int(request.match_info['id'])
         except (KeyError, ValueError):
             raise AccessError('Съёмка не найдена.', 404) from None
-        from .disk_sale_media import FILE_PREFIX
         async with AsyncSession(self.api.engine) as session:
             shooting = await session.get(Shooting, sid)
             booking = await session.get(Booking, shooting.booking_id) if shooting else None
@@ -208,7 +216,7 @@ class Workflow:
             selected = (await session.scalars(select(SaleDraftPhoto.sha256).join(
                 SaleDraft, SaleDraft.id == SaleDraftPhoto.draft_id).where(
                 SaleDraft.booking_id == booking.id,
-                ~SaleDraftPhoto.storage_path.like(FILE_PREFIX + '%')))).all()
+                SaleDraftPhoto.storage_path.like(ROOT + '/%')))).all()
         return web.json_response({'shootingId': sid, 'stored': sorted(set(stored)),
                                   'selected': sorted(set(selected) - set(stored)),
                                   'open': shooting.status == 'READY_FOR_SALE' and not shooting.full_upload_completed_at},
@@ -313,6 +321,7 @@ class Workflow:
             assigned_photographers = {u.id: u for u in await session.scalars(select(User).where(
                 User.id.in_({b.photographer_id for b in bookings if b.photographer_id})))}
             rows = []
+            from .no_sale import public as public_no_sale
             for b in bookings:
                 from .services.pricing import snapshot, unit_price
                 effective_price = await unit_price(session, b)
@@ -355,6 +364,7 @@ class Workflow:
                     'declaredDeposit': str(money(b.deposit)),
                     'bankPayments': [public_bill(bill) for bill in bank_bills],
                     'saleRecorded': bool(purchases),
+                    'noSale': public_no_sale(b),
                     'shootingId': shoot.id if shoot else None, 'fullUploaded': bool(shoot and shoot.full_upload_completed_at),
                     'uploadedOriginals': int(original_count or 0),
                     'shootingStatus': shoot.status if shoot else None,
@@ -427,6 +437,7 @@ class Workflow:
                         'price': str(money(album.price))} for album in albums],
             'canApproveDiscount': bool({'OWNER', 'ADMIN'} & set(a['roles'])),
             'canAuditDisk': 'OWNER' in a['roles'],
+            'canTakeOverSales': bool({'OWNER', 'ADMIN'} & set(a['roles'])),
             'canCheckBankConnection': 'OWNER' in a['roles'],
             **payment_settings(refund_integration=getattr(self.api, 'booking_refunds', None)),
             'packages': [{'id': p.id, 'name': p.name, 'price': prices[p.id]} for p in packages if p.active],
@@ -482,6 +493,29 @@ class Workflow:
             booking = await session.get(Booking, draft.booking_id)
             folder, _context = await storage_location(session, booking, draft.id)
         return await self.save_disk_original(folder[len(ROOT):], raw)
+
+    async def copy_disk_original(self, source, folder, digest, size):
+        """Copy a confirmed original into another app folder on the Disk itself."""
+        token, client_id = configured_from_env()
+        if not token:
+            raise AccessError('Яндекс.Диск не подключён. Кадр остаётся в локальной очереди.', 503)
+        name = source.rsplit('/', 1)[-1]
+        ext = name.rsplit('.', 1)[-1].lower() if '.' in name else 'jpg'
+        ext = ext if ext in {'jpg', 'jpeg', 'png', 'webp'} else 'jpg'
+        storage = YandexDisk(token, client_id)
+        path = ROOT + folder + f'/{digest}.{ext}'
+        try:
+            await storage.copy(source, path, size=size, sha256=digest)
+        except YandexDiskError as exc:
+            if 'HTTP 409' not in str(exc):
+                raise
+            # The shoot folder may not exist yet.
+            parent = ROOT
+            for part in folder.strip('/').split('/'):
+                parent += '/' + part
+                await storage.ensure_dir(parent)
+            await storage.copy(source, path, size=size, sha256=digest)
+        return path
 
     async def save_disk_original(self, folder, raw):
         token, client_id = configured_from_env()
@@ -608,11 +642,17 @@ class Workflow:
                     booking = await session.get(Booking, shooting.booking_id) if shooting else None
                     if not await can_access_booking(session, actor.id, roles, booking, photos=True):
                         raise AccessError('Нет доступа к съёмке.', 403)
+                    digest = data['sha256'] if kind == 'shoot_photo_link' else hashlib.sha256(raw).hexdigest()
                     old = await session.scalar(select(PhotoStorage.id).where(PhotoStorage.shooting_id == sid,
-                        PhotoStorage.sha256 == hashlib.sha256(raw).hexdigest()).limit(1))
+                        PhotoStorage.sha256 == digest).limit(1))
                     if not old and (shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at):
                         raise AccessError('Загрузка новых кадров уже закрыта или ещё недоступна.', 409)
                     prepared['target'] = sid
+                    if kind == 'shoot_photo_link' and not old:
+                        selected = await selected_original(session, booking.id, digest)
+                        if selected is None:
+                            raise AccessError(LINK_FALLBACK, 409)
+                        prepared['link_source'] = (selected.storage_path, selected.byte_size)
             # Detached identity/targets above are all that provider calls need.
             # No connection, transaction or business row lock remains checked out.
             if kind in {'sale_receipt', 'booking_receipt'}:
@@ -622,6 +662,9 @@ class Workflow:
                 prepared['analysis']['documents'] = manifest(raw)
             elif kind == 'sale_selected' and not prepared.get('completed_duplicate'):
                 prepared['path'] = await self.save_selected(draft, raw)
+            elif kind == 'shoot_photo_link' and prepared.get('link_source'):
+                source, size = prepared['link_source']
+                prepared['path'] = await self.copy_disk_original(source, f'/shootings/{sid}', data['sha256'], size)
             elif kind == 'shoot_photo':
                 from .services.media_files import direct_disk_mode
                 if direct_disk_mode(getattr(self.api, 'standalone', None)):
@@ -901,7 +944,7 @@ class Workflow:
         await audit(session, actor, 'receipt_uploaded', 'receipt', receipt.id)
         return {'bookingId': bid, 'receiptId': receipt.id, 'receipt': receipt_state(receipt)}
 
-    async def link_selected_original(self, session, actor, booking, shooting, data):
+    async def link_selected_original(self, session, actor, booking, shooting, data, *, prepared_path=None):
         """Count a guest-selected original in the full shoot without a second upload.
 
         The selected original of this same booking is already stored and
@@ -919,15 +962,17 @@ class Workflow:
                     'storageStatus': existing.status, 'linked': True}
         if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
             raise AccessError('Загрузка новых кадров уже закрыта или ещё недоступна.', 409)
-        from .disk_sale_media import FILE_PREFIX
-        selected = await session.scalar(select(SaleDraftPhoto).join(
-            SaleDraft, SaleDraft.id == SaleDraftPhoto.draft_id).where(
-            SaleDraft.booking_id == booking.id, SaleDraftPhoto.sha256 == digest,
-            ~SaleDraftPhoto.storage_path.like(FILE_PREFIX + '%')).order_by(SaleDraftPhoto.id).limit(1))
+        selected = await selected_original(session, booking.id, digest)
         if selected is None:
             # The browser falls back to a normal upload of this file.
-            raise AccessError('Кадр не найден среди выбранных. Загрузите файл обычным способом.', 409)
-        path = selected.storage_path
+            raise AccessError(LINK_FALLBACK, 409)
+        # The full-shoot archive must hold its own copy in the shoot folder:
+        # completion checks every original there, and a sale gallery may be
+        # purged later. The copy was made and verified before this transaction.
+        expected = ROOT + f'/shootings/{sid}/{digest}.'
+        if not prepared_path or not prepared_path.startswith(expected):
+            raise AccessError('Копия кадра для архива съёмки не подготовлена. Повторите отправку.', 409)
+        path = prepared_path
         photo = Photo(shooting_id=sid, file_id=path, original_name=name, source_sha256=digest)
         session.add(photo)
         await session.flush()
@@ -963,7 +1008,8 @@ class Workflow:
                         json.dumps(recovery))
             return {'shootingId': sid, **recovery}
         if kind == 'shoot_photo_link':
-            return await self.link_selected_original(session, actor, booking, shooting, data)
+            return await self.link_selected_original(session, actor, booking, shooting, data,
+                                                     prepared_path=(prepared_media or {}).get('path'))
         if kind == 'shoot_photo':
             from .services.media_files import direct_disk_mode
             digest = hashlib.sha256(raw).hexdigest()

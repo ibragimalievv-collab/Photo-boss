@@ -12,7 +12,7 @@ import {setFormActor,captureForms,restoreForms} from './form-state.js';
 import {academyCoachScreen,academyTrackSwitch,academyTrack,loadAcademyCoach,resetAcademyCoach,openAcademyLesson} from './academy-coach.js';
 import {loadShootControl,shootControlView,loadDeliveryContacts,deliveryContactsView} from './delivery.js';
 import {loadGalleries,galleriesView,mountGalleries,deactivateGalleries} from './galleries.js';
-import {loadWorkflow,workflowView,workflowClick,workflowSubmit,workflowSelect,workflowFolderChange,openWorkflowBooking,closeWorkflowBooking} from './workflow.js';
+import {loadWorkflow,workflowView,workflowClick,workflowSubmit,workflowSelect,workflowFolderChange,uploadShootFiles,isShootUploading,openWorkflowBooking,closeWorkflowBooking} from './workflow.js';
 import {developmentView,loadDevelopment,developmentClick,developmentSubmit} from './development.js';
 import {setOutboxUser} from './outbox.js';
 import {workdayView,loadWorkday,workdayClick,workdaySubmit} from './workday.js';
@@ -212,28 +212,60 @@ async function loadBookingSms(id){
  try{const config=await request(`/bookings/${id}/sms-reminder`,{allowSnapshot:false});if(!box.isConnected)return;box.innerHTML=bookingSmsView(id,config);}
  catch(error){if(box.isConnected){box.textContent='Не удалось проверить SMS-напоминание. ';const button=document.createElement('button');button.type='button';button.className='btn ghost';button.dataset.smsRefresh=String(id);button.textContent='Повторить проверку';box.append(button);}}
 }
+const NO_SALE_REASONS=[['NOT_LIKED','Не понравились фотографии'],['PRICE','Дорого'],['NO_MONEY','Нет денег с собой'],['LATER','Подумает, вернётся позже'],['OTHER','Другая причина']];
+// iOS Safari cannot pick folders; offer the folder button only where it works.
+const folderPicking=(()=>{try{return 'webkitdirectory' in document.createElement('input')&&!/iP(hone|ad|od)/.test(navigator.userAgent);}catch{return false;}})();
+function cardUploadView(b,own){
+ const roles=state.me.user.roles,canUpload=own||roles.some(r=>['OWNER','ADMIN'].includes(r));
+ const frames=Number(b.frames||0);
+ if(!canUpload||!b.shootingId)return '';
+ if(b.fullUploaded)return `<p class="small muted">Вся съёмка загружена: ${frames} ${frames%10===1&&frames%100!==11?'кадр':frames%10>=2&&frames%10<=4&&(frames%100<10||frames%100>=20)?'кадра':'кадров'}.</p>`;
+ const busy=isShootUploading(b.shootingId);
+ return `<section class="card-upload" data-card-upload="${b.shootingId}"><div><strong>Вся съёмка</strong><small>${frames?`На сервере уже ${frames}. Выберите ту же папку — отправятся только новые.`:'Выберите все кадры съёмки. Отправка начнётся сразу.'}</small></div>
+ <label class="btn full-width file-button${busy?' is-disabled':''}">${frames?'Догрузить фото':'Загрузить всю съёмку'}<input type="file" accept="image/jpeg,image/png,image/webp" multiple data-card-files="${b.shootingId}" ${busy?'disabled':''}></label>
+ ${folderPicking?`<label class="btn ghost full-width file-button${busy?' is-disabled':''}">Выбрать папку целиком<input type="file" webkitdirectory multiple data-card-files="${b.shootingId}" ${busy?'disabled':''}></label>`:''}
+ <label class="check-line"><input type="checkbox" data-card-fast="${b.shootingId}" checked> Быстрая загрузка: уменьшить до 4000 px (выбранные гостем уходят оригиналами)</label>
+ <p class="small" data-card-progress="${b.shootingId}" role="status" aria-live="polite">${busy?'Загрузка уже идёт…':''}</p></section>`;
+}
+function afterShootView(b,own){
+ const roles=state.me.user.roles,ready=b.shootingStatus==='READY_FOR_SALE'||b.status==='READY_FOR_SALE'||b.status==='SOLD';
+ if(!ready)return '<p class="small muted">Продажа и загрузка фото откроются после кнопки «Закончить съёмку».</p>';
+ const staff=own||roles.some(r=>['OWNER','ADMIN'].includes(r))||(roles.includes('MANAGER')&&b.managerId===state.me.user.id);
+ const upload=cardUploadView(b,own);
+ if(b.status==='SOLD')return `<p class="small muted">Продажа оформлена.</p><button class="btn ghost full-width" data-sale-booking="${b.id}">Открыть продажу / допродажа</button>${upload}`;
+ if(b.noSale)return `<div class="notice"><strong>Гость не купил</strong><p>${esc(b.noSale.label)}${b.noSale.note?' — '+esc(b.noSale.note):''}</p></div><button class="btn primary full-width" data-sale-booking="${b.id}">Гость вернулся — оформить продажу</button>${upload}${staff?`<button class="btn ghost full-width" data-no-sale-undo="${b.id}">Снять отметку «не купил»</button>`:''}`;
+ return `<button class="btn primary full-width" data-sale-booking="${b.id}">Оформить продажу</button>${upload}${staff?`<button class="btn ghost full-width" data-no-sale="${b.id}">Гость не купил</button>`:''}`;
+}
+function noSaleSheet(id){
+ showSheet('Гость не купил',`<form id="noSaleForm" class="form-grid" data-booking="${id}"><p>Отметка закроет съёмку без продажи. Если гость вернётся, продажу можно оформить позже — отметка снимется сама.</p>
+ <fieldset class="choice-list"><legend>Причина</legend>${NO_SALE_REASONS.map(([value,label],i)=>`<label><input type="radio" name="reason" value="${value}" ${i===0?'checked':''} required> ${label}</label>`).join('')}</fieldset>
+ <label class="field">Комментарий (для «Другая причина» обязателен)<textarea class="input" name="note" maxlength="500" rows="2"></textarea></label>
+ <p class="small muted">Подтверждённая предоплата не возвращается автоматически — решение о возврате принимает владелец.</p>
+ <button class="btn primary full-width" type="submit">Отметить «гость не купил»</button><p class="small" data-no-sale-feedback role="status"></p></form>`);
+}
 function showBooking(id){
  const b=[...state.bookings,...(state.dashboard?.bookings||[])].find(x=>x.id===id);if(!b)return;
  const roles=state.me.user.roles,own=roles.includes('PHOTOGRAPHER')&&b.photographerId===state.me.user.id;
- const steps={ASSIGNED:['pickup','📥 Забрать съёмку'],PICKED_UP:['start','▶️ Начать съёмку'],SHOOTING:['finish','⏹ Завершить съёмку'],SHOT:['ready','✅ Готово к продаже']};
+ const steps={ASSIGNED:['begin','▶️ Начать съёмку'],PICKED_UP:['begin','▶️ Начать съёмку'],SHOOTING:['complete','✅ Закончить съёмку'],SHOT:['complete','✅ Закончить съёмку']};
  const step=own&&b.shootingId?steps[b.shootingStatus]:null;
+ const done=b.shootingStatus==='READY_FOR_SALE'||['READY_FOR_SALE','SOLD'].includes(b.status);
  const canAssign=roles.some(r=>['OWNER','ADMIN'].includes(r))&&['NEW','CONFIRMED','PENDING_CONFIRMATION','RESCHEDULED','ASSIGNED'].includes(b.status)&&(!b.shootingStatus||['NEW','CONFIRMED','PENDING_CONFIRMATION','ASSIGNED'].includes(b.shootingStatus));
  const fields=[['Запись',`№ ${b.id}`],['Когда',`${dateLabel(b.date)} · ${b.time}`],['Отель',b.hotel],['Гость',b.client],['Телефон',b.phone||'Не указан'],['Менеджер',b.manager||'Не указан'],['Номер',b.room],['Фотограф',b.photographer||'Не назначен'],['Кадров в съёмке',b.frames??'—']];
  showSheet(esc(b.hotel+' · '+b.client),`${mark(b.shootingStatus||b.status)}<div class="detail-grid">${fields.map(([a,v])=>`<div class="detail"><small>${a}</small><b>${esc(v)}</b></div>`).join('')}</div>
- <section class="booking-sms section" data-booking-sms="${b.id}" aria-live="polite">Проверяем настройки SMS-напоминания…</section>
+ ${step?`<button class="btn primary full-width section" data-shoot-booking="${b.id}" data-shoot-action="${step[0]}">${step[1]}</button>`:''}
+ ${done?`<div class="section booking-next">${afterShootView(b,own)}</div>`:''}
+ ${done?'':`<section class="booking-sms section" data-booking-sms="${b.id}" aria-live="polite">Проверяем настройки SMS-напоминания…</section>`}
  ${receiptsOnly()&&['CANCELLED','REJECTED'].includes(b.status)?'<p class="notice">Запись отменена. Предоплата не используется для новой съёмки. Возврат проверяет владелец; подтверждения банковского возврата здесь пока нет.</p>':''}
- ${!b.trashed&&!['CANCELLED','REJECTED'].includes(b.status)?receiptsOnly()?`<button type="button" class="btn primary full-width section" data-booking-receipt="${b.id}">Прикрепить чек предоплаты</button>`:`<button type="button" class="btn primary full-width section" data-workflow="booking-payment" data-purpose="DEPOSIT" data-booking="${b.id}">Предоплата по QR</button>`:''}
+ ${!done&&!b.trashed&&!['CANCELLED','REJECTED'].includes(b.status)?receiptsOnly()?`<button type="button" class="btn primary full-width section" data-booking-receipt="${b.id}">Прикрепить чек предоплаты</button>`:`<button type="button" class="btn primary full-width section" data-workflow="booking-payment" data-purpose="DEPOSIT" data-booking="${b.id}">Предоплата по QR</button>`:''}
  ${b.canEdit?`<div class="row wrap section">${b.trashed||['CANCELLED','REJECTED'].includes(b.status)?`<button class="btn ghost" data-booking-manage="restore" data-id="${b.id}">Восстановить запись</button>`:`<button class="btn ghost" data-booking-manage="edit" data-id="${b.id}">Редактировать / перенести</button><button class="btn ghost" data-booking-manage="cancel" data-id="${b.id}">Отменить запись</button>`}${!b.trashed?`<button class="btn ghost" data-booking-manage="trash" data-id="${b.id}">Удалить в корзину</button>`:''}</div>`:''}
  ${roles.some(r=>['OWNER','ADMIN'].includes(r))||own?`<button class="btn full-width" data-gallery-booking="${b.id}">Галерея выдачи</button>`:''}
  ${canAssign?`<button class="btn full-width section" data-assign-photographer="${b.id}">${b.photographerId?'Изменить фотографа':'Назначить фотографа'}</button>`:''}
- ${step?`<button class="btn primary full-width section" data-shoot-booking="${b.id}" data-shoot-action="${step[0]}">${step[1]}</button>`:''}
  ${own&&!b.shootingId?`<p class="small muted">Этапы съёмки недоступны: не найдена карточка съёмки. Сообщите администратору.</p>`:''}
- ${!step&&b.shootingStatus==='READY_FOR_SALE'?'<p class="small muted">Съёмка готова к продаже.</p>':''}
- <div class="section">${b.shootingStatus==='READY_FOR_SALE'||b.status==='READY_FOR_SALE'?`<button class="btn ghost full-width" data-sale-booking="${b.id}">Перейти к продаже</button>`:'<p>Для продажи завершите предыдущие этапы съёмки и отметьте готовность фотографий.</p>'}</div>`);
+ ${done?'':`<div class="section">${afterShootView(b,own)}</div>`}`);
  void loadBookingSms(id);
 }
 async function shootingAction(id,step){
- const labels={pickup:'Съёмка принята.',start:'Съёмка начата.',finish:'Съёмка завершена.',ready:'Съёмка готова к продаже.'};
+ const labels={pickup:'Съёмка принята.',start:'Съёмка начата.',finish:'Съёмка завершена.',ready:'Съёмка готова к продаже.',begin:'Съёмка начата.',complete:'Съёмка завершена. Загрузите фото и оформите продажу.'};
  await request(`/bookings/${id}/shooting/${step}`,{method:'POST',body:{}});
  closeSheet();
  await loadRoute();
@@ -273,7 +305,9 @@ document.addEventListener('click',async event=>{
  try{
   if(b.dataset.development)return await developmentClick(b);
   if(b.dataset.bookingReceipt){const actorId=state.me.user.id;return openBookingReceipt(Number(b.dataset.bookingReceipt),{isCurrent:()=>state.me?.user.id===actorId,onSaved:()=>toast(window.PHOTO_BOSS_CONFIG?.RECEIPT_AUTOMATIC===true?'Чек сохранён в очередь автоматической проверки.':'Чек сохранён в очередь. После отправки он появится у владельца для сверки поступления.')});}
-  if(b.dataset.saleBooking){const id=Number(b.dataset.saleBooking);await go('workflow');workflowSelect(id);document.querySelector('#workflowSale')?.scrollIntoView({block:'center'});return;}
+  if(b.dataset.saleBooking){closeSheet();const id=Number(b.dataset.saleBooking);await go('workflow');workflowSelect(id);document.querySelector('#workflowSale')?.scrollIntoView({block:'center'});return;}
+  if(b.dataset.noSale)return noSaleSheet(Number(b.dataset.noSale));
+  if(b.dataset.noSaleUndo){const id=Number(b.dataset.noSaleUndo);b.disabled=true;await request(`/bookings/${id}/no-sale`,{method:'DELETE'});closeSheet();await loadRoute();showBooking(id);toast('Отметка снята.');return;}
   if(b.dataset.workflow){await workflowClick(b);return;}
   if(b.dataset.workday)return await workdayClick(b);
   if(b.dataset.team)return await teamClick(b);
@@ -303,6 +337,16 @@ document.addEventListener('toggle',event=>{
  const id=section.dataset.hotelSection;
  if(section.open)state.expandedHotels.add(id);else state.expandedHotels.delete(id);
 },true);
+document.addEventListener('change',async e=>{
+ const input=e.target;if(!input.matches?.('input[data-card-files]'))return;
+ const shootingId=Number(input.dataset.cardFiles),box=input.closest('[data-card-upload]');
+ const note=box?.querySelector('[data-card-progress]'),fast=box?.querySelector('[data-card-fast]')?.checked!==false;
+ const files=[...input.files];input.value='';if(!files.length)return;
+ const pickers=[...(box?.querySelectorAll('input[type=file]')||[])];pickers.forEach(x=>{x.disabled=true;x.closest('label')?.classList.add('is-disabled');});
+ try{await uploadShootFiles(files,{shootingId,compress:fast,note});}
+ catch(error){if(note?.isConnected)note.textContent=error.message;else toast(error.message);}
+ finally{pickers.forEach(x=>{x.disabled=false;x.closest('label')?.classList.remove('is-disabled');});}
+});
 document.addEventListener('change',async e=>{if(e.target.id==='workflowShootFolder'){try{await workflowFolderChange(e.target);}catch(error){const note=document.querySelector('#workflowFolderProgress');if(note)note.textContent=error.message;toast(error.message);}return;}if(e.target.id==='workflowSalePick'){workflowSelect(e.target.value);return;}if(e.target.id==='bookingDay'){if(!e.target.value)return;state.day=e.target.value;await loadRoute('shootings');}});
 let bookingSearchTimer=null,bookingSearchVersion=0;
 document.addEventListener('input',e=>{if(e.target.id!=='bookingSearch')return;state.search=e.target.value;clearTimeout(bookingSearchTimer);const ticket=++bookingSearchVersion;bookingSearchTimer=setTimeout(async()=>{const query=state.search,routeTicket=state.requestId;try{const d=await request(`/bookings?day=${state.day}&q=${encodeURIComponent(query)}&trash=${state.bookingTrash?'1':'0'}`);if(ticket!==bookingSearchVersion||state.route!=='shootings'||routeTicket!==state.requestId)return;const pos=document.querySelector('#bookingSearch')?.selectionStart;state.bookings=d.items;state.hotels=d.hotels||[];state.bookingsTruncated=d.truncated;$('#app').innerHTML=shootingsView();const input=$('#bookingSearch');input.focus();input.setSelectionRange(pos,pos);}catch(error){toast(error.message);}},300);});
@@ -316,6 +360,13 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-audi
  }catch(error){toast(error.message);}});
 document.addEventListener('click',event=>{const button=event.target.closest('[data-sms-refresh]');if(button)void loadBookingSms(Number(button.dataset.smsRefresh));});
 document.addEventListener('submit',async e=>{
+ if(e.target.id==='noSaleForm'){
+  e.preventDefault();const form=e.target,id=Number(form.dataset.booking),button=form.querySelector('[type=submit]'),feedback=form.querySelector('[data-no-sale-feedback]');button.disabled=true;
+  try{const reason=form.elements.reason.value,note=form.elements.note.value.trim();if(reason==='OTHER'&&!note)throw new Error('Напишите коротко, почему гость не купил.');
+   await request(`/bookings/${id}/no-sale`,{method:'POST',body:{reason,note}});closeSheet();await loadRoute();showBooking(id);toast('Отмечено: гость не купил.');}
+  catch(error){if(feedback?.isConnected)feedback.textContent=error.message;button.disabled=false;}
+  return;
+ }
  if(e.target.classList.contains('booking-sms-form')){
   e.preventDefault();const form=e.target,id=Number(form.dataset.booking),button=form.querySelector('[type=submit]'),feedback=form.querySelector('[data-sms-feedback]');if(button)button.disabled=true;
   try{const config=await request(`/bookings/${id}/sms-reminder`,{method:'PUT',body:{enabled:form.elements.enabled.checked,consent:form.elements.consent.checked,leadMinutes:Number(form.elements.leadMinutes.value)}});if(!form.isConnected)return;const box=form.closest('[data-booking-sms]');box.innerHTML=bookingSmsView(id,config);box.querySelector('[data-sms-feedback]').textContent='Настройки сохранены. Статус отправки показан выше.';}

@@ -57,7 +57,7 @@ async def _open_shoot(factory, bid):
         return shooting.id
 
 
-async def _selected(factory, bid, digest, path='app:/sales/1/selected.jpg'):
+async def _selected(factory, bid, digest, path='app:/PhotoBoss/sales/1/selected.jpg'):
     async with factory() as session:
         draft = SaleDraft(booking_id=bid, created_by_id=1, status='COMPLETED')
         session.add(draft)
@@ -94,7 +94,7 @@ async def _path(value):
     return value
 
 
-def test_link_reuses_selected_original_without_bytes(tmp_path):
+def test_link_reuses_selected_original_without_bytes(tmp_path, monkeypatch):
     async def run():
         url = f"sqlite+aiosqlite:///{tmp_path / 'link.sqlite'}"
         engine, factory, bid = await prepared(url)
@@ -115,6 +115,12 @@ def test_link_reuses_selected_original_without_bytes(tmp_path):
                 return await original_rows(conn, sql.replace(' FOR UPDATE', ''), **params)
             api.rows = rows
             workday = Workday(api)
+            copies = []
+
+            async def copy(_self, source, folder, digest, size):
+                copies.append((source, folder, digest, size))
+                return f'app:/PhotoBoss{folder}/{digest}.jpg'
+            monkeypatch.setattr(Workflow, 'copy_disk_original', copy)
             async with factory() as session:
                 before = await session.scalar(select(func.count(Photo.id)).where(Photo.shooting_id == sid))
             body = {'actorId': 2, 'key': 'link-test-key-00000001', 'kind': 'shoot_photo_link', 'date': '2026-09-22',
@@ -130,8 +136,17 @@ def test_link_reuses_selected_original_without_bytes(tmp_path):
                 assert await session.scalar(select(func.count(Photo.id)).where(Photo.shooting_id == sid)) == before + 1
                 photo = await session.get(Photo, first['photoId'])
                 storage = await session.scalar(select(PhotoStorage).where(PhotoStorage.photo_id == photo.id))
-                assert photo.file_id == storage.disk_path == 'app:/sales/1/selected.jpg'
+                copied = f'app:/PhotoBoss/shootings/{sid}/{digest}.jpg'
+                assert photo.file_id == storage.disk_path == copied, 'the archive keeps its own copy in the shoot folder'
+                assert copies == [('app:/PhotoBoss/sales/1/selected.jpg', f'/shootings/{sid}', digest, 1234)]
                 assert photo.original_name == 'IMG_7.jpg' and storage.sha256 == digest and storage.byte_size == 1234
+                # The fixture's other frames have no storage receipts; only the
+                # linked one is checked here against the completion rules.
+                from sqlalchemy import delete
+                await session.execute(delete(Photo).where(Photo.shooting_id == sid, Photo.id != photo.id))
+                from app.services.photo_storage import require_confirmed_originals
+                assert await require_confirmed_originals(session, sid) == 1, 'a linked frame must not block completion'
+                await session.rollback()
 
             missing = dict(body, key='link-test-key-00000003', data={'shooting': {'id': sid}, 'sha256': 'b' * 64})
             try:
@@ -215,7 +230,7 @@ def test_photo_hashes_lists_stored_and_reusable_selected(tmp_path):
                                          status='STORED', sha256=stored_digest))
                 await session.commit()
             await _selected(factory, bid, selected_digest)
-            await _selected(factory, bid, stored_digest, path='app:/sales/2/also-stored.jpg')
+            await _selected(factory, bid, stored_digest, path='app:/PhotoBoss/sales/2/also-stored.jpg')
             from types import SimpleNamespace
             from app.miniapp_api import MiniApp
             workflow = Workflow(MiniApp(engine, SimpleNamespace(), []))
@@ -234,3 +249,41 @@ def test_photo_hashes_lists_stored_and_reusable_selected(tmp_path):
         finally:
             await engine.dispose()
     asyncio.run(run())
+
+
+def test_disk_copy_is_confirmed_by_size_and_checksum(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.yandex_disk import YandexDisk, YandexDiskError
+    digest = 'a' * 64
+    good = {'type': 'file', 'size': 2048, 'sha256': digest}
+    missing = YandexDiskError('Yandex.Disk HTTP 404: DiskNotFoundError', http_status=404)
+
+    async def run(metadata, expect_post):
+        disk = YandexDisk('synthetic')
+        disk.metadata = AsyncMock(side_effect=metadata)
+        disk._json = AsyncMock(return_value={})
+        try:
+            return await disk.copy('app:/PhotoBoss/sales/1/x.jpg', 'app:/PhotoBoss/shootings/2/x.jpg',
+                                   size=2048, sha256=digest, wait_seconds=0)
+        finally:
+            assert disk._json.await_count == (1 if expect_post else 0)
+
+    # Identical target already there: accepted without another copy.
+    assert asyncio.run(run([good], False)) == 'app:/PhotoBoss/shootings/2/x.jpg'
+    # Missing target: copied once and confirmed.
+    assert asyncio.run(run([missing, good], True)) == 'app:/PhotoBoss/shootings/2/x.jpg'
+    # A different file must never be overwritten or accepted.
+    try:
+        asyncio.run(run([{'type': 'file', 'size': 999, 'sha256': 'b' * 64}], False))
+    except YandexDiskError as exc:
+        assert 'другой файл' in str(exc)
+    else:
+        raise AssertionError('accepted a different file at the target')
+    # A copy that does not match the original is an integrity error.
+    try:
+        asyncio.run(run([missing, {'type': 'file', 'size': 2048, 'sha256': 'c' * 64}], True))
+    except YandexDiskError as exc:
+        assert 'не совпадает' in str(exc)
+    else:
+        raise AssertionError('accepted a mismatching copy')
