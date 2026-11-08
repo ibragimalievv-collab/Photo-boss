@@ -1,4 +1,5 @@
 """Real-shoot coaching queue and persisted sales practice."""
+from .services.ai_provider import ai_configured
 import asyncio
 import hashlib
 import io
@@ -28,7 +29,13 @@ class LimitedImage(io.BytesIO):
 
 
 async def queue_reviews(session):
-    shootings=(await session.execute(select(Shooting,Booking).join(Booking,Shooting.booking_id==Booking.id).where(Shooting.full_upload_completed_at.is_not(None),Booking.photographer_id.is_not(None)))).all()
+    from .operational_start import configured_start_date
+    start = configured_start_date()
+    query = select(Shooting,Booking).join(Booking,Shooting.booking_id==Booking.id).where(
+        Shooting.full_upload_completed_at.is_not(None),Booking.photographer_id.is_not(None))
+    if start is not None:
+        query = query.where(Booking.shoot_date >= start)
+    shootings=(await session.execute(query)).all()
     count=0
     for shooting,booking in shootings:
         ids=list((await session.scalars(select(Photo.id).where(Photo.shooting_id==shooting.id).order_by(Photo.id))).all())
@@ -51,11 +58,16 @@ async def queue_reviews(session):
 
 
 async def review_one(factory,bot):
-    if not config.openai_api_key: return False
+    if not ai_configured(config, vision=True): return False
+    from .operational_start import configured_start_date
+    start = configured_start_date()
+    eligible = (ShootDevelopmentReview.shooting_id.in_(select(Shooting.id).join(
+        Booking, Shooting.booking_id == Booking.id).where(Booking.shoot_date >= start))
+        if start is not None else True)
     async with factory() as session:
         deadline=utc_now()-timedelta(minutes=5)
-        expired=await session.execute(update(ShootDevelopmentReview).where(ShootDevelopmentReview.status=='RUNNING',ShootDevelopmentReview.attempts>=5,ShootDevelopmentReview.claimed_at<deadline).values(status='FAILED',last_error='Последняя попытка прервана. Сохранённые кадры доступны; запустите повтор.'))
-        row=await session.scalar(select(ShootDevelopmentReview).where(ShootDevelopmentReview.status.in_(['PENDING','RETRY','RUNNING']),ShootDevelopmentReview.attempts<5,
+        expired=await session.execute(update(ShootDevelopmentReview).where(eligible,ShootDevelopmentReview.status=='RUNNING',ShootDevelopmentReview.attempts>=5,ShootDevelopmentReview.claimed_at<deadline).values(status='FAILED',last_error='Последняя попытка прервана. Сохранённые кадры доступны; запустите повтор.'))
+        row=await session.scalar(select(ShootDevelopmentReview).where(eligible,ShootDevelopmentReview.status.in_(['PENDING','RETRY','RUNNING']),ShootDevelopmentReview.attempts<5,
             (ShootDevelopmentReview.claimed_at.is_(None)) | (ShootDevelopmentReview.claimed_at<utc_now()-timedelta(minutes=5))).order_by(ShootDevelopmentReview.id).with_for_update(skip_locked=True).limit(1))
         if not row:
             await session.commit()
@@ -116,7 +128,7 @@ class Development:
             for review in reviews:
                 stored = await self.api.rows(conn, 'SELECT value FROM settings WHERE key=:key', key=f'shoot-audit:{review["id"]}')
                 review['fileChecks'] = json.loads(stored[0]['value']) if stored else []
-        return web.json_response({'configured':bool(config.openai_api_key),'rules':ai.SALES_RULES,'scenarios':ai.SALES_SCENARIOS,'bookingScenarios':ai.BOOKING_SCENARIOS,
+        return web.json_response({'configured':ai_configured(config),'rules':ai.SALES_RULES,'scenarios':ai.SALES_SCENARIOS,'bookingScenarios':ai.BOOKING_SCENARIOS,
             'reviews':[{'id':r['id'],'shootingId':r['shooting_id'],'photographerId':r['photographer_id'],'status':r['status'],
                 'total':len(json.loads(r['photo_ids'])),'analyzed':sum(len(b['frames']) for b in json.loads(r['analyzed'])),
                 'summaryParts':len(json.loads(r['summary_parts'])),'batches':json.loads(r['analyzed']),'result':parsed(r['result']),'error':r['last_error'],'at':str(r['created_at']),
@@ -126,7 +138,7 @@ class Development:
     async def start(self,request):
         a=request['miniapp_actor'];body=await self.api.body(request)
         if set(body)!={'clientType'} or not isinstance(body['clientType'],str) or body['clientType'] not in {s['type'] for s in [*ai.SALES_SCENARIOS,*ai.BOOKING_SCENARIOS]}: raise AccessError('Выберите сценарий.',400)
-        if not config.openai_api_key: raise AccessError('AI-тренажёр не подключён. Учебные материалы доступны.',503)
+        if not ai_configured(config): raise AccessError('AI-тренажёр не подключён. Учебные материалы доступны.',503)
         scenario=next(s for s in [*ai.SALES_SCENARIOS,*ai.BOOKING_SCENARIOS] if s['type']==body['clientType'])
         async with self.api.engine.begin() as conn:
             if body['clientType'].startswith('booking-'):

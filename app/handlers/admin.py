@@ -13,6 +13,7 @@ from ..config import config, number
 from ..db import Session
 from ..keyboards import inline
 from ..miniapp_sessions import revoke_sessions
+from ..staff_qr_login import revoke_for_user as revoke_staff_qr
 from ..models import (
     AuditLog,
     Booking,
@@ -326,6 +327,7 @@ async def employee_fire_confirm(callback, current_user, current_roles):
                     shooting.status = "CONFIRMED"
         target.active = False
         await revoke_sessions(session, target.id)
+        await revoke_staff_qr(session, target.id)
         target.terminated_at = datetime.now(UTC).replace(tzinfo=None)
         actor = await get_user(session, callback.from_user.id)
         await audit(session, actor, "employee_fired", "user", target.id)
@@ -360,6 +362,7 @@ async def employee_restore(callback, current_roles):
             )
         if target.active:
             return await callback.answer("Сотрудник уже работает.", show_alert=True)
+        await revoke_staff_qr(session, target.id)
         target.active = True
         target.terminated_at = None
         actor = await get_user(session, callback.from_user.id)
@@ -460,6 +463,7 @@ async def employee_remove_role(callback, current_user, current_roles):
             )
         ).one()
         await session.delete(user_role)
+        await revoke_staff_qr(session, target.id)
         remaining = target_roles - {role}
         if not remaining:
             target.active = False
@@ -854,6 +858,12 @@ async def admin_finish_reschedule(m, state, current_user, current_roles):
         return await m.answer("Неверное время. Пример: 16:30")
     data = await state.get_data()
     booking_id = data.get("admin_reschedule_booking_id")
+    from ..operational_start import OperationalStartError, require_booking_date
+    new_day = date.fromisoformat(data["admin_reschedule_date"])
+    try:
+        require_booking_date(new_day)
+    except OperationalStartError as error:
+        return await m.answer(str(error))
     async with Session() as s:
         booking = await s.get(Booking, booking_id, with_for_update=True)
         if not await can_access_booking(s, current_user.id, current_roles, booking):
@@ -865,7 +875,7 @@ async def admin_finish_reschedule(m, state, current_user, current_roles):
         if booking.status not in {"NEW", "PENDING_CONFIRMATION", "CONFIRMED", "ASSIGNED", "RESCHEDULED"}:
             await state.clear()
             return await m.answer("Съёмку уже нельзя переносить.")
-        booking.shoot_date = date.fromisoformat(data["admin_reschedule_date"])
+        booking.shoot_date = new_day
         booking.shoot_time = new_time
         booking.status = "RESCHEDULED"
         shooting = await s.scalar(
@@ -1496,6 +1506,7 @@ async def eroles(m, state, current_roles):
             user = User(tg_id=data["tg"], name=data["name"])
             session.add(user)
             await session.flush()
+        await session.execute(select(User.id).where(User.id == user.id).with_for_update())
         existing = set(
             (
                 await session.execute(
@@ -1507,6 +1518,8 @@ async def eroles(m, state, current_roles):
             return await m.answer(
                 "Изменять владельца или администратора может только владелец."
             )
+        if requested - existing or not user.active:
+            await revoke_staff_qr(session, user.id)
         user.name = data["name"]
         for role in requested - existing:
             session.add(UserRole(user_id=user.id, role=role))

@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from ..access import StaffFilter
+from ..config import config
 from ..db import Session
 from ..keyboards import inline
 from ..models import Booking, Receipt, utc_now
@@ -62,11 +63,13 @@ async def request_photo(message, state, booking_id, purpose):
     await state.set_state(ReceiptFlow.photo)
     await state.set_data({"receipt_booking": booking_id, "receipt_purpose": purpose})
     label = "брони" if purpose == "DEPOSIT" else "оплаты съёмки"
+    from ..services.ai_provider import responses_profile
+    provider = 'Яндекс AI Studio' if responses_profile(config).provider == 'yandex' else 'OpenAI'
     await message.answer(
         f"Пришлите одно фото чека {label} для записи #{booking_id}. "
         "Должны читаться сумма, дата, получатель и номер операции.\n"
         "Оплата останется неподтверждённой до проверки владельцем. "
-        "При подключённом распознавании фото обрабатывается OpenAI.\n"
+        f"При подключённом распознавании фото обрабатывается {provider}.\n"
         "Отмена: /cancel. Вернуться можно через «🧾 Чеки и оплата»."
     )
 

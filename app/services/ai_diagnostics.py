@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 _last: dict[str, dict] = {}
 
 MESSAGES = {
+    'comparison_limit': 'Лимит проверочных запросов достигнут или недоступен. Ваш текст сохранён; новые платные запросы остановлены.',
     'not_configured': 'OpenAI API не подключён на сервере. Владельцу нужно проверить настройку ключа.',
     'invalid_api_key': 'OpenAI отклонил API-ключ. Владельцу нужно проверить ключ проекта на сервере.',
     'insufficient_quota': 'OpenAI сообщает об исчерпании квоты или лимита расходов API. Владельцу нужно проверить оплату и лимиты API-проекта.',
@@ -25,7 +26,7 @@ MESSAGES = {
     'refusal': 'ИИ не смог выполнить это задание. Уточните ответ или выберите другой учебный пример.',
     'invalid_output': 'ИИ вернул ответ, который не прошёл проверку формата. Ваш текст сохранён; повторите запрос.',
 }
-NONRETRYABLE = {'not_configured', 'invalid_api_key', 'insufficient_quota', 'model_not_found',
+NONRETRYABLE = {'comparison_limit', 'not_configured', 'invalid_api_key', 'insufficient_quota', 'model_not_found',
                 'permission_denied', 'unsupported_country_region_territory', 'invalid_schema', 'invalid_request', 'refusal'}
 
 
@@ -34,7 +35,7 @@ def safe_label(value):
 
 
 def record(purpose, model, status, *, code=None, http_status=None):
-    entry = {'purpose': safe_label(purpose), 'provider': 'openai', 'model': safe_label(model),
+    entry = {'purpose': safe_label(purpose), 'provider': 'yandex' if str(model).startswith('gpt://') else 'openai', 'model': safe_label(model),
              'status': status, 'checkedAt': datetime.now(UTC).isoformat()}
     if code:
         entry['errorCode'] = safe_label(code)
@@ -53,8 +54,11 @@ def unavailable(purpose, model, code, *, http_status=None):
         code = 'provider_unavailable'
     record(purpose, model, 'not_configured' if code == 'not_configured' else 'unavailable',
            code=code, http_status=http_status)
+    message = MESSAGES[code]
+    if str(model).startswith('gpt://'):
+        message = message.replace('OpenAI', 'Яндекс AI Studio')
     return {'status': 'not_configured' if code == 'not_configured' else 'unavailable',
-            'errorCode': code, 'message': MESSAGES[code], 'retryable': code not in NONRETRYABLE}
+            'errorCode': code, 'message': message, 'retryable': code not in NONRETRYABLE}
 
 
 def http_failure(purpose, model, http_status, body):

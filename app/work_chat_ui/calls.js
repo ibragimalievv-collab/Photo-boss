@@ -3,6 +3,7 @@ import {icon,avatar,initials} from '/work-chat/ui.js';
 import {cameraConstraints,openCamera} from '/work-chat/camera.js';
 import {esc} from '/app/js/domain.js';
 import {setIncomingRingtone,stopIncomingRingtone} from '/work-chat/ringtone.js';
+const standaloneMode=()=>window.PHOTO_BOSS_CONFIG?.STANDALONE===true;
 
 // A call has its own dialog so chat navigation cannot accidentally capture media
 // or destroy an active connection. Only a deliberate Join/Call click gets media.
@@ -23,7 +24,7 @@ const ignored = new Set();
 const callApi = (path, body) => api(`/chat/calls${path}`, body === undefined ? {} : {method:'POST', body:
     ['/start','/join'].includes(path)?{...body,expectedUserId:me?.user?.id}:body});
 const status = text => { const e = panel.querySelector('[data-call-status]'); if(e) e.textContent = text; };
-const mediaMessage = e => ({NotAllowedError:'Разрешите микрофон и камеру в настройках Telegram или браузера и повторите звонок.',
+const mediaMessage = e => ({NotAllowedError:standaloneMode()?'Разрешите микрофон и камеру в настройках браузера и повторите звонок.':'Разрешите микрофон и камеру в настройках Telegram или браузера и повторите звонок.',
     NotFoundError:'Микрофон или камера не найдены. Проверьте устройство.',
     NotReadableError:'Микрофон или камера заняты другим приложением.',
     OverconstrainedError:'Камера не поддерживает выбранный режим.'}[e.name] || e.message || 'Не удалось начать звонок.');
@@ -82,7 +83,7 @@ export function resetCalls() {
     panel.close();panel.innerHTML='';banner.hidden=true;banner.dataset.room='';banner.innerHTML='';
     document.body.append(banner);
     document.querySelector('[data-top-call]')?.remove();stopIncomingRingtone();
-    window.Telegram?.WebApp?.disableClosingConfirmation?.();
+    if(!standaloneMode())window.Telegram?.WebApp?.disableClosingConfirmation?.();
     me=null;available=[];selected=null;ignored.clear();lastFocus=null;
     starting=false;polling=false;controlsBusy=false;
 }
@@ -95,7 +96,7 @@ export function callToolbar(peer, name) {
 
 async function media(mode) {
     if(!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection)
-        throw new ApiError('Звонки недоступны в этой версии Telegram. Обновите Telegram и откройте Photo Boss заново.');
+        throw new ApiError(standaloneMode()?'Звонки недоступны в этом браузере. Обновите браузер и откройте Photo Boss по защищённой ссылке.':'Звонки недоступны в этой версии Telegram. Обновите Telegram и откройте Photo Boss заново.');
     return navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true, noiseSuppression:true, autoGainControl:true},
         video:mode === 'video' ? cameraConstraints() : false});
 }
@@ -159,7 +160,7 @@ async function begin({peer=null, room=null, mode='audio', name=''} = {}) {
             audio:true,video:mode==='video',facing:stream.getVideoTracks()[0]?.getSettings?.().facingMode||'user',iceServers:result.iceServers,relayConfigured:result.relayConfigured,
             lastSync:Date.now(),closed:false};
         active=c; banner.hidden=true; liveUI(c);setBanner();
-        window.Telegram?.WebApp?.enableClosingConfirmation?.();
+        if(!standaloneMode())window.Telegram?.WebApp?.enableClosingConfirmation?.();
         syncTimer=setInterval(sync,1000); await sync(); refresh();
     } catch(e) {
         stream?.getTracks().forEach(t=>t.stop());
@@ -311,7 +312,7 @@ async function hangup(endForAll=false,message='') {
     active=null;c.closed=true; clearInterval(syncTimer);polling=false;controlsBusy=false;
     c.stream.getTracks().forEach(t=>t.stop()); for(const p of c.peers.values())p.pc.close();
     panel.querySelectorAll('video,audio').forEach(v=>{v.pause();v.srcObject=null;});
-    window.Telegram?.WebApp?.disableClosingConfirmation?.();
+    if(!standaloneMode())window.Telegram?.WebApp?.disableClosingConfirmation?.();
     if(message) fail(message); else {panel.close();lastFocus?.focus?.();}
     try {await callApi('/leave',{callId:c.room.id,session:c.session,endForAll});} catch { /* Server heartbeat removes stale sessions. */ }
     if(ticket===generation)refresh();

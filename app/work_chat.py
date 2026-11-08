@@ -129,7 +129,10 @@ class WorkChat:
 
     async def _notify_one(self, tg_id, text_value):
         from .push_notifications import app_channel, queue_for_telegram_id
-        if app_channel():
+        from .services.media_files import standalone_media_mode
+        if standalone_media_mode(getattr(self.api, 'standalone', None)) or app_channel():
+            # tg_id is a stable legacy identity column, also used for new local
+            # staff IDs. This branch resolves User.id locally; it never contacts Telegram.
             return await queue_for_telegram_id(self.engine, tg_id,
                 kind='call' if text_value.startswith('☎') else 'chat', message=text_value)
         try:

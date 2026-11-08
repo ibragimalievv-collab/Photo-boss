@@ -10,6 +10,9 @@ import json
 import logging
 import os
 import time
+from dataclasses import dataclass, field
+from decimal import Decimal
+from types import SimpleNamespace
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -20,8 +23,19 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .bank_receipt_basis import (
+    BASIS_KEY,
+    RECONCILIATION_REQUIRED,
+    REVIEW_MESSAGE,
+    first_credit_conflict,
+    has_settlement_review,
+    public_settlement_review,
+    receipt_basis,
+    record_settlement_review,
+)
 from .miniapp_security import AccessError
 from .models import BankPayment, Booking, Hotel, Receipt, Sale, SaleDraft, User, utc_now
+from .payment_mode import receipts_only, require_payment_qr
 from .sber_qr_certificates import SberQRCertificateError, build_sber_qr_ssl_context
 from .sber_qr_client import (
     QRClient,
@@ -43,12 +57,12 @@ QR_PROVIDER = 'sber_qr'
 
 def configured():
     """Legacy acquiring gate; QR.API must never substitute its credentials."""
-    return os.getenv('SBER_PAYMENTS_ENABLED') == '1' and bool(os.getenv('SBER_MERCHANT_LOGIN') and os.getenv('SBER_MERCHANT_PASSWORD'))
+    return not receipts_only() and os.getenv('SBER_PAYMENTS_ENABLED') == '1' and bool(os.getenv('SBER_MERCHANT_LOGIN') and os.getenv('SBER_MERCHANT_PASSWORD'))
 
 
 def _qr_requested():
     # A malformed explicit flag must fail closed, rather than choose acquiring.
-    return os.getenv('SBER_QR_ENABLED', '0') != '0'
+    return not receipts_only() and os.getenv('SBER_QR_ENABLED', '0') != '0'
 
 
 def _ecom_test_mode():
@@ -65,17 +79,43 @@ def _qr_configuration(*, for_creation):
         raise AccessError('QR Сбера ещё не подключён. Владелец должен проверить настройки и доступ банка.', 503) from None
 
 
-def payment_settings():
+def _require_working_order_access(refund_integration, *, config=None, bill=None):
+    """Complete credentials/OAuth never establish the working bank contract."""
+    try:
+        if refund_integration is None:
+            raise ValueError
+        adapter = refund_integration.require_working_order_access()
+        current = config or _qr_configuration(for_creation=False)
+        binding = _qr_binding(current)
+        # A verified contract belongs to one merchant/application. Changing
+        # server settings cannot transfer that permission to another binding.
+        if (current.environment != 'production' or adapter._binding() != binding
+                or (bill is not None and _bill_metadata(bill).get('binding') != binding)):
+            raise ValueError
+    except (ValueError, AttributeError, TypeError):
+        raise AccessError('Банк ещё не подтвердил рабочий доступ к оплатам и их точным операциям.', 503) from None
+
+
+def payment_settings(*, refund_integration=None):
     """Public provider selection without reading certificate contents or bank I/O."""
+    from .merchant_qr import merchant_qr_settings
+
+    if receipts_only():
+        return {'paymentMode': 'receipts', 'bankConfigured': False, 'bankProvider': None,
+                'bankTestMode': False, 'merchantQRConfigured': False,
+                'merchantQRAutomaticConfirmation': False}
+    merchant = merchant_qr_settings()
     if _qr_requested():
         try:
             config = _qr_configuration(for_creation=True)
             complete, test_mode = True, config.environment == 'sandbox'
+            if not test_mode:
+                _require_working_order_access(refund_integration, config=config)
         except AccessError:
             complete, test_mode = False, os.getenv('SBER_QR_ENV') != 'production'
-        return {'bankConfigured': complete, 'bankProvider': QR_PROVIDER, 'bankTestMode': test_mode}
+        return {**merchant, 'bankConfigured': complete, 'bankProvider': QR_PROVIDER, 'bankTestMode': test_mode}
     available = configured()
-    return {'bankConfigured': available, 'bankProvider': ECOM_PROVIDER if available else None,
+    return {**merchant, 'bankConfigured': available, 'bankProvider': ECOM_PROVIDER if available else None,
             'bankTestMode': _ecom_test_mode()}
 
 
@@ -145,7 +185,97 @@ async def bank_call(method, payload):
         raise AccessError('Ответ банка не получен. Счёт сохранён; проверьте его статус перед повтором.', 503) from None
 
 
-async def _approve_verified_payment(session, bill, refunded, *, provider):
+def _refund_schema_requested():
+    value = os.getenv('PHOTO_BOSS_BANK_REFUNDS_SCHEMA', '0')
+    if value not in {'0', '1'}:
+        raise AccessError('Настройки банковского учёта требуют проверки владельца.', 503)
+    return value == '1'
+
+
+def _bill_snapshot(bill):
+    """Detach only fields that identify an existing order; never an actor/session."""
+    return SimpleNamespace(**{name: getattr(bill, name, None) for name in (
+        'id', 'booking_id', 'created_by_id', 'order_number', 'bank_order_id',
+        'amount', 'test_mode', 'pricing_snapshot', 'reservation_version_id')})
+
+
+def _bill_fingerprint(bill):
+    value = _bill_snapshot(bill)
+    return hashlib.sha256(json.dumps([value.id, value.booking_id, value.created_by_id,
+        value.order_number, value.bank_order_id, str(money(value.amount)), value.test_mode,
+        value.pricing_snapshot, value.reservation_version_id], separators=(',', ':')).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class _BankObservation:
+    fingerprint: str = field(repr=False)
+    data_json: bytes = field(repr=False)
+    evidence: object = field(default=None, repr=False)
+
+    @property
+    def data(self):
+        return json.loads(self.data_json)
+
+
+async def read_bank_observation(bill, *, refund_integration=None):
+    """Read the bank before the monetary transaction, using detached order fields."""
+    target = _bill_snapshot(bill)
+    metadata = _bill_metadata(target)
+    evidence = None
+    if metadata['provider'] == QR_PROVIDER:
+        config = _qr_configuration(for_creation=False)
+        if (metadata['environment'] != config.environment
+                or metadata.get('binding') != _qr_binding(config)):
+            raise AccessError('Счёт относится к другому приложению или среде банка. Нужна проверка владельца.', 409)
+        if not target.test_mode:
+            _require_working_order_access(refund_integration, config=config, bill=target)
+        amount = int(money(target.amount) * 100)
+        try:
+            client = QRClient.from_config(config)
+            if refund_integration is None:
+                data = await client.get_status(target.bank_order_id, target.order_number, amount)
+            else:
+                observed = await client.get_status_observation(target.bank_order_id, target.order_number, amount)
+                data = observed.status
+                if not target.test_mode and data.get('status') in {'PAID', 'PARTIAL_REFUND', 'REFUNDED'}:
+                    # This method is DB/network-free and requires the separate,
+                    # explicitly installed working-order capability contract.
+                    try:
+                        verified_target = SimpleNamespace(**vars(target))
+                        # A status lookup by partner number can recover an
+                        # uncertain registration without creating another bill.
+                        verified_target.bank_order_id = data.get('bank_order_id')
+                        evidence = refund_integration.verify_order_observation(
+                            verified_target, observed.order_details)
+                    except AccessError:
+                        raise
+                    except ValueError:
+                        raise AccessError('Банк ещё не подтвердил доступ к точным операциям оплаты и возврата.', 503) from None
+        except SberQRClientError:
+            raise AccessError('Подтверждение оплаты по QR от банка не получено. Счёт сохранён для повторной сверки.', 503) from None
+    else:
+        if target.test_mode != _ecom_test_mode():
+            raise AccessError('Счёт относится к другой среде банка. Нужна проверка владельца.', 409)
+        payload = {'orderId': target.bank_order_id} if target.bank_order_id else {'orderNumber': target.order_number}
+        data = await bank_call('getOrderStatusExtended', payload)
+    try:
+        encoded = json.dumps(data, separators=(',', ':'), allow_nan=False).encode()
+    except (ValueError, TypeError):
+        raise AccessError('Банк вернул неоднозначные данные. Нужна проверка владельца.', 503) from None
+    return _BankObservation(_bill_fingerprint(target), encoded, evidence)
+
+
+async def _refund_hook(method, *args, **kwargs):
+    """Keep opt-in models in their owner; translate only fixed public failures."""
+    try:
+        return await method(*args, **kwargs)
+    except AccessError:
+        raise
+    except ValueError:
+        raise AccessError('Банковский учёт требует сверки владельца. Повторное поступление не добавлено.', 409) from None
+
+
+async def _approve_verified_payment(session, bill, refunded, *, provider, refund_integration=None):
     """Existing receipt/deposit ledger, in the caller's locked transaction."""
     if bill.test_mode:
         bill.status = 'TEST_PAID'
@@ -153,7 +283,13 @@ async def _approve_verified_payment(session, bill, refunded, *, provider):
     amount_kopecks = int(money(bill.amount) * 100)
     if type(refunded) is not int or not 0 <= refunded <= amount_kopecks:
         raise AccessError('Банк вернул неоднозначные данные возврата. Нужна проверка владельца.', 409)
-    net = money((amount_kopecks - refunded) / 100)
+    net = money(Decimal(amount_kopecks - refunded) / 100)
+    if not bill.receipt_id:
+        reason = await first_credit_conflict(session, bill) if net > 0 else None
+        if reason or has_settlement_review(bill):
+            await record_settlement_review(session, bill, provider=provider,
+                refunded=refunded, net=net, reason=reason)
+            return
     if not bill.receipt_id and net > 0:
         receipt = Receipt(booking_id=bill.booking_id, uploaded_by_id=bill.created_by_id,
             purpose='DEPOSIT' if json.loads(bill.pricing_snapshot).get('kind') == 'DEPOSIT' else 'PAYMENT',
@@ -163,24 +299,26 @@ async def _approve_verified_payment(session, bill, refunded, *, provider):
                 'provider': QR_PROVIDER if provider == QR_PROVIDER else 'sber', 'orderNumber': bill.order_number}),
             reviewed_at=utc_now())
         session.add(receipt)
+        if refund_integration is not None:
+            await _refund_hook(refund_integration.bind_receipt_from_bill, session, bill, receipt, created=True)
         await session.flush()
         bill.receipt_id = receipt.id
     elif bill.receipt_id:
         receipt = await session.get(Receipt, bill.receipt_id, with_for_update=True)
+        if refund_integration is not None:
+            await _refund_hook(refund_integration.bind_receipt_from_bill, session, bill, receipt, created=False)
         receipt.status, receipt.verified_amount = ('APPROVED', net) if net > 0 else ('REJECTED', None)
+        from .services.automatic_receipts import analysis_of
+        evidence = analysis_of(receipt)
+        evidence['bankSettlement'] = {'provider': provider, 'orderNumber': bill.order_number,
+                                      'netAmount': str(net), 'checkedAt': utc_now().isoformat()}
+        receipt.analysis = json.dumps(evidence, ensure_ascii=False)
     bill.status = 'PAID' if not refunded else 'PARTIAL_REFUND' if net else 'REFUNDED'
 
 
-async def _reconcile_qr(session, bill, metadata):
-    config = _qr_configuration(for_creation=False)
-    if (metadata['environment'] != config.environment
-            or metadata.get('binding') != _qr_binding(config)):
-        raise AccessError('Счёт относится к другому приложению или среде банка. Нужна проверка владельца.', 409)
+async def _reconcile_qr(session, bill, metadata, observation, *, refund_integration=None):
     amount = int(money(bill.amount) * 100)
-    try:
-        data = await QRClient.from_config(config).get_status(bill.bank_order_id, bill.order_number, amount)
-    except SberQRClientError:
-        raise AccessError('Подтверждение оплаты по QR от банка не получено. Счёт сохранён для повторной сверки.', 503) from None
+    data = observation.data
     bill.checked_at = utc_now()
     if (not isinstance(data, dict) or data.get('order_number') != bill.order_number
             or data.get('currency') != '643' or type(data.get('amount_kopecks')) is not int
@@ -193,6 +331,7 @@ async def _reconcile_qr(session, bill, metadata):
     if not isinstance(state, str) or state not in {
             'PENDING', 'PAID', 'TEST_PAID', 'PARTIAL_REFUND', 'REFUNDED', 'CANCELLED', 'DECLINED'}:
         raise AccessError('Банк не подтвердил однозначный статус оплаты. Нужна проверка владельца.', 409)
+    bill.bank_order_id = data['bank_order_id']
     if state in {'PAID', 'TEST_PAID', 'PARTIAL_REFUND', 'REFUNDED'}:
         paid, refunded = data.get('paid_kopecks'), data.get('refunded_kopecks')
         if (data.get('settlement_verified') is not True or type(paid) is not int or paid != amount
@@ -204,13 +343,39 @@ async def _reconcile_qr(session, bill, metadata):
             raise AccessError('Банк не подтвердил сумму фактической оплаты и возврата. Нужна проверка владельца.', 409)
         if bill.test_mode:
             bill.status = 'REFUNDED' if refunded == paid else 'TEST_PAID'
+        elif refund_integration is not None:
+            if observation.evidence is None:
+                raise AccessError('Нет подтверждённых банковских операций для рабочего учёта.', 409)
+            booking = await session.get(Booking, bill.booking_id)
+            established = await _refund_hook(refund_integration.bank_history_present, session, bill)
+            if established:
+                # The immutable history owns NET now. A stale PAID aggregate
+                # must never restore money already returned by a verified event.
+                await _refund_hook(refund_integration.apply_verified_bank_evidence,
+                    session, booking, bill, observation.evidence)
+                if bill.status != RECONCILIATION_REQUIRED:
+                    receipt = await session.get(Receipt, bill.receipt_id, with_for_update=True)
+                    net = money(receipt.verified_amount) if receipt and receipt.status == 'APPROVED' else money(0)
+                    bill.status = 'REFUNDED' if net == 0 else 'PARTIAL_REFUND' if net < money(bill.amount) else 'PAID'
+            elif refunded:
+                # A first observation after a refund cannot manufacture its
+                # original cash event or its exact refund correlation history.
+                await record_settlement_review(session, bill, provider=QR_PROVIDER,
+                    refunded=refunded, net=money(Decimal(paid - refunded) / 100),
+                    reason='original_refund_history_unavailable')
+            else:
+                await _approve_verified_payment(session, bill, refunded, provider=QR_PROVIDER,
+                    refund_integration=refund_integration)
+                if bill.status != RECONCILIATION_REQUIRED:
+                    await _refund_hook(refund_integration.apply_verified_bank_evidence,
+                        session, booking, bill, observation.evidence)
         else:
             await _approve_verified_payment(session, bill, refunded, provider=QR_PROVIDER)
     else:
         if (type(data.get('paid_kopecks')) is not int or data['paid_kopecks'] != 0
                 or type(data.get('refunded_kopecks')) is not int or data['refunded_kopecks'] != 0):
             raise AccessError('Статус банка не совпал с денежными операциями. Нужна проверка владельца.', 409)
-        if bill.receipt_id:
+        if bill.receipt_id or has_settlement_review(bill):
             # A previously verified payment cannot be erased by an unpaid state.
             raise AccessError('Банк вернул противоречивый статус ранее оплаченного счёта.', 409)
         bill.status = state
@@ -219,15 +384,23 @@ async def _reconcile_qr(session, bill, metadata):
     await refresh_payment_statuses(session, bill.booking_id)
 
 
-async def reconcile(session, bill):
+async def reconcile(session, bill, *, observation=None, refund_integration=None):
     """Idempotent accounting using the provider recorded when the bill was made."""
+    if refund_integration is not None and observation is None:
+        raise AccessError('Подтверждение банка необходимо получить до изменения учёта.', 409)
+    # Compatibility for older internal callers. HTTP/worker paths prefetch and
+    # close their preview session before any provider I/O.
+    observation = observation or await read_bank_observation(bill)
+    if not isinstance(observation, _BankObservation) or observation.fingerprint != _bill_fingerprint(bill):
+        raise AccessError('Банковский счёт изменился во время проверки. Повторите сверку этого же счёта.', 409)
     metadata = _bill_metadata(bill)
     if metadata['provider'] == QR_PROVIDER:
-        return await _reconcile_qr(session, bill, metadata)
-    if bill.test_mode != _ecom_test_mode():
-        raise AccessError('Счёт относится к другой среде банка. Нужна проверка владельца.', 409)
-    payload = {'orderId': bill.bank_order_id} if bill.bank_order_id else {'orderNumber': bill.order_number}
-    data = await bank_call('getOrderStatusExtended', payload)
+        if not bill.test_mode:
+            _require_working_order_access(refund_integration, bill=bill)
+        return await _reconcile_qr(session, bill, metadata, observation, refund_integration=refund_integration)
+    if refund_integration is not None and not bill.test_mode:
+        raise AccessError('Для этого старого банковского провайдера нужен отдельный проверенный учёт возвратов.', 409)
+    data = observation.data
     bill.checked_at = utc_now()
     if str(data.get('errorCode', '0')) != '0':
         return
@@ -247,24 +420,45 @@ async def reconcile(session, bill):
             raise AccessError('Банк вернул неоднозначные данные возврата. Нужна проверка владельца.', 409)
         await _approve_verified_payment(session, bill, refunded, provider=ECOM_PROVIDER)
     elif state in {3, 4}:
+        if has_settlement_review(bill):
+            if state == 3:
+                raise AccessError('Банк вернул противоречивый статус ранее подтверждённой операции.', 409)
+            await record_settlement_review(session, bill, provider=ECOM_PROVIDER,
+                refunded=int(money(bill.amount) * 100), net=money(0), reason=None)
+            await session.flush()
+            await refresh_payment_statuses(session, bill.booking_id)
+            return
         bill.status = 'REFUNDED' if state == 4 else 'CANCELLED'
         if bill.receipt_id:
             receipt = await session.get(Receipt, bill.receipt_id, with_for_update=True)
             receipt.status, receipt.verified_amount = 'REJECTED', None
     elif state == 6:
+        if has_settlement_review(bill):
+            raise AccessError('Банк вернул противоречивый статус ранее подтверждённой операции.', 409)
         bill.status = 'DECLINED'
     await session.flush()
     await refresh_payment_statuses(session, bill.booking_id)
 
 
-def public_bill(bill):
-    return {'id': bill.id, 'bookingId': bill.booking_id, 'amount': str(money(bill.amount)),
+def public_bill(bill, *, refund_integration=None):
+    result = {'id': bill.id, 'bookingId': bill.booking_id, 'amount': str(money(bill.amount)),
             'status': bill.status, 'url': bill.payment_url,
             'testMode': bill.test_mode, 'provider': _bill_metadata(bill)['provider'],
             'qrPath': f'/bank-payments/{bill.id}/qr' if bill.payment_url else None}
+    if bill.status == RECONCILIATION_REQUIRED:
+        result.update(url=None, qrPath=None, reconciliationRequired=True,
+                      message=REVIEW_MESSAGE, verifiedBankFact=public_settlement_review(bill))
+    elif not bill.test_mode and result['provider'] == QR_PROVIDER:
+        try:
+            _require_working_order_access(refund_integration, bill=bill)
+        except AccessError:
+            # Existing orders remain readable/reconcilable if access is later
+            # withdrawn, but must not expose another payable QR or link.
+            result.update(url=None, qrPath=None)
+    return result
 
 
-def _connection_readiness():
+def _connection_readiness(*, refund_integration=None):
     """Only allowlisted metadata; never parse a certificate or contact the bank."""
     result = {'provider': QR_PROVIDER, 'enabled': False, 'environment': 'sandbox',
         'authenticationConfigurationComplete': False, 'orderConfigurationComplete': False,
@@ -284,12 +478,26 @@ def _connection_readiness():
         orderConfigurationComplete=not order_issues,
         orderCreationEnabled=config.enabled and not order_issues,
         issues=list(order_issues))
+    if config.environment == 'production':
+        try:
+            _require_working_order_access(refund_integration, config=config)
+        except AccessError:
+            result['orderCreationEnabled'] = False
+            result['issues'].append('working_order_access_unconfirmed')
     return config, result
 
 
 class BankPayments:
     def __init__(self, api):
         self.api = api
+
+    def refund_integration(self):
+        if not _refund_schema_requested():
+            return None
+        integration = getattr(self.api, 'booking_refunds', None)
+        if integration is None:
+            raise AccessError('Банковский учёт возвратов ещё не подготовлен. Нужна проверка владельца.', 503)
+        return integration
 
     async def access(self, session, a, booking):
         actor = await session.get(User, a['id'])
@@ -307,14 +515,15 @@ class BankPayments:
 
     async def connection(self, request):
         await self._owner(request)
-        _, result = _connection_readiness()
+        _, result = _connection_readiness(refund_integration=getattr(self.api, 'booking_refunds', None))
         return web.json_response(result, headers={'Cache-Control': 'no-store'})
 
     async def check_connection(self, request):
+        require_payment_qr()
         await self._owner(request)
         if await self.api.body(request) != {}:
             raise AccessError('Проверка использует только настройки сервера. Лишние параметры запрещены.', 400)
-        config, result = _connection_readiness()
+        config, result = _connection_readiness(refund_integration=getattr(self.api, 'booking_refunds', None))
         result.update(ok=False, scope='certificate_and_oauth_only', stage='configuration')
         if config is None or not result['authenticationConfigurationComplete']:
             result['error'] = 'Для проверки банка не хватает подтверждённых настроек подключения.'
@@ -348,8 +557,10 @@ class BankPayments:
         return web.json_response(result, headers={'Cache-Control': 'no-store'})
 
     async def create(self, request):
+        require_payment_qr()
+        refund_integration = self.refund_integration()
         body, a = await self.api.body(request), request['miniapp_actor']
-        optional = {'discountId', 'albumId', 'albumQuantity', 'sourceDraftId', 'allowZeroDue'}
+        optional = {'discountId', 'albumId', 'albumQuantity', 'sourceDraftId', 'allowZeroDue', 'photoAmount'}
         if (set(body) - optional != {'bookingId', 'total', 'sold', 'tariffId', 'amount', 'requestKey', 'purpose'}
                 or type(body['bookingId']) is not int or type(body['total']) is not int or type(body['sold']) is not int
                 or not isinstance(body['purpose'], str) or body['purpose'] not in {'PURCHASE', 'DEPOSIT', 'BALANCE'}
@@ -371,9 +582,9 @@ class BankPayments:
             if bill:
                 if bill.created_by_id != a['id'] or bill.payload_hash != digest:
                     raise AccessError('Ключ счёта уже использован для других данных.', 409)
-                return web.json_response(public_bill(bill))
+                return web.json_response(public_bill(bill, refund_integration=refund_integration))
             pending = await session.scalar(select(BankPayment).where(BankPayment.booking_id == booking.id,
-                BankPayment.status.in_(['CREATING', 'PENDING'])).limit(1))
+                BankPayment.status.in_(['CREATING', 'PENDING', RECONCILIATION_REQUIRED])).limit(1))
             if pending:
                 raise AccessError(f'По съёмке уже есть счёт №{pending.id}. Проверьте его перед созданием нового.', 409)
             try:
@@ -413,7 +624,7 @@ class BankPayments:
                         quote = await sale_quote(session, booking, body['sold'], body['total'], body['tariffId'],
                             saved=frozen,
                             discount_id=body.get('discountId'), album_id=body.get('albumId'),
-                            album_quantity=body.get('albumQuantity'))
+                            album_quantity=body.get('albumQuantity'), photo_amount=body.get('photoAmount'))
                         if draft:
                             # The quote and invoice commit together before bank
                             # I/O. Counts remain unaccepted until payment, but
@@ -445,6 +656,8 @@ class BankPayments:
             if _qr_requested():
                 qr_config = _qr_configuration(for_creation=True)
                 provider, test_mode = QR_PROVIDER, qr_config.environment == 'sandbox'
+                if not test_mode:
+                    _require_working_order_access(refund_integration, config=qr_config)
             else:
                 if not configured():
                     raise AccessError('СберБизнес ещё не подключён. Нужны настройки банковского сервиса владельца.', 503)
@@ -453,6 +666,7 @@ class BankPayments:
                 if not return_url.startswith('https://'):
                     raise AccessError('Владелец должен настроить адрес возврата СберБизнес.', 503)
             quote['_bank'] = {'provider': provider, 'environment': 'sandbox' if test_mode else 'production'}
+            quote[BASIS_KEY] = await receipt_basis(session, booking.id)
             if qr_config is not None:
                 quote['_bank']['binding'] = _qr_binding(qr_config)
             bill = BankPayment(booking_id=booking.id, created_by_id=actor.id, request_key=body['requestKey'],
@@ -460,6 +674,8 @@ class BankPayments:
                 test_mode=test_mode,
                 pricing_snapshot=json.dumps(quote, ensure_ascii=False))
             session.add(bill)
+            if refund_integration is not None:
+                await _refund_hook(refund_integration.bind_bill, session, bill, booking)
             await session.flush()
             await audit(session, actor, 'bank_bill_created', 'bank_payment', bill.id, f'booking={booking.id};amount={amount}')
             hotel = await session.get(Hotel, booking.hotel_id)
@@ -498,27 +714,45 @@ class BankPayments:
                 bill.payment_url = payment_url
                 bill.status = 'PENDING'
             await session.commit()
-        return web.json_response(public_bill(bill))
+        return web.json_response(public_bill(bill, refund_integration=refund_integration))
 
     async def status(self, request):
+        require_payment_qr()
         a = request['miniapp_actor']
-        async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
+        refund_integration = self.refund_integration()
+        # Authorize a detached preview, then release its transaction before the
+        # provider can take up to 25 seconds. Recheck role and exact bill after
+        # re-locking; dismissal, reset or registration races cannot reuse it.
+        async with AsyncSession(self.api.engine) as session:
             preview = await session.get(BankPayment, int(request.match_info['id']))
             if not preview:
                 raise AccessError('Счёт не найден.', 404)
-            booking = await session.get(Booking, preview.booking_id, with_for_update=True)
+            booking = await session.get(Booking, preview.booking_id)
             await self.access(session, a, booking)
-            bill = await session.get(BankPayment, preview.id, with_for_update=True, populate_existing=True)
-            await reconcile(session, bill)
+            target = _bill_snapshot(preview)
+        observation = await read_bank_observation(target, refund_integration=refund_integration)
+        async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
+            booking = await session.get(Booking, target.booking_id, with_for_update=True)
+            if not booking:
+                raise AccessError('Запись больше недоступна. Обновите рабочие данные.', 404)
+            await self.access(session, a, booking)
+            bill = await session.get(BankPayment, target.id, with_for_update=True, populate_existing=True)
+            if not bill:
+                raise AccessError('Счёт не найден.', 404)
+            await reconcile(session, bill, observation=observation, refund_integration=refund_integration)
             await session.commit()
-            return web.json_response(public_bill(bill))
+            return web.json_response(public_bill(bill, refund_integration=refund_integration))
 
     async def qr(self, request):
+        require_payment_qr()
+        refund_integration = self.refund_integration()
         async with AsyncSession(self.api.engine) as session:
             bill = await session.get(BankPayment, int(request.match_info['id']))
             if not bill:
                 raise AccessError('Счёт не найден.', 404)
             await self.access(session, request['miniapp_actor'], await session.get(Booking, bill.booking_id))
+            if not bill.test_mode and _bill_metadata(bill)['provider'] == QR_PROVIDER:
+                _require_working_order_access(refund_integration, bill=bill)
             if bill.status != 'PENDING' or not _bill_payment_url(bill):
                 raise AccessError('Для этого счёта нет активного QR.', 409)
             image = qrcode.make(bill.payment_url)
@@ -527,13 +761,23 @@ class BankPayments:
             return web.Response(body=data.getvalue(), content_type='image/png', headers={'Cache-Control': 'no-store'})
 
 
-async def payment_loop(engine, interval=30):
+async def payment_loop(engine, interval=30, *, refund_integration=None):
     while True:
+        if receipts_only():
+            await asyncio.sleep(interval)
+            continue
+        try:
+            if _refund_schema_requested() and refund_integration is None:
+                raise AccessError('refund_integration_unavailable', 503)
+        except AccessError:
+            log.warning('Bank reconciliation deferred: refund integration unavailable')
+            await asyncio.sleep(interval)
+            continue
         try:
             qr_polling = not qr_client_issues(SberQRConfig.from_env(), for_order=True)
         except (ValueError, OSError):
             qr_polling = False
-        if configured() or qr_polling:
+        if not receipts_only() and (configured() or qr_polling):
             try:
                 from .operations_guard import operation_lease
                 async with operation_lease(engine):
@@ -546,9 +790,18 @@ async def payment_loop(engine, interval=30):
                                 preview = await session.get(BankPayment, bid)
                                 if preview is None:
                                     continue
-                                await session.get(Booking, preview.booking_id, with_for_update=True)
+                                target = _bill_snapshot(preview)
+                            observation = await read_bank_observation(target,
+                                refund_integration=refund_integration)
+                            async with AsyncSession(engine) as session:
+                                booking = await session.get(Booking, target.booking_id, with_for_update=True)
+                                if booking is None:
+                                    continue
                                 bill = await session.get(BankPayment, bid, with_for_update=True, populate_existing=True)
-                                await reconcile(session, bill)
+                                if bill is None:
+                                    continue
+                                await reconcile(session, bill, observation=observation,
+                                    refund_integration=refund_integration)
                                 await session.commit()
                         except (AccessError, SQLAlchemyError, OSError) as exc:
                             # A bill requiring old credentials must not block the
@@ -560,6 +813,9 @@ async def payment_loop(engine, interval=30):
 
 
 def install_bank_payments(app, api):
+    from .merchant_qr import install_merchant_qr
+
+    install_merchant_qr(app, api)
     service = BankPayments(api)
     app.router.add_get('/api/miniapp/bank-payments/connection', service.connection)
     app.router.add_post('/api/miniapp/bank-payments/connection/check', service.check_connection)

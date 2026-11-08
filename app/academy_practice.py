@@ -1,4 +1,5 @@
 """Authenticated Academy assignments, uploads and reviews inside the Mini App."""
+from .services.ai_provider import ai_configured
 import asyncio
 import hashlib
 import io
@@ -56,12 +57,12 @@ class BoundedPhoto(io.BytesIO):
         return super().write(data)
 
 
-async def photo_bytes(bot, storage, file_id):
+async def photo_bytes(bot, storage, file_id, *, standalone=None):
+    from .services.media_files import load_private_media
     if file_id.startswith(DISK_PREFIX):
         return await storage.download_bytes(file_id[len(DISK_PREFIX):], max_bytes=MAX_IMAGE_BYTES)
-    buffer = BoundedPhoto()
-    await bot.download(file_id, destination=buffer, timeout=25)
-    return buffer.getvalue()
+    return await load_private_media(bot, file_id, max_bytes=MAX_IMAGE_BYTES, timeout=25,
+                                    standalone=standalone)
 
 
 class AcademyPractice:
@@ -264,6 +265,7 @@ class AcademyPractice:
         return web.FileResponse(category.image_paths[pose - 1], headers={"Content-Type": "image/jpeg"})
 
     async def photo(self, request):
+        from .services.media_files import LegacyMediaUnavailable
         aid, pose = positive_id(request.match_info["id"]), positive_id(request.match_info["pose"])
         async with self.engine.connect() as conn:
             await self.assignment(conn, request["miniapp_actor"], aid)
@@ -271,7 +273,11 @@ class AcademyPractice:
                 WHERE assignment_id=:id AND pose_index=:pose""", id=aid, pose=pose)
         if not rows:
             raise AccessError("Фото не найдено.", 404)
-        payload = await photo_bytes(self.api.bot, request.app["yandex_disk"], rows[0]["submitted_file_id"])
+        try:
+            payload = await photo_bytes(self.api.bot, request.app["yandex_disk"], rows[0]["submitted_file_id"],
+                                        standalone=getattr(self.api, 'standalone', None))
+        except LegacyMediaUnavailable as exc:
+            raise AccessError(str(exc), 409) from exc
         if request.query.get("preview") == "1":
             payload, _ = await asyncio.to_thread(analysis_copy, payload)
         return web.Response(body=payload, content_type="image/jpeg")
@@ -450,6 +456,7 @@ class AcademyPractice:
         return web.json_response(result)
 
     async def recover_photos(self, request):
+        from .services.media_files import LegacyMediaUnavailable
         actor = request['miniapp_actor']
         aid = positive_id(request.match_info['id'])
         async with self.engine.connect() as conn:
@@ -460,7 +467,12 @@ class AcademyPractice:
         missing = []
         for shot in shots:
             try:
-                await photo_bytes(self.api.bot, request.app['yandex_disk'], shot['submitted_file_id'])
+                await photo_bytes(self.api.bot, request.app['yandex_disk'], shot['submitted_file_id'],
+                                  standalone=getattr(self.api, 'standalone', None))
+            except LegacyMediaUnavailable as exc:
+                # An unmapped archive reference is not a missing original.
+                # Keep every submission and its review history untouched.
+                raise AccessError(str(exc), 409) from exc
             except YandexDiskError as exc:
                 if exc.http_status != 404:
                     raise
@@ -510,6 +522,7 @@ class AcademyPractice:
         return True
 
     async def _load_submissions(self, row, shots, storage, *, prepare_large=True):
+        from .services.media_files import LegacyMediaUnavailable
         by_index = {s["pose_index"]: s for s in shots}
         unavailable = [index for index in range(1, 6) if index not in by_index]
         uploaded = []
@@ -519,7 +532,8 @@ class AcademyPractice:
             if shot is None:
                 continue
             try:
-                payload = await photo_bytes(self.api.bot, storage, shot["submitted_file_id"])
+                payload = await photo_bytes(self.api.bot, storage, shot["submitted_file_id"],
+                                            standalone=getattr(self.api, 'standalone', None))
                 if (not payload.startswith(b"\xff\xd8\xff") or not payload.endswith(b"\xff\xd9")
                         or len(payload) > MAX_IMAGE_BYTES):
                     raise ValueError("Stored practice photo is not a bounded JPEG")
@@ -528,6 +542,9 @@ class AcademyPractice:
                 else:
                     uploaded.append(payload)
                 del payload
+            except LegacyMediaUnavailable:
+                # Defer review without reopening/removing retained archive slots.
+                deferred = True
             except YandexDiskError as exc:
                 if exc.http_status == 404:
                     unavailable.append(index)
@@ -644,12 +661,12 @@ class AcademyPractice:
                 context = await self.assignment_context(conn, row, bind=True)
                 previous_review = await self.previous_review(conn, row)
             processed += 1
-            result = ai_unavailable('academy_review', config.academy_analysis_model, 'not_configured') if not config.openai_api_key else {"status": "unavailable"}
+            result = ai_unavailable('academy_review', config.academy_analysis_model, 'not_configured') if not ai_configured(config) else {"status": "unavailable"}
             async with self.engine.connect() as conn:
                 shots = await self.api.rows(conn, """SELECT pose_index,submitted_file_id FROM training_submissions
                     WHERE assignment_id=:id ORDER BY pose_index""", id=row["id"])
             category = CATEGORY_BY_SLUG[row["category_slug"]]
-            if config.openai_api_key:
+            if ai_configured(config):
                 uploaded, unavailable, deferred = await self._load_submissions(row, shots, storage, prepare_large=True)
                 if unavailable and not deferred:
                     reopened = await self._reopen_unavailable_photos(

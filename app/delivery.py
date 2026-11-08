@@ -115,8 +115,7 @@ class Delivery:
     def client_photos_query(gallery):
         query = select(DeliveryPhoto).where(DeliveryPhoto.gallery_id == gallery.id)
         if gallery.delivery_mode == 'ALL':
-            return query.where(or_(DeliveryPhoto.upload_set == 'ALL', DeliveryPhoto.origin == 'SALE'),
-                               guest_photo_clause())
+            return query.where(guest_photo_clause())
         direct = aliased(DeliveryPhoto)
         uploaded_separately = select(direct.id).where(
             direct.gallery_id == DeliveryPhoto.gallery_id,
@@ -147,8 +146,10 @@ class Delivery:
             result['botStartedAt'] = result['botStartedAt'].isoformat() if result['botStartedAt'] else None
             result['botLinkSentAt'] = result['botLinkSentAt'].isoformat() if result['botLinkSentAt'] else None
             result['clientUrl'] = self.origin() + '/g/' + g.access_token
-            bot = await self.api.bot.me()
-            result['botUrl'] = 'https://t.me/' + bot.username + '?start=' + ('gallery_' if g.published else 'booking_') + g.access_token
+            from .services.media_files import standalone_media_mode
+            if not standalone_media_mode(getattr(self.api, 'standalone', None)):
+                bot = await self.api.bot.me()
+                result['botUrl'] = 'https://t.me/' + bot.username + '?start=' + ('gallery_' if g.published else 'booking_') + g.access_token
         from .gallery_workspace import GalleryWorkspace
         return await GalleryWorkspace(self).enrich(session, result, g)
 
@@ -481,7 +482,7 @@ class Delivery:
     @staticmethod
     def direct_photo_allowed(gallery, photo):
         return bool(photo and photo.gallery_id == gallery.id and (
-            photo.upload_set == 'ALL' or photo.origin == 'SALE' if gallery.delivery_mode == 'ALL'
+            photo.upload_set in {'ALL', 'SELECTED'} if gallery.delivery_mode == 'ALL'
             else photo.selected or photo.upload_set == 'SELECTED'))
 
     async def authorize_public_download(self, request, files, *, direct=False):
@@ -504,7 +505,8 @@ class Delivery:
             async with self.download_slots:
                 return await verify_original(self.api.engine, self.api.bot, SimpleNamespace(
                     storage_path=photo.disk_path, telegram_file_id=photo.disk_path,
-                    byte_size=photo.byte_size, sha256=photo.sha256))
+                    byte_size=photo.byte_size, sha256=photo.sha256),
+                    standalone=getattr(self.api, 'standalone', None))
         token, client_id = configured_from_env()
         if not token:
             raise YandexDiskError('Storage unavailable')
@@ -682,8 +684,11 @@ class Delivery:
 
     async def campaign(self, request):
         from .miniapp_security import require_owner
+        from .services.media_files import standalone_media_mode
         actor = request['miniapp_actor']
         require_owner(actor['roles'])
+        if standalone_media_mode(getattr(self.api, 'standalone', None)):
+            raise AccessError('Рассылка через Telegram недоступна в самостоятельном приложении. История рассылок сохранена.', 409)
         body = await self.api.body(request)
         if set(body) != {'text','confirmed'} or body['confirmed'] is not True or not isinstance(body['text'],str) or not 1 <= len(body['text'].strip()) <= 3000:
             raise AccessError('Подтвердите текст сообщения, до 3000 символов.', 400)
@@ -746,7 +751,9 @@ def install_delivery(app, api):
     service = Delivery(api)
     app['delivery'] = service
     app['delivery_archive_slot'] = asyncio.Semaphore(1)
-    SERVICES[api.bot.token] = service
+    from .services.media_files import standalone_media_mode
+    if not standalone_media_mode(getattr(api, 'standalone', None)):
+        SERVICES[api.bot.token] = service
     @web.middleware
     async def public_headers(request, handler):
         if not request.path.startswith('/g/'):

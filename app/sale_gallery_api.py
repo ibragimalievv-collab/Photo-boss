@@ -9,6 +9,7 @@ from .launch_policy import app_url
 from .miniapp_security import AccessError
 from .models import Booking, Sale, SaleDraft, SaleDraftPhoto, Setting, User
 from .services.core import roles_of
+from .services.media_files import LegacyMediaUnavailable
 from .services.sale_gallery import (
     gallery_results,
     link_draft,
@@ -81,7 +82,10 @@ class SaleGalleryAPI:
         try:
             for photo in photos:
                 async with request.app['delivery'].download_slots:
-                    await verify_original(self.api.engine, self.api.bot, photo)
+                    await verify_original(self.api.engine, self.api.bot, photo,
+                                          standalone=getattr(self.api, 'standalone', None))
+        except LegacyMediaUnavailable as exc:
+            raise AccessError(str(exc), 409) from exc
         except ValueError as exc:
             raise AccessError(str(exc), 409) from exc
         except (YandexDiskError, OSError, TimeoutError) as exc:

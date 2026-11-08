@@ -271,8 +271,8 @@ class Attendance:
         return web.json_response(self.result(actor, start, end, self.now()))
 
     async def send_photo(self, actor, raw, purpose):
-        from .push_notifications import app_channel
-        if app_channel():
+        from .services.media_files import direct_disk_mode
+        if direct_disk_mode(getattr(self.api, 'standalone', None)):
             from .services.media_files import save_private_media
             from .yandex_disk import YandexDiskError
             try:
@@ -725,7 +725,7 @@ class Attendance:
 
     async def evidence(self, request):
         from .people import People, check_editor, positive_id
-        from .services.media_files import load_private_media
+        from .services.media_files import LegacyMediaUnavailable, load_private_media
         check_editor(request['miniapp_actor']['roles'])
         table, field, _, _ = attendance_fields(request.match_info['purpose'])
         async with self.api.engine.connect() as conn:
@@ -736,7 +736,11 @@ class Attendance:
                     datetime.fromisoformat(str(rows[0]['shift_date'])).date())
         if not rows or not rows[0]['photo']:
             raise AccessError('Фото не найдено.', 404)
-        raw = await load_private_media(self.api.bot, rows[0]['photo'], max_bytes=MAX_PHOTO, timeout=25)
+        try:
+            raw = await load_private_media(self.api.bot, rows[0]['photo'], max_bytes=MAX_PHOTO, timeout=25,
+                                           standalone=getattr(self.api, 'standalone', None))
+        except LegacyMediaUnavailable as exc:
+            raise AccessError(str(exc), 409) from exc
         return web.json_response({'image': 'data:image/jpeg;base64,' + base64.b64encode(raw).decode()}, headers={'Cache-Control': 'no-store'})
 
     async def review(self, request):

@@ -163,6 +163,15 @@ async def _reflect(conn):
     return metadata.tables
 
 
+def _require_no_immutable_refund_schema(tables):
+    # Reset's archive format predates these immutable financial facts. Refuse
+    # before installing guards/DDL or changing any ledger, including when the
+    # runtime feature flag is off but the additive schema is already present.
+    if {'booking_reservation_versions', 'booking_cancellation_cases',
+        'bank_original_pay_facts', 'bank_refund_intents', 'payment_cash_events'} & set(tables):
+        raise ResetError('Immutable refund history prevents operational reset/restore')
+
+
 async def _lock(conn, tables):
     if conn.dialect.name == 'postgresql':
         await conn.execute(text('SELECT pg_advisory_xact_lock(7620182632501)'))
@@ -334,6 +343,7 @@ async def reset(engine, request_id, owner_id, *, expected_preview_sha256=None, e
     try:
         async with sqlite_operation_barrier(engine), engine.begin() as conn:
             tables = await _reflect(conn)
+            _require_no_immutable_refund_schema(tables)
             await _lock(conn, tables)
             await _owner(conn, tables, owner_id)
             archive_table = tables[ARCHIVE_TABLE]
@@ -413,6 +423,7 @@ async def restore(engine, request_id, owner_id):
     try:
         async with sqlite_operation_barrier(engine), engine.begin() as conn:
             tables = await _reflect(conn)
+            _require_no_immutable_refund_schema(tables)
             await _lock(conn, tables)
             await _owner(conn, tables, owner_id)
             row = await _verified_archive(conn, tables[ARCHIVE_TABLE], request_id)

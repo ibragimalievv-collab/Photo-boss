@@ -5,7 +5,7 @@ export function permissions(roles){
  const owner=roles.includes('OWNER'), admin=roles.includes('ADMIN');
  return {financeScope:owner?'all':admin?'today':'self',audit:owner,manageSchedule:owner||admin,manageBookings:owner||admin||roles.includes('MANAGER')};
 }
-export function defaultTheme(roles){return roles.includes('OWNER')?'premium':'light';}
+export function defaultTheme(){return 'premium';}
 export function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));}
 export function money(kopeks){if(!Number.isSafeInteger(kopeks))return '—';return new Intl.NumberFormat('ru-RU',{maximumFractionDigits:kopeks%100?2:0,minimumFractionDigits:kopeks%100?2:0}).format(kopeks/100)+' ₽';}
 export function todayKey(){return new Intl.DateTimeFormat('sv-SE',{timeZone:'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());}
@@ -18,6 +18,7 @@ export function periodRange(period,today=todayKey()){
 }
 export function dateLabel(day,options={day:'numeric',month:'long'}){return new Intl.DateTimeFormat('ru-RU',{...options,timeZone:'Europe/Moscow'}).format(new Date(day+'T12:00:00Z'));}
 export function initials(name){return name.split(/\s+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('');}
+export function plural(number,forms){const n=Math.abs(number)%100,last=n%10;return forms[n>=11&&n<=14?2:last===1?0:last>=2&&last<=4?1:2];}
 export function computeCommission(amountKopeks,frames){
  if(!Number.isSafeInteger(amountKopeks)||amountKopeks<0||!Number.isInteger(frames)||frames<0)throw new Error('Некорректные данные');
  const rate=frames>=150?15:10;

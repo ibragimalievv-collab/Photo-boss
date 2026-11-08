@@ -1,4 +1,4 @@
-"""Receipt extraction is advisory. Only an owner verifies actual bank receipts."""
+"""Receipt ledger and extraction; document admission is distinct from settlement."""
 
 import base64
 import hashlib
@@ -13,8 +13,8 @@ import aiohttp
 from sqlalchemy import func, select
 
 from ..config import config
-from ..models import Receipt, Sale
-from .ai_diagnostics import compatible_schema, http_failure, record
+from ..models import Booking, Receipt, Sale
+from .ai_diagnostics import compatible_schema, http_failure, record, unavailable
 
 logger = logging.getLogger(__name__)
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -39,6 +39,13 @@ async def payment_totals(session, booking_id):
     paid = money(await session.scalar(select(func.coalesce(
         func.sum(Receipt.verified_amount), 0
     )).where(Receipt.booking_id == booking_id, Receipt.status == "APPROVED")))
+    from ..refund_schema import enabled as refund_schema_enabled
+    if refund_schema_enabled():
+        from ..booking_refund_integration import build_booking_refunds
+        booking = await session.get(Booking, booking_id)
+        if booking is not None:
+            credit = await build_booking_refunds(session.bind).photo_credit(session, booking)
+            paid = Decimal(credit.available_kopecks) / 100
     return total, paid, max(total - paid, Decimal(0))
 
 
@@ -118,7 +125,16 @@ def validate_extraction(data):
 
 
 async def extract_receipt(content):
-    if not config.openai_api_key:
+    from .automatic_receipts import enabled, recipient_profile
+    if enabled():
+        if recipient_profile() is None:
+            return {'status': 'waiting_configuration'}
+        from .receipt_ai import extract
+        return await extract(content)
+    from .ai_provider import (ComparisonLimitError, capture_comparison_response,
+                              reserve_comparison_response, response_text, responses_profile)
+    profile = responses_profile(config, receipt=True)
+    if not profile.configured:
         return {"status": "not_configured"}
     from .photo_storage import image_format
     try:
@@ -126,7 +142,7 @@ async def extract_receipt(content):
     except ValueError:
         return {"status": "unavailable"}
     payload = {
-        "model": config.receipt_analysis_model,
+        "model": profile.model,
         "store": False,
         "max_output_tokens": 1600,
         "instructions": (
@@ -150,27 +166,28 @@ async def extract_receipt(content):
                             "strict": True, "schema": compatible_schema(SCHEMA)}},
     }
     try:
+        reservation = reserve_comparison_response(profile, payload)
         async with (
             aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=35)) as client,
             client.post(
-                "https://api.openai.com/v1/responses",
-                headers={"Authorization": f"Bearer {config.openai_api_key}"},
+                profile.endpoint,
+                headers=profile.headers,
                 json=payload,
+                allow_redirects=False,
             ) as response,
         ):
             result = await response.json()
+            capture_comparison_response(reservation, profile, response.status, result)
             if response.status != 200:
-                return http_failure('receipt', config.receipt_analysis_model, response.status, result)
-        if result.get("status") != "completed":
+                return http_failure('receipt', profile.model, response.status, result)
+        if not isinstance(result, dict) or result.get("status") != "completed":
             return {"status": "unavailable"}
-        text = "".join(
-            part["text"] for item in result.get("output", [])
-            if item.get("type") == "message"
-            for part in item.get("content", []) if part.get("type") == "output_text"
-        )
+        text = response_text(result)
         fields = validate_extraction(json.loads(text))
-        record('receipt', config.receipt_analysis_model, 'completed')
+        record('receipt', profile.model, 'completed')
         return {"status": "extracted", "fields": fields}
+    except ComparisonLimitError:
+        return unavailable('receipt', profile.model, 'comparison_limit')
     except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError):
         # Never log a body, image, token, or Telegram download URL.
         logger.warning("Receipt extraction unavailable; manual review required")

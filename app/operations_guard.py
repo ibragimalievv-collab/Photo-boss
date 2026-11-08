@@ -28,7 +28,9 @@ class _SQLiteLeaseSnapshot:
 
 class OperationsResetError(AccessError):
     def __init__(self, generation):
-        super().__init__('Рабочие данные обнулены владельцем. Обновите приложение и начните действие заново.', 409)
+        from .operational_start import stale_operation_message
+        message = stale_operation_message() or 'Рабочие данные обнулены владельцем. Обновите приложение и начните действие заново.'
+        super().__init__(message, 409)
         self.generation = generation
 
 
@@ -41,6 +43,9 @@ async def current_generation(conn):
 
 async def require_generation(conn, supplied):
     generation = await current_generation(conn)
+    from .operational_start import configured_start_date
+    if not generation and configured_start_date() is not None:
+        raise AccessError('Новый рабочий период ещё подготавливается. Повторите действие позднее.', 503)
     if generation and supplied != generation:
         raise OperationsResetError(generation)
     return generation

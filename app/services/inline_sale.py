@@ -67,6 +67,8 @@ async def create(session, actor, roles, guest, *, now):
             raise ValueError
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise ValueError('Укажите имя гостя, корректные дату и время съёмки.') from exc
+    from ..operational_start import require_booking_date
+    require_booking_date(day)
     packages = list(await session.scalars(select(Package).where(Package.active.is_(True)).order_by(Package.id)))
     pid = guest.get('packageId')
     if pid is not None:
@@ -92,6 +94,13 @@ async def create(session, actor, roles, guest, *, now):
         pricing_snapshot=json.dumps(quote, ensure_ascii=False),
         manager_id=actor.id, photographer_id=photographer_id, status='READY_FOR_SALE')
     session.add(booking)
+    from ..refund_schema import enabled as refund_schema_enabled
+    if refund_schema_enabled():
+        from datetime import UTC, datetime
+        from .booking_reservations import create_initial_version
+        reserved = await create_initial_version(session, booking, actor.id,
+            recorded_at=datetime.now(UTC), walk_in=True)
+        booking.reservation_version_id = reserved.id
     await session.flush()
     # This is an empty shooting record, never a fabricated full upload.
     session.add(Shooting(booking_id=booking.id, status='READY_FOR_SALE'))

@@ -1,6 +1,6 @@
 """Fixed hotel unit prices and immutable booking/sale calculation snapshots."""
 import json
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import select
 
@@ -116,8 +116,24 @@ async def album_line(session, booking, album_id, quantity, saved=None):
             'quantity': quantity, 'amount': str(money(price * quantity))}
 
 
+def manual_photo_amount(value):
+    """An explicit sale total, in roubles; reject invalid input without rounding."""
+    if type(value) not in (str, int, float, Decimal) or len(str(value)) > 32:
+        raise ValueError('Укажите сумму продажи фотографий в рублях, не меньше нуля и с точностью до копеек.')
+    try:
+        amount = Decimal(str(value).strip().replace(',', '.'))
+        if not amount.is_finite() or not 0 <= amount <= Decimal('9999999999.99'):
+            raise InvalidOperation
+        exact = money(amount)
+        if exact != amount:
+            raise InvalidOperation
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError('Укажите сумму продажи фотографий в рублях, не меньше нуля и с точностью до копеек.') from exc
+    return exact
+
+
 async def sale_quote(session, booking, sold, total, tariff_id=None, saved=None, *,
-                     discount_id=None, album_id=None, album_quantity=None):
+                     discount_id=None, album_id=None, album_quantity=None, photo_amount=None):
     if saved:
         quote = snapshot(saved)
         if tariff_id is not None and tariff_id != quote.get('tariffId'):
@@ -163,6 +179,21 @@ async def sale_quote(session, booking, sold, total, tariff_id=None, saved=None, 
     if discount_id is not None or (snapshot(saved) or {}).get('discountId'):
         from .sale_discounts import apply_discount
         result = await apply_discount(session, booking, result, discount_id, saved)
+    recorded = snapshot(saved) or {}
+    fixed_amount = recorded.get('manualPhotoAmount')
+    if saved and photo_amount is not None and (fixed_amount is None or
+            manual_photo_amount(photo_amount) != manual_photo_amount(fixed_amount)):
+        raise ValueError('Сумма продажи уже зафиксирована. Изменять её после расчёта нельзя.')
+    chosen_amount = fixed_amount if saved else photo_amount
+    if chosen_amount is not None:
+        if result.get('discountId'):
+            raise ValueError('Введите итоговую сумму без дополнительной скидки: она уже учтена в этой сумме.')
+        amount = manual_photo_amount(chosen_amount)
+        adjustment = money(amount - money(result['amount']))
+        result.update(amount=str(amount), manualPhotoAmount=str(amount))
+        if adjustment:
+            result['lines'].append({'type': 'PRICE_ADJUSTMENT', 'name': 'Согласованная цена продажи фотографий',
+                'price': str(adjustment), 'quantity': 1, 'amount': str(adjustment)})
     album = await album_line(session, booking, album_id, album_quantity, saved)
     if album:
         result['lines'].append(album)

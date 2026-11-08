@@ -42,6 +42,9 @@ async def provider_error(response, purpose, model, *, recording=False):
 
 
 async def transcribe(raw, mime):
+    if getattr(config, 'ai_provider', 'openai') == 'yandex':
+        from .yandex_voice import transcribe as yandex_transcribe
+        return await yandex_transcribe(raw, mime, config)
     purpose = 'voice_transcription'
     if not config.openai_api_key:
         raise audio_error(unavailable(purpose, TRANSCRIPTION_MODEL, 'not_configured'), recording=True)
@@ -77,6 +80,9 @@ async def transcribe(raw, mime):
         raise audio_error(unavailable(purpose, TRANSCRIPTION_MODEL, 'invalid_output'), recording=True) from exc
 
 async def synthesize(message):
+    if getattr(config, 'ai_provider', 'openai') == 'yandex':
+        from .yandex_voice import synthesize as yandex_synthesize
+        return await yandex_synthesize(message, config)
     purpose = 'voice_speech'
     if not config.openai_api_key:
         raise audio_error(unavailable(purpose, SPEECH_MODEL, 'not_configured'))
@@ -187,7 +193,7 @@ class VoiceTraining:
             evaluation = json.loads(current['evaluation'] or '{}')
             latest += ' Ошибки. ' + '. '.join(evaluation.get('errors', []))
             latest += ' Рекомендации. ' + '. '.join(evaluation.get('recommendations', []))
-        key = (actor['id'], sid, current['revision'])
+        key = (getattr(config, 'ai_provider', 'openai'), actor['id'], sid, current['revision'])
         cached = self.audio_cache.get(key)
         if cached and time.monotonic() - cached[0] < 300:
             audio = cached[1]
@@ -202,7 +208,8 @@ class VoiceTraining:
                 self.audio_cache[key] = (time.monotonic(), audio)
             finally:
                 self.pending.discard(actor['id'])
-        return web.Response(body=audio, content_type='audio/mpeg', headers={'Cache-Control': 'private, no-store'})
+        mime = 'audio/wav' if getattr(config, 'ai_provider', 'openai') == 'yandex' else 'audio/mpeg'
+        return web.Response(body=audio, content_type=mime, headers={'Cache-Control': 'private, no-store'})
 
 
 def install_voice_training(app, development):

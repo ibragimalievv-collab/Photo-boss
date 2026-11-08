@@ -9,7 +9,7 @@ import os
 import secrets
 from datetime import timedelta
 
-from sqlalchemy import exists, or_, select
+from sqlalchemy import exists, select
 
 from ..models import (
     Booking,
@@ -31,6 +31,62 @@ def storage_identity():
     token, client = configured_from_env()
     read_token = os.getenv('YANDEX_DISK_READ_TOKEN', '').strip() or token
     return hashlib.sha256(json.dumps([token, read_token, client]).encode()).hexdigest()
+
+
+def original_file_reference(path, digest):
+    """The legacy Telegram column is not a Disk path; keep its 300-char bound.
+
+    Reads use the full storage_path and validate its checksum. Never truncate
+    that authoritative path or widen the production schema for a long label.
+    """
+    return path if len(path) <= 300 else 'disk-sha256:' + digest
+
+
+async def register_full_shoot(session, actor, booking):
+    """Reuse confirmed originals in this booking's private sale picker."""
+    from ..models import Photo, PhotoStorage, Shooting
+    from .photo_storage import require_confirmed_originals
+
+    shooting = await session.scalar(select(Shooting).where(
+        Shooting.booking_id == booking.id).with_for_update())
+    if not shooting or shooting.full_upload_completed_at is None:
+        return 0
+    await require_confirmed_originals(session, shooting.id)
+    meta = await session.get(Setting, f'gallery:meta:{booking.id}')
+    preferences = json.loads(meta.value) if meta else {}
+    if preferences.get('purged') or preferences.get('trashed'):
+        raise ValueError('Сначала восстановите галерею из корзины.')
+    gallery = await session.scalar(select(DeliveryGallery).where(DeliveryGallery.booking_id == booking.id))
+    if gallery is None:
+        client = await session.get(Client, booking.client_id)
+        defaults = await session.get(Setting, 'gallery:defaults')
+        days = json.loads(defaults.value).get('days', 180) if defaults else 180
+        if type(days) is not int or days not in {30, 90, 180, 365}:
+            days = 180
+        gallery = DeliveryGallery(booking_id=booking.id, access_token=secrets.token_urlsafe(24),
+            title=((client.name if client else '') or 'Фотографии гостя')[:120],
+            created_by_id=actor.id, published=False, auto_publish=True,
+            delivery_mode='SELECTED', expires_at=utc_now()+timedelta(days=days))
+        session.add(gallery)
+        await session.flush()
+    rows = list(await session.scalars(select(PhotoStorage).join(Photo,
+        Photo.id == PhotoStorage.photo_id).where(Photo.shooting_id == shooting.id,
+            PhotoStorage.shooting_id == shooting.id).order_by(PhotoStorage.photo_id)))
+    existing = {p.sha256: p for p in await session.scalars(select(DeliveryPhoto).where(
+        DeliveryPhoto.gallery_id == gallery.id, DeliveryPhoto.upload_set == 'ALL'))}
+    added = 0
+    for row in rows:
+        if row.sha256 in existing:
+            continue
+        photo = DeliveryPhoto(gallery_id=gallery.id, uploaded_by_id=actor.id,
+            filename='Кадр-' + str(row.photo_id) + '.' + row.disk_path.rsplit('.', 1)[-1],
+            disk_path=row.disk_path, sha256=row.sha256, byte_size=row.byte_size,
+            selected=False, upload_set='ALL', origin='SHOOTING', storage_identity=storage_identity())
+        session.add(photo)
+        existing[row.sha256] = photo
+        added += 1
+    await session.flush()
+    return added
 
 
 async def storage_location(session, booking, draft_id):
@@ -55,15 +111,20 @@ def paid_sale_photo_clause(photo=DeliveryPhoto):
             DeliveryGallery.id == photo.gallery_id,
             Sale.booking_id == SaleDraft.booking_id,
             SaleDraft.status == 'COMPLETED', Sale.payment_status == 'PAID',
+            photo.upload_set == 'SELECTED',
+            SaleDraftPhoto.sha256 == photo.sha256,
+            SaleDraftPhoto.byte_size == photo.byte_size,
             photo.storage_identity == storage_identity())).correlate(photo)
 
 
 def guest_photo_clause(photo=DeliveryPhoto):
-    return or_(photo.origin != 'SALE', paid_sale_photo_clause(photo))
+    # Publication, a manual "selected" flag, or an ALL upload cannot grant
+    # access to unpurchased originals. Keep paid manual links working too.
+    return paid_sale_photo_clause(photo)
 
 
 async def paid_gallery_ids(session, gallery_ids=None):
-    query = select(DeliveryPhoto.gallery_id).where(DeliveryPhoto.origin == 'SALE', paid_sale_photo_clause())
+    query = select(DeliveryPhoto.gallery_id).where(paid_sale_photo_clause())
     if gallery_ids is not None:
         query = query.where(DeliveryPhoto.gallery_id.in_(gallery_ids))
     return set(await session.scalars(query.distinct()))
@@ -210,7 +271,7 @@ async def annotate_result(session, actor, roles, result):
     return result | {'gallery': summaries[booking.id]}
 
 
-async def verify_original(engine, bot, photo):
+async def verify_original(engine, bot, photo, *, standalone=None):
     """Read existing bytes after releasing the pool; never send a client message."""
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -225,10 +286,8 @@ async def verify_original(engine, bot, photo):
     elif disk_reference(photo.storage_path):
         raw = await configured_storage().download_bytes(photo.storage_path)
     else:
-        import io
-        output = io.BytesIO()
-        await bot.download(photo.telegram_file_id, destination=output, timeout=40)
-        raw = output.getvalue()
+        from .media_files import load_private_media
+        raw = await load_private_media(bot, photo.telegram_file_id, timeout=40, standalone=standalone)
     if len(raw) != photo.byte_size or hashlib.sha256(raw).hexdigest() != photo.sha256:
         raise ValueError('Оригинал не совпадает с сохранённой фотографией продажи.')
     return raw

@@ -2,6 +2,7 @@
 import json
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, or_, select
 
@@ -103,6 +104,8 @@ async def complete_full_upload(session, actor, shooting_id, *, allow_management=
     await require_confirmed_originals(session, shooting.id)
     sync = await storage_summary(session, shooting.id)
     shooting.full_upload_completed_at = datetime.now(UTC).replace(tzinfo=None)
+    from .sale_gallery import register_full_shoot
+    await register_full_shoot(session, actor, booking)
     commissions = await finalize_photographer_commissions(session, booking)
     await audit(session, actor, 'full_shoot_upload_completed', 'shooting', shooting.id,
                 f"photos={count};percent={commissions['percent']};sales_updated={commissions['sales']};disk_pending={sync['pending']};disk_failed={sync['failed']}")
@@ -205,7 +208,7 @@ async def validate_remaining_photos(session, booking, total, sold):
 
 
 async def set_sale_counts(session, actor, draft, total, sold, *, tariff_id=None, discount_id=None,
-                          album_id=None, album_quantity=None):
+                          album_id=None, album_quantity=None, photo_amount=None):
     if draft.created_by_id != actor.id or draft.status not in {'AWAITING_RECEIPT', 'AWAITING_COUNTS', 'AWAITING_SELECTED'}:
         raise ValueError('Черновик продажи уже закрыт.')
     if type(total) is not int or type(sold) is not int or not 0 < sold <= total <= 10000:
@@ -224,7 +227,8 @@ async def set_sale_counts(session, actor, draft, total, sold, *, tariff_id=None,
     if recorded.get('_bankQuote') and discount_id not in (None, recorded.get('discountId')):
         raise ValueError('Скидка уже закреплена в банковском счёте.')
     quote = await sale_quote(session, booking, sold, total, tariff_id, draft.pricing_snapshot,
-                             discount_id=discount_id, album_id=album_id, album_quantity=album_quantity)
+                             discount_id=discount_id, album_id=album_id, album_quantity=album_quantity,
+                             photo_amount=photo_amount)
     amount = money(quote['amount'])
     draft.pricing_snapshot = json.dumps(quote, ensure_ascii=False)
     before, paid, _ = await payment_totals(session, booking.id)
@@ -313,6 +317,9 @@ async def complete_sale(session, actor, draft_id, *, verified_references=None):
     percent, actual_full_count = await final_photographer_percent(
         session, booking.id
     )
+    # One persisted operation time keeps turnover and both employees' accruals
+    # in the same business day even if later awaited work crosses midnight.
+    sale_recorded_at = datetime.now(UTC).replace(tzinfo=None)
     if percent is None:
         photographer_percent_value = Decimal(0)
         photographer_commission = Decimal(0)
@@ -322,7 +329,7 @@ async def complete_sale(session, actor, draft_id, *, verified_references=None):
         photographer_commission = (
             sale_amount * photographer_percent_value / 100
         ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        finalized_at = datetime.now(UTC).replace(tzinfo=None)
+        finalized_at = sale_recorded_at
     sale = Sale(
         booking_id=booking.id,
         created_by_id=actor.id,
@@ -336,6 +343,7 @@ async def complete_sale(session, actor, draft_id, *, verified_references=None):
         percent=float(photographer_percent_value),
         commission=float(photographer_commission),
         commission_finalized_at=finalized_at,
+        created_at=sale_recorded_at,
     )
     session.add(sale)
     await session.flush()
@@ -355,12 +363,18 @@ async def complete_sale(session, actor, draft_id, *, verified_references=None):
             status="PENDING",
         )
         session.add(receipt)
+        from ..booking_refund_integration import bind_new_receipt
+        await bind_new_receipt(session, receipt, booking)
         await session.flush()
 
-        from ..operational_alerts import queue_receipt_review
-        await queue_receipt_review(session, booking, actor.id,
-            analysis=json.loads(draft.receipt_analysis or '{}'), expected=amount,
-            event_key=f'receipt-review:draft:{draft.id}:expected:{money(amount)}')
+        from .automatic_receipts import admit, enabled
+        if enabled():
+            await admit(session, booking, receipt)
+        else:
+            from ..operational_alerts import queue_receipt_review
+            await queue_receipt_review(session, booking, actor.id,
+                analysis=json.loads(draft.receipt_analysis or '{}'), expected=amount,
+                event_key=f'receipt-review:draft:{draft.id}:expected:{money(amount)}')
 
     if inline_no_manager:
         sale.manager_percent_applied = '0'
@@ -385,8 +399,9 @@ async def complete_sale(session, actor, draft_id, *, verified_references=None):
                 user_id=manager.id,
                 kind="Комиссия менеджера",
                 amount=float(manager_amount),
-                period=datetime.now(UTC).date().isoformat(),
+                period=sale_recorded_at.replace(tzinfo=UTC).astimezone(ZoneInfo(config.training_timezone)).date().isoformat(),
                 note=f"sale={sale.id};booking={booking.id}",
+                created_at=sale_recorded_at,
             )
         session.add(manager_entry)
         await session.flush()
@@ -395,7 +410,7 @@ async def complete_sale(session, actor, draft_id, *, verified_references=None):
 
     draft.status = "COMPLETED"
     booking.status = "SOLD"
-    draft.completed_at = datetime.now(UTC).replace(tzinfo=None)
+    draft.completed_at = sale_recorded_at
     await audit(
         session,
         actor,

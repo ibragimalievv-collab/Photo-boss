@@ -40,6 +40,7 @@ FIELDS = {
     'full_upload_completed_at': 'Полная загрузка завершена', 'terminated_at': 'Доступ отключён',
     'expected_amount': 'Ожидаемая сумма, ₽', 'price_per_photo': 'Цена фотографии, ₽',
     'percent': 'Процент', 'value': 'Значение', 'key': 'Настройка',
+    'hotelId': 'Отель', 'employeeId': 'Сотрудник', 'start': 'Начало', 'end': 'Окончание',
     'source': 'Источник', 'capture': 'Как записано событие', 'date': 'Дата',
     'revision': 'Версия записи', 'track': 'Направление обучения',
     'mode': 'Режим разговора', 'maxSeconds': 'Лимит разговора, секунд',
@@ -68,6 +69,10 @@ VALUES = {
     'coach': 'ИИ-наставник', 'guest': 'Учебный гость',
 }
 ACTIONS = {
+    'schedule_month_days_updated': 'Изменены рабочие и выходные дни',
+    'schedule_month_employee_added': 'Сотрудник добавлен в график',
+    'schedule_month_updated': 'Обновлён месячный график',
+    'miniapp_shift_updated': 'Изменены часы смены',
     'bank_reconciled': 'Поступление оплаты сверено с банком',
     'candidate_created': 'Добавлен кандидат', 'candidate_hired': 'Кандидат принят в команду',
     'candidate_updated': 'Обновлена карточка кандидата', 'checklist_configured': 'Изменён контрольный список смены',

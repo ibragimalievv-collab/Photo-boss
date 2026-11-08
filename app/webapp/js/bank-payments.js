@@ -1,16 +1,18 @@
 import {api} from './api.js';
-import {esc} from './domain.js';
+import {esc,todayKey} from './domain.js';
 import {updatePricePreview} from './hotel-pricing.js';
-import {outboxRows} from './outbox.js';
+import {outboxRows,enqueueBatch,retryOperation,flushOutbox} from './outbox.js';
 
 let booking=null,settings=null,qrURL=null,qrBillId=null,generation=0,qrVersion=0,poller=null,knownBills=new Map(),connectionVersion=0;
 const checks=new Map(),announcedPayments=new Set();
 const POLL_INTERVAL=10000,MAX_POLL_CHECKS=120,MAX_POLL_AGE=20*60*1000;
 const pendingStatuses=new Set(['CREATING','PENDING']);
-const states={CREATING:'Создание не подтверждено — проверьте статус',PENDING:'Ожидает оплаты',PAID:'Поступление подтверждено банком',TEST_PAID:'Тестовая оплата — деньги в кассу не зачислены',DECLINED:'Отклонён банком',CANCELLED:'Отменён',REFUNDED:'Возвращён',PARTIAL_REFUND:'Частичный возврат'};
+const receiptsOnly=()=>typeof window!=='undefined'&&window.PHOTO_BOSS_CONFIG?.PAYMENT_MODE==='receipts';
+const states={CREATING:'Создание не подтверждено — проверьте статус',PENDING:'Ожидает оплаты',PAID:'Поступление подтверждено банком',TEST_PAID:'Тестовая оплата — деньги в кассу не зачислены',DECLINED:'Отклонён банком',CANCELLED:'Отменён',REFUNDED:'Возвращён',PARTIAL_REFUND:'Частичный возврат',RECONCILIATION_REQUIRED:'Банк подтвердил денежную операцию. Второе поступление не добавлено; нужна сверка владельца. Новый QR создавать нельзя.'};
 
 export function bankConnectionPanel(data){
  connectionVersion++;
+ if(data?.paymentMode==='receipts'||receiptsOnly())return '';
  if(!data?.canCheckBankConnection)return '';
  return `<section id="bankConnectionPanel" class="panel section"><h3>Подключение Сбера</h3><p>Проверка сертификата и доступа к банку без выставления счёта гостю.</p><button type="button" class="btn ghost" data-bank-connection>Проверить подключение Сбера</button><p role="status" aria-live="polite">Проверка ещё не выполнялась.</p></section>`;
 }
@@ -33,6 +35,31 @@ document.addEventListener('click',async event=>{
  finally{if(current())button.disabled=false;}
 });
 
+const paymentHosts={sber_qr:new Set(['qr.nspk.ru','qr.sberbank.ru']),sber_ecom:new Set(['ecommerce.sberbank.ru','ecomtest.sberbank.ru','ecomift.sberbank.ru','securepayments.sberbank.ru','sbergate.com','payecom.ru'])};
+export function bankPaymentLink(bill){
+ if(receiptsOnly())return null;
+ if(bill?.status!=='PENDING'||!Number.isSafeInteger(bill.id)||bill.id<1||typeof bill.testMode!=='boolean'||typeof bill.amount!=='string'||!/^\d+(?:\.\d{1,2})?$/.test(bill.amount)||!Number.isFinite(Number(bill.amount))||Number(bill.amount)<=0)return null;
+ const value=bill.url;if(typeof value!=='string'||!value.startsWith('https://')||/[\s\u0000-\u001f\u007f\\]/.test(value))return null;
+ try{
+  const url=new URL(value),authority=value.slice(value.indexOf('//')+2).split(/[/?#]/)[0];
+  if(url.protocol!=='https:'||authority.includes('@')||url.username||url.password||url.port&&url.port!=='443'||url.hash||!paymentHosts[bill.provider]?.has(url.hostname))return null;
+  if(bill.provider==='sber_qr'&&(value.length>256||!url.pathname||url.pathname==='/'))return null;
+  return url.href;
+ }catch{return null;}
+}
+export function bankPaymentStatus(bill){return states[bill?.status]||(bill?.status==='RECONCILIATION_REQUIRED'?'Банк подтвердил денежную операцию; нужна сверка владельца. Новый QR создавать нельзя.':'Подтверждение оплаты не получено.');}
+export async function openBankPaymentLink(bill,{bookingId,isCurrent,onChecked}={}){
+ if(typeof isCurrent!=='function'||!isCurrent())return null;
+ if(!Number.isSafeInteger(bill?.id)||bill.id<1||!Number.isSafeInteger(bookingId)||bookingId<1)throw new Error('Не удалось определить банковский счёт.');
+ const checked=await api(`/bank-payments/${bill.id}/status`,{method:'POST',body:{},allowSnapshot:false,timeoutMs:20000});
+ if(!isCurrent())return null;
+ if(checked?.id!==bill.id||checked.bookingId!==bookingId)throw new Error('Счёт банка не совпал с выбранной записью.');
+ if(onChecked)await onChecked(checked);
+ if(!isCurrent())return null;
+ if(checked.status!=='PENDING')return checked;
+ const url=bankPaymentLink(checked);if(!url)throw new Error('Банк не подтвердил безопасную ссылку оплаты. Проверьте счёт.');
+ location.assign(url);return checked;
+}
 function clearQR(){qrVersion++;if(qrURL)URL.revokeObjectURL(qrURL);qrURL=null;qrBillId=null;}
 function route(){return typeof location==='undefined'?null:location.hash;}
 function contextFor(element){return {generation,bookingId:booking?.id,actorId:settings?.actorId,route:route(),panel:element.closest('#bankPanel')};}
@@ -51,7 +78,7 @@ function schedulePoll(state,delay=POLL_INTERVAL){
 function resumePolling(){if(poller)schedulePoll(poller,0);}
 function preparePolling(b,data){
  stopPolling();announcedPayments.clear();
- if(!b||!data.bankConfigured)return;
+ if(!b||!data.bankConfigured||data.paymentMode==='receipts'||receiptsOnly())return;
  poller={generation,bookingId:b.id,actorId:data.actorId,route:route(),pending:new Map((b.bankPayments||[]).filter(bill=>pendingStatuses.has(bill.status)).map(bill=>[bill.id,bill])),timer:null,running:false,stopped:false,startedAt:Date.now(),checkCount:0,failures:0};
  schedulePoll(poller,0);
 }
@@ -70,6 +97,7 @@ function paymentPanelText(data){
 }
 export function bankPanel(b,data){
  generation++;clearQR();booking=b;settings=data;knownBills=new Map((b?.bankPayments||[]).map(bill=>[bill.id,bill]));preparePolling(b,data);if(!b)return '';
+ if(data.paymentMode==='receipts'||receiptsOnly())return '<section class="notice"><h3>Оплата по чеку</h3><p>Прикрепите чек к продаже. Владелец сверит фактическое поступление и подтвердит сумму. До полной оплаты фотографии гостю недоступны.</p></section>';
  const balance=Boolean(b.sales?.length&&!b.draft);
  return `<section id="bankPanel" class="panel section"><h3>Оплата гостем · СберБизнес</h3><p>${paymentPanelText(data)}</p><form id="bankPaymentForm" class="form-grid"><label class="field">Что оплачивает гость<select class="input" name="purpose"><option value="PURCHASE">Покупку по количеству и тарифу в форме выше</option><option value="DEPOSIT">Заявленную предоплату по записи</option><option value="BALANCE" ${balance?'selected':''}>Остаток уже оформленных продаж</option></select></label><label class="field">Сумма сейчас, ₽ (пусто — весь остаток)<input class="input" name="amount" type="number" min="0.01" max="10000000" step="0.01"></label><button class="btn primary" ${data.bankConfigured?'':'disabled'}>Сформировать платёжный QR</button><p role="status"></p></form><div id="bankBills">${(b.bankPayments||[]).map(billView).join('')}</div><div id="bankQR"></div></section>`;
 }
@@ -82,9 +110,9 @@ export function bankPaymentPayload(sale,b,data,{purpose,amount,requestKey},rows=
  return {bookingId:b.id,total:purpose==='PURCHASE'?Number(sale.elements.total.value):0,
   sold:purpose==='PURCHASE'?Number(sale.elements.sold.value):0,tariffId:quote?.tariffId||null,
   ...(sourceDraftId?{sourceDraftId}:{}),discountId:quote?.discountId||null,albumId:quote?.albumId||null,
-  albumQuantity:quote?.albumQuantity??null,amount:amount||null,purpose,requestKey};
+  albumQuantity:quote?.albumQuantity??null,...(quote?.photoAmount!=null?{photoAmount:quote.photoAmount}:{}),amount:amount||null,purpose,requestKey};
 }
-function billView(bill){return `<article class="section" data-bank-bill="${bill.id}"><strong>Счёт №${bill.id}: ${esc(bill.amount)} ₽</strong><p>${bill.testMode?'ТЕСТОВАЯ СРЕДА · ':''}${esc(states[bill.status]||bill.status)}</p>${bill.status==='PENDING'&&bill.qrPath?`<button type="button" class="btn ghost" data-bank-qr="${bill.id}">Показать QR</button><a class="btn ghost" href="${esc(bill.url)}" target="_blank" rel="noopener noreferrer">Открыть оплату</a>`:''}<button type="button" class="btn ghost" data-bank-check="${bill.id}">Проверить в банке</button><p role="status"></p></article>`;}
+function billView(bill){return `<article class="section" data-bank-bill="${bill.id}"><strong>Счёт №${bill.id}: ${esc(bill.amount)} ₽</strong><p>${bill.testMode?'ТЕСТОВАЯ СРЕДА · ':''}${esc(bankPaymentStatus(bill))}</p>${bankPaymentLink(bill)&&bill.qrPath===`/bank-payments/${bill.id}/qr`?`<button type="button" class="btn ghost" data-bank-qr="${bill.id}">Показать QR</button><button type="button" class="btn ghost" data-bank-open="${bill.id}">Оплатить на этом телефоне</button>`:''}<button type="button" class="btn ghost" data-bank-check="${bill.id}">Проверить в банке</button><p role="status"></p></article>`;}
 async function showQR(id,context){
  const ticket=++qrVersion,blob=await api(`/bank-payments/${id}/qr`,{responseType:'blob'});if(ticket!==qrVersion||!current(context))return;
  clearQR();qrURL=URL.createObjectURL(blob);qrBillId=id;const box=context.panel.querySelector('#bankQR');box.innerHTML='';
@@ -143,14 +171,14 @@ async function pollPending(state){
   }
  }finally{state.running=false;if(pollingCurrent(state))schedulePoll(state,Math.min(60000,POLL_INTERVAL*2**state.failures));}
 }
-function invalidate(){generation++;connectionVersion++;stopPolling();clearQR();announcedPayments.clear();}
+function invalidate(){generation++;connectionVersion++;stopPolling();clearQR();announcedPayments.clear();clearBookingBankPayment();}
 window.addEventListener('hashchange',invalidate);
 window.addEventListener('pagehide',invalidate);
 window.addEventListener('pb-operations-reset',invalidate);
 document.addEventListener('pb-chat-account-reset',invalidate);
 window.addEventListener('offline',pausePolling);
 window.addEventListener('online',resumePolling);
-window.addEventListener('pb-workflow-mounted',resumePolling);
+window.addEventListener('pb-workflow-mounted',()=>{resumePolling();if(activeBookingQR&&!bookingQRCurrent(activeBookingQR))clearBookingBankPayment();});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)pausePolling();else resumePolling();});
 
 document.addEventListener('submit',async event=>{
@@ -174,11 +202,95 @@ document.addEventListener('submit',async event=>{
 });
 
 document.addEventListener('click',async event=>{
- const button=event.target.closest('[data-bank-qr],[data-bank-check]');if(!button||button.disabled)return;
+ const button=event.target.closest('[data-bank-qr],[data-bank-check],[data-bank-open]');if(!button||button.disabled)return;
  const context=contextFor(button);if(!current(context))return;button.disabled=true;
  try{
-  if(button.dataset.bankQr)await showQR(Number(button.dataset.bankQr),context);
+  if(button.dataset.bankOpen)await openBankPaymentLink({id:Number(button.dataset.bankOpen)},{bookingId:context.bookingId,isCurrent:()=>current(context),onChecked:bill=>acceptBill(bill,context,button.closest('[data-bank-bill]'))});
+  else if(button.dataset.bankQr)await showQR(Number(button.dataset.bankQr),context);
   else{const id=Number(button.dataset.bankCheck),bill=await readBill(id,context);if(!current(context))return;validateBill(bill,id,context);await acceptBill(bill,context,button.closest('[data-bank-bill]'));resumePolling();}
- }catch(error){pollMessage(context,error.message,button.dataset.bankCheck||button.dataset.bankQr);}
+ }catch(error){if(current(context)&&button.dataset.bankOpen){button.remove?.();clearQR();context.panel.querySelector('#bankQR').textContent=error.message;}pollMessage(context,error.message,button.dataset.bankCheck||button.dataset.bankQr||button.dataset.bankOpen);}
  finally{button.disabled=false;}
 });
+
+// Presentation of the existing durable outbox gate; no second bank-create path.
+
+let bookingQRGeneration=0,activeBookingQR=null;
+const bookingQROpenings=new Map(),unresolvedBookingBills=new Set(['CREATING','PENDING','RECONCILIATION_REQUIRED']);
+const bookingQRCurrent=context=>activeBookingQR===context&&context.bookingQRGeneration===bookingQRGeneration&&context.route===route()&&context.dialog.isConnected&&context.isCurrent();
+const bookingQRNode=(tag,text)=>{const value=document.createElement(tag);if(text!=null)value.textContent=text;return value;};
+function clearBookingQRImage(context){if(context.imageURL)URL.revokeObjectURL(context.imageURL);context.imageURL=null;context.imageVersion++;context.controls.replaceChildren();}
+export function clearBookingBankPayment(){const previous=activeBookingQR;activeBookingQR=null;bookingQRGeneration++;if(previous){clearBookingQRImage(previous);if(previous.dialog.open)previous.dialog.close();previous.dialog.remove();}}
+
+async function bookingGate(booking,settings,isCurrent){
+ const identity=`${settings.actorId}:${booking.id}`;
+ if(bookingQROpenings.has(identity)){
+  const pendingOpen=bookingQROpenings.get(identity),saved=await pendingOpen;
+  if(saved||!isCurrent())return saved;
+  if(bookingQROpenings.get(identity)===pendingOpen)bookingQROpenings.delete(identity);
+  return bookingGate(booking,settings,isCurrent);
+ }
+ const task=(async()=>{
+  const rows=await outboxRows();if(!isCurrent())return null;
+  const existing=(booking.bankPayments||[]).find(bill=>unresolvedBookingBills.has(bill.status));
+  const sameBooking=row=>row.bankPayload?.bookingId===booking.id||row.data?.booking?.id===booking.id||row.result?.bookingId===booking.id;
+  let saved=existing?rows.find(row=>['booking_bank_payment','sale_bank_payment'].includes(row.kind)&&sameBooking(row)&&(row.result?.id===existing.id||row.data?.existingBillId===existing.id)):null;
+  if(!existing)saved=rows.find(row=>row.kind==='booking_bank_payment'&&sameBooking(row)&&row.status!=='synced'&&(!row.result||unresolvedBookingBills.has(row.result.status)));
+  if(saved)return saved;
+  const [row]=await enqueueBatch([{key:crypto.randomUUID(),kind:'booking_bank_payment',date:todayKey(),
+   data:{booking:{id:booking.id},payment:{},...(existing?{existingBillId:existing.id}:{})}}]);
+  return row;
+ })();bookingQROpenings.set(identity,task);
+ try{return await task;}finally{if(bookingQROpenings.get(identity)===task)bookingQROpenings.delete(identity);}
+}
+
+async function displayBookingQR(context,row){
+ if(!bookingQRCurrent(context))return;
+ const bill=row?.result;
+ const stamp=JSON.stringify([row?.status,row?.error,bill]);if(stamp===context.stamp)return;context.stamp=stamp;
+ clearBookingQRImage(context);
+ context.message.textContent=row?.error||(bill?(bill.testMode?'ТЕСТОВАЯ СРЕДА · ':'')+bankPaymentStatus(bill):'Создаём банковский счёт. Повторная заявка не нужна.');
+ context.amount.textContent=bill?.amount?'Сумма счёта: '+bill.amount+' ₽':'';
+ if(!bill||row.error||row.status==='error'||!bankPaymentLink(bill)||bill.bookingId!==context.bookingId||bill.qrPath!==`/bank-payments/${bill.id}/qr`)return;
+ const open=bookingQRNode('button','Оплатить на этом телефоне');open.type='button';open.className='btn primary';
+ open.onclick=async()=>{
+  if(!bookingQRCurrent(context)||open.disabled)return;open.disabled=true;
+  try{await openBankPaymentLink(bill,{bookingId:context.bookingId,isCurrent:()=>bookingQRCurrent(context),onChecked:checked=>displayBookingQR(context,{...row,result:checked})});}
+  catch(error){if(bookingQRCurrent(context)){context.stamp=null;clearBookingQRImage(context);context.message.textContent=error.message;}}
+  finally{if(bookingQRCurrent(context))open.disabled=false;}
+ };
+ context.controls.append(open,bookingQRNode('p','На другом телефоне отсканируйте QR в приложении банка.'));
+ const version=context.imageVersion;
+ try{
+  const blob=await api(bill.qrPath,{responseType:'blob',allowSnapshot:false});
+  if(!bookingQRCurrent(context)||version!==context.imageVersion)return;
+  if(!blob||blob.type!=='image/png'||!Number.isFinite(blob.size)||blob.size<=0||blob.size>2*1024*1024)throw new Error('Банк не подтвердил изображение QR. Проверьте счёт.');
+  const image=bookingQRNode('img');context.imageURL=URL.createObjectURL(blob);image.src=context.imageURL;image.alt='Банковский QR для суммы этой записи';image.style.maxWidth='300px';
+  image.onerror=()=>{if(bookingQRCurrent(context)&&version===context.imageVersion){context.stamp=null;clearBookingQRImage(context);context.message.textContent='QR не загрузился. Проверьте счёт ещё раз.';}};
+  context.controls.append(image);
+ }catch(error){if(bookingQRCurrent(context)&&version===context.imageVersion){context.stamp=null;clearBookingQRImage(context);context.message.textContent=error.message;}}
+}
+async function refreshBookingQR(){
+ const context=activeBookingQR;if(!context)return;if(!bookingQRCurrent(context)){clearBookingBankPayment();return;}
+ const ticket=++context.refreshVersion;
+ try{const rows=await outboxRows();if(bookingQRCurrent(context)&&ticket===context.refreshVersion)await displayBookingQR(context,rows.find(row=>row.key===context.key));}
+ catch(error){if(bookingQRCurrent(context)){context.stamp=null;clearBookingQRImage(context);context.message.textContent=error.message;}}
+}
+export async function showBookingBankPayment(booking,settings,{isCurrent}={}){
+ if(receiptsOnly()||settings?.paymentMode==='receipts')throw new Error('Прикрепите чек предоплаты. Поступление подтвердит владелец.');
+ clearBookingBankPayment();
+ if(!Number.isSafeInteger(booking?.id)||booking.id<1||!Number.isSafeInteger(settings?.actorId)||settings.actorId<1||settings.bankConfigured!==true||typeof isCurrent!=='function')throw new Error('Откройте актуальную запись и проверьте доступ к банку.');
+ if(!isCurrent())return;
+ if(['0','0.00'].includes(booking.declaredDeposit)&&!(booking.bankPayments||[]).some(bill=>unresolvedBookingBills.has(bill.status)))throw new Error('Предоплата по этой записи не требуется. Новый QR не нужен.');
+ const ticket=bookingQRGeneration,row=await bookingGate(booking,settings,()=>ticket===bookingQRGeneration&&isCurrent());
+ if(!row||ticket!==bookingQRGeneration||!isCurrent())return;
+ const dialog=bookingQRNode('dialog');dialog.className='sheet';dialog.setAttribute('aria-label','Банковская оплата записи');dialog.style.cssText='max-width:420px;width:calc(100vw - 32px);padding:20px;';
+ const close=bookingQRNode('button','Закрыть');close.type='button';close.className='btn ghost';close.onclick=clearBookingBankPayment;
+ const message=bookingQRNode('p'),amount=bookingQRNode('p'),controls=bookingQRNode('div'),check=bookingQRNode('button','Проверить счёт');message.setAttribute('role','status');
+ const context={bookingQRGeneration:ticket,route:route(),bookingId:booking.id,actorId:settings.actorId,isCurrent,dialog,message,amount,controls,key:row.key,imageVersion:0,imageURL:null,refreshVersion:0};
+ check.type='button';check.className='btn ghost';check.onclick=async()=>{if(!bookingQRCurrent(context)||check.disabled)return;check.disabled=true;context.stamp=null;try{await retryOperation(context.key);await refreshBookingQR();}catch(error){if(bookingQRCurrent(context)){clearBookingQRImage(context);context.message.textContent=error.message;}}finally{if(bookingQRCurrent(context))check.disabled=false;}};
+ dialog.append(close,bookingQRNode('h2','Оплата по банковскому счёту · запись №'+booking.id),amount,message,controls,check);
+ activeBookingQR=context;document.body.append(dialog);dialog.addEventListener('close',()=>{if(activeBookingQR===context)clearBookingBankPayment();});dialog.addEventListener('cancel',event=>{event.preventDefault();if(activeBookingQR===context)clearBookingBankPayment();});
+ try{dialog.showModal();await displayBookingQR(context,row);void flushOutbox();await refreshBookingQR();}catch(error){if(bookingQRCurrent(context))clearBookingBankPayment();throw error;}
+}
+window.addEventListener('pb-outbox',()=>void refreshBookingQR());
+window.addEventListener('pb-operations-stale',invalidate);

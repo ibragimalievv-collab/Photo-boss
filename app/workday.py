@@ -61,8 +61,13 @@ class Workday:
         async with self.api.engine.connect() as conn:
             items=await self.checklist(conn,a['roles'])
             done={r['item_key']:bool(r['done']) for r in await self.api.rows(conn,'SELECT item_key,done FROM work_checklist_completions WHERE user_id=:uid AND shift_date=:day',uid=a['id'],day=day)}
-            sale_rows=await self.api.rows(conn,'SELECT id,amount,payment_status FROM sales WHERE credited_user_id=:uid AND created_at>=:lo AND created_at<:hi',uid=a['id'],lo=lo,hi=hi)
             condition = booking_scope_sql(a['id'], a['roles'])
+            sale_scope = 's.credited_user_id=:uid'
+            if 'MANAGER' in a['roles']:
+                sale_scope += f' OR (b.manager_id=:uid AND ({condition}))'
+            sale_rows=await self.api.rows(conn,f'''SELECT s.id,s.amount,s.payment_status
+                FROM sales s LEFT JOIN bookings b ON b.id=s.booking_id
+                WHERE ({sale_scope}) AND s.created_at>=:lo AND s.created_at<:hi''',uid=a['id'],lo=lo,hi=hi)
             bookings=await self.api.rows(conn,f'SELECT b.id,b.status FROM bookings b WHERE ({condition}) AND b.shoot_date=:day',uid=a['id'],day=day)
             close=await self.api.rows(conn,'SELECT status,ended_at,report_note,report_saved_at FROM shift_check_outs WHERE user_id=:uid AND shift_date=:day',uid=a['id'],day=day)
             config_items = [parsed(r['value'])|{'key':r['key']} for r in await self.api.rows(conn,"SELECT key,value FROM settings WHERE key LIKE 'checklist:%' ORDER BY key")] if {'OWNER','ADMIN'} & set(a['roles']) else []
@@ -127,6 +132,8 @@ class Workday:
             body = json.loads(encoded)
         except (ValueError, UnicodeDecodeError) as exc:
             raise AccessError('Некорректная операция.', 400) from exc
+        if not isinstance(body, dict):
+            raise AccessError('Некорректная операция.', 400)
         part = await reader.next()
         if part is None or part.name != 'file':
             raise AccessError('Не найдено вложение.', 400)
@@ -138,8 +145,22 @@ class Workday:
             raw.extend(chunk)
             if len(raw) > 20 * 1024 * 1024:
                 raise AccessError('Фото должно быть не больше 20 МБ.', 413)
-        if await reader.next() is not None:
-            raise AccessError('Передавайте одно вложение за запрос.', 400)
+        next_part = await reader.next()
+        if next_part is not None:
+            if body.get('kind') not in {'booking_receipt', 'sale_receipt'} or next_part.name != 'file':
+                raise AccessError('Передавайте одно вложение или до двух файлов одного чека.', 400)
+            second = bytearray()
+            while not next_part.at_eof():
+                chunk = await next_part.read_chunk(65536)
+                if not chunk and not next_part.at_eof():
+                    raise ConnectionResetError('Incomplete second receipt attachment')
+                second.extend(chunk)
+                if len(second) > 8 * 1024 * 1024:
+                    raise AccessError('Каждый файл чека должен быть не больше 8 МБ.', 413)
+            if await reader.next() is not None:
+                raise AccessError('К одному платежу можно прикрепить не больше двух файлов.', 400)
+            from .services.receipt_documents import pack
+            raw = pack([bytes(raw), bytes(second)])
         return await self.execute(request['miniapp_actor'], body, bytes(raw))
 
     async def execute(self, a, body, raw=None):
@@ -176,6 +197,12 @@ class Workday:
             raise AccessError('Некорректный идентификатор операции.', 400)
         if not isinstance(body['kind'], str) or body['kind'] not in KINDS | {'checklist','shift_report','attendance','cash_expense','break_start','break_end'}: raise AccessError('Этот тип операции не поддерживает синхронизацию.',400)
         if type(body['actorId']) is not int or body['actorId'] != a['id']: raise AccessError('Аккаунт изменился. Операция принадлежит другому сотруднику.',403)
+        if body['kind'] in {'booking_receipt', 'sale_receipt'} and raw is not None:
+            from .services.receipt_documents import canonical
+            try:
+                raw = canonical(raw)
+            except ValueError as exc:
+                raise AccessError(str(exc), 400) from None
         payload = json.dumps(body,sort_keys=True,ensure_ascii=False).encode()
         digest=hashlib.sha256(payload + (b'\x00'+hashlib.sha256(raw).digest() if raw is not None else b'')).hexdigest()
         kind = body['kind']
@@ -215,13 +242,24 @@ class Workday:
         """Revalidate both before storage and under the final operation lock."""
         # Never acknowledge a pre-reset operation, even if its key remains
         # in the shared idempotency ledger. Manual cash outflows survive
-        # the reset and retain their original payload hash and replay.
-        if body['kind'] != 'cash_expense':
+        # the reset and retain their original payload hash and replay. A new
+        # workspace's explicit start boundary also isolates those old outflows.
+        from .operational_start import configured_start_date
+        if body['kind'] != 'cash_expense' or configured_start_date() is not None:
             await require_generation(conn, body.get('generation', ''))
         if body['kind'].startswith('sale_') or body['kind'] == 'booking':
             sales_generation = await conn.scalar(text("SELECT value FROM settings WHERE key='sales:generation'"))
+            if not sales_generation and configured_start_date() is not None:
+                raise AccessError('Новый рабочий период ещё подготавливается. Повторите действие позднее.', 503)
             if sales_generation and body.get('salesGeneration', '') != sales_generation:
-                raise AccessError('Продажи обнулены владельцем. Обновите приложение и начните продажу заново; старые файлы сохранены.', 409)
+                from .operational_start import stale_operation_message
+                raise AccessError(stale_operation_message() or 'Продажи обнулены владельцем. Обновите приложение и начните продажу заново; старые файлы сохранены.', 409)
+        if body['kind'] == 'cash_expense' and configured_start_date() is not None:
+            from .operational_start import OperationalStartError, require_cash_date
+            try:
+                require_cash_date(self.api.day(body['date']))
+            except OperationalStartError as error:
+                raise AccessError(str(error), 409) from None
         users=await self.api.rows(conn,'SELECT id,active FROM users WHERE id=:uid'+user_lock_clause(conn),uid=a['id'])
         if not users or not users[0]['active']: raise AccessError('Доступ отключён.',403)
         roles={r['role'] for r in await self.api.rows(conn,'SELECT role FROM user_roles WHERE user_id=:uid',uid=a['id'])}
@@ -339,6 +377,7 @@ def install_workday(app,api):
     from .workflow import Workflow
     app.router.add_get('/api/miniapp/photos/{photo}/image', PhotoFiles(api).image)
     app.router.add_get('/api/miniapp/receipts/{id}/image', Workflow(api).receipt_image)
+    app.router.add_post('/api/miniapp/receipts/{id}/retry', Workflow(api).receipt_retry)
     app.router.add_get('/api/miniapp/sale-drafts/{id}/receipt/image', Workflow(api).draft_receipt_image)
     for method,path,handler in [('GET','/workflow',Workflow(api).listing),('GET','/workday',service.state),('PUT','/workday/checklist',service.configure),('POST','/operations/sync',service.operation),('POST','/operations/media',service.media),('POST','/sales/{id}/feedback-link',service.feedback_link)]:
         app.router.add_route(method,'/api/miniapp'+path,handler)

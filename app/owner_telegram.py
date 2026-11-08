@@ -3,6 +3,7 @@
 Telegram has no send idempotency key: a process loss after provider acceptance
 and before committing can repeat a copy. No historical catch-up on activation.
 """
+from .services.ai_provider import ai_configured
 import asyncio
 import json
 import logging
@@ -24,24 +25,40 @@ from .models import (
     utc_now,
 )
 from .push_notifications import app_channel, eligible, payload_for, queue_notice
+from .work_events import WORK_EVENTS
 
 log = logging.getLogger(__name__)
 START_KEY = 'notify:owner-telegram:enabled-at'
 OWNER_KEY = 'notify:owner-telegram:'
-WORK_EVENTS = {
-    'booking_created': 'Создана запись', 'booking_updated': 'Запись изменена',
-    'booking_rescheduled': 'Съёмка перенесена', 'booking_cancelled': 'Съёмка отменена',
-    'booking_trashed': 'Запись перемещена в корзину', 'booking_restored': 'Запись восстановлена',
-    'receipt_uploaded': 'Загружен чек предоплаты', 'sale_receipt_captured': 'Загружен чек продажи',
-    'shift_report_saved': 'Сохранён отчёт смены', 'break_corrected': 'Исправлена отметка обеда',
-    'hotel_tariff_saved': 'Изменены цены отеля', 'candidate_created': 'Новый кандидат',
-    'candidate_updated': 'Кандидат обновлён', 'candidate_hired': 'Кандидат принят',
-    'miniapp_employee_updated': 'Изменены данные сотрудника',
-    'miniapp_owner_access_changed': 'Изменён доступ владельца',
-    'delivery_handoff': 'Фотографии переданы гостю',
-    'full_shoot_upload_completed': 'Завершена загрузка съёмки',
-    'shoot_storage_recovery': 'Запущено восстановление фотографий',
-}
+
+async def work_event_context(session, event):
+    from .models import Booking, Receipt, SaleDraft, Shooting
+    from .services.booking_notices import booking_description
+    actor = await session.get(User, event.user_id) if event.user_id else None
+    description = f'Кто: {actor.name if actor else "Система"}'
+    booking = None
+    if event.entity == 'booking':
+        booking = await session.get(Booking, event.entity_id)
+    elif event.entity in {'receipt', 'sale_draft', 'shooting'}:
+        model = {'receipt': Receipt, 'sale_draft': SaleDraft, 'shooting': Shooting}[event.entity]
+        related = await session.get(model, event.entity_id) if event.entity_id else None
+        if related:
+            booking = await session.get(Booking, related.booking_id)
+    payload = {'workEventAction': event.action}
+    route = ('/app/#workday' if event.entity in {'shift_check_out', 'work_break'} else
+             '/app/#team' if event.entity in {'hr_candidate', 'user'} else '/app/#audit')
+    if booking:
+        description += '\n' + await booking_description(session, booking)
+        route = f'/app/#{"shootings" if event.entity == "booking" else "workflow"}?booking={booking.id}'
+        payload['bookingId'] = booking.id
+        if event.action == 'booking_cancelled' and booking.status in {'CANCELLED', 'REJECTED'} and booking.cancellation_reason:
+            description += '\nПричина: ' + booking.cancellation_reason
+    elif event.entity == 'user' and event.entity_id:
+        worker = await session.get(User, event.entity_id)
+        if worker:
+            description += '\nСотрудник: ' + worker.name
+    payload['description'] = description
+    return route, description, payload
 
 
 async def queue_owner_work_events(engine):
@@ -60,13 +77,9 @@ async def queue_owner_work_events(engine):
                     Notification.event_key == 'owner-audit:' + AuditLog.id.cast(String)).exists())
                 .order_by(AuditLog.id).limit(100)))
             for event in events:
-                route = ('/app/#shootings?booking='+str(event.entity_id) if event.entity == 'booking'
-                         else '/app/#workflow' if event.entity in {'receipt', 'sale_draft', 'shooting'}
-                         else '/app/#workday' if event.entity in {'shift_check_out', 'work_break'}
-                         else '/app/#team' if event.entity in {'hr_candidate', 'user'} else '/app/#audit')
+                route, description, context = await work_event_context(session, event)
                 await queue_notice(session, uid, kind='work_event', event_key=f'owner-audit:{event.id}',
-                    message=WORK_EVENTS[event.action]+f'. Событие №{event.id}; объект №{event.entity_id or 0}.',
-                    url=route)
+                    message=WORK_EVENTS[event.action]+'.\n'+description, payload=context, url=route)
         await session.commit()
 
 
@@ -81,7 +94,7 @@ async def queue_connection_state(engine, storage):
         'Системные push: настройки сервера': push_configured(),
         'Банк: настройки эквайринга': bank_configured(),
         'Звонки: TURN для сложных сетей': ice_config(0)['relayConfigured'],
-        'ИИ: ключ провайдера настроен': bool(config.openai_api_key),
+        'ИИ: ключ провайдера настроен': ai_configured(config),
     }
     async with AsyncSession(engine) as session:
         key = 'notify:connection-state'
@@ -154,9 +167,11 @@ async def deliver_owner_copies(engine, bot):
                 # Only a relative application URL from the server's allowlisted builder.
                 path = payload['url'] if payload['url'].startswith('/app/#') else '/app/#home'
                 try:
+                    from .launch_policy import app_url
+                    destination = app_url().split('#', 1)[0] + '#' + path.split('#', 1)[1]
                     async with asyncio.timeout(15):
                         await bot.send_message(user.tg_id,
-                            payload['title']+'\n'+notice.text[:3200]+'\nhttps://photo-boss.onrender.com'+path,
+                            payload['title']+'\n'+notice.text[:3200]+'\n'+destination,
                             parse_mode=None)
                 except TelegramForbiddenError:
                     delivery.status, delivery.last_error = 'FAILED', 'bot_blocked'

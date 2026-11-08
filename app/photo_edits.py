@@ -1,4 +1,5 @@
 """Photo correction, separate from Academy. AI only selects bounded color parameters."""
+from .services.ai_provider import ai_configured
 import asyncio
 import base64
 import hashlib
@@ -82,7 +83,7 @@ async def apply(session, actor, data):
     else:
         if data['action'] not in {'MANUAL', 'AI'} or original.status != 'STORED':
             raise AccessError('Сначала дождитесь сохранения оригинала на Диске.', 409)
-        if data['action'] == 'AI' and not config.openai_api_key:
+        if data['action'] == 'AI' and not ai_configured(config, vision=True):
             raise AccessError('AI не подключён. Ручная обработка доступна.', 409)
         settings = parameters(data['parameters']) if data['action'] == 'MANUAL' else None
         edit = PhotoEdit(photo_id=original.photo_id, created_by_id=actor['id'], mode=data['action'],

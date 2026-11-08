@@ -33,7 +33,7 @@ from .yandex_disk import install_yandex_disk, storage_recovery_loop
 
 logger = logging.getLogger(__name__)
 WEBHOOK_PATH = "/telegram/webhook"
-RELEASE = "miniapp-3.54-bounded-schema-startup"
+RELEASE = "miniapp-3.55-ru-migration"
 
 
 async def app_redirect(request):
@@ -134,13 +134,16 @@ async def on_startup(app):
             await reset_chat_menu(bot, tg_id)
         logger.info("Mini App menu configured: %s", app_url())
     logger.info("Telegram bot @%s is authenticated", me.username)
-    logger.info("Academy AI configured=%s; model=%s; tracks=photographer,booking", bool(config.openai_api_key), config.academy_analysis_model)
+    from .services.ai_provider import ai_configured, responses_profile
+    profile = responses_profile(config)
+    logger.info("Academy AI provider=%s configured=%s; model=%s; tracks=photographer,booking",
+                profile.provider, profile.configured, profile.model)
     if os.getenv("AI_STARTUP_PROBE", "0") == "1":
         from .services.development_ai import ROLEPLAY_SCHEMA, structured
         await structured('Проверка подключения. Верни reply="Готов", score=null, errors=[], recommendations=[].',
             [{'type': 'input_text', 'text': 'Синтетический тест без личных данных.'}],
             ROLEPLAY_SCHEMA, 'startup_probe', limit=300)
-    if config.openai_api_key:
+    if ai_configured(config):
         async def verify_live_voice():
             from .realtime_training import model_name, probe_realtime
             available = await probe_realtime()
@@ -246,7 +249,7 @@ def main():
     from .hr_bot import install_hr_bot
     install_hr_bot(app, engine, config.bot_token)
     from .avito_hr import install_avito_hr
-    install_avito_hr(app, engine, miniapp=miniapp)
+    install_avito_hr(app, engine)
     port = int(os.getenv("PORT", "10000"))
     logger.info("Starting Render web service on port %s", port)
     web.run_app(app, host="0.0.0.0", port=port, print=None)

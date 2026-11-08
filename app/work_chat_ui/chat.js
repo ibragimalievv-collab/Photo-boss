@@ -12,7 +12,7 @@ document.body.append(dialog);
 const css=document.createElement('link');css.rel='stylesheet';css.href='/work-chat/chat.css';document.head.append(css);
 
 let me=null, people=null, current={kind:'closed'}, timer=null, unreadTimer=null, previousFocus=null;
-let sessionGeneration=0,bootPromise=null,autoBoot=true,unreadRevision=0;
+let sessionGeneration=0,bootPromise=null,autoBoot=true,unreadRevision=0,chatReady=false;
 const drafts=new Map(),attachmentDrafts=new Map(),outbox=new Map();
 let flushing=null;
 const outboxPrefix=userId=>`pb-chat-outbox:${userId??me?.user?.id}:`;
@@ -40,7 +40,7 @@ async function queueMessage(thread,body,file){
  outbox.set(clientId,item);renderOutbox();flushOutbox();
 }
 async function flushOutbox(){
- if(flushing||!me||!navigator.onLine)return;
+ if(flushing||!me||!chatReady||!navigator.onLine)return;
  const job=flushing={generation:sessionGeneration,userId:me.user.id},blocked=new Set();
  try{for(const item of [...outbox.values()].sort((a,b)=>a.createdAt-b.createdAt)){
   if(!sameSession(job.generation,job.userId)||!navigator.onLine)break;
@@ -93,14 +93,14 @@ function renderPresence(){
  }
 }
 async function refreshPresence(){
- if(!me||presenceBusy||!dialog.open||document.visibilityState!=='visible')return;
+ if(!me||!chatReady||presenceBusy||!dialog.open||document.visibilityState!=='visible')return;
  const generation=sessionGeneration,userId=me.user.id;presenceBusy=true;
  try{const data=await api('/chat/presence');if(sameSession(generation,userId)){onlinePeople=new Set(data.online);presenceAt=Date.now();}}
  catch{if(sameSession(generation,userId))onlinePeople=null;}
  finally{if(sameSession(generation,userId)){presenceBusy=false;renderPresence();}}
 }
 async function sendHeartbeat(online=document.visibilityState==='visible'&&navigator.onLine){
- if(!me||(online&&heartbeatBusy))return;
+ if(!me||!chatReady||(online&&heartbeatBusy))return;
  const generation=sessionGeneration,userId=me.user.id,sequence=++presenceSequence;
  if(online)heartbeatBusy=true;
  try{await api('/chat/presence',{method:'POST',keepalive:!online,body:{sessionId:presenceSession,sequence,online}});}
@@ -119,8 +119,8 @@ function startPresence(){
 function clearObjectUrls(){previewObserver?.disconnect();previewObserver=null;previewQueue.length=0;for(const media of dialog.querySelectorAll('audio,video')){media.pause();media.removeAttribute('src');}for(const url of objectUrls)URL.revokeObjectURL(url);objectUrls.clear();}
 function stopPoll(){if(timer){clearInterval(timer);timer=null;}}
 function unreadBadge(n){return n>0?`<span class="pb-chat-unread">${n>99?'99+':n}</span>`:'';}
-function setUnreadBadge(n){unreadRevision++;const btn=document.querySelector('[data-open-chat]');if(!btn)return;btn.innerHTML=`${icon('chat')}<span>Чат</span>${unreadBadge(Number(n)||0)}`;btn.setAttribute('aria-label',n>0?`Рабочий чат, непрочитанных: ${n}`:'Рабочий чат');}
-async function refreshUnread(){if(!me)return;const generation=sessionGeneration,userId=me.user.id,revision=++unreadRevision;try{const data=await api('/chat/unread');if(sameSession(generation,userId)&&revision===unreadRevision){setUnreadBadge(data.total||0);applyUnread(data);}}catch(e){if(sameSession(generation,userId)&&revision===unreadRevision&&e.status===428)setUnreadBadge(0);}}
+function setUnreadBadge(n){unreadRevision++;const btn=document.querySelector('[data-open-chat]');if(!btn)return;btn.innerHTML=`${icon('chat')}<span class="pb-chat-trigger-label">Чат</span>${unreadBadge(Number(n)||0)}`;btn.setAttribute('aria-label',n>0?`Рабочий чат, непрочитанных: ${n}`:'Рабочий чат');}
+async function refreshUnread(){if(!me||!chatReady)return;const generation=sessionGeneration,userId=me.user.id,revision=++unreadRevision;try{const data=await api('/chat/unread');if(sameSession(generation,userId)&&revision===unreadRevision){setUnreadBadge(data.total||0);applyUnread(data);}}catch(e){if(sameSession(generation,userId)&&revision===unreadRevision&&e.status===428)setUnreadBadge(0);}}
 function applyUnread(data){if(!people)return;people.general.unread=data.general||0;for(const person of people.people)person.unread=data.people?.[person.id]||0;for(const row of dialog.querySelectorAll('[data-peer],[data-chat=general]')){const count=row.dataset.peer?data.people?.[row.dataset.peer]||0:data.general||0;row.querySelector('.pb-chat-unread')?.remove();row.insertAdjacentHTML('beforeend',unreadBadge(count));}}
 function startUnreadPoll(){if(unreadTimer)clearInterval(unreadTimer);refreshUnread();unreadTimer=setInterval(()=>{if(document.visibilityState==='visible')refreshUnread();},10000);}
 function close(){closeRecorder();stopPoll();current={kind:'closed'};clearObjectUrls();if(deletePanel.open)closeDelete();dialog.close();previousFocus?.focus?.();}
@@ -167,9 +167,9 @@ async function loadImagePreview(img,id){
  catch{if(img.isConnected){img.alt='Фото временно недоступно';img.classList.add('failed');}}
 }
 async function ensureRules(view){
- const rules=await api('/chat/rules');
+ const rules=await api('/chat/rules',{allowSnapshot:false});
  if(current!==view)return false;
- if(rules.accepted)return true;
+ if(rules.accepted){await activateChat(sessionGeneration,me?.user?.id);return current===view;}
  shell('Правила Photo Boss',`<article class="pb-chat-rules">${esc(rules.text)}</article><p class="pb-chat-muted">Подтверждение относится ко всему рабочему пространству. Это не договор оказания услуг и не отдельное согласие на обработку персональных данных.</p><p class="pb-chat-error" data-chat-error hidden></p><button class="pb-chat-btn primary" data-chat-accept data-version="${esc(rules.version)}" data-sha="${esc(rules.sha256)}">Принять общие правила и открыть чат</button>`);
  return false;
 }
@@ -380,11 +380,11 @@ dialog.addEventListener('submit',async e=>{
 });
 function inject(){
  const top=document.querySelector('#topbar');if(!top||top.querySelector('[data-open-chat]'))return;
- const btn=document.createElement('button');btn.className='pb-chat-trigger';btn.dataset.openChat='1';btn.innerHTML=`${icon('chat')}<span>Чат</span>`;btn.setAttribute('aria-label','Рабочий чат');
- btn.addEventListener('click',home);top.append(btn);
+ const btn=document.createElement('button');btn.className='pb-chat-trigger';btn.dataset.openChat='1';btn.innerHTML=`${icon('chat')}<span class="pb-chat-trigger-label">Чат</span>`;btn.setAttribute('aria-label','Рабочий чат');
+ btn.addEventListener('click',home);const actions=top.querySelector('.topbar-actions');if(actions)actions.prepend(btn);else top.append(btn);
 }
 export function resetWorkChat(){
- autoBoot=false;sessionGeneration++;bootPromise=null;me=null;people=null;current={kind:'closed'};
+ autoBoot=false;sessionGeneration++;bootPromise=null;chatReady=false;me=null;people=null;current={kind:'closed'};
  closeRecorder();resetCalls();stopPoll();if(unreadTimer)clearInterval(unreadTimer);unreadTimer=null;
  if(presenceTimer)clearInterval(presenceTimer);presenceTimer=null;
  flushing=null;presenceBusy=false;heartbeatBusy=false;onlinePeople=null;presenceAt=0;
@@ -392,17 +392,27 @@ export function resetWorkChat(){
  if(deletePanel.open)closeDelete();pendingDelete=null;previousFocus=null;
  if(dialog.open)dialog.close();dialog.innerHTML='';document.querySelector('[data-open-chat]')?.remove();
 }
+async function activateChat(generation,userId){
+ if(!sameSession(generation,userId)||!userId||chatReady)return;
+ chatReady=true;startUnreadPoll();startPresence();initCalls(me);await restoreOutbox();
+}
+async function prepareChat(generation,userId){
+ // Presence, calls and saved messages require the same accepted work rules as
+ // the chat screen. Do not poll/send first and repeatedly swallow HTTP428.
+ const rules=await api('/chat/rules',{allowSnapshot:false});
+ if(sameSession(generation,userId)&&rules.accepted)await activateChat(generation,userId);
+}
 export async function initWorkChat(userData=null){
  if(userData?.user?.id){
-  if(me?.user?.id===userData.user.id){me=userData;inject();initCalls(me);return;}
+  if(me?.user?.id===userData.user.id){me=userData;inject();if(chatReady)initCalls(me);else try{await prepareChat(sessionGeneration,me.user.id);}catch{}return;}
   resetWorkChat();
-  autoBoot=true;me=userData;inject();startUnreadPoll();startPresence();initCalls(me);await restoreOutbox();return;
+  autoBoot=true;me=userData;inject();try{await prepareChat(sessionGeneration,me.user.id);}catch{}return;
  }
  autoBoot=true;if(bootPromise)return bootPromise;
  const generation=sessionGeneration;
  const promise=(async()=>{try{
   const data=await api('/me');if(generation!==sessionGeneration||!autoBoot)return;
-  me=data;inject();startUnreadPoll();startPresence();initCalls(me);await restoreOutbox();
+  me=data;inject();try{await prepareChat(generation,me.user.id);}catch{}
  }catch{if(generation===sessionGeneration)me=null;}})();
  bootPromise=promise;try{await promise;}finally{if(bootPromise===promise)bootPromise=null;}
 }
@@ -415,7 +425,7 @@ document.addEventListener('visibilitychange',()=>{sendHeartbeat();if(document.vi
 window.addEventListener('pagehide',()=>sendHeartbeat(false));
 window.addEventListener('pageshow',()=>{sendHeartbeat();refreshPresence();});
 window.addEventListener('offline',()=>{onlinePeople=null;renderPresence();renderOutbox();sendHeartbeat(false);});
-window.addEventListener('online',()=>{sendHeartbeat();refreshPresence();poll();flushOutbox();});
+window.addEventListener('online',()=>{if(me&&!chatReady){void initWorkChat(me);return;}sendHeartbeat();refreshPresence();poll();flushOutbox();});
 setInterval(()=>{if(document.visibilityState==='visible')flushOutbox();},10000);
 document.addEventListener('pb-calls-updated',()=>{if(!dialog.open)return;const toolbar=dialog.querySelector('.pb-call-toolbar');if(toolbar)toolbar.outerHTML=callToolbar(current.peer,current.title);});
 
@@ -425,3 +435,6 @@ window.visualViewport?.addEventListener('resize',resizeChatViewport);
 window.visualViewport?.addEventListener('scroll',resizeChatViewport);
 resizeChatViewport();
 
+
+// Native widget and the in-app next-shoot card use the same guarded chat flow.
+document.addEventListener('pb-work-chat-open',()=>{if(me)void home();});

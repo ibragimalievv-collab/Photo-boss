@@ -13,6 +13,7 @@ function identity(){
  if(identityCleared){try{if(sessionStorage.getItem('pb_browser_session_only')==='1')return null;}catch{}}
  try{const id=Number(localStorage.getItem(LAST_ID));if(!identityCleared&&Number.isSafeInteger(id)&&id>0)return id;}catch{}
  try{if(sessionStorage.getItem('pb_browser_session_only')==='1')return null;}catch{}
+ if(window.PHOTO_BOSS_CONFIG?.STANDALONE===true)return null;
  try{return JSON.parse(new URLSearchParams(window.Telegram?.WebApp?.initData||'').get('user')||'null')?.id||null;}catch{return null;}
 }
 const cachedPaths=new Set(['/me','/workflow','/workday','/attendance','/onboarding','/dashboard','/shoot-control','/galleries','/academy','/academy/coach?track=photographer','/academy/coach?track=booking','/academy/mentor?track=photographer','/academy/mentor?track=booking','/academy/diagnostic']);

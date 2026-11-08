@@ -1,4 +1,5 @@
 import {readSnapshot,saveSnapshot,setSnapshotUser,reconcileOperationsGeneration} from './localstore.js';
+const standaloneMode=()=>window.PHOTO_BOSS_CONFIG?.STANDALONE===true;
 export class ApiError extends Error {constructor(message,status=0,telegramId=null,retryAfterMs=0){super(message);this.status=status;this.retryAfterMs=retryAfterMs;this.telegramId=Number.isSafeInteger(telegramId)&&telegramId>0?telegramId:null;}}
 
 const SECURE_INIT_KEY='photo_boss_init_data_v1';
@@ -31,6 +32,7 @@ function ownerTokenFresh(token){
  }catch{return false;}
 }
 const HASH_OWNER_LAUNCH_TOKEN=(()=>{
+ if(standaloneMode())return '';
  const value=ownerTokenFromHash();
  if(ownerTokenFresh(value))sessionSet(SESSION_OWNER_KEY,value);
  return ownerTokenFresh(value)?value:'';
@@ -58,8 +60,8 @@ function launchInitData(){
   return new URLSearchParams(query).get('tgWebAppData')||'';
  }catch{return '';}
 }
-const LAUNCH_INIT_DATA=launchInitData();
-function secureStorage(){return window.Telegram?.WebApp?.SecureStorage||null;}
+const LAUNCH_INIT_DATA=standaloneMode()?'':launchInitData();
+function secureStorage(){return standaloneMode()?null:window.Telegram?.WebApp?.SecureStorage||null;}
 function secureGet(key,timeoutMs=900){
  const storage=secureStorage();
  if(!storage?.getItem)return Promise.resolve('');
@@ -116,8 +118,9 @@ export async function api(path,{body,method='GET',timeoutMs,responseType,allowSn
  const current=()=>{if(revision!==accountRevision)throw new ApiError('Аккаунт изменился. Откройте раздел заново.',409);};
  if(method==='GET'&&!responseType&&typeof navigator!=='undefined'&&navigator.onLine===false){if(allowSnapshot){const cached=await readSnapshot(path);current();if(cached)return cached;}throw new ApiError(allowSnapshot?'Без сети: откройте этот раздел при подключении, чтобы сохранить данные.':'Для актуального списка сотрудников нужно соединение с сервером. Подключитесь к сети и откройте график ещё раз.');}
  const cfg=window.PHOTO_BOSS_CONFIG||{};
- const ownerToken=browserSessionOnly?'':ownerTokenFresh(HASH_OWNER_LAUNCH_TOKEN)?HASH_OWNER_LAUNCH_TOKEN:storedOwnerLaunchToken();
- const telegram=browserSessionOnly?{value:'',source:'none'}:await telegramInitData();
+ const nativeAuth=browserSessionOnly||standaloneMode();
+ const ownerToken=nativeAuth?'':ownerTokenFresh(HASH_OWNER_LAUNCH_TOKEN)?HASH_OWNER_LAUNCH_TOKEN:storedOwnerLaunchToken();
+ const telegram=nativeAuth?{value:'',source:'none'}:await telegramInitData();
  let primary=telegram.value?{kind:'telegram',value:telegram.value,source:telegram.source}:
              ownerToken?{kind:'owner',value:ownerToken,source:HASH_OWNER_LAUNCH_TOKEN?'hash':'session'}:{kind:'session',value:'',source:'cookie'};
  const alternate=primary.kind==='telegram'&&ownerToken?{kind:'owner',value:ownerToken,source:HASH_OWNER_LAUNCH_TOKEN?'hash':'session'}:null;

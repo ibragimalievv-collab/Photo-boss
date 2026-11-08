@@ -51,7 +51,8 @@ async def create_booking_record(session, actor, data, photographer_id=None):
             raise ValueError('Фотограф недоступен.')
     try:
         name = data['client_name'].strip()
-        phone = data['client_phone']
+        from .guest_phone import guest_phone
+        phone = guest_phone(data['client_phone'])
         room = data['room'].strip()
         count = data['guest_count']
         deposit = Decimal(str(data.get('deposit', '1000')))
@@ -67,6 +68,8 @@ async def create_booking_record(session, actor, data, photographer_id=None):
             raise ValueError
     except (ValueError, TypeError, KeyError, AttributeError, InvalidOperation) as exc:
         raise ValueError('Проверьте данные гостя, дату, количество гостей и сумму брони.') from exc
+    from ..operational_start import require_booking_date
+    require_booking_date(day)
     # All bookings need a consistent hotel/rate snapshot, but they never modify
     # the hotel. Shared locks let different managers record guests concurrently
     # while an exclusive tariff/hotel change still waits until those snapshots
@@ -91,6 +94,13 @@ async def create_booking_record(session, actor, data, photographer_id=None):
                       manager_id=actor.id, photographer_id=photographer_id,
                       status='PENDING_CONFIRMATION')
     session.add(booking)
+    from ..refund_schema import enabled as refund_schema_enabled
+    if refund_schema_enabled():
+        from datetime import UTC, datetime
+        from .booking_reservations import create_initial_version
+        reserved = await create_initial_version(session, booking, actor.id,
+                                                recorded_at=datetime.now(UTC))
+        booking.reservation_version_id = reserved.id
     await session.flush()
     session.add(Shooting(booking_id=booking.id, status='PENDING_CONFIRMATION'))
     await audit(session, actor, 'booking_created', 'booking', booking.id)

@@ -1,13 +1,14 @@
 <!doctype html>
-<html lang="ru" data-theme="light" data-mode="live">
+<html lang="ru" data-theme="premium" data-mode="live">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#f4f6fa"><meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0f1012"><meta name="color-scheme" content="light dark">
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Photo Boss">
 <meta name="referrer" content="no-referrer"><title>Photo Boss · Рабочее пространство</title>
 <link rel="manifest" href="./manifest.webmanifest"><link rel="apple-touch-icon" href="./assets/apple-touch-icon.png">
 <link rel="icon" href="./assets/icon.svg" type="image/svg+xml"><link rel="stylesheet" href="./css/styles.css">
-<link rel="stylesheet" href="./css/galleries.css">
+<link rel="stylesheet" href="./css/galleries.css"><link rel="stylesheet" href="./css/staff-widget.css">
+<link rel="stylesheet" href="./css/workspace-review.css"><link rel="stylesheet" href="./css/schedule-month.css">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script src="./config.js"></script><script type="module" src="./js/app.js"></script>
 <script type="module" src="./js/install.js"></script>
@@ -22,7 +23,7 @@
 <div id="previewBar" class="preview-bar" hidden></div>
 <main id="app" class="content" tabindex="-1" aria-live="polite"><div class="loading-screen"><div class="spinner"></div><h1>Photo Boss</h1><p>Загружаем рабочее пространство…</p></div></main>
 <div id="installBar" class="app-install-bar" hidden><button id="installApp" class="btn ghost" aria-haspopup="dialog">Установить Photo Boss</button></div>
-<footer class="workspace-footer">PHOTO BOSS · 3.54 <span>Команда. Съёмки. Результат.</span></footer></div>
+<footer class="workspace-footer">PHOTO BOSS · 3.62 <span>Команда. Съёмки. Результат.</span></footer></div>
 <nav id="bottomNav" class="bottom-nav" aria-label="Навигация"></nav>
 <dialog id="sheet" class="sheet" aria-labelledby="sheetTitle"><div class="sheet-grip"></div><button id="closeSheet" class="icon-button close-sheet" aria-label="Закрыть окно">×</button><div id="sheetContent"></div></dialog>
 <dialog id="installDialog" class="sheet install-sheet" aria-labelledby="installTitle">
@@ -31,7 +32,7 @@
 <p>Приложение появится на главном экране и будет открываться отдельным окном.</p>
 <p id="installEmbedded" class="notice" hidden>Открой эту ссылку в обычном браузере: Chrome на Android или Safari на iPhone. В Telegram используй меню «Открыть в браузере».</p>
 <div id="installInstructions"></div>
-<p class="small">После установки открой Photo Boss и войди по логину и паролю. При первом входе подтверди аккаунт через Telegram и создай личный пароль.</p>
+<p id="installLoginHint" class="small">После установки откройте Photo Boss и войдите по QR-коду сотрудника или логину и паролю. QR-код выдаёт владелец или администратор.</p>
 <label for="installLink" class="small">Ссылка для установки</label>
 <input id="installLink" type="url" readonly aria-label="Ссылка для установки Photo Boss">
 <div class="row wrap"><button id="copyInstallLink" class="btn ghost">Скопировать ссылку</button><a id="openInstallLink" class="btn ghost" target="_blank" rel="noopener noreferrer">Открыть в браузере</a></div>

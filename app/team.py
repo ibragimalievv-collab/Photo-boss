@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .miniapp_security import AccessError, utc_bounds
 from .models import utc_now
-from .people import People, check_editor, positive_id
+from .people import People, allocate_local_identity, check_editor, positive_id
 from .services.booking_access import booking_scope_sql
 from .services.insights import cents, parsed
 from .services.onboarding import guides, quiz_for, quiz_kind
@@ -103,9 +103,12 @@ class Team:
     async def hire(self,request):
         actor=request['miniapp_actor'];check_editor(actor['roles'])
         cid=positive_id(request.match_info['id']);body=await self.api.body(request)
-        if set(body)!={'revision','telegramId','hotelIds'} or type(body['revision']) is not int or not isinstance(body['hotelIds'],list) or len(body['hotelIds'])>50:
+        standalone = getattr(self.api, 'standalone', False)
+        fields = {'revision', 'hotelIds'} if standalone else {'revision','telegramId','hotelIds'}
+        if set(body)!=fields or type(body['revision']) is not int or not isinstance(body['hotelIds'],list) or len(body['hotelIds'])>50:
             raise AccessError('Проверьте данные найма.',400)
-        tg=positive_id(body['telegramId'],maximum=2**52-1);hotels=sorted({positive_id(h) for h in body['hotelIds']})
+        tg = None if standalone else positive_id(body['telegramId'],maximum=2**52-1)
+        hotels=sorted({positive_id(h) for h in body['hotelIds']})
         try:
             async with self.api.engine.begin() as conn:
                 await self.people.current_editor(conn,actor['id'])
@@ -115,6 +118,8 @@ class Team:
                 if c['employee_id']: return web.json_response({'employeeId':c['employee_id'],'alreadyHired':True})
                 if c['revision']!=body['revision'] or c['stage']!='DOCUMENTS': raise AccessError('Сначала завершите интервью, решение и оформление.',409)
                 await self.people.verify_hotels(conn,hotels)
+                if standalone:
+                    tg = await allocate_local_identity(conn)
                 users=await self.api.rows(conn,'SELECT id,active FROM users WHERE tg_id=:tg FOR UPDATE',tg=tg)
                 if users:
                     uid=users[0]['id']

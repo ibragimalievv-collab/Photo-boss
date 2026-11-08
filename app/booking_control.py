@@ -1,4 +1,5 @@
 """On-shift booking reminders and hotel staffing advice from recorded activity."""
+from .services.ai_provider import ai_configured
 import asyncio
 import hashlib
 import json
@@ -136,7 +137,7 @@ async def advisor(session, actor_id, data, now):
               'hotelIds': sorted(h['id'] for h in data['hotels']), 'fingerprint': activity_fingerprint(data)}
     # The model chooses only among validated transfers; it cannot invent hotels,
     # move employees, or turn unknown guest traffic into a measured fact.
-    if config.openai_api_key and data['choices']:
+    if ai_configured(config) and data['choices']:
         schema = obj({'choice': {'type': 'integer', 'enum': list(range(len(data['choices'])))}, 'reason': STR})
         response = await structured('Ты помощник администратора Photo Boss. Выбери один вариант из choices. '
             'Пиши по-русски. В reason кратко объясни принцип выбора без чисел и без выдуманных данных о гостях. '

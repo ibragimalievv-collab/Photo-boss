@@ -32,7 +32,8 @@ KINDS = {'operational_alert', 'service_status', 'work_event', 'booking_assignmen
 
 
 def app_channel():
-    return os.getenv('PHOTO_BOSS_NOTIFICATION_CHANNEL', 'telegram') == 'app'
+    return (os.getenv('PHOTO_BOSS_STANDALONE', '0') == '1'
+            or os.getenv('PHOTO_BOSS_NOTIFICATION_CHANNEL', 'telegram') == 'app')
 
 
 def configured():
@@ -381,11 +382,19 @@ def payload_for(notice):
         url = '/app/#attendance'
     if notice.kind == 'attendance_fine' and details.get('canReview') and isinstance(details.get('fineKey'), str):
         url = '/app/#more?attendanceFine=' + quote(details['fineKey'], safe='')
+    if notice.kind in {'work_event', 'service_status'}:
+        from .work_events import work_event_title, work_event_url
+        url = work_event_url(details.get('url'))
+        if notice.kind == 'work_event':
+            titles['work_event'] = work_event_title(details.get('workEventAction'), notice.text or '')
+    from .notification_delivery import notification_tag, push_urgency
     payload = {'title': 'Photo Boss · ' + titles.get(notice.kind, 'Рабочее уведомление'),
-            'body': 'Откройте Photo Boss, чтобы посмотреть подробности.', 'url': url, 'tag': f'pb-notice-{notice.id}'}
+            'body': 'Откройте Photo Boss, чтобы посмотреть подробности.', 'url': url,
+            'tag': notification_tag(notice, notice_booking_id(notice)), 'urgency': push_urgency(notice.kind)}
     if notice.kind == 'booking_reminder' and isinstance(details.get('pushSummary'), str):
         payload['body'] = details['pushSummary'][:180] + '. Откройте съёмку в Photo Boss.'
-    deadline = reminder_deadline(notice)
+    from .notification_delivery import event_deadline
+    deadline = reminder_deadline(notice) or event_deadline(notice)
     if deadline:
         payload['expiresAt'] = deadline.isoformat()
     return payload
@@ -393,7 +402,7 @@ def payload_for(notice):
 
 async def send_push(subscription, payload):
     from pywebpush import WebPushException, webpush
-    ttl = 300 if payload['title'].endswith('звонок') else 3600
+    ttl = 60 if payload['title'].endswith('звонок') else 3600
     if payload.get('expiresAt'):
         remaining = (datetime.fromisoformat(payload['expiresAt']) - current_utc()).total_seconds()
         if remaining <= 0:
@@ -403,7 +412,7 @@ async def send_push(subscription, payload):
         response = await asyncio.to_thread(webpush, subscription_info=subscription,
             data=json.dumps(payload, ensure_ascii=False), vapid_private_key=os.environ['WEB_PUSH_PRIVATE_KEY'],
             vapid_claims={'sub': os.environ['WEB_PUSH_SUBJECT']}, ttl=ttl,
-            timeout=10, headers={'Urgency': 'high'})
+            timeout=10, headers={'Urgency': payload.get('urgency') if payload.get('urgency') in {'very-low','low','normal','high'} else 'normal'})
         return response.status_code
     except WebPushException as exc:
         return exc.status_code or 503
@@ -449,6 +458,13 @@ async def deliver_push(engine, *, limit=20):
                     or notice.created_at < utc_now() - timedelta(seconds=60 if notice.kind == 'call' else 86400)):
                 delivery.status = 'SKIPPED'
             else:
+                from .notification_delivery import PREFIX as PREF_PREFIX, URGENT, quiet_until, saved_preferences
+                preference = await session.get(Setting, PREF_PREFIX + str(notice.user_id))
+                deferred = quiet_until(saved_preferences(preference.value if preference else None), current_utc()) if notice.kind not in URGENT else None
+                if deferred is not None:
+                    delivery.next_attempt_at = deferred
+                    await session.commit()
+                    continue
                 code = await send_push(json.loads(sub.subscription), payload_for(notice))
                 if code is None:
                     delivery.status = 'SKIPPED'
@@ -534,14 +550,15 @@ class AppPush:
         return user
 
     async def status(self, request):
-        from .models import Booking, Client, Hotel, OwnerTelegramDelivery
+        from .models import Booking, Client, Hotel, OwnerTelegramDelivery, Shooting
         from .notification_feed import details, page_parameters, visibility
         from .owner_telegram import OWNER_KEY, START_KEY
         limit, before = page_parameters(request)
         async with AsyncSession(self.api.engine) as session:
             actor = await self.actor(session, request)
             visible = await visibility(session, actor, session.info['push_roles'])
-            owner_eligible = actor.tg_id > 0 and 'OWNER' in session.info['push_roles']
+            owner_eligible = (not getattr(self.api, 'standalone', False)
+                              and actor.tg_id > 0 and 'OWNER' in session.info['push_roles'])
             preference = await session.get(Setting, OWNER_KEY+str(actor.id)) if owner_eligible else None
             owner_copy = bool(preference)
             mirror_start = await session.get(Setting, START_KEY) if owner_copy else None
@@ -564,8 +581,11 @@ class AppPush:
             # Keep related objects in the identity map: description enrichment
             # is a fixed number of queries for a page, never one per notice.
             booking_ids = [notice_booking_id(n) for n in rows]
-            bookings = {b.id: b for b in await session.scalars(select(Booking).where(
-                Booking.id.in_([bid for bid in booking_ids if bid is not None])))}
+            booking_rows = (await session.execute(select(Booking, Shooting.status).outerjoin(
+                Shooting, Shooting.booking_id == Booking.id).where(
+                Booking.id.in_([bid for bid in booking_ids if bid is not None])))).all()
+            bookings = {b.id: b for b, _ in booking_rows}
+            shooting_states = {b.id: status for b, status in booking_rows}
             hotels = list(await session.scalars(select(Hotel).where(Hotel.id.in_({b.hotel_id for b in bookings.values()}))))
             clients = list(await session.scalars(select(Client).where(Client.id.in_({b.client_id for b in bookings.values()}))))
             items = []
@@ -588,7 +608,11 @@ class AppPush:
                     'createdAt': notice.created_at.isoformat()+'Z',
                     'pushState': await push_delivery_state(session, notice, active_devices=active_devices,
                         deliveries=deliveries.get(notice.id, []), earliest_subscription=earliest_subscription),
-                    'ownerTelegramState': telegram_state})
+                    'ownerTelegramState': telegram_state,
+                    'acceptBookingId': booking.id if bid and notice.kind == 'booking_assignment' and booking
+                        and booking.photographer_id == actor.id and 'PHOTOGRAPHER' in session.info['push_roles']
+                        and booking.status not in {'PENDING_CONFIRMATION','CANCELLED','REJECTED'}
+                        and shooting_states.get(booking.id) == 'ASSIGNED' else None})
             # Strong references above intentionally last through all descriptions.
             _related = hotels, clients
             return web.json_response({'configured': configured(), 'channel': 'app' if app_channel() else 'telegram',
@@ -620,6 +644,8 @@ class AppPush:
         return web.json_response({'ok': True})
 
     async def owner_telegram(self, request):
+        if getattr(self.api, 'standalone', False):
+            raise AccessError('В самостоятельном Photo Boss уведомления приходят в приложение и через push.', 409)
         from .owner_telegram import OWNER_KEY
         body = await self.api.body(request)
         if set(body) != {'enabled'} or type(body['enabled']) is not bool:
@@ -694,9 +720,53 @@ class AppPush:
                 Notification.kind == 'push_test', Notification.created_at > utc_now()-timedelta(seconds=30)))
             if latest:
                 raise AccessError('Проверка уже отправлена. Подождите 30 секунд.', 429)
-            await queue_notice(session, actor.id, kind='push_test', event_key='test:'+uuid4().hex)
+            identifier = await queue_notice(session, actor.id, kind='push_test', event_key='test:'+uuid4().hex)
             await session.commit()
-        return web.json_response({'queued': True})
+        return web.json_response({'queued': True, 'notificationId': identifier})
+
+
+    async def preferences(self, request):
+        from .notification_delivery import DEFAULT, PREFIX, preferences, saved_preferences
+        async with AsyncSession(self.api.engine) as session:
+            actor = await self.actor(session, request)
+            saved = await session.get(Setting, PREFIX + str(actor.id))
+            value = saved_preferences(saved.value if saved else None)
+            confirmed = await session.get(Setting, 'push:test-confirmed:' + str(actor.id))
+            last_confirmation = json.loads(confirmed.value) if confirmed else None
+            if request.method == 'PUT':
+                value = preferences(await self.api.body(request))
+                if saved is None:
+                    session.add(Setting(key=PREFIX + str(actor.id), value=json.dumps(value)))
+                else:
+                    saved.value = json.dumps(value)
+                await session.commit()
+            return web.json_response({'preferences': value,
+                'lastUserConfirmation': last_confirmation},
+                headers={'Cache-Control': 'no-store'})
+
+    async def confirm_test(self, request):
+        body = await self.api.body(request)
+        if not isinstance(body, dict) or set(body) != {'id'} or type(body['id']) is not int or not 0 < body['id'] < 2**63:
+            raise AccessError('Проверочное уведомление не найдено.', 400)
+        async with AsyncSession(self.api.engine) as session:
+            actor = await self.actor(session, request)
+            notice = await session.get(Notification, body['id'], with_for_update=True)
+            if (notice is None or notice.user_id != actor.id or notice.kind != 'push_test'
+                    or notice.created_at < utc_now()-timedelta(minutes=10)):
+                raise AccessError('Проверка устарела. Отправьте новое уведомление.', 404)
+            key = 'push:test-confirmed:' + str(actor.id)
+            row = await session.get(Setting, key)
+            previous = json.loads(row.value) if row else None
+            confirmation = previous if previous and previous.get('notificationId') == notice.id else {
+                'notificationId': notice.id, 'confirmedAt': utc_now().isoformat()+'Z',
+                'confirmation': 'user_reported_receipt'}
+            if row is None:
+                session.add(Setting(key=key, value=json.dumps(confirmation)))
+            else:
+                row.value = json.dumps(confirmation)
+            notice.acknowledged_at = notice.acknowledged_at or utc_now()
+            await session.commit()
+        return web.json_response({'confirmed': True, **confirmation}, headers={'Cache-Control':'no-store'})
 
 
 def install_push(app, api):
@@ -705,6 +775,9 @@ def install_push(app, api):
     app.router.add_post('/api/miniapp/push/subscribe', service.subscribe)
     app.router.add_post('/api/miniapp/push/unsubscribe', service.unsubscribe)
     app.router.add_post('/api/miniapp/push/test', service.test)
+    app.router.add_post('/api/miniapp/push/test/confirm', service.confirm_test)
+    app.router.add_get('/api/miniapp/push/preferences', service.preferences)
+    app.router.add_put('/api/miniapp/push/preferences', service.preferences)
     app.router.add_post('/api/miniapp/push/read', service.read)
     app.router.add_post('/api/miniapp/push/read-all', service.read_all)
     app.router.add_post('/api/miniapp/push/owner-telegram', service.owner_telegram)

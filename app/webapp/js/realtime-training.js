@@ -7,7 +7,7 @@ const recovery=new Map(),display=new Map();
 function renderStatus(s){
  const root=host(s.id);if(!root)return;
  const state=display.get(s.id)||{};
- const phase=s.ending?'stopping':s.finishing?'saving':s.closed?'stopped':s.pc?.connectionState==='connected'?(s.muted?'muted':'active'):'connecting';
+ const phase=s.ending?'stopping':s.finishing?'saving':s.closed?'stopped':(s.connected||s.pc?.connectionState==='connected')?(s.muted?'muted':'active'):'connecting';
  root.dataset.realtimePhase=phase;
  const labels={connecting:'Подключаем разговор',active:'Живой разговор идёт',muted:'Микрофон выключен',stopping:'Завершаем разговор',stopped:'Разговор завершён',saving:'Сохраняем разбор'};
  const write=(selector,text)=>{const node=root.querySelector(selector);if(node&&node.textContent!==text)node.textContent=text;};
@@ -113,6 +113,12 @@ function sealTranscript(s){
 }
 function handleEvent(s,event){
  if(s.closed)return;
+ if(s.websocket){
+  if(event.type==='response.created'){s.pcmItem=null;s.pcmResponseStarted=null;s.pcmResponseSamples=0;}
+  if(event.type==='response.output_item.added'&&event.item?.role==='assistant')s.pcmItem=event.item.id;
+  if(event.type==='input_audio_buffer.speech_started')clearPCM(s,true);
+  if(['response.output_audio.delta','response.audio.delta'].includes(event.type)){queuePCM(s,event);return;}
+ }
  const assistant=s.mode==='coach'?'coach':'client';
  if(event.type==='conversation.item.added'||event.type==='conversation.item.created'){
   const value=event.item;
@@ -145,14 +151,14 @@ function handleEvent(s,event){
  if(event.type==='input_audio_buffer.speech_stopped'){s.speaking=false;notice(s.id,'ИИ готовит ответ…');}
  if(event.type==='output_audio_buffer.started'){s.playingResponse=event.response_id||s.responseId;notice(s.id,'ИИ говорит. Можно перебить или задать следующий вопрос.');}
  if(event.type==='output_audio_buffer.cleared'){interruptResponse(s,event.response_id||s.playingResponse);s.playingResponse=null;saveLater(s);}
- if(event.type==='output_audio_buffer.stopped'){const responseId=event.response_id||s.playingResponse;for(const value of s.items)if(responseId&&value.responseId===responseId)value.played=true;s.playingResponse=null;notice(s.id,'Ваш ход. Говорите обычным голосом.');}
+ if(event.type==='output_audio_buffer.stopped'){const responseId=event.response_id||s.playingResponse;for(const value of s.items)if(responseId&&value.responseId===responseId)value.played=true;s.playingResponse=null;remember(s);notice(s.id,'Ваш ход. Говорите обычным голосом.');}
  if(event.type==='error')notice(s.id,'Сбой голосового сервиса. Остановите разговор и подключитесь повторно.');
  if(s.items.length>=78)void stop(s,'Достигнут объём одной тренировки. Сохраните разговор и получите разбор.');
 }
 function meter(s){
  try{
   const Audio=window.AudioContext||window.webkitAudioContext;if(!Audio)return;
-  s.context=new Audio();void s.context.resume().catch(()=>{});
+  s.context=s.context||new Audio();void s.context.resume().catch(()=>{});
   const source=s.context.createMediaStreamSource(s.stream),analyser=s.context.createAnalyser();analyser.fftSize=256;source.connect(analyser);
   const samples=new Uint8Array(analyser.fftSize);
   s.meterTimer=setInterval(()=>{analyser.getByteTimeDomainData(samples);const level=Math.sqrt(samples.reduce((sum,x)=>sum+(x-128)**2,0)/samples.length);const state=display.get(s.id)||{};state.meter=s.muted?'Микрофон выключен':level>2?'Микрофон слышит ваш голос':'Микрофон включён · ожидает речь';display.set(s.id,state);renderStatus(s);},250);
@@ -162,9 +168,91 @@ function release(s){
  clearTimeout(s.saveTimer);clearTimeout(s.limitTimer);clearTimeout(s.connectTimer);clearTimeout(s.disconnectTimer);clearInterval(s.clockTimer);clearInterval(s.meterTimer);
  for(const track of s.stream?.getTracks()||[])track.stop();s.stream=null;
  try{s.channel?.close();s.pc?.close();}catch{}
+ clearPCM(s,false);try{s.worklet?.disconnect();s.pcmInput?.disconnect();if(s.worklet)s.worklet.port.onmessage=null;}catch{}
  try{s.audio?.pause();if(s.audio)s.audio.srcObject=null;}catch{}
  if(s.context)void s.context.close().catch(()=>{});
  if(document.documentElement.dataset.pbLiveVoice===String(s.id))delete document.documentElement.dataset.pbLiveVoice;
+}
+function clearPCM(s,notify){
+ const hadAudio=Boolean(s.pcmNodes?.size),candidate=s.playingResponse||s.responseId;
+ const matching=s.items.filter(value=>value.responseId===candidate);
+ const fullyPlayed=!hadAudio&&matching.length>0&&matching.every(value=>value.played);
+ const response=!fullyPlayed&&(hadAudio||s.responding||s.playingResponse)?candidate:null;
+ const heard=s.pcmResponseStarted==null?0:Math.max(0,Math.min(s.pcmResponseSamples/44100,(s.context?.currentTime||0)-s.pcmResponseStarted));
+ for(const value of s.pcmNodes||[]){value.cancelled=true;try{value.source.stop();value.source.disconnect();}catch{}}
+ s.pcmNodes?.clear();s.pcmPlayAt=s.context?.currentTime||0;
+ if(response){s.pcmIgnored?.add(response);interruptResponse(s,response);}
+ if(response&&notify&&s.channel?.readyState==='open'){
+  try{
+   if(s.responding||hadAudio)s.channel.send(JSON.stringify({type:'response.cancel'}));
+   if(s.pcmItem)s.channel.send(JSON.stringify({type:'conversation.item.truncate',item_id:s.pcmItem,content_index:0,audio_end_ms:Math.floor(heard*1000)}));
+  }catch{}
+ }
+ s.playingResponse=null;
+}
+function finishPCM(s,response){
+ if(!response||s.pcmIgnored?.has(response))return;
+ s.pcmDone.add(response);
+ if(![...s.pcmNodes].some(value=>value.response===response))handleEvent(s,{type:'output_audio_buffer.stopped',response_id:response});
+}
+function queuePCM(s,event){
+ if(s.closed||s.ending)return;
+ const response=event.response_id||s.responseId;
+ if(!response||s.pcmIgnored.has(response))return;
+ try{
+  if(typeof event.delta!=='string'||event.delta.length>8*1024*1024)throw Error('invalid_audio');
+  const raw=atob(event.delta);if(!raw.length||raw.length%2)throw Error('invalid_audio');
+  const data=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)data[i]=raw.charCodeAt(i);
+  const view=new DataView(data.buffer),buffer=s.context.createBuffer(1,data.length/2,44100),values=buffer.getChannelData(0);
+  for(let i=0;i<values.length;i++)values[i]=view.getInt16(i*2,true)/32768;
+  const start=Math.max(s.context.currentTime+0.03,s.pcmPlayAt||0);
+  if(start-s.context.currentTime+buffer.duration>120)throw Error('audio_queue_limit');
+  const source=s.context.createBufferSource();source.buffer=buffer;source.connect(s.context.destination);
+  const value={source,response,cancelled:false};s.pcmNodes.add(value);
+  if(s.pcmResponseStarted==null)s.pcmResponseStarted=start;
+  s.pcmResponseSamples=(s.pcmResponseSamples||0)+values.length;s.pcmPlayAt=start+buffer.duration;
+  source.onended=()=>{s.pcmNodes.delete(value);source.disconnect();if(!value.cancelled&&!s.closed&&s.pcmDone.has(response))finishPCM(s,response);};
+  if(s.playingResponse!==response)handleEvent(s,{type:'output_audio_buffer.started',response_id:response});
+  source.start(start);
+ }catch{void stop(s,'Не удалось воспроизвести голосовой ответ. Проверьте браузер и подключитесь повторно.');}
+}
+async function startPCM(s,response){
+ const Audio=window.AudioContext||window.webkitAudioContext;
+ if(!Audio||typeof AudioWorkletNode==='undefined'||typeof WebSocket==='undefined')throw Error('Этот браузер не поддерживает живой голос. Откройте Фотобосс в Safari или Chrome.');
+ if(response.path!==`/voice-transport/${s.leaseId}`||!/^[A-Za-z0-9_-]{43}$/.test(response.connectionToken||''))throw Error('Некорректное голосовое подключение. Повторите вход.');
+ s.context=new Audio({sampleRate:44100});await s.context.resume().catch(()=>{});
+ await s.context.audioWorklet.addModule('/app/js/voice-pcm-worklet.js');
+ if(s.closed||s.ending)throw Error('Разговор остановлен.');
+ s.pcmNodes=new Set();s.pcmIgnored=new Set();s.pcmDone=new Set();s.pcmPlayAt=0;
+ s.worklet=new AudioWorkletNode(s.context,'photo-boss-pcm',{numberOfInputs:1,numberOfOutputs:1,channelCount:1});
+ s.pcmInput=s.context.createMediaStreamSource(s.stream);s.pcmInput.connect(s.worklet);s.worklet.connect(s.context.destination);
+ const ws=new WebSocket(location.origin.replace(/^http/,'ws')+response.path,['pb-voice',response.connectionToken]);response.connectionToken='';s.websocket=ws;
+ s.channel={get readyState(){return ws.readyState===1?'open':ws.readyState===0?'connecting':'closed';},send(data){ws.send(data);},close(){ws.close();}};
+ s.worklet.port.onmessage=event=>{
+  if(s.closed||!s.connected||ws.readyState!==1)return;
+  if(ws.bufferedAmount>512*1024){void stop(s,'Связь слишком медленная для живого голоса. Проверьте интернет и подключитесь повторно.');return;}
+  const bytes=new Uint8Array(event.data);let binary='';for(const value of bytes)binary+=String.fromCharCode(value);
+  ws.send(JSON.stringify({type:'input_audio_buffer.append',audio:btoa(binary)}));
+ };
+ await new Promise((resolve,reject)=>{
+  const timer=setTimeout(()=>{ws.close();reject(Error('Не удалось подключить голосовой ИИ. Повторите подключение.'));},25000);
+  ws.onerror=()=>{clearTimeout(timer);reject(Error('Голосовая связь прервалась. Проверьте интернет.'));};
+  ws.onclose=()=>{clearTimeout(timer);if(!s.connected)reject(Error('Голосовое подключение закрыто. Повторите подключение.'));else if(!s.closed)void stop(s,'Голосовая связь прервалась. Сохраните реплики и подключитесь повторно.');};
+  ws.onmessage=event=>{
+   try{
+    const value=JSON.parse(event.data);
+    if(value.type==='pb.voice.ready'){
+     if(s.closed||s.ending){clearTimeout(timer);ws.close();reject(Error('Разговор остановлен.'));return;}
+     clearTimeout(timer);s.connected=true;
+     s.channel.send(JSON.stringify({type:'response.create'}));resolve();
+     if(s.context.state!=='running')notice(s.id,'Нажмите «Включить звук ИИ», чтобы начать разговор.');
+    }else{
+     handleEvent(s,value);
+     if(['response.output_audio.done','response.audio.done'].includes(value.type))finishPCM(s,value.response_id||s.responseId);
+    }
+   }catch{void stop(s,'Не удалось прочитать голосовой ответ. Подключитесь повторно.');}
+  };
+ });
 }
 async function endLease(s,keepalive=false){
  if(!s.leaseId)return;
@@ -176,6 +264,7 @@ async function stop(s,message='Разговор остановлен. Репли
   s.ending=true;controls(s);
   for(const track of s.stream?.getAudioTracks()||[])track.enabled=false;
   s.audio?.pause();
+  if(s.websocket)clearPCM(s,true);
   if(!s.closed&&!unloading){
    notice(s.id,'Останавливаем микрофон и сохраняем последние реплики…');
    if(s.responding&&s.channel?.readyState==='open')s.channel.send(JSON.stringify({type:'response.cancel'}));
@@ -238,12 +327,16 @@ async function start(root){
   const response=await api(`/academy/sales-training/${id}/realtime/start`,{method:'POST',body:{revision:s.revision,sdp:offer.sdp,mode:s.mode},timeoutMs:60000});
   s.leaseId=response.leaseId;s.model=response.model;
   if(s.closed||ticket!==generation){await endLease(s);return;}
-  remember(s);await s.pc.setRemoteDescription({type:'answer',sdp:response.sdp});
+  remember(s);
+  if(response.transport==='websocket'){
+   s.channel?.close();s.pc?.close();s.pc=null;await startPCM(s,response);
+  }else await s.pc.setRemoteDescription({type:'answer',sdp:response.sdp});
+  if(s.closed||s.ending||ticket!==generation){release(s);await endLease(s);return;}
   meter(s);s.began=Date.now();s.seconds=0;
   s.clockTimer=setInterval(()=>{s.seconds=Math.floor((Date.now()-s.began)/1000);renderStatus(s);},1000);
   s.limitTimer=setTimeout(()=>void stop(s,'Время разговора завершилось. Получите разбор или начните новый разговор.'),Math.min(Number(response.maxSeconds)||600,600)*1000);
-  s.connectTimer=setTimeout(()=>{if(s.pc?.connectionState!=='connected')void stop(s,'Не удалось установить голосовую связь. Проверьте сеть и подключитесь повторно.');},25000);
-  notice(id,s.pc.connectionState==='connected'?'Разговор подключён. Говорите обычным голосом.':'Устанавливаем голосовую связь…');controls(s);
+  s.connectTimer=setTimeout(()=>{if(!s.connected&&s.pc?.connectionState!=='connected')void stop(s,'Не удалось установить голосовую связь. Проверьте сеть и подключитесь повторно.');},25000);
+  notice(id,s.websocket&&s.context?.state!=='running'?'Нажмите «Включить звук ИИ», чтобы начать разговор.':(s.connected||s.pc?.connectionState==='connected')?'Разговор подключён. Говорите обычным голосом.':'Устанавливаем голосовую связь…');controls(s);
  }catch(error){clearTimeout(timeout);s.closed=true;release(s);if(active===s)active=null;
   try{if(s.requested&&!s.leaseId&&!error.status){const state=await api(`/academy/sales-training/${id}/realtime/status`,{timeoutMs:15000});if(state.active)s.leaseId=state.leaseId;}if(s.leaseId){remember(s);await endLease(s);}}catch{}
   notice(id,microphoneError(error));controls(s);}
@@ -272,7 +365,7 @@ document.addEventListener('click',async event=>{
   if(action==='stop')return await stop(s);
   if(action==='retry'){await flush(s);notice(id,'Реплики сохранены.');controls(s);return;}
   if(action==='mute'){s.muted=!s.muted;for(const track of s.stream?.getAudioTracks()||[])track.enabled=!s.muted;controls(s);notice(id,s.muted?'Микрофон выключен. ИИ вас не слышит.':'Микрофон включён.');}
-  if(action==='sound')await s.audio?.play();
+  if(action==='sound'){if(s.websocket){await s.context?.resume();notice(id,'Голос включён. Говорите обычным голосом.');}else await s.audio?.play();}
  }catch(error){notice(id,microphoneError(error));}
 });
 function leave(){generation++;if(active){const s=active;if(s.ending){s.closed=true;release(s);}void stop(s,'Разговор остановлен при закрытии экрана.',true);}}

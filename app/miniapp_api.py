@@ -5,6 +5,7 @@ existing bot workflows. Plans are not presented as confirmed attendance.
 """
 from __future__ import annotations
 
+from .services.ai_provider import ai_configured
 import hashlib
 import html
 import json
@@ -120,6 +121,10 @@ ACTIONS = {
     "miniapp_shift_cancelled": "Отменил запланированную смену",
     "miniapp_schedule_text_applied": "Применил график из текста",
     "miniapp_password_changed": "Настроил личный вход",
+    "staff_qr_created": "Создал QR-вход сотрудника",
+    "staff_qr_rotated": "Заменил QR-вход сотрудника",
+    "staff_qr_revoked": "Отключил QR-вход сотрудника",
+    "staff_qr_login": "Вошёл по личному QR-коду",
 }
 
 
@@ -138,8 +143,14 @@ def first_role(roles):
 
 
 class MiniApp:
-    def __init__(self, engine, bot, lessons, *, blocks=None, tz_name="Europe/Moscow", static_dir=None):
+    def __init__(self, engine, bot, lessons, *, blocks=None, tz_name="Europe/Moscow", static_dir=None,
+                 standalone=False, qr_signing_key=None):
+        from .refund_schema import install as install_refund_schema
+        install_refund_schema()  # Mapping only, never startup DDL.
         self.engine, self.bot = engine, bot
+        if type(standalone) is not bool:
+            raise ValueError('Explicit application mode required')
+        self.standalone, self.qr_signing_key = standalone, qr_signing_key
         self.tz = ZoneInfo(tz_name)
         self.lessons = [{"slug": l.slug, "title": l.title, "body": l.body,
                          "duration": "Короткий урок", "day": getattr(l, "day", index),
@@ -183,6 +194,8 @@ class MiniApp:
         # owners only, allow a short-lived server-signed token issued by the bot.
         init_data = request.headers.get("X-Telegram-Init-Data", "")
         launch_token = request.headers.get("X-PhotoBoss-Owner-Launch", "")
+        if self.standalone and (init_data or launch_token):
+            raise AccessError('Войдите в Photo Boss по личному QR-коду или паролю.', 401)
         owner_fallback = False
         if init_data:
             telegram_id = validate_init_data(
@@ -194,7 +207,8 @@ class MiniApp:
             telegram_id = validate_owner_launch_token(launch_token, self.bot.token)
             owner_fallback = True
         else:
-            telegram_id = await miniapp_sessions.authenticate(self.engine, request)
+            telegram_id = (await miniapp_sessions.authenticate(self.engine, request, standalone=True)
+                           if self.standalone else await miniapp_sessions.authenticate(self.engine, request))
         request["miniapp_telegram_id"] = telegram_id
         async with self.engine.connect() as conn:
             people = await self.rows(conn, "SELECT id,tg_id,name,active FROM users WHERE tg_id=:tg", tg=telegram_id)
@@ -203,6 +217,9 @@ class MiniApp:
             actor = dict(people[0])
             roles = await self.rows(conn, "SELECT role FROM user_roles WHERE user_id=:uid", uid=actor["id"])
             actor["roles"] = [r for r in ROLE_ORDER if any(x["role"] == r for x in roles)]
+            if (request.get("miniapp_auth_method") == "qr"
+                    and sorted(actor["roles"]) != request.get("miniapp_qr_roles")):
+                raise AccessError("QR-код изменился. Попросите новый QR.", 401)
             if not STAFF_ROLES & set(actor["roles"]):
                 raise AccessError("Владелец ещё не назначил вам рабочую роль.")
             if owner_fallback and "OWNER" not in actor["roles"]:
@@ -310,8 +327,10 @@ class MiniApp:
         require_owner(request['miniapp_actor']['roles'])
         from .config import config
         from .services.ai_diagnostics import public_diagnostics
-        return web.json_response({'provider': 'openai', 'configured': bool(config.openai_api_key),
-            'models': {'academy': config.academy_analysis_model, 'receipts': config.receipt_analysis_model},
+        from .services.ai_provider import responses_profile
+        profile = responses_profile(config)
+        return web.json_response({'provider': profile.provider, 'configured': profile.configured,
+            'models': {'academy': profile.model, 'receipts': responses_profile(config, receipt=True).model},
             'checks': public_diagnostics(), 'scope': 'since_server_start',
             'note': 'Наличие ключа не доказывает успешный ответ API. Проверка использует только тестовый текст.'})
 
@@ -329,7 +348,7 @@ class MiniApp:
             [{'type': 'input_text', 'text': 'Проверка соединения, без данных сотрудников и гостей.'}],
             ROLEPLAY_SCHEMA, 'connection_probe', limit=300)
         return web.json_response({'ok': result['status'] == 'completed', 'status': result['status'],
-            'errorCode': result.get('errorCode'), 'message': result.get('message', 'OpenAI ответил корректно.')})
+            'errorCode': result.get('errorCode'), 'message': result.get('message', 'ИИ ответил корректно.')})
 
     async def me(self, request):
         actor = request["miniapp_actor"]
@@ -347,7 +366,7 @@ class MiniApp:
         )
         return web.json_response({"user": {"id": actor["id"], "telegramId": actor["tg_id"],
             "name": actor["name"], "roles": actor["roles"],
-            "theme": theme[0]["value"] if theme and theme[0]["value"] in THEMES else ("premium" if "OWNER" in actor["roles"] else "light")},
+            "theme": theme[0]["value"] if theme and theme[0]["value"] in THEMES else "premium"},
             "permissions": actor["permissions"], "screenCaptureAllowed": capture_allowed,
             "passwordConfigured": bool(password),
             "passwordLogin": json.loads(password[0]['value'])['login'] if password else '',
@@ -379,7 +398,7 @@ class MiniApp:
                 await conn.execute(text("""INSERT INTO settings (key,value) VALUES (:key,:value)
                     ON CONFLICT (key) DO UPDATE SET value=excluded.value"""), {"key": key, "value": digest})
                 await self.audit_write(conn, actor, "miniapp_opened", "user", actor["id"],
-                    "Подтверждён вход через Telegram. Это не журнал каждого просмотра экрана.")
+                    "Подтверждён вход в Photo Boss. Это не журнал каждого просмотра экрана.")
         return web.json_response({"ok": True})
 
     async def audit_write(self, conn, actor, action, entity, eid, details):
@@ -398,7 +417,7 @@ class MiniApp:
             key = f"miniapp:theme:{actor['id']}"
             await self.rows(conn, "SELECT id FROM users WHERE id=:uid FOR UPDATE", uid=actor["id"])
             old = await self.rows(conn, "SELECT value FROM settings WHERE key=:key", key=key)
-            previous = old[0]["value"] if old else ("premium" if "OWNER" in actor["roles"] else "light")
+            previous = old[0]["value"] if old else "premium"
             await conn.execute(text("""INSERT INTO settings (key,value) VALUES (:key,:value)
                 ON CONFLICT (key) DO UPDATE SET value=excluded.value"""), {"key": key, "value": body["theme"]})
             await self.audit_write(conn, actor, "miniapp_theme_changed", "user", actor["id"], f"Оформление: {previous} → {body['theme']}")
@@ -423,7 +442,8 @@ class MiniApp:
                 key = f'q{i}'
                 params[key] = '%' + term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
                 where += ' AND (' + ' OR '.join(f"LOWER(COALESCE({field},'')) LIKE :{key} ESCAPE '\\'" for field in fields) + ')'
-        rows = await self.rows(conn, f"""SELECT b.id,b.room,b.guest_count,b.shoot_date,b.shoot_time,b.status,
+        refund_columns = 'b.reservation_version_id,' if getattr(self, 'booking_refunds', None) is not None else ''
+        rows = await self.rows(conn, f"""SELECT {refund_columns} b.id,b.room,b.guest_count,b.shoot_date,b.shoot_time,b.status,
             b.photographer_id,b.manager_id,b.hotel_id,c.name AS client,c.phone,h.name AS hotel,
             sh.id AS shooting_id,sh.status AS shooting_status,
             p.name AS photographer,m.name AS manager,pk.name AS package,
@@ -441,10 +461,15 @@ class MiniApp:
                  "shootingId": r["shooting_id"], "shootingStatus": r["shooting_status"],
                  "managerId": r["manager_id"], "manager": r['manager'], "hotelId": r["hotel_id"], "hotel": r["hotel"],
                  "trashed": trash,
+                 "refundEnabled": getattr(self, 'booking_refunds', None) is not None,
                  "canEdit": bool({'OWNER', 'ADMIN'} & set(actor['roles']) or ('MANAGER' in actor['roles'] and r['manager_id'] == actor['id'])),
                  "type": r["package"] or "Съёмка", "frames": r["frames"]} for r in rows]
         for item in items:
             item['revision'] = version(item)
+        if getattr(self, 'booking_refunds', None) is not None:
+            for item, row in zip(items, rows):
+                value = row['reservation_version_id']
+                item['reservationVersionId'] = str(value) if value else None
         return items
 
     async def bookings(self, request):
@@ -623,25 +648,32 @@ class MiniApp:
             uid = row["user_id"]
             e = employees.setdefault(uid, {"id": uid, "name": row["name"], "role": "", "sales": 0, "commission": 0, "adjustments": 0, "earned": 0})
             e["adjustments"] += cents(row["amount"])
+            e["positiveAdjustments"] = e.get("positiveAdjustments", 0) + max(cents(row["amount"]), 0)
+            e["deductions"] = e.get("deductions", 0) + max(-cents(row["amount"]), 0)
         for item in employees.values():
             item["earned"] = item["commission"] + item["adjustments"]
+            item["grossEarned"] = item["commission"] + item.get("positiveAdjustments", 0)
+            item.setdefault("deductions", 0)
         cash = None
         if not own:
-            receipts = await self.rows(conn, "SELECT r.verified_amount FROM receipts r " +
-                ("JOIN bookings b ON b.id=r.booking_id " if hotel_only else "") +
-                "WHERE r.status='APPROVED' AND r.reviewed_at>=:lo AND r.reviewed_at<:hi " +
-                (f"AND ({hotel_scope})" if hotel_only else ""), **args)
-            cash = sum(cents(r["verified_amount"]) for r in receipts)
+            from .services.payment_cash_report import cash_rows
+            receipts = await cash_rows(self, conn, lower, upper,
+                booking_clause=hotel_scope if hotel_only else '', uid=actor['id'])
+            cash = sum(r['amount_kopecks'] for r in receipts)
         return {"period": period, "from": str(start), "to": str(end), "scope": "self" if own else "hotels" if hotel_only else "company",
-                "unscopedAdjustmentsExcluded": hotel_only,
+                "unscopedAdjustmentsExcluded": hotel_only, "accrualsSeparated": True,
                 "sales": sum(cents(s["amount"]) for s in sales), "cashReceived": cash,
                 "payroll": sum(e["earned"] for e in employees.values()),
+                "grossPayroll": sum(e["grossEarned"] for e in employees.values()),
+                "deductions": sum(e["deductions"] for e in employees.values()),
                 "employees": sorted(employees.values(), key=lambda x: (-x["sales"], x["name"])),
                 "salesRows": [{"id": s["id"], "bookingId": s["booking_id"], "client": s["client"],
                     "employee": s["employee"], "date": str(as_utc(s["created_at"]).astimezone(self.tz).date()),
                     "amount": cents(s["amount"]), "status": s["payment_status"]} for s in sales[:100]],
                 "salesCount": len(sales), "salesListLimited": len(sales) > 100,
-                "note": ("Только назначенные вам отели. Ручные премии и удержания без надёжной привязки к отелю здесь не показаны; владелец и сам сотрудник видят их в своих отчётах. " if hotel_only else "") + "Касса — подтверждённые чеки по дате подтверждения. Начислено — комиссии и записи премий/удержаний существующего бота. Это не выплаченная зарплата и не чистая прибыль. Продажи показаны до учёта оплаты."}
+                "note": ("Только назначенные вам отели. Ручные премии и удержания без надёжной привязки к отелю здесь не показаны; владелец и сам сотрудник видят их в своих отчётах. " if hotel_only else "") +
+                    ("Касса — подтверждённые поступления и возвраты по дате операции; прежние чеки без банковской истории — по дате подтверждения владельцем. " if getattr(self, 'booking_refunds', None) is not None else "Касса — подтверждённые чеки по дате подтверждения. ") +
+                    "Начислено — комиссии и записи премий/удержаний. Это не выплаченная зарплата и не чистая прибыль. Продажи показаны до учёта оплаты."}
 
     async def finance(self, request):
         actor = request["miniapp_actor"]
@@ -706,10 +738,42 @@ class MiniApp:
                 "bookings": await self.bookings_data(conn, actor, today),
                 "finance": await self.finance_data(conn, actor, today, today, "today"),
                 "updatedAt": datetime.now(timezone.utc).isoformat()}
+            result['attention'] = await self.dashboard_attention(conn, actor, today)
             if 'PHOTOGRAPHER' in actor['roles']:
                 from .services.assignment_notifications import assignment_items
                 result['assignments'] = await assignment_items(conn, actor['id'], today)
         return web.json_response(result)
+
+    async def dashboard_attention(self, conn, actor, today):
+        """Read-only work requiring attention, using the same booking scope as the list."""
+        scope = booking_scope_sql(actor['id'], actor['roles'])
+        visible = "NOT EXISTS (SELECT 1 FROM settings st WHERE st.key='booking:trash:' || CAST(b.id AS VARCHAR))"
+        drafts = await self.rows(conn, f"""SELECT d.id,d.booking_id,d.created_at,u.name AS operator,
+            c.name AS client,h.name AS hotel FROM sale_drafts d JOIN bookings b ON b.id=d.booking_id
+            JOIN users u ON u.id=d.created_by_id JOIN clients c ON c.id=b.client_id
+            JOIN hotels h ON h.id=b.hotel_id WHERE d.status IN ('AWAITING_RECEIPT','AWAITING_COUNTS','AWAITING_SELECTED')
+            AND b.status NOT IN ('CANCELLED','REJECTED') AND ({scope}) AND {visible}
+            ORDER BY d.created_at,d.id LIMIT 5""", uid=actor['id'])
+        overdue = await self.rows(conn, f"""SELECT b.id,b.shoot_date,b.shoot_time,c.name AS client,h.name AS hotel
+            FROM bookings b JOIN clients c ON c.id=b.client_id JOIN hotels h ON h.id=b.hotel_id
+            WHERE b.shoot_date>=:since AND b.shoot_date<:today AND b.status IN
+            ('NEW','PENDING_CONFIRMATION','CONFIRMED','RESCHEDULED','ASSIGNED','PICKED_UP','ARRIVED','SHOOTING','IN_PROGRESS')
+            AND ({scope}) AND {visible} ORDER BY b.shoot_date,b.shoot_time,b.id LIMIT 5""",
+            uid=actor['id'], since=today-timedelta(days=7), today=today)
+        pending = None
+        if 'OWNER' in actor['roles']:
+            rows = await self.rows(conn, """SELECT
+                (SELECT COUNT(*) FROM shift_check_ins i JOIN users u ON u.id=i.user_id
+                 WHERE i.status='PENDING_REVIEW' AND u.active=TRUE) +
+                (SELECT COUNT(*) FROM shift_check_outs o JOIN users u ON u.id=o.user_id
+                 WHERE o.status='PENDING_REVIEW' AND u.active=TRUE) AS count""")
+            pending = int(rows[0]['count'])
+        return {'unfinishedSales': [{'id': r['id'], 'bookingId': r['booking_id'],
+                    'client': r['client'], 'hotel': r['hotel'], 'operator': r['operator'],
+                    'createdAt': str(r['created_at'])} for r in drafts],
+                'overdueBookings': [{'id': r['id'], 'date': str(r['shoot_date']),
+                    'time': str(r['shoot_time'])[:5], 'client': r['client'], 'hotel': r['hotel']} for r in overdue],
+                'pendingAttendance': pending}
 
     async def schedule(self, request):
         actor = request["miniapp_actor"]
@@ -742,8 +806,10 @@ class MiniApp:
                     ("" if 'OWNER' in actor['roles'] else
                      "AND id IN (SELECT hotel_id FROM hotel_employees WHERE user_id=:uid) ") +
                     "ORDER BY name", uid=actor['id'])]
+            from .schedule_month import month_plan
+            monthly = await month_plan(self, conn, actor, str(start)[:7])
         return web.json_response({"items": items, "employees": employees, "hotels": hotels,
-                                  "unavailableEmployees": unavailable})
+                                  "unavailableEmployees": unavailable, "monthPlan": monthly})
 
     async def create_shift(self, request):
         payload = await self.body(request)
@@ -798,6 +864,9 @@ class MiniApp:
             editor_roles = {r['role'] for r in await self.rows(conn,
                 'SELECT role FROM user_roles WHERE user_id=:uid', uid=actor['id'])}
             require_schedule_editor(editor_roles)
+            from .schedule_month import lock_month, mark_working_day
+            for month in sorted({p['date'][:7] for p in payloads}):
+                await lock_month(conn, month)
             for payload, (uid, hid, start, end) in zip(payloads, parsed):
                 if not await self.rows(conn, "SELECT id FROM hotels WHERE id=:hid AND active=TRUE", hid=hid):
                     raise AccessError("Отель недоступен.", 400)
@@ -814,6 +883,7 @@ class MiniApp:
                 await self.audit_write(conn, actor, "miniapp_shift_created", "shift", row["id"], detail)
                 from .schedule_import import forget_day_plan
                 await forget_day_plan(conn, uid, payload['date'])
+                await mark_working_day(self, conn, actor, uid, payload['date'])
                 ids.append(row['id'])
         return ids
 
@@ -1069,10 +1139,22 @@ class MiniApp:
                    "assets/academy/hero.jpg", "assets/academy/family.jpg", "assets/academy/child.jpg",
                    "assets/academy/couple.jpg", "assets/academy/coast.jpg", "assets/academy/evening.jpg", "assets/academy/lens.jpg", "assets/academy/exposure.svg", "assets/academy/window-light.svg", "assets/academy/perspective.svg", "assets/academy/group-depth.svg"}
         allowed.update({'js/sale-files.js', 'js/schedule-import.js', 'js/gallery-folders.js'})
-        allowed.update({'hr-avito.html', 'js/hr-avito.js'})
-        allowed.update({'js/attendance-fines.js', 'js/hotel-points.js', 'js/storage-audit.js', 'js/notifications.js', 'js/lunch.js', 'js/hotel-pricing.js', 'js/bank-payments.js', 'js/disk-folder-audit.js', 'js/sale-disk.js'})
+        allowed.update({'js/schedule-month.js', 'js/schedule-hours.js', 'css/schedule-month.css'})
+        allowed.update({'js/workspace-overview.js', 'js/guest-phone.js', 'css/workspace-review.css'})
+        allowed.update({'js/voice-pcm-worklet.js', 'js/receipt-review.js'})
+        allowed.update({'js/staff-widget.js', 'css/staff-widget.css', 'assets/widget-aperture.svg'})
+        allowed.update({'js/booking-receipt.js', 'js/receipt-state.js', 'js/receipt-files.js', 'js/gallery-reserve.js', 'js/gallery-sale.js'})
+        allowed.update({'js/attendance-fines.js', 'js/hotel-points.js', 'js/storage-audit.js', 'js/notifications.js', 'js/lunch.js', 'js/hotel-pricing.js', 'js/bank-payments.js', 'js/merchant-qr.js', 'js/disk-folder-audit.js', 'js/sale-disk.js'})
         if name not in allowed:
             raise web.HTTPNotFound()
+        if name == 'config.js' and self.standalone:
+            public = {'API_BASE_URL': '', 'API_TIMEOUT_MS': 90000, 'STANDALONE': True}
+            from .payment_mode import receipts_only
+            public['PAYMENT_MODE'] = 'receipts' if receipts_only() else 'standard'
+            from .services.automatic_receipts import enabled as receipt_auto_enabled
+            public['RECEIPT_AUTOMATIC'] = receipt_auto_enabled()
+            return web.Response(text='window.PHOTO_BOSS_CONFIG = ' + json.dumps(public) + ';\n',
+                                content_type='application/javascript', headers={'Cache-Control': 'no-store'})
         path = self.static_dir / name
         if not path.is_file():
             raise web.HTTPNotFound()
@@ -1100,6 +1182,10 @@ class MiniApp:
             app.router.add_route(method, PREFIX + path, handler)
         from .schedule_import import install_schedule_import
         install_schedule_import(app, self)
+        from .schedule_month import install_schedule_month
+        install_schedule_month(app, self)
+        from .schedule_hours import install_schedule_hours
+        install_schedule_hours(app, self)
         from .academy_coach import install_academy_coach
         install_academy_coach(app, self)
         from .academy_mentor import install_academy_mentor
@@ -1108,13 +1194,19 @@ class MiniApp:
         install_academy_diagnostic(app, self)
 
 
-def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/Moscow"):
-    miniapp = MiniApp(engine, bot, lessons, blocks=blocks, tz_name=tz_name)
+def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/Moscow",
+                    standalone=False, qr_signing_key=None):
+    miniapp = MiniApp(engine, bot, lessons, blocks=blocks, tz_name=tz_name,
+                      standalone=standalone, qr_signing_key=qr_signing_key)
+    from .booking_refund_integration import install_booking_refunds
+    install_booking_refunds(app, miniapp)
     miniapp.register(app)
     from .hotel_points import install_hotel_points
     install_hotel_points(app, miniapp)
     from .delivery import install_delivery
     install_delivery(app, miniapp)
+    from .gallery_reserve import install_gallery_reserve
+    install_gallery_reserve(app, app['delivery'])
     from .insights import install_insights
     install_insights(app, miniapp)
     from .team import install_team
@@ -1135,5 +1227,10 @@ def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/M
     install_disk_folder_audits(app, miniapp)
     from .disk_sale_media import install_disk_sale_media
     install_disk_sale_media(app, miniapp)
+    if standalone:
+        from .receipt_review import install_receipt_review
+        install_receipt_review(app, miniapp)
+        from .staff_widget import install_staff_widget
+        install_staff_widget(app, miniapp)
     return miniapp
 

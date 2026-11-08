@@ -7,9 +7,10 @@ const allowed=new Set(['workflowBooking','workflowSale','workflowShoot','salesTr
 const operational=new Set(['workflowBooking','workflowSale','workflowShoot']);
 const prefix='pb-form-draft-v1:';
 const ttl=7*86400000;
+const isBookingDraft=k=>k.includes(':workflowBooking:');
 function key(form){return actor&&allowed.has(form.id)&&!(operationalReset&&operational.has(form.id))?`${prefix}${actor}:${form.id}:${form.dataset?.draftScope||'default'}${operational.has(form.id)&&generation?':'+generation:''}`:null;}
-function saved(k){if(drafts.has(k))return drafts.get(k);try{const d=JSON.parse(sessionStorage.getItem(k)||'null');if(d&&Date.now()-d.at<ttl){drafts.set(k,d);return d;}}catch{}return null;}
-function persist(k,d){drafts.set(k,d);try{sessionStorage.setItem(k,JSON.stringify({...d,files:undefined}));}catch{}}
+function saved(k){if(drafts.has(k))return drafts.get(k);for(const getStorage of [()=>sessionStorage,...(isBookingDraft(k)?[()=>localStorage]:[])])try{const d=JSON.parse(getStorage().getItem(k)||'null');if(d&&Date.now()-d.at<ttl){drafts.set(k,d);return d;}}catch{}return null;}
+function persist(k,d){drafts.set(k,d);const text=JSON.stringify({...d,files:undefined});try{sessionStorage.setItem(k,text);}catch{}if(isBookingDraft(k))try{localStorage.setItem(k,text);}catch{}}
 export function setFormActor(id,nextGeneration=''){
  const nextActor=Number.isSafeInteger(id)&&id>0?id:null;
  const next=typeof nextGeneration==='string'?nextGeneration:'';
@@ -22,10 +23,12 @@ export function setFormActor(id,nextGeneration=''){
   for(const k of [...drafts.keys()])if([...operational].some(form=>k.startsWith(`${prefix}${actor}:${form}:`)))drafts.delete(k);
   for(let i=sessionStorage.length-1;i>=0;i--){const k=sessionStorage.key(i);if(k&&[...operational].some(form=>k.startsWith(`${prefix}${actor}:${form}:`)))sessionStorage.removeItem(k);}
   sessionStorage.removeItem(`pb-workflow-sale:${actor}`);sessionStorage.setItem(marker,generation);
+  for(let i=localStorage.length-1;i>=0;i--){const k=localStorage.key(i);if(k?.startsWith(`${prefix}${actor}:workflowBooking:`)&&!k.endsWith(':'+generation))localStorage.removeItem(k);}
  }catch{}
 }
 export function captureForm(form){
  const k=key(form);if(!k)return;
+ if(form.id==='workflowBooking'&&!form.dataset.bookingIntentKey)form.dataset.bookingIntentKey=crypto.randomUUID();
  const fields={},files={},names={};
  for(const el of [...form.elements]){
   if(!el.name||['button','submit','password','hidden'].includes(el.type))continue;
@@ -36,14 +39,15 @@ export function captureForm(form){
  }
  const previous=saved(k);
  for(const name of Object.keys(names))if(!names[name].length&&previous?.names?.[name]?.length&&!files[name]?.length&&form.dataset.pendingKeys){names[name]=previous.names[name];}
- persist(k,{at:Date.now(),fields,files,names,pendingKeys:form.dataset.pendingKeys||null});
+ persist(k,{at:Date.now(),fields,files,names,pendingKeys:form.dataset.pendingKeys||null,bookingIntentKey:form.dataset.bookingIntentKey||null});
 }
 export function captureForms(root=document){for(const form of root.querySelectorAll('form'))captureForm(form);}
-export function clearForm(form){const k=key(form);if(k){drafts.delete(k);try{sessionStorage.removeItem(k);}catch{}}delete form.dataset.pendingKeys;}
+export function clearForm(form){const k=key(form);if(k){drafts.delete(k);try{sessionStorage.removeItem(k);}catch{}if(isBookingDraft(k))try{const stored=JSON.parse(localStorage.getItem(k)||'null');if(!stored||stored.bookingIntentKey===(form.dataset.bookingIntentKey||null))localStorage.removeItem(k);}catch{}}delete form.dataset.pendingKeys;delete form.dataset.bookingIntentKey;}
 export function restoreForms(root=document){
  for(const form of root.querySelectorAll('form')){
   const k=key(form),d=k&&saved(k);if(!d)continue;
   if(d.pendingKeys)form.dataset.pendingKeys=d.pendingKeys;
+  if(form.id==='workflowBooking'&&typeof d.bookingIntentKey==='string'&&/^[a-f0-9-]{36}$/i.test(d.bookingIntentKey))form.dataset.bookingIntentKey=d.bookingIntentKey;
   for(const [name,value] of Object.entries(d.fields||{})){
    const el=form.elements[name];if(!el||el.readOnly)continue;
    if(el.type==='checkbox')el.checked=Boolean(value);

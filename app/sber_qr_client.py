@@ -11,6 +11,7 @@ import json
 import re
 import ssl
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -151,6 +152,28 @@ def _json_object(pairs):
     return data
 
 
+@dataclass(frozen=True)
+class QRStatusObservation:
+    """Ephemeral server-side status evidence from one verified bank response.
+
+    Accounting and the exact-operation ledger must consume the same response,
+    rather than perform two reads that can straddle a payment/refund. Details
+    remain private, are omitted from repr, and are returned as defensive copies.
+    Do not persist/serialize this object or return it from an application API.
+    """
+
+    _status_json: bytes = field(repr=False)
+    _details_json: bytes = field(repr=False)
+
+    @property
+    def status(self):
+        return json.loads(self._status_json)
+
+    @property
+    def order_details(self):
+        return json.loads(self._details_json)
+
+
 class QRClient:
     """One-shot requests; uncertain registration must be reconciled, not retried."""
 
@@ -287,6 +310,12 @@ class QRClient:
                 "status": "PENDING", "test_mode": self.config.environment == "sandbox"}
 
     async def get_status(self, order_id, order_number, amount_kopecks):
+        """Compatibility projection without exposing private operation evidence."""
+        observation = await self.get_status_observation(order_id, order_number, amount_kopecks)
+        return observation.status
+
+    async def get_status_observation(self, order_id, order_number, amount_kopecks):
+        """Read once; retain validated operation details for the monetary writer."""
         if ((order_id is not None and not _identifier(order_id, 36))
                 or not _order_number(order_number) or not _amount(amount_kopecks)):
             raise SberQRClientError("qr_status_input_invalid")
@@ -336,7 +365,10 @@ class QRClient:
             net = 0
             status = {"CREATED": "PENDING", "ON_PAYMENT": "PENDING", "REVOKED": "CANCELLED",
                       "DECLINED": "DECLINED", "EXPIRED": "CANCELLED"}[state]
-        return {"bank_order_id": data["order_id"], "order_number": order_number, "status": status,
+        normalized = {"bank_order_id": data["order_id"], "order_number": order_number, "status": status,
                 "currency": "643", "amount_kopecks": amount_kopecks, "paid_kopecks": paid,
                 "refunded_kopecks": refunded, "test_mode": self.config.environment == "sandbox",
                 "settlement_verified": state in {"PAID", "REFUNDED", "REVERSED"}}
+        return QRStatusObservation(
+            json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode(),
+            json.dumps(data, sort_keys=True, separators=(",", ":")).encode())

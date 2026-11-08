@@ -404,6 +404,12 @@ async def finish_reschedule(m, state, current_roles):
     except ValueError:
         return await m.answer("Неверное время. Пример: 16:30")
     data = await state.get_data()
+    from ..operational_start import OperationalStartError, require_booking_date
+    new_day = date.fromisoformat(data["reschedule_date"])
+    try:
+        require_booking_date(new_day)
+    except OperationalStartError as error:
+        return await m.answer(str(error))
     async with Session() as s:
         booking, manager = await owned_booking(
             s, m.from_user.id, data["reschedule_booking_id"], lock=True
@@ -417,7 +423,7 @@ async def finish_reschedule(m, state, current_roles):
                 or await booking_has_work(s, booking, shooting)):
             await state.clear()
             return await m.answer("Съёмка уже начата, закрыта или продана. Перенос недоступен.")
-        booking.shoot_date = date.fromisoformat(data["reschedule_date"])
+        booking.shoot_date = new_day
         booking.shoot_time = new_time
         booking.status = "RESCHEDULED"
         if shooting:

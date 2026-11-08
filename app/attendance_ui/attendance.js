@@ -2,6 +2,7 @@
 import {api} from '/app/js/api.js';
 import {esc} from '/app/js/domain.js';
 import {enqueueOperation,outboxRows} from '/app/js/outbox.js';
+const standaloneMode=()=>window.PHOTO_BOSS_CONFIG?.STANDALONE===true;
 
 export function phase(data) {
  if (!data?.eligible) return 'CONTROL';
@@ -18,16 +19,16 @@ export function getLocation(tg, browser = navigator, timeout = 16000) {
   const finish = (value, error) => { if (done) return; done=true; clearTimeout(timer); error ? reject(new Error(error)) : resolve(value); };
   const timer = setTimeout(() => finish(null, 'Не удалось получить координаты вовремя. Включите геолокацию и повторите.'), timeout);
   const accept = x => {
-   if (!x) return finish(null, 'Доступ к геолокации не предоставлен. Разрешите его в настройках Telegram.');
+   if (!x) return finish(null, standaloneMode()?'Доступ к геолокации не предоставлен. Разрешите его в настройках браузера.':'Доступ к геолокации не предоставлен. Разрешите его в настройках Telegram.');
    const lat=x.latitude, lon=x.longitude, accuracy=x.horizontal_accuracy ?? x.accuracy ?? null;
    if (!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180) return finish(null,'Телефон вернул некорректные координаты.');
    finish({latitude:lat,longitude:lon,accuracy:Number.isFinite(accuracy)?accuracy:null});
   };
   const fallback = () => {
-   if (!browser.geolocation) return finish(null,'На этом устройстве геолокация недоступна. Попробуйте Telegram на телефоне.');
+   if (!browser.geolocation) return finish(null,standaloneMode()?'На этом устройстве геолокация недоступна. Откройте Photo Boss в браузере телефона.':'На этом устройстве геолокация недоступна. Попробуйте Telegram на телефоне.');
    browser.geolocation.getCurrentPosition(p=>accept(p.coords),e=>finish(null,e.code===1?'Разрешение на геолокацию отклонено. Включите доступ в настройках приложения.':'Координаты недоступны. Включите геолокацию и повторите.'),{enableHighAccuracy:true,timeout:14000,maximumAge:0});
   };
-  const manager=tg?.LocationManager;
+  const manager=standaloneMode()?null:tg?.LocationManager;
   if (!manager || !tg?.isVersionAtLeast?.('8.0')) return fallback();
   const request = () => {
    if (done) return;
@@ -40,14 +41,14 @@ export function getLocation(tg, browser = navigator, timeout = 16000) {
 }
 
 function cameraMessage(error) {
- if (error?.name === 'NotAllowedError' || error?.name === 'SecurityError') return 'Доступ к камере отклонён. Разрешите камеру для Telegram и повторите.';
+ if (error?.name === 'NotAllowedError' || error?.name === 'SecurityError') return standaloneMode()?'Доступ к камере отклонён. Разрешите камеру для Photo Boss в браузере и повторите.':'Доступ к камере отклонён. Разрешите камеру для Telegram и повторите.';
  if (error?.name === 'NotFoundError' || error?.name === 'OverconstrainedError') return 'Подходящая камера не найдена на устройстве.';
  if (error?.name === 'NotReadableError' || error?.name === 'AbortError') return 'Камера занята другим приложением. Закройте его и повторите.';
- return 'Не удалось открыть камеру. Обновите Telegram и проверьте разрешение камеры.';
+ return standaloneMode()?'Не удалось открыть камеру. Проверьте разрешение камеры в браузере.':'Не удалось открыть камеру. Обновите Telegram и проверьте разрешение камеры.';
 }
 
 export async function requestCamera(mediaDevices = navigator.mediaDevices, facingMode = 'environment') {
- if (!mediaDevices?.getUserMedia) throw new Error('Живая камера недоступна в этом Telegram. Обновите приложение. Выбор фото из галереи для отметки смены отключён.');
+ if (!mediaDevices?.getUserMedia) throw new Error(standaloneMode()?'Живая камера недоступна в этом браузере. Обновите браузер. Выбор фото из галереи для отметки смены отключён.':'Живая камера недоступна в этом Telegram. Обновите приложение. Выбор фото из галереи для отметки смены отключён.');
  try {
   return await mediaDevices.getUserMedia({
    audio:false,
@@ -77,9 +78,9 @@ export function cameraFrame(video) {
 function install() {
  const root=document.querySelector('#app');if (!root) return;
  const link=document.createElement('link');link.rel='stylesheet';link.href='/shift/attendance.css';document.head.append(link);
- const tg=window.Telegram?.WebApp;
+ const tg=window.PHOTO_BOSS_CONFIG?.STANDALONE===true?null:window.Telegram?.WebApp;
  const dialog=document.createElement('dialog');dialog.id='attendanceDialog';dialog.className='att-dialog';dialog.setAttribute('aria-label','Моя смена');document.body.append(dialog);
- let data=null, failure='', busy=false, photo=null, purpose='start', retakePurpose=null, generation=0, loading=false, refreshAgain=false, outboxRefreshPending=false;
+ let data=null, failure='', busy=false, photo=null, purpose='start', retakePurpose=null, generation=0, loading=false, refreshAgain=false, outboxRefreshPending=false, actorId=null;
  const syncedAttendance=new Set();
  let point=null,pointAt=0,photoAt=null,pointSaved=false;
  const localDay=value=>new Intl.DateTimeFormat('en-CA',{timeZone:data?.timezone||'Europe/Moscow',year:'numeric',month:'2-digit',day:'2-digit'}).format(value);
@@ -120,7 +121,8 @@ function install() {
  function card() {
   // The app clears its header when authentication or staff access is unavailable.
   if (!document.querySelector('#topbar')?.children.length) return;
-  if (!['','#home','#schedule','#more','#workflow'].includes(location.hash)) return;
+  if (!['','#home'].includes(location.hash)) return;
+  if (data && !data.eligible && data.canReview) return;
   if(root.querySelector('#attendanceCard'))return;
   const panel=document.createElement('section');panel.id='attendanceCard';panel.className='att-card';panel.setAttribute('aria-label',gpsRequired()?'Смена и геолокация':'Моя смена');
   panel.innerHTML=`<div class="att-card-copy"><div class="eyebrow">${gpsRequired()?'СМЕНА И ГЕОЛОКАЦИЯ':'МОЯ СМЕНА'}</div><h2>${data?title():'Моя смена'}</h2><p>${failure?'Не удалось загрузить статус. Обновите его.':!data?'Загрузка статуса…':data.eligible?data.start?.at?`Начало ${clock(data.start.at)}${data.end?.at?` · Уход ${clock(data.end.at)}`:''}`:gpsRequired()?'Геолокация и живое фото при начале и завершении смены.':'Живое фото начала и завершения. Геолокация временно отключена.':'Личные отметки фотографов и менеджеров; владелец контролирует график.'}</p></div><div class="att-card-actions">${button(!data?'Обновить':!data.eligible?'Проверить смены':phase(data)==='NOT_STARTED'?'Начать смену':phase(data)==='STARTED'?'Завершить смену':phase(data)==='FINISHED'?'Посмотреть отметки':'Продолжить отметку','open')}${data?.canReview?button('Контроль смен','review','secondary'):''}</div>`;
@@ -137,7 +139,7 @@ function install() {
    if(!['STARTED','FINISHED'].includes(data[part]?.status)&&!storedPending(data[part])&&(row.status!=='synced'||!data[part]&&data._offline))data[part]={status:row.result?.attendanceStatus||'PENDING_REVIEW',claimedAt:row.data.claimedAt,_localOnly:row.status!=='synced',photoSaved:row.status==='synced',locationSaved:row.status==='synced'&&row.data.latitude!=null,evidenceSource:'offline'};
   }
   failure='';
- }catch(e){failure=e.message;}finally{loading=false;updateCard();draw();if(refreshAgain){refreshAgain=false;await refresh();}}}
+ }catch(e){if(version===generation)failure=e.message;}finally{loading=false;updateCard();draw();if(refreshAgain){refreshAgain=false;await refresh();}}}
  async function queueOffline(){
   if(!freshPhoto())throw new Error('Сделайте свежее фото камерой повторно.');
   if(gpsRequired()&&(!point||Date.now()-pointAt>300000))throw new Error('Получите свежую геолокацию и сделайте фото повторно.');
@@ -199,7 +201,7 @@ function install() {
    const part=act==='retake-start'?'start':'end';if(busy||!canRetake(part))return;
    retakePurpose=part;photo=null;photoAt=null;point=null;pointSaved=false;failure='';draw();return;
   }
-  if(act==='settings'){try{if(tg?.LocationManager?.openSettings)tg.LocationManager.openSettings();else message('Разрешите местоположение и камеру в настройках разрешений Telegram.');}catch{message('Откройте настройки разрешений Telegram на телефоне.');}return;}
+  if(act==='settings'){try{if(tg?.LocationManager?.openSettings)tg.LocationManager.openSettings();else message(standaloneMode()?'Разрешите местоположение и камеру для Photo Boss в настройках браузера.':'Разрешите местоположение и камеру в настройках разрешений Telegram.');}catch{message(standaloneMode()?'Откройте настройки разрешений браузера на телефоне.':'Откройте настройки разрешений Telegram на телефоне.');}return;}
   if(act==='camera'){
    if(busy||!data?.eligible)return;
    cameraMode=purpose==='start'?'user':'environment';
@@ -280,7 +282,16 @@ function install() {
   // discards it. The next open/visibility refresh fetches the cleared ledger.
  }
  window.addEventListener('pb-operations-reset',()=>clearAttendance());
- document.addEventListener('pb-chat-account-reset',()=>clearAttendance(true));
+ document.addEventListener('pb-chat-account-reset',()=>{actorId=null;clearAttendance(true);});
+ // /me may reconcile the operational generation while the eager status load
+ // is still pending. Refresh after the app has adopted the authenticated actor
+ // so an initial reset/401 cannot leave the card permanently in its error state.
+ document.addEventListener('pb-chat-account-ready',event=>{
+  const next=event.detail?.user?.id;
+  if(!Number.isSafeInteger(next)||next<=0)return;
+  if(actorId!==next){clearAttendance(true);actorId=next;}
+  void refresh();
+ });
  document.addEventListener('visibilitychange',()=>{
   if(document.hidden){if(cameraActive){generation++;stopCamera();busy=false;failure='Камера была выключена, потому что приложение свернули.';}}
   else if(!busy){refresh().then(draw);}

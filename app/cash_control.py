@@ -35,6 +35,11 @@ class CashControl:
         day=self.api.day(data['paidOn'])
         if not self.api.today()-timedelta(days=366)<=day<=self.api.today():
             raise AccessError('Укажите фактическую дату оплаты за последние 367 дней.',400)
+        from .operational_start import OperationalStartError, require_cash_date
+        try:
+            require_cash_date(day)
+        except OperationalStartError as error:
+            raise AccessError(str(error), 409) from None
         hotel=positive_id(data['hotelId']) if data['hotelId'] is not None else None
         employee=positive_id(data['employeeId']) if data['employeeId'] is not None else None
         if (data['category']=='PAYROLL') != (employee is not None):

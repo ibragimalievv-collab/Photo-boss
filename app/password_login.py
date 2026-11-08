@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import re
 import secrets
 import time
@@ -93,6 +94,16 @@ class PasswordLogin:
 
     async def verified(self, conn, request, actor):
         """An ordinary remembered device session is insufficient to set/reset a password."""
+        if getattr(self.api, 'standalone', False):
+            now = time.time()
+            raw = sessions.cookie(request)
+            saved = await sessions.lookup(conn, raw, now)
+            verified = (saved or {}).get('qr_verified_at')
+            return bool(saved and saved.get('auth_method') == 'qr'
+                        and saved['telegram_id'] == actor['tg_id']
+                        and raw.split('.', 1)[0] == str(actor['id'])
+                        and type(verified) in (int, float) and math.isfinite(verified)
+                        and now - VERIFY_TTL <= verified <= now)
         init = request.headers.get('X-Telegram-Init-Data', '')
         if init:
             return validate_init_data(init, self.api.bot.token, max_age=VERIFY_TTL) == actor['tg_id']
@@ -132,7 +143,10 @@ class PasswordLogin:
                 except AccessError:
                     allowed = False
             if not allowed:
-                raise AccessError('Подтвердите аккаунт через Telegram для создания или восстановления пароля.', 403)
+                message = ('Для настройки пароля войдите ещё раз по личному QR-коду или укажите текущий пароль.'
+                           if getattr(self.api, 'standalone', False) else
+                           'Подтвердите аккаунт через Telegram для создания или восстановления пароля.')
+                raise AccessError(message, 403)
             await conn.execute(text('INSERT INTO settings(key,value) VALUES (:key,:uid) '
                                     'ON CONFLICT(key) DO NOTHING'),
                                {'key': LOGIN_PREFIX + login, 'uid': str(actor['id'])})

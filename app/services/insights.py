@@ -44,8 +44,8 @@ async def period_data(api, conn, start, end):
     sales = await api.rows(conn, '''SELECT s.*,b.hotel_id,b.manager_id,u.name AS employee
         FROM sales s LEFT JOIN bookings b ON b.id=s.booking_id
         JOIN users u ON u.id=s.credited_user_id WHERE s.created_at>=:lo AND s.created_at<:hi''', **params)
-    receipts = await api.rows(conn, '''SELECT r.*,b.hotel_id FROM receipts r JOIN bookings b ON b.id=r.booking_id
-        WHERE r.status='APPROVED' AND r.reviewed_at>=:lo AND r.reviewed_at<:hi''', **params)
+    from .payment_cash_report import cash_rows
+    receipts = await cash_rows(api, conn, lo, hi)
     payroll = await api.rows(conn, '''SELECT p.*,u.name AS employee FROM payroll_entries p JOIN users u ON u.id=p.user_id
         WHERE p.created_at>=:lo AND p.created_at<:hi''', **params)
     bookings = await api.rows(conn, 'SELECT * FROM bookings WHERE shoot_date>=:start AND shoot_date<=:end', **params)
@@ -55,10 +55,14 @@ async def period_data(api, conn, start, end):
         WHERE shift_date>=:start AND shift_date<=:end AND status='STARTED' ''', **params)
     bad_receipts = await api.rows(conn, '''SELECT * FROM receipts WHERE created_at>=:lo AND created_at<:hi''', **params)
     revenue = sum(cents(s['amount']) for s in sales)
-    cash = sum(cents(r['verified_amount']) for r in receipts)
+    cash = sum(r['amount_kopecks'] for r in receipts)
     paid = await api.rows(conn, "SELECT * FROM cash_movements WHERE paid_on>=:start AND paid_on<=:end ORDER BY paid_on DESC,id DESC", **params)
     paid_out = sum(cents(r['amount']) for r in paid if r['status']=='POSTED')
-    accrued = sum(cents(s['commission']) for s in sales) + sum(cents(p['amount']) for p in payroll)
+    # Withholdings are not a cash inflow. Keep gross earnings and deductions
+    # visible separately, and do not offset one employee's debt against another
+    # employee's payable earnings when estimating cash after accruals.
+    accrued = sum(cents(s['commission']) for s in sales) + sum(max(cents(p['amount']), 0) for p in payroll)
+    deductions = sum(max(-cents(p['amount']), 0) for p in payroll)
     employees, hotels = {}, {}
     names = {h['id']: h['name'] for h in await api.rows(conn, 'SELECT id,name FROM hotels')}
     user_names = {u['id']: u['name'] for u in await api.rows(conn, 'SELECT id,name FROM users')}
@@ -73,18 +77,24 @@ async def period_data(api, conn, start, end):
             m['bookedSales'] = m.get('bookedSales', 0) + 1
     for r in receipts:
         h = hotels.setdefault(r['hotel_id'], {'id': r['hotel_id'], 'name': names.get(r['hotel_id'], 'Без отеля'), 'revenue': 0, 'sales': 0, 'cash': 0})
-        h['cash'] += cents(r['verified_amount'])
+        h['cash'] += r['amount_kopecks']
     for p in payroll:
         e = employees.setdefault(p['user_id'], {'id': p['user_id'], 'name': p['employee'], 'revenue': 0, 'sales': 0, 'accrued': 0, 'bookings': 0})
-        e['accrued'] += cents(p['amount'])
+        amount = cents(p['amount'])
+        e['accrued'] += max(amount, 0)
+        e['deductions'] = e.get('deductions', 0) + max(-amount, 0)
     user_names = {u['id']: u['name'] for u in await api.rows(conn, 'SELECT id,name FROM users')}
     for b in bookings:
         e = employees.setdefault(b['manager_id'], {'id': b['manager_id'], 'name': user_names.get(b['manager_id'], ''), 'revenue': 0, 'sales': 0, 'accrued': 0, 'bookings': 0})
         e['bookings'] += 1
+    for employee in employees.values():
+        employee.setdefault('deductions', 0)
+        employee['netAccrued'] = employee['accrued'] - employee['deductions']
+    payable_accruals = sum(max(employee['netAccrued'], 0) for employee in employees.values())
     feedback = await api.rows(conn, 'SELECT rating FROM guest_feedback WHERE submitted_at>=:lo AND submitted_at<:hi AND rating IS NOT NULL', **params)
     from .discipline import period
     discipline = await period(api,conn,start,end)
-    metrics = {'guestReviews': len(feedback), 'guestRating': round(sum(r['rating'] for r in feedback)/len(feedback), 2) if feedback else 0, 'revenue': revenue, 'cash': cash, 'accrued': accrued, 'cashAfterAccruals': cash-accrued, 'paidOut':paid_out, 'netCash':cash-paid_out,
+    metrics = {'guestReviews': len(feedback), 'guestRating': round(sum(r['rating'] for r in feedback)/len(feedback), 2) if feedback else 0, 'revenue': revenue, 'cash': cash, 'accrued': accrued, 'deductions': deductions, 'payableAccruals': payable_accruals, 'cashAfterAccruals': cash-payable_accruals, 'paidOut':paid_out, 'netCash':cash-paid_out,
                'average': int((Decimal(revenue) / len(sales)).quantize(Decimal(1), rounding=ROUND_HALF_UP)) if sales else 0,
                'sales': len(sales), 'shootings': len(shootings), 'bookings': len(bookings),
                'cancellations': sum(b['status'] in ('CANCELLED', 'REJECTED') for b in bookings),
@@ -95,11 +105,11 @@ async def period_data(api, conn, start, end):
                'pendingAttendance': sum(r['pending'] for r in discipline.values()),
                'receipts':len(bad_receipts),
                'receiptIssues': sum(r['status']=='REJECTED' or (bool(receipt_check(r)['findings']) and (r['status']=='PENDING' or parsed(r['analysis']).get('status')=='extracted')) for r in bad_receipts)}
-    return {'from': str(start), 'to': str(end), 'metrics': metrics,
+    return {'from': str(start), 'to': str(end), 'metrics': metrics, 'accrualsSeparated': True,
             'employees': sorted(employees.values(), key=lambda x: -x['revenue']), 'hotels': list(hotels.values()),
             'paidMovements':[{'id':r['id'],'category':r['category'],'amount':cents(r['amount']),'paidOn':str(r['paid_on']),'hotelId':r['hotel_id'],'employeeId':r['employee_id'],'note':r['note'],'status':r['status'],'voidReason':r['void_reason']} for r in paid[:200]],
             'paidMovementCount':len(paid),
-            'note': 'Чистая касса за период = поступления по дате подтверждения чека минус внесённые оплаченные расходы по дате оплаты. Начисления сотрудникам вычитаются только из отдельного показателя «остаток после начислений». Неучтённые расходы и начальный остаток неизвестны; это не прибыль и не банковский баланс.'}
+            'note': 'Чистая касса за период = подтверждённые поступления минус оплаченные расходы. Начисления и удержания показаны отдельно. Остаток после начислений учитывает положительный итог каждого сотрудника; удержания не увеличивают кассу и не погашают начисления другому сотруднику. Выплаты учитываются в оплаченных расходах. Начальный остаток неизвестен; эти показатели не являются банковским балансом или прибылью.'}
 
 
 async def compare_periods(api, conn, start, end, *, offset_days=None):
@@ -144,13 +154,26 @@ async def anomalies(api, conn):
                 add(f"sale:{s['id']}:commission", 'Комиссия отличается от правила 150 кадров', 'sale', s['id'], {'frames': s['frames'], 'expectedPercent': expected, 'actualPercent': s['percent'], 'commission': cents(s['commission'])}, 'critical')
         if s['manager_percent_applied'] is not None:
             from decimal import InvalidOperation
+            valid = False
             try:
                 rate=Decimal(s['manager_percent_applied'])
                 valid=rate.is_finite() and 0<=rate<=100
                 expected_manager=cents(Decimal(str(s['amount']))*rate/100) if valid else None
             except (InvalidOperation,ValueError):
                 expected_manager=None
-            if expected_manager is None or s['manager_amount'] is None or s['manager_user_id']!=s['manager_id'] or cents(s['manager_amount'])!=expected_manager:
+            quote = parsed(s.get('pricing_snapshot'))
+            inline_without_manager = (quote.get('inlineSale') is True
+                                      and quote.get('managerCommissionEligible') is False)
+            if inline_without_manager:
+                # This explicit sale snapshot deliberately accrues no manager
+                # entry. A personal zero-rate manager still needs its linked row.
+                manager_matches = (valid and rate == 0 and s['manager_payroll_entry_id'] is None
+                                   and s['manager_amount'] is None and s['manager_user_id'] is None)
+            else:
+                manager_matches = (expected_manager is not None and s['manager_amount'] is not None
+                                   and s['manager_user_id'] == s['manager_id']
+                                   and cents(s['manager_amount']) == expected_manager)
+            if not manager_matches:
                 add(f"sale:{s['id']}:manager",'Начисление менеджеру отличается от ставки продажи','sale',s['id'],
                     {'appliedPercent':s['manager_percent_applied'],'expectedAmount':expected_manager,'actualAmount':cents(s['manager_amount']) if s['manager_amount'] is not None else None,'payrollEntryId':s['manager_payroll_entry_id']},'critical')
     # Compare unit prices only within the same hotel/package and preceding 90 days.

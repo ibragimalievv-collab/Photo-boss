@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#f4f6fa">
+<title>Вход по QR · Фотобосс</title>
+<link rel="stylesheet" href="/staff-login/login.css">
+<script type="module" src="/staff-login/login.js"></script>
+</head>
+<body>
+<main class="login-shell">
+  <a class="brand" href="/app/" aria-label="Фотобосс — обычный вход">PHOTO BOSS</a>
+  <section class="login-card" aria-labelledby="loginTitle">
+    <p class="eyebrow">Персональный доступ</p>
+    <h1 id="loginTitle">Вход по QR-коду</h1>
+    <p id="loginStatus" class="status" role="status" aria-live="polite">Проверяем код сотрудника…</p>
+    <div id="loginIdentity" class="identity" hidden>
+      <span class="identity-label">Ваш аккаунт</span>
+      <h2 id="loginName"></h2>
+      <p id="loginRoles"></p>
+    </div>
+    <p id="loginError" class="error" role="alert" hidden></p>
+    <button id="loginButton" class="button primary" type="button" hidden>Войти</button>
+    <button id="retryButton" class="button" type="button" hidden>Повторить проверку</button>
+    <p id="loginHelp" class="help">Логин и пароль вводить не нужно. Проверьте своё имя перед входом.</p>
+    <a class="ordinary-login" href="/app/">Другой способ входа</a>
+  </section>
+  <p class="footer">Рабочее пространство Фотобосса</p>
+</main>
+<noscript>Для входа по QR включите JavaScript или откройте обычный вход в Фотобосс.</noscript>
+</body>
+</html>

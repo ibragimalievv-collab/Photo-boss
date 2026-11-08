@@ -33,7 +33,7 @@ export function tariffOptions(b,tariffs){
  const chosenAlbum=(fixed?.lines||[]).find(line=>line.type==='ALBUM'),albums=(state?.albums||[]).filter(album=>album.hotelId===b.hotelId);
  const albumOptions=chosenAlbum?`<option value="${chosenAlbum.albumId}" selected>${esc(chosenAlbum.name)} · ${esc(chosenAlbum.price)} ₽/шт.</option>`:
  `<option value="">Без альбома</option>${albums.map(album=>`<option value="${album.id}">${esc(album.name)} · ${esc(album.price)} ₽/шт.</option>`).join('')}`;
- return `<label class="field">Способ расчёта<select class="input" name="tariffId" ${fixed?'disabled':'required'}>${options}</select></label><label class="field">Печатный альбом — отдельный товар<select class="input" name="albumId" ${fixed?'disabled':''}>${albumOptions}</select></label><label class="field">Количество альбомов<input class="input" name="albumQuantity" type="number" min="1" max="100" step="1" value="${chosenAlbum?.quantity||1}" ${fixed?'disabled':''}></label><div class="notice" id="salePricePreview" role="status">Укажите количество: приложение покажет сумму продажи, поступления и доплату.</div>`;
+ return `<label class="field">Способ расчёта<select class="input" name="tariffId" ${fixed?'disabled':'required'}>${options}</select></label><label class="field">Продал фотографии за, ₽<input class="input" name="photoAmount" type="text" inputmode="decimal" autocomplete="off" placeholder="Введите итоговую сумму" value="${esc(fixed?.manualPhotoAmount??'')}" ${fixed?'disabled':''}><small>Введите согласованную с гостем сумму за выбранные фотографии. Скидка уже входит в эту сумму; подтверждение руководителя не нужно. Пустое поле — расчёт по тарифу. Предоплата вычитается ниже, альбом оплачивается отдельно.</small></label><label class="field">Печатный альбом — отдельный товар<select class="input" name="albumId" ${fixed?'disabled':''}>${albumOptions}</select></label><label class="field">Количество альбомов<input class="input" name="albumQuantity" type="number" min="1" max="100" step="1" value="${chosenAlbum?.quantity||1}" ${fixed?'disabled':''}></label><div class="notice" id="salePricePreview" role="status">Укажите количество: приложение покажет сумму продажи, поступления и доплату.</div>`;
 }
 export function updatePricePreview(form,b,tariffs){
  if(!form||!b)return;
@@ -46,6 +46,11 @@ export function updatePricePreview(form,b,tariffs){
  const validDiscount=!discounted||(approval?.status==='APPROVED'&&t?.kind==='UNIT'&&sold===total&&total===approval.total&&price===Number(approval.unitPrice)&&!Number(b.soldTotal||0));
  if(!validDiscount)photoAmount=null;
  if(discounted&&photoAmount!==null)photoAmount=Math.round(photoAmount*50)/100;
+ const manualText=String(fixed?.manualPhotoAmount??form.elements.photoAmount?.value??'').trim().replace(/\s+/g,'').replace(',','.');
+ const hasManual=manualText!=='';
+ const validManual=!hasManual||(/^\d+(?:\.\d{1,2})?$/.test(manualText)&&Number.isFinite(Number(manualText))&&Number(manualText)<=9999999999.99&&!discounted);
+ if(!validManual)photoAmount=null;
+ else if(hasManual&&photoAmount!==null)photoAmount=Number(manualText);
  const savedAlbum=(fixed?.lines||[]).find(line=>line.type==='ALBUM'),albumId=Number(form.elements.albumId?.value),albumQuantity=Number(form.elements.albumQuantity?.value||1);
  const album=savedAlbum||(state?.albums||[]).find(row=>row.id===albumId&&row.hotelId===b.hotelId);
  const albumCount=savedAlbum?.quantity??albumQuantity,albumAmount=album&&Number.isInteger(albumCount)&&albumCount>0&&albumCount<=100?Math.round(Number(album.price)*albumCount*100)/100:0;
@@ -53,8 +58,8 @@ export function updatePricePreview(form,b,tariffs){
  const paid=Number(b.paidAmount||0),due=amount===null?null:Math.max(0,Math.round((Number(b.salesAmount||0)+amount-paid)*100)/100);
  const creditAmount=amount===null?null:Math.max(0,Math.round((paid-Number(b.salesAmount||0)-amount)*100)/100);
  const box=form.querySelector('#salePricePreview');
- if(box)box.textContent=amount===null?'Проверьте цену записи, способ расчёта и количество кадров.':`${t.kind==='PACKAGE'?`Пакет «${t.name}»`: `${sold} кадр. × ${price.toLocaleString('ru-RU')} ₽`}${discounted?' со скидкой 50% на фотографии':''} = ${photoAmount.toLocaleString('ru-RU')} ₽.${album?` Альбом «${album.name}»: ${albumCount} × ${Number(album.price).toLocaleString('ru-RU')} ₽ = ${albumAmount.toLocaleString('ru-RU')} ₽.`:''} Итого продажа: ${amount.toLocaleString('ru-RU')} ₽. Подтверждённые поступления по съёмке: ${paid.toLocaleString('ru-RU')} ₽. Предоплата по записи: ${Number(b.declaredDeposit||0).toLocaleString('ru-RU')} ₽; подтверждённая часть уже входит в поступления и повторно не вычитается. Остаток с учётом прежних покупок: ${due.toLocaleString('ru-RU')} ₽.${creditAmount>0?` Переплата / к возврату после сверки: ${creditAmount.toLocaleString('ru-RU')} ₽. Автоматического возврата нет; решение фиксирует руководитель.`:''}`;
- return amount===null?null:{amount,due,creditAmount,tariffId:fixed?.tariffId||t?.tariffId||t?.id||null,
+ if(box)box.textContent=amount===null?'Проверьте цену записи, способ расчёта и количество кадров.':`${hasManual?'Фотографии · сумма, согласованная с гостем':t.kind==='PACKAGE'?`Пакет «${t.name}»`: `${sold} кадр. × ${price.toLocaleString('ru-RU')} ₽`}${discounted?' со скидкой 50% на фотографии':''} = ${photoAmount.toLocaleString('ru-RU')} ₽.${album?` Альбом «${album.name}»: ${albumCount} × ${Number(album.price).toLocaleString('ru-RU')} ₽ = ${albumAmount.toLocaleString('ru-RU')} ₽.`:''} Итого продажа: ${amount.toLocaleString('ru-RU')} ₽. Подтверждённые поступления по съёмке: ${paid.toLocaleString('ru-RU')} ₽. Предоплата по записи: ${Number(b.declaredDeposit||0).toLocaleString('ru-RU')} ₽; подтверждённая часть уже входит в поступления и повторно не вычитается. Остаток с учётом прежних покупок: ${due.toLocaleString('ru-RU')} ₽.${creditAmount>0?` Переплата / к возврату после сверки: ${creditAmount.toLocaleString('ru-RU')} ₽. Автоматического возврата нет; решение фиксирует руководитель.`:''}`;
+ return amount===null?null:{amount,due,creditAmount,photoAmount:hasManual?Number(manualText).toFixed(2):null,tariffId:fixed?.tariffId||t?.tariffId||t?.id||null,
   discountId,albumId:savedAlbum?.albumId||album?.id||null,albumQuantity:album?albumCount:null};
 }
 function refreshSalePricing(){

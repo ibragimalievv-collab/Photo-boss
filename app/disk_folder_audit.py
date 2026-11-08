@@ -1,4 +1,5 @@
 """Owner-requested, read-only audits of private folders outside the app namespace."""
+from .services.ai_provider import ai_configured
 import asyncio
 import hashlib
 import json
@@ -70,7 +71,7 @@ def public_job(job):
         'totalPhotos': len(files), 'processed': job['offset'], 'summary': summary,
         'files': [row | {'name': names.get(row['photoId'], 'Фото'), 'path': paths.get(row['photoId'])} for row in job['results']],
         'aiFrames': [frame | {'name': names.get(frame['photo_id'], 'Фото'), 'path': paths.get(frame['photo_id'])} for frame in job['aiFrames']],
-        'aiErrors': job['aiErrors'], 'aiConfigured': bool(config.openai_api_key),
+        'aiErrors': job['aiErrors'], 'aiConfigured': ai_configured(config),
         'note': 'Проверка читает файлы с Диска. Не загружает копии, не удаляет исходники и не меняет продажи. Похожие кадры и AI-оценки требуют проверки человеком.'}
 
 
@@ -219,7 +220,7 @@ async def process_disk_audit(engine, *, storage=None, batch_size=3):
                     if photo['md5'] and hashlib.md5(raw, usedforsecurity=False).hexdigest() != photo['md5']:
                         raise ValueError('Контрольная сумма исходника изменилась. Запустите новую проверку папки.')
                     job['results'].append(result)
-                    if config.openai_api_key and raw.startswith((b'\xff\xd8\xff', b'\x89PNG')):
+                    if ai_configured(config) and raw.startswith((b'\xff\xd8\xff', b'\x89PNG')):
                         images.append((index + 1, raw))
                 except (YandexDiskError, ValueError, OSError, SyntaxError, Image.DecompressionBombError) as exc:
                     job['results'].append({'photoId': index + 1, 'status': 'unavailable',

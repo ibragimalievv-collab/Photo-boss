@@ -1,5 +1,6 @@
 import {api} from './api.js';
 import {localAction,openLocal,writeOperations} from './localstore.js';
+import {receiptPayload} from './receipt-files.js';
 let userId=null,operationsGeneration='',salesGeneration='',running=false,timer=null,retryDue=0,rerunRequested=false,authEpoch=0,queueRepairing=false;
 // A camera photo or a large sale original must not delay a new booking. Keep
 // bounded, independent workers, while preserving the original order of every
@@ -15,13 +16,34 @@ const scheduleRetry=delay=>{
  clearTimeout(timer);retryDue=due;
  timer=setTimeout(()=>{timer=null;retryDue=0;void flushOutbox();},wait);
 };
-const update=row=>writeOperations([row]);
+async function update(row){
+ const actor=userId,db=await openLocal();
+ try{return await new Promise((resolve,reject)=>{
+  const tx=db.transaction(['operations','snapshots'],'readwrite'),store=tx.objectStore('operations');
+  const saved=store.get(row.key),marker=tx.objectStore('snapshots').get(`operations-generation:${row.userId}`);
+  let reads=0,accepted=false,stale=false,failure=null;
+  const finish=()=>{
+   if(++reads!==2)return;
+   try{
+    const current=saved.result,generation=marker.result?.generation||'';
+    stale=row.kind!=='cash_expense'&&(row.generation||'')!==generation;
+    if(stale||actor!==userId||row.userId!==actor||!current||current.userId!==actor||
+     (current.supersededByGallery&&current.supersededByGallery!==row.supersededByGallery)||
+     (current.status==='synced'&&row.status!=='synced'))return;
+    store.put(row);accepted=true;
+   }catch(error){failure=error;tx.abort();}
+  };
+  saved.onsuccess=finish;marker.onsuccess=finish;
+  tx.oncomplete=()=>{if(stale)window.dispatchEvent(new Event('pb-operations-stale'));resolve(accepted);};
+  tx.onerror=()=>reject(failure||tx.error);tx.onabort=()=>reject(failure||tx.error||new Error('Не удалось сохранить рабочую операцию.'));
+ });}finally{db.close();}
+}
 const changed=()=>window.dispatchEvent(new Event('pb-outbox'));
 // Older servers converted every domain error to this generic 400. Recheck such
 // media once, with the original key and bytes; never reset arbitrary bad requests.
 const LEGACY_MEDIA_RECOVERY='media-recovery-v2-20261017';
 const legacyMediaError=row=>row.status==='error'&&row.errorStatus===400&&row.legacyMediaRecovery!==LEGACY_MEDIA_RECOVERY&&
- Boolean(row.hasBlob||row.blob)&&['shoot_photo','delivery_photo','sale_selected','booking_receipt','sale_receipt','attendance'].includes(row.kind)&&
+ Boolean(row.hasBlob||row.blob)&&['shoot_photo','delivery_photo','gallery_reserve_photo','sale_selected','booking_receipt','sale_receipt','attendance'].includes(row.kind)&&
  typeof row.error==='string'&&row.error.startsWith('Не удалось прочитать вложение.');
 // Called only after /me has confirmed the active account. A previous 401 is not
 // a permanent rejection of the saved file; retry it after this new login only.
@@ -37,7 +59,8 @@ export function rejectedBooking(rows){
  // These domain validations roll back before the idempotency ledger is written.
  // Never alter an acknowledged, uncertain, auth/reset or unknown rejection.
  return Boolean(rows.length&&rows.every(Boolean)&&row.kind==='booking'&&row.status==='error'&&
-  row.errorStatus===409&&!row.result&&BOOKING_VALIDATION_ERRORS.has(row.error)&&
+  row.errorStatus===409&&!row.result&&(BOOKING_VALIDATION_ERRORS.has(row.error)||
+   /^Новый рабочий период начинается \d{2}\.\d{2}\.\d{4}\. Выберите эту или более позднюю дату съёмки\.$/.test(row.error||''))&&
   rows.slice(1).every(item=>item.kind==='booking_receipt'&&item.data?.booking?.key===row.key&&
    item.status==='local'&&!item.result&&(!item.errorStatus||item.errorStatus===424)))?row:null;
 }
@@ -157,6 +180,64 @@ export async function repairSaleQueue(keys,{draftId,total,sold,price},files=[],d
  committed=true;changed();return added;
  }finally{queueRepairing=false;if(committed||rerunRequested)void flushOutbox();}
 }
+// Switch only the remaining photo transfer to already stored gallery originals.
+// Original requests (including uncertain uploads) retain their exact payload,
+// bytes and key. The server still owns counts, payment and sale idempotency.
+export async function recoverSaleFromGallery(keys,{draftId},photos){
+ if(running||queueRepairing)throw new Error('Дождитесь завершения текущей отправки, затем продолжите из галереи.');
+ if(!Array.isArray(keys)||keys.length<3||new Set(keys).size!==keys.length||
+  !Number.isSafeInteger(draftId)||draftId<1||!Array.isArray(photos)||!photos.length||photos.length>10000)
+  throw new Error('Обновите исходную продажу и выберите недостающие кадры.');
+ const ids=photos.map(photo=>typeof photo==='number'?photo:photo?.photo);
+ if(ids.some(id=>!Number.isSafeInteger(id)||id<1||id>=2**31)||new Set(ids).size!==ids.length)
+  throw new Error('Выберите разные фотографии из галереи этой съёмки.');
+ queueRepairing=true;let committed=false,added=[],failure=null;
+ try{
+  const actor=userId,generation=operationsGeneration,saleGeneration=salesGeneration;
+  const allowed=new Set(['sale_start','sale_start_inline','sale_receipt','sale_counts','sale_selected','sale_disk_selected','sale_gallery_selected','sale_complete']);
+  const selectedKinds=new Set(['sale_selected','sale_disk_selected','sale_gallery_selected']);
+  try{await localAction('operations','readwrite',store=>{
+   const rows=new Array(keys.length);let remaining=keys.length,first=null;
+   const abort=error=>{failure=error;store.transaction.abort();};
+   const finish=()=>{
+    try{
+     if(!actor||actor!==userId||generation!==operationsGeneration||saleGeneration!==salesGeneration||running||
+      rows.some(row=>!row||row.userId!==actor||(row.generation||'')!==generation||
+       (row.salesGeneration||'')!==saleGeneration||!allowed.has(row.kind)||row.status==='syncing'||row.supersededByGallery))
+      throw new Error('Аккаунт или очередь изменились. Обновите продажу.');
+     const starts=rows.filter(isSaleStart),completions=rows.filter(row=>row.kind==='sale_complete'),counts=rows.filter(row=>row.kind==='sale_counts');
+     const start=starts[0],complete=completions[0];
+     if(starts.length!==1||start.status!=='synced'||start.result?.draftId!==draftId||completions.length!==1||
+      !['local','error'].includes(complete.status)||complete.result||typeof complete.data?.price!=='string'||
+      !counts.length||counts.some(row=>row.status!=='synced')||
+      rows.some(row=>!isSaleStart(row)&&row!==complete&&!selectedKinds.has(row.kind)&&row.status!=='synced')||
+      rows.some(row=>!isSaleStart(row)&&!(row.data?.draft?.id===draftId||row.data?.draft?.key===start.key))||
+      !rows.some(row=>selectedKinds.has(row.kind)&&['local','error'].includes(row.status)))
+      throw new Error('Сначала дождитесь подтверждения чека и количества кадров в этой продаже.');
+     const accepted=rows.filter(row=>selectedKinds.has(row.kind)&&row.status==='synced');
+     const acceptedIds=new Set(accepted.map(row=>row.result?.photoId).filter(id=>Number.isSafeInteger(id)&&id>0));
+     const acceptedCount=Math.max(acceptedIds.size,...accepted.map(row=>row.result?.selectedPhotos).filter(value=>Number.isSafeInteger(value)&&value>=0));
+     const sold=counts[counts.length-1].data?.sold;
+     if(!Number.isSafeInteger(sold)||sold-acceptedCount<1||ids.length!==sold-acceptedCount)
+      throw new Error('Количество принятых фотографий изменилось. Обновите продажу и выберите оставшиеся кадры.');
+     const at=Date.now(),draft={id:draftId};
+     const items=[...ids.map(photo=>({kind:'sale_gallery_selected',data:{draft,photo}})),
+      {kind:'sale_complete',data:{draft,price:complete.data.price}}];
+     added=items.map((item,order)=>({...item,key:crypto.randomUUID(),userId:actor,generation,
+      salesGeneration:saleGeneration,date:complete.date,blob:null,filename:'',status:'local',createdAt:at,order,recoveryOf:complete.key}));
+     const replacement=added[added.length-1].key;
+     for(const row of rows)if(row.status!=='synced'&&(selectedKinds.has(row.kind)||row===complete))
+      store.put({...row,supersededByGallery:replacement,supersededAt:at,autoRetryPaused:true});
+     for(const row of added)store.add(row);
+    }catch(error){abort(error);}
+   };
+   keys.forEach((key,index)=>{const request=store.get(key);if(!first)first=request;
+    request.onsuccess=()=>{rows[index]=request.result;if(!--remaining)finish();};});
+   return first;
+  });}catch(error){throw failure||error;}
+  committed=true;changed();return added;
+ }finally{queueRepairing=false;if(committed||rerunRequested)void flushOutbox();}
+}
 async function resumeRepairedCompletion(repair){
  if(repair.userId!==userId||repair.status!=='synced'||!repair.resumeCompleteKey)return;
  const complete=await localAction('operations','readonly',store=>store.get(repair.resumeCompleteKey));
@@ -186,8 +267,24 @@ export async function outboxRows(){
 export async function enqueueBatch(items){
  if(!userId)throw new Error('Сначала откройте приложение при доступной сети.');
  if(!items.length)throw new Error('Нет действий для сохранения.');
- const at=Date.now(),actor=userId;
- const rows=items.map((item,i)=>({key:item.key||crypto.randomUUID(),userId:actor,generation:operationsGeneration,salesGeneration,kind:item.kind,date:item.date,data:item.data,blob:item.blob||null,filename:item.blob?.name||'',status:'local',createdAt:at,order:i}));
+ const at=Date.now(),actor=userId,generation=operationsGeneration,saleGeneration=salesGeneration,rows=[];
+ for(const [i,item] of items.entries()){
+  let blob=item.blob||null;
+  if(blob&&['booking_receipt','sale_receipt'].includes(item.kind)&&Array.isArray(blob))blob=await receiptPayload(blob);
+  const blobType=blob?.type||'',filename=blob?.name||(blobType==='application/vnd.photoboss.receipt-bundle'?'receipt.pbr':'');
+  if(blob&&['booking_receipt','sale_receipt'].includes(item.kind)){
+   // WebKit can persist a File reference whose backing object disappears on
+   // browser restart. Own the bounded receipt bytes before acknowledging save.
+   if(!blob.size||blob.size>16*1024*1024+2048)throw Error('Чек должен содержать до двух файлов по 8 МБ.');
+   let bytes;try{bytes=await blob.arrayBuffer();}catch{throw Error('Не удалось прочитать чек. Выберите файл ещё раз; форма остаётся заполненной.');}
+   if(!bytes.byteLength)throw Error('Выбранный чек пуст. Выберите файл ещё раз.');
+   // ArrayBuffer is structured-cloned into IndexedDB itself; WebKit Blob
+   // backing files can also disappear between browser processes.
+   blob=bytes;
+  }
+  rows.push({key:item.key||crypto.randomUUID(),userId:actor,generation,salesGeneration:saleGeneration,kind:item.kind,date:item.date,data:item.data,blob,blobType,filename,status:'local',createdAt:at,order:i,...(item.kind==='sale_start_inline'&&item.merchantPreparation===true?{merchantPreparation:true}:{})});
+ }
+ if(actor!==userId||generation!==operationsGeneration||saleGeneration!==salesGeneration)throw Error('Аккаунт или рабочий период изменился. Откройте форму заново.');
  if(!await writeOperations(rows,{add:true}))throw new Error('Рабочие данные обнулены. Обновите приложение перед продолжением.');
  changed();void flushOutbox();return rows;
 }
@@ -198,7 +295,7 @@ const duplicateSelectedRejection=row=>row.kind==='sale_selected'&&row.errorStatu
 const duplicateReceiptRejection=row=>row.kind==='sale_receipt'&&row.errorStatus===409&&row.error==='Этот чек уже использовался или похож на ранее загруженный.';
 export function canReplaceOperationFile(row){
  return Boolean(row?.status==='error'&&([400,413].includes(row.errorStatus)||duplicateSelectedRejection(row)||duplicateReceiptRejection(row))&&
-  ['shoot_photo','delivery_photo','sale_selected','booking_receipt','sale_receipt'].includes(row.kind));
+  ['shoot_photo','delivery_photo','gallery_reserve_photo','sale_selected','booking_receipt','sale_receipt'].includes(row.kind));
 }
 // This exact validation rolls back before recording the idempotency key. A
 // deliberate new selection may replace its stale reference, never an uncertain
@@ -250,8 +347,13 @@ export async function replaceOperationFile(key,file){
  const row=await localAction('operations','readonly',s=>s.get(key));
  if(!row||row.userId!==userId||!canReplaceOperationFile(row))throw new Error('Этот файл нельзя заменять: дождитесь результата отправки или повторите исходный файл.');
  const maximum=['booking_receipt','sale_receipt'].includes(row.kind)?8*1024*1024:20*1024*1024;
- if(!file||!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>maximum)throw new Error(`Нужен JPEG, PNG или WebP до ${maximum/1024/1024} МБ.`);
- row.blob=file;row.filename=file.name||row.filename;row.status='local';row.error='';row.errorStatus=0;row.retryAt=0;
+ if(['booking_receipt','sale_receipt'].includes(row.kind)){
+  const payload=await receiptPayload(Array.isArray(file)?file:[file]);
+  row.blob=await payload.arrayBuffer();row.blobType=payload.type;row.filename='receipt';row.status='local';row.error='';row.errorStatus=0;row.retryAt=0;
+  await update(row);changed();return flushOutbox();
+ }
+ if(!file||!['image/jpeg','image/png','image/webp',...(['booking_receipt','sale_receipt'].includes(row.kind)?['application/pdf']:[])].includes(file.type)||!file.size||file.size>maximum)throw new Error(`Нужен JPEG, PNG или WebP до ${maximum/1024/1024} МБ.`);
+ row.blob=row.kind==='booking_receipt'?await file.arrayBuffer():file;row.blobType=file.type||'';row.filename=file.name||row.filename;row.status='local';row.error='';row.errorStatus=0;row.retryAt=0;
  await update(row);changed();return flushOutbox();
 }
 // Store one original locally, send it, and wait for confirmation before loading
@@ -284,7 +386,7 @@ export async function enqueueFilesOneByOne(files,operationFor,onProgress=()=>{})
  return {done:total,total};
 }
 
-export async function retryOperation(key){const rows=await outboxRows();if(!rows.some(r=>r.key===key))return;const row=await localAction('operations','readonly',s=>s.get(key));if(!row||row.userId!==userId)return;row.status='local';row.error='';if(!isBankGate(row)&&row.kind.startsWith('sale_')){row.saleTransientFailures=0;row.autoRetryPaused=false;}if(row.errorStatus!==429)row.retryAt=0;await update(row);for(const item of rows){if(item.errorStatus===424){const pending=await localAction('operations','readonly',s=>s.get(item.key));if(!pending||pending.userId!==userId)continue;pending.status='local';pending.error='';pending.retryAt=0;await update(pending);}}changed();return flushOutbox();}
+export async function retryOperation(key){const rows=await outboxRows();if(!rows.some(r=>r.key===key))return;const row=await localAction('operations','readonly',s=>s.get(key));if(!row||row.userId!==userId)return;if(row.supersededByGallery)throw new Error('Эта передача уже продолжена из галереи. Проверьте результат той же продажи.');row.status='local';row.error='';if(!isBankGate(row)&&row.kind.startsWith('sale_')){row.saleTransientFailures=0;row.autoRetryPaused=false;}if(row.errorStatus!==429)row.retryAt=0;await update(row);for(const item of rows){if(item.errorStatus===424){const pending=await localAction('operations','readonly',s=>s.get(item.key));if(!pending||pending.userId!==userId||pending.supersededByGallery)continue;pending.status='local';pending.error='';pending.retryAt=0;await update(pending);}}changed();return flushOutbox();}
 // Explicit user retry may bypass our local network-failure cooldown, never a
 // server Retry-After or a permanent access/validation error. Keep original keys
 // and bytes so a lost successful response is recovered idempotently.
@@ -292,10 +394,10 @@ export async function syncOutboxNow(){
  const actor=userId;
  for(const item of await outboxRows()){
   if(actor!==userId)break;
-  if(item.status!=='local'||item.errorStatus===429||!item.retryAt)continue;
+  if(item.supersededByGallery||item.status!=='local'||item.errorStatus===429||!item.retryAt)continue;
   const row=await localAction('operations','readonly',s=>s.get(item.key));
   if(actor!==userId)break;
-  if(!row||row.userId!==actor||row.status!=='local'||row.errorStatus===429)continue;
+  if(!row||row.userId!==actor||row.supersededByGallery||row.status!=='local'||row.errorStatus===429)continue;
   row.retryAt=0;if(!isBankGate(row)&&row.kind.startsWith('sale_')){row.saleTransientFailures=0;row.autoRetryPaused=false;}await update(row);
  }
  changed();return flushOutbox();
@@ -325,13 +427,16 @@ async function syncBankGate(row,active){
    ...(row.kind==='sale_bank_payment'?{allowZeroDue:true}:{})};
   if(!await update(row)||!sameActor())return null;
  }
- const bill=row.result?.id?await api(`/bank-payments/${row.result.id}/status`,{method:'POST',body:{},timeoutMs:20000}):
+ const attached=row.data.existingBillId;
+ if(attached!=null&&(!Number.isSafeInteger(attached)||attached<1||row.kind!=='booking_bank_payment'))fail('Не удалось определить сохранённый банковский счёт.');
+ const billId=row.result?.id||attached;
+ const bill=billId?await api(`/bank-payments/${billId}/status`,{method:'POST',body:{},timeoutMs:20000}):
   await api('/bank-payments',{method:'POST',body:row.bankPayload,timeoutMs:20000});
  if(!sameActor())return null;
  if(bill?.status==='NO_PAYMENT_REQUIRED'&&row.kind==='sale_bank_payment'&&bill.allowZeroDue===true&&bill.amount==='0.00'&&
   bill.testMode===false&&bill.bookingId===row.bankPayload.bookingId&&bill.sourceDraftId===row.bankPayload.sourceDraftId)return bill;
  if(!bill||!Number.isSafeInteger(bill.id)||bill.id<1||bill.bookingId!==row.bankPayload.bookingId||
-  (row.result?.id&&row.result.id!==bill.id))fail('Ответ банка не совпал с записью. Проверьте состояние счёта.');
+  (billId&&billId!==bill.id))fail('Ответ банка не совпал с записью. Проверьте состояние счёта.');
  row.result=bill;
  // Save the bill identity before showing QR or scheduling another status call.
  if(!await update(row)||!sameActor())return null;
@@ -362,6 +467,7 @@ async function flushOutboxWorker(worker){
   if(worker==='media')for(const repair of await outboxRows())if(repair.status==='synced'&&repair.resumeCompleteKey)await resumeRepairedCompletion(repair);
   for(const item of await outboxRows()){
    if(!active())break;
+   if(item.supersededByGallery)continue;
    if(operationWorker(item)!==worker)continue;
    // Legacy rows remain legacy packets; never stamp a freshly adopted reset
    // generation onto an old action, even if another tab held a stale cursor.
@@ -389,6 +495,7 @@ async function flushOutboxWorker(worker){
    const row=await localAction('operations','readonly',s=>s.get(item.key));
    if(!active())break;
    if(!row)continue;
+   if(row.supersededByGallery)continue;
    if(worker==='attendance'&&row.status==='synced')blockedAttendance.delete(row.date);
    if(!['local','syncing'].includes(row.status)&&!legacyMediaError(row)&&!renewedAuth(row)&&!legacySaleDependency(row,previous)){if(sale){previous.push(row);if(row.status!=='synced')blockedSales.add(sale);}continue;}
    if(legacySaleDependency(row,previous)){row.saleDependencyRecovery=SALE_DEPENDENCY_RECOVERY;row.status='local';row.error='';row.retryAt=0;await update(row);}
@@ -413,9 +520,9 @@ async function flushOutboxWorker(worker){
     const operation={actorId:row.userId,key:row.key,kind:row.kind,date:row.date,data:row.data,...(row.generation!==undefined?{generation:row.generation}:{}),...((row.kind.startsWith('sale_')||row.kind==='booking')&&row.salesGeneration?{salesGeneration:row.salesGeneration}:{})};
     let body=operation,path='/operations/sync';
     if(row.blob){
-     const bytes=await row.blob.arrayBuffer();
+     const bytes=row.blob instanceof ArrayBuffer?row.blob:await row.blob.arrayBuffer();
      if(!bytes.byteLength){const error=new Error('Сохранённое фото пустое. Выберите файл заново.');error.status=400;throw error;}
-     const upload=new Blob([bytes],{type:row.blob.type||'application/octet-stream'});
+     const upload=new Blob([bytes],{type:row.blobType||row.blob.type||'application/octet-stream'});
      body=new FormData();body.append('operation',JSON.stringify(operation));body.append('file',upload,row.filename||'upload');
      path='/operations/media';
     }

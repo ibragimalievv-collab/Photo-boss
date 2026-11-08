@@ -1,4 +1,5 @@
 """AI-only learning plans, normalized skills, quizzes and real-shoot requests."""
+from .services.ai_provider import ai_configured
 import asyncio
 import hashlib
 import json
@@ -152,7 +153,7 @@ class AcademyCoach:
             fingerprint = hashlib.sha256(json.dumps(evidence, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
             plans = await self.api.rows(conn, '''SELECT id,data,fingerprint FROM academy_coaching_plans
                 WHERE user_id=:uid AND track=:track ORDER BY id DESC LIMIT 1''', uid=uid, track=track)
-        return {'track': track, 'practiceReady': practice_ready, 'configured': bool(config.openai_api_key), 'skills': skills,
+        return {'track': track, 'practiceReady': practice_ready, 'configured': ai_configured(config), 'skills': skills,
                 'diagnosticAssessment': assessment, 'bookingReadiness': readiness, 'needsDiagnostic': needs_diagnostic,
                 'lessons': lessons, 'completed': done, 'passedQuizzes': [r['topic_slug'] for r in quizzes],
                 'comparison': comparison, 'plan': ({'id': plans[0]['id'], **parsed(plans[0]['data'])} if plans else None),
@@ -176,7 +177,7 @@ class AcademyCoach:
                 raise AccessError('Сначала пройдите входную диагностику: наставник подберёт обучение по результатам.', 409)
             if not data['stale']:
                 return web.json_response({'plan': data['plan'], 'diagnostic': data['diagnostic']})
-            if not config.openai_api_key:
+            if not ai_configured(config):
                 raise AccessError('AI-помощник не подключён. Уроки и сохранённые результаты доступны.', 503)
             lessons = [x for x in data['lessons'] if not x.get('locked')]
             schema = plan_schema(track, lessons, data['_evidence']['allowedCategories'])

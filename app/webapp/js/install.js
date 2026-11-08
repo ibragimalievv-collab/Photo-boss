@@ -1,4 +1,5 @@
-// Installation is public; working data still require the existing Telegram login.
+// Installation is public; the server still authenticates every working account.
+const standaloneMode=()=>window.PHOTO_BOSS_CONFIG?.STANDALONE===true;
 const bar=document.querySelector('#installBar');
 const button=document.querySelector('#installApp');
 const dialog=document.querySelector('#installDialog');
@@ -8,11 +9,16 @@ const ios=/iPhone|iPad|iPod/.test(navigator.userAgent)||(navigator.platform==='M
 const android=/Android/.test(navigator.userAgent);
 const installed=()=>display.matches||navigator.standalone===true;
 let deferredPrompt=null,installing=false,installationCompleted=false;
+if(standaloneMode()){
+ const hint=document.querySelector('#installLoginHint');
+ if(hint)hint.textContent='После установки открой Photo Boss и войди по персональному QR или логину и паролю. QR для первого входа и восстановления доступа выдаёт владелец или администратор.';
+ document.querySelector('#installEmbedded').textContent='Открой эту ссылку в обычном браузере: Chrome на Android или Safari на iPhone.';
+}
 
 function refresh(){bar.hidden=installed()||installationCompleted;}
 function showInstructions(){
  status.textContent='';
- document.querySelector('#installEmbedded').hidden=!window.Telegram?.WebApp?.initData&&!/Telegram|; wv\)/i.test(navigator.userAgent);
+ document.querySelector('#installEmbedded').hidden=standaloneMode()?!/Telegram|; wv\)/i.test(navigator.userAgent):!window.Telegram?.WebApp?.initData&&!/Telegram|; wv\)/i.test(navigator.userAgent);
  document.querySelector('#installInstructions').innerHTML=ios
   ? '<h3>iPhone и iPad</h3><ol><li>Открой ссылку в Safari.</li><li>Нажми «Поделиться» и выбери «На экран Домой».</li><li>Если есть переключатель «Открывать как веб-приложение», включи его. Нажми «Добавить».</li></ol>'
   : android

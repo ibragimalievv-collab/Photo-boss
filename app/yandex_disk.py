@@ -32,7 +32,7 @@ class YandexDiskError(RuntimeError):
         "provider_error", "api_http", "api_timeout", "api_network", "invalid_response",
         "unsafe_target", "integrity", "upload_http", "upload_timeout", "upload_network",
         "download_http", "download_timeout", "download_network", "download_limit",
-        "probe_mismatch", "not_configured", "validation",
+        "probe_mismatch", "not_configured", "validation", "legacy_media_unavailable",
     })
 
     def __init__(self, message, *, code="provider_error", http_status=None):

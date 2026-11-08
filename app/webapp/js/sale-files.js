@@ -11,7 +11,7 @@ export async function checkSaleFiles(files){
 // A chosen FileList is only a selection. A ready gallery requires the final
 // durable operation acknowledgement and every predecessor in that same sale.
 export function saleSaveState(rows){
- const files=rows.filter(row=>['sale_selected','sale_disk_selected'].includes(row?.kind));
+ const files=rows.filter(row=>['sale_selected','sale_disk_selected','sale_gallery_selected'].includes(row?.kind));
  const complete=rows.find(row=>row?.kind==='sale_complete');
  const accepted=Boolean(rows.length&&rows.every(row=>row?.status==='synced')&&
   Number.isSafeInteger(complete?.result?.saleId)&&complete.result.saleId>0);
