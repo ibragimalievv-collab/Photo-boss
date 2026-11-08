@@ -1,4 +1,8 @@
-"""Real browser: request/approve 50%, three frames, frozen album and one deposit.
+"""Real browser: three frames at the amount agreed with the guest, an album and one deposit.
+
+Version 3.62 has no 50% discount request on the sale screen: the photographer
+records the amount agreed with the guest instead, and the server keeps the
+difference as a separate line of the sale.
 
 Disposable SQLite and synthetic fixtures only; storage/OCR are stubbed. No live
 guest photos, notifications or bank transactions are sent.
@@ -17,17 +21,15 @@ from unittest.mock import AsyncMock, patch
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from playwright.async_api import async_playwright, expect
-from sqlalchemy import func, select
+from sqlalchemy import select
 from test_miniapp_release import TOKEN, signed
 from test_workflow_services import booking_data, fixture
 
 from app.miniapp_api import install_miniapp
 from app.models import (
     HotelAlbumTariff,
-    Notification,
     Receipt,
     Sale,
-    SaleDiscountApproval,
     Shooting,
     User,
     UserRole,
@@ -98,23 +100,14 @@ async def main():
                         form = page.locator('#workflowSale')
                         await form.locator('[name=total]').fill('3')
                         await form.locator('[name=sold]').fill('3')
-                        await page.get_by_role('button', name='Запросить скидку 50% на всю съёмку', exact=True).click()
-                        panel = page.locator('#saleDiscountPanel')
-                        await expect(panel).to_contain_text('Ожидает подтверждения')
-                        await page.get_by_role('button', name='Запросить скидку 50% на всю съёмку', exact=True).click()
-                        await expect(panel).to_contain_text('Ожидает подтверждения')
-                        async with factory() as session:
-                            assert await session.scalar(select(func.count(SaleDiscountApproval.id))) == 1
-                            assert await session.scalar(select(func.count(Notification.id)).where(Notification.kind == 'sale_discount')) == 1
-                        await panel.get_by_role('button', name='Подтвердить', exact=True).click()
-                        await expect(panel).to_contain_text('Подтверждён')
-                        await panel.locator('[name=discountId]').select_option(index=1)
-                        await form.locator('[name=total]').fill('3')
-                        await form.locator('[name=sold]').fill('3')
+                        await expect(page.get_by_role('button', name='Запросить скидку 50% на всю съёмку', exact=True)).to_have_count(0)
+                        await form.locator('[name=photoAmount]').fill('1000')
                         await form.locator('[name=albumId]').select_option('1')
                         await form.locator('[name=albumQuantity]').fill('2')
-                        await expect(form.locator('#salePricePreview')).to_contain_text('20\u00a0600')
-                        await expect(form.locator('#salePricePreview')).to_contain_text('19\u00a0600')
+                        preview = form.locator('#salePricePreview')
+                        await expect(preview).to_contain_text('сумма, согласованная с гостем')
+                        await expect(preview).to_contain_text('Итого продажа: 21\u00a0000')
+                        await expect(preview).to_contain_text('Остаток с учётом прежних покупок: 20\u00a0000')
                         await form.locator('[name=receipt]').set_input_files('app/webapp/assets/academy/coast.jpg')
                         await form.locator('[name=selected]').set_input_files([
                             'app/webapp/assets/academy/family.jpg', 'app/webapp/assets/academy/child.jpg',
@@ -123,14 +116,14 @@ async def main():
                         await expect(form.locator('[data-operation-progress]')).to_contain_text('сохранена сервером', timeout=30000)
                         async with factory() as session:
                             sales = list(await session.scalars(select(Sale)))
-                            assert len(sales) == 1 and sales[0].sold_photos == 3 and sales[0].amount == 20600
+                            assert len(sales) == 1 and sales[0].sold_photos == 3 and sales[0].amount == 21000
                             quote = json.loads(sales[0].pricing_snapshot)
-                            assert [line['amount'] for line in quote['lines']] == ['1200.00', '-600.00', '20000.00']
+                            assert [(line['type'], line['amount']) for line in quote['lines']] == [
+                                ('UNIT', '1200.00'), ('PRICE_ADJUSTMENT', '-200.00'), ('ALBUM', '20000.00')]
                             receipt = await session.scalar(select(Receipt).where(Receipt.purpose == 'PAYMENT'))
-                            assert receipt.expected_amount == 19600
-                            assert await session.scalar(select(func.count(Notification.id)).where(Notification.kind == 'sale_discount')) == 2
+                            assert receipt.expected_amount == 20000  # the confirmed 1000 deposit counted once
                         assert not errors, errors
-                        print('PASS: mobile browser requested and approved 50% once; 3 frames + 2 albums = 20600; confirmed deposit1000 applied once; receipt balance19600; one completed sale')
+                        print('PASS: mobile sale at the agreed 1000 for 3 frames + 2 albums = 21000; confirmed deposit 1000 applied once; receipt balance 20000; one completed sale')
                     finally:
                         await browser.close()
         finally:

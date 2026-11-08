@@ -187,6 +187,8 @@ async def main():
                     await page.evaluate("async()=>{const m=await import('/app/js/workflow.js');await m.workflowSubmit(document.querySelector('#workflowSale'));}")
                     assert await page.evaluate("async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).length;}") == 6
 
+                    # The personal shift card lives on the home screen (still offline here).
+                    await page.evaluate("location.hash='#home'")
                     await page.locator('#attendanceCard [data-att=open]').click()
                     dialog = page.locator('#attendanceDialog')
                     for _ in range(2):
@@ -292,6 +294,7 @@ async def main():
                     await page.locator('#workflowBooking [name=shoot_time]').fill('15:00')
                     await page.locator('#workflowBooking button').click()
                     await wait_async(page, "async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).filter(r=>r.kind==='booking'&&r.status==='synced').length===3;}")
+                    await page.locator('[data-quick-booking-close]').click()  # booking opens in a dialog now
                     await page.locator('#bottomNav [data-go=home]').click()
                     await page.locator('[data-action="new-booking"]').click()
                     field = page.locator('#workflowBooking [name=client_name]')
@@ -300,16 +303,18 @@ async def main():
                     assert await field.evaluate('(el)=>el===document.activeElement')
                     # Opening the shortcut again preserves an unsent next guest.
                     await field.fill('Unsent Guest')
+                    await page.locator('[data-quick-booking-close]').click()
                     await page.locator('#bottomNav [data-go=home]').click()
                     await page.locator('[data-action="new-booking"]').click()
                     assert await field.input_value() == 'Unsent Guest'
                     assert await field.is_enabled()
                     assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                    await page.locator('[data-quick-booking-close]').click()  # the unsent guest stays in the closed form
                     await page.evaluate("""async()=>{
                         const m=await import('/app/js/workflow.js');await m.loadWorkflow(1);
                         document.querySelector('#app').innerHTML=m.workflowView();
                     }""")
-                    await page.locator('[data-receipt-status]').get_by_role('button', name='Посмотреть фото чека').click()
+                    await page.locator('[data-receipt-status]').get_by_role('button', name='Посмотреть чек · файл 1').click()
                     await wait_async(page, "()=>document.querySelector('dialog[aria-label=\"Фото чека\"] img')?.naturalWidth>0")
                     await page.locator('dialog[aria-label="Фото чека"]').get_by_role('button', name='Закрыть', exact=True).click()
                     await page.locator('dialog[aria-label="Фото чека"]').wait_for(state='detached')
@@ -368,6 +373,8 @@ async def main():
                         const keys=JSON.parse(document.querySelector('#workflowSale').dataset.pendingKeys);
                         return rows.filter(r=>keys.includes(r.key)).map(r=>({key:r.key,kind:r.kind,data:r.data}));
                     }""")
+                    # Reload straight into this sale (the page itself was drawn over home).
+                    await page.evaluate("history.replaceState(null,'','#workflow?booking=3')")
                     await page.reload()
                     await page.locator('#workflowSale [data-workflow="repair-sale"]').wait_for(state='visible')
                     await page.locator('#workflowSale [data-workflow="repair-sale"]').click()
@@ -429,7 +436,7 @@ async def main():
                     panel = await owner.new_page()
                     panel.on('pageerror', lambda e: errors.append(str(e)))
                     await panel.goto(str(server.make_url('/app/#home')))
-                    await panel.locator('#app [data-go=attendance]').click()
+                    await panel.locator('#app .home-shift-summary[data-go=attendance]').click()  # the alert also links there
                     await panel.locator('h1').filter(has_text='Контроль смен').wait_for()
                     assert panel.url.endswith('#attendance')
                     for purpose in ('start', 'end'):

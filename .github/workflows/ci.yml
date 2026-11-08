@@ -215,7 +215,7 @@ jobs:
         run: |
           python tests/notifications_fines_browser_check.py
           python tests/notification_center_browser_check.py
-      - name: Verify mobile discount approval, album and deposit calculation
+      - name: Verify agreed sale amount, album and deposit calculation
         run: |
           python tests/pricing_approval_browser_check.py
           python tests/hotel_pricing_browser_check.py

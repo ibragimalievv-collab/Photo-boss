@@ -1,6 +1,8 @@
 import {esc} from './domain.js';
 import {preferBrowserSession} from './api.js';
-import '/staff-login/scan.js';
+// The QR scanner only serves the login screen. Loaded on the side, so a file
+// that fails to load disables the scan button instead of the whole app.
+import('/staff-login/scan.js').catch(()=>{});
 
 const field=(label,input)=>`<label class="field"><span>${label}</span>${input}</label>`;
 const standaloneMode=()=>window.PHOTO_BOSS_CONFIG?.STANDALONE===true;

@@ -5,6 +5,15 @@ import vm from 'node:vm';
 const source=fs.readFileSync('app/webapp/js/workflow.js','utf8').replace(/^import .*;\n/gm,'').replaceAll('export ','');
 const fileSource=fs.readFileSync('app/webapp/js/sale-files.js','utf8');
 const {saleSaveState}=await import('data:text/javascript;base64,'+Buffer.from(fileSource).toString('base64'));
+// workflow.js imports are stripped. Pure helpers run for real, the price quote
+// is the confirmed one a valid sale form produces (pricing math has its own
+// check), and anything else this harness does not model gets a neutral stub.
+const importedNames=[...fs.readFileSync('app/webapp/js/workflow.js','utf8').matchAll(/^import\s*\{([^}]*)\}\s*from/gm)]
+ .flatMap(m=>m[1].split(',').map(x=>x.trim().split(/\s+as\s+/).pop()).filter(Boolean));
+const realistic={...await import('../app/webapp/js/guest-phone.js'),...await import('../app/webapp/js/receipt-files.js'),
+ galleryRecoveryKeys:(_queue,keys)=>keys, // no gallery photos in these scenarios
+ updatePricePreview:(form,b)=>{const amount=Number(b?.price||0)*Number(form?.values?.sold||0);return {amount,due:0,creditAmount:0,photoAmount:null,tariffId:null,discountId:null,albumId:null,albumQuantity:null};}};
+const stubImports=context=>{for(const name of importedNames)if(!(name in context))context[name]=realistic[name]||(()=>'');};
 const deferred=()=>{let resolve;const promise=new Promise(done=>{resolve=done;});return {promise,resolve};};
 const response=(selected=7)=>({actorId:42,bookings:[7,8].map(id=>({id,status:'READY_FOR_SALE',price:'400',paidAmount:'400',sales:[],totalFrames:10,marker:selected})),tariffs:[]});
 function harness(){
@@ -23,6 +32,7 @@ function harness(){
    querySelector:selector=>selector==='#app'?app:selector==='#workflowSale'?mounted:null,querySelectorAll:()=>[]},
   api:async(path,options)=>{requests.push({path,options});return respond(path,options);},
  });
+ stubImports(context);
  vm.runInContext(source,context);
  vm.runInContext('savedUpdateFormProgress=updateFormProgress;workflowView=()=>"workflow";mountDiscountPanel=()=>{};updateFormProgress=()=>{};refreshQuote=()=>{};',context);
  context.initial=response();vm.runInContext('data=initial;selected=7;',context);
@@ -39,28 +49,8 @@ function harness(){
   reset:()=>{for(const fn of documentListeners['pb-chat-account-reset']||[])fn();},
   submit:form=>{context.formFixture=form;return vm.runInContext('workflowSubmit(formFixture)',context);},
   click:button=>{context.buttonFixture=button;return vm.runInContext('workflowClick(buttonFixture)',context);},
-  discount:button=>documentListeners.click[0]({target:{closest:()=>button}}),
   replacement:()=>replaced,
  };
-}
-
-// A repeated request cannot refresh an old PENDING snapshot over a decision.
-// Disable all actions in that booking's panel until its request and refresh end.
-{
- const h=harness(),form=h.form(),gate=deferred();form.elements.total={value:'3'};
- const status={textContent:''},panel={isConnected:true,querySelector:()=>status};
- const request={disabled:false,closest:()=>panel,hasAttribute:()=>true};
- const approve={disabled:false,closest:()=>panel,hasAttribute:()=>false,dataset:{saleDiscountDecision:'1',decision:'APPROVED'}};
- panel.querySelectorAll=()=>[request,approve];
- h.respond(path=>path==='/sale-discounts'?gate.promise:response());
- const pending=h.discount(request);
- assert.equal(request.disabled,true);assert.equal(approve.disabled,true);
- await h.discount(approve);assert.equal(h.requests.length,1,'A decision must wait for the in-flight request refresh');
- gate.resolve({ok:true});await pending;
- assert.equal(request.disabled,false);assert.equal(approve.disabled,false);
- h.respond(async path=>path.includes('/decision')?{ok:true}:response());
- await h.discount(approve);
- assert.equal(h.requests.filter(row=>row.path.includes('/decision')).length,1);
 }
 
 // An older selection must never win merely because its HTTP response arrived last.

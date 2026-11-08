@@ -100,6 +100,7 @@ async def run(database_url):
                         await page.get_by_text('Основание отмены: Correct erroneous fixture entry',exact=True).wait_for(state='attached')
                         await page.get_by_text('Оплаченные расходы и выплаты',exact=True).click()
                         await page.get_by_text('Основание отмены: Correct erroneous fixture entry',exact=True).wait_for()
+                        await page.get_by_text('Центр событий и уведомления',exact=True).click()  # collapsed by default
                         await page.locator('#notifyDaily').check()
                         async with page.expect_response(lambda r:r.url.endswith('/events/preferences') and r.status==200):
                             await page.get_by_role('button',name='Сохранить уведомления',exact=True).click()
@@ -141,9 +142,11 @@ async def run(database_url):
                 await page.locator('[data-action="new-sale"]').click()
                 await page.locator('#workflowSalePick').wait_for(state='visible')
                 await page.goto(BASE+'/app/')
-                await page.locator('#attendanceCard [data-att=open]').click()
-                await page.locator('#attendanceDialog').wait_for(state='visible')
-                await page.locator('[data-att=close]').click()
+                # Owners and admins review shifts rather than check in, so their home
+                # has no personal shift card; the photographer's own check-in dialog
+                # is covered by the attendance_*_browser_check scenarios.
+                await page.get_by_text('Команда сегодня',exact=True).wait_for()
+                assert await page.locator('#attendanceCard').count() == 0
                 await page.locator('[data-open-people]').click()
                 await page.locator('[data-people=hotels]').click()
                 await page.locator('#pbHotelForm [name=name]').fill('Hotel from mobile app')
@@ -172,7 +175,7 @@ async def run(database_url):
                         await page.reload()
                     else:
                         await page.get_by_role('button',name='Повторить',exact=True).click()
-                    await page.get_by_role('heading',name='Всё под контролем',exact=True).wait_for()
+                    await page.locator('.home-review-heading h1').wait_for()  # the day summary is back
                 assert bot.send_message.await_count==0
                 assert bot.me.await_count==0
                 await page.goto(BASE+'/app/#workday')

@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -101,7 +102,7 @@ async def main():
                         page = await context.new_page()
                         page.on('pageerror', lambda error: errors.append(str(error)))
                         await page.goto(BASE+'/app/#home')
-                        await page.get_by_role('heading', name='Всё под контролем', exact=True).wait_for()
+                        await page.locator('.home-review-heading h1').wait_for()  # the day summary
                         assert await page.locator('#bookingControl').count() == 0
                         assert await page.get_by_text('Записи и помощь менеджерам', exact=True).count() == 0
                         assert await page.get_by_text('Подсказки и задания для менеджеров', exact=True).count() == 0
@@ -112,11 +113,14 @@ async def main():
                         await form.locator('[name=room]').fill('QA-'+str(uid))
                         await form.locator('[name=shoot_date]').fill((api.today()+timedelta(days=1)).isoformat())
                         await form.locator('[name=shoot_time]').fill('12:30')
+                        await form.get_by_text('Чек и дополнительные параметры', exact=True).click()  # quick form keeps extras folded
                         await form.locator('[name=deposit]').fill('0')
                         await form.get_by_role('button', name='Сохранить бронь', exact=True).click()
-                        await expect(form.locator('[data-operation-progress]')).to_contain_text('сохранена сервером')
+                        # The quick form is cleared for the next guest; the saved booking is listed under it.
+                        await expect(page.locator('[data-quick-booking-history] [data-booking-history]').filter(has_text='Synthetic '+role)).to_contain_text('сохранена сервером')
                         async with sessions() as session:
                             assert await session.scalar(select(func.count(Booking.id)).where(Booking.manager_id == uid, Booking.room == 'QA-'+str(uid))) == 1
+                        await page.locator('[data-quick-booking-close]').click()
                         await page.locator('[data-action=app-notifications]').click()
                         center = page.locator('#appNotifications')
                         if uid == 1:
@@ -129,7 +133,7 @@ async def main():
                             await mark.focus()
                             await page.keyboard.press('Enter')
                             await expect(page.locator('[data-notice-count]')).to_have_text('39')
-                            await expect(center.locator(f'[data-notice-id="{latest}"]')).to_have_class('notification-card is-read ')
+                            await expect(center.locator(f'[data-notice-id="{latest}"]')).to_have_class(re.compile(r'\bis-read\b'))  # cards also carry a category class
                             assert await page.evaluate('document.activeElement.dataset.noticeControl') == f'open-{latest}'
                             await page.reload()
                             await page.locator('[data-action=app-notifications]').click()
@@ -159,7 +163,7 @@ async def main():
                             await center.locator(f'[data-notice-mark="{retry_id}"]').click()
                             await expect(page.locator('[data-notice-count]')).to_be_hidden()
                             await page.screenshot(path=str(output/f'owner-inbox-{width}.png'), full_page=False)
-                            await page.locator('#closeSheet').click()
+                            await page.get_by_role('button', name='Назад на главную', exact=True).click()  # notifications are a page now
                             # Real booking card, mocked SMS states: no actual provider.
                             for status, reason, available, expected in [
                                 ('unavailable', 'provider_not_configured', False, 'SMS-сервис не подключён'),
@@ -182,7 +186,7 @@ async def main():
                                 await page.screenshot(path=str(output/f'sms-{status}-{width}.png'), full_page=False)
                                 await page.locator('#closeSheet').click()
                                 await page.evaluate("location.hash='#more'")
-                                await page.get_by_role('heading', name='Ваше пространство', exact=True).wait_for()
+                                await page.get_by_role('heading', name='Все разделы', exact=True).wait_for()
                         else:
                             await expect(center.get_by_text('Пока нет уведомлений', exact=True)).to_be_visible()
                             await expect(center.get_by_role('button', name='Прочитать всё', exact=True)).to_be_disabled()

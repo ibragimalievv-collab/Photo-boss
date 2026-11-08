@@ -37,7 +37,7 @@ async def main():
             async def route(r):
                 nonlocal lost_upload_reply, delayed_assignment
                 if r.request.url.startswith('https://telegram.org/') or any(
-                    r.request.url.startswith(BASE + prefix) for prefix in ('/shift/', '/people/', '/work-chat/')):
+                    r.request.url.startswith(BASE + prefix) for prefix in ('/shift/', '/people/', '/work-chat/', '/staff-login/')):
                     # Isolate unrelated widgets; keep the real Academy navigation/app module.
                     return await r.fulfill(body='', content_type='text/javascript')
                 full_path = r.request.url.removeprefix(BASE)

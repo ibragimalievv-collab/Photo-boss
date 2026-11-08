@@ -12,6 +12,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from PIL import Image, ImageChops
 from playwright.async_api import async_playwright, expect
+from test_delivery import pay_for
 from test_insights import fixture
 from test_miniapp_release import TOKEN, signed
 
@@ -69,7 +70,7 @@ async def check_disk_diagnostics(page):
         available, hold = True, True
         await page.locator('[data-disk-info]').click()
         await asyncio.wait_for(entered.wait(), 5)
-        await page.locator('#galleryWorkspace [data-go=home]').first.click()
+        await page.locator('#sidebar .side-item[data-go=home]').click()  # staff keep the workspace menu in galleries
         await expect(page.locator('#sidebar')).to_be_visible()
         release.set()
         await page.wait_for_load_state('networkidle')
@@ -175,6 +176,16 @@ async def main():
             storage[ROOT + f'/delivery/booking-1/test/Все фото/{i}.jpg'] = raw
             session.add(DeliveryPhoto(id=i, gallery_id=g.id, uploaded_by_id=1, filename=f'family-{i}.jpg',
                 disk_path=ROOT + f'/delivery/booking-1/test/Все фото/{i}.jpg', sha256=str(i)*64, byte_size=len(raw), selected=i == 2, upload_set='ALL'))
+            if i == 2:
+                frame_two = raw
+        # The sale uploads its own copy of the sold frame; guests see paid copies only.
+        sold_path = ROOT + '/delivery/booking-1/test/Выбранные/2.jpg'
+        storage[sold_path] = frame_two
+        sold = DeliveryPhoto(id=7, gallery_id=g.id, uploaded_by_id=1, filename='family-2.jpg', disk_path=sold_path,
+                             sha256='2'*64, byte_size=len(frame_two), upload_set='SELECTED')
+        session.add(sold)
+        await session.flush()
+        await pay_for(session, sold, actor_id=1)
         await session.commit()
     delivery = app['delivery']
     async def photo_bytes(photo):
@@ -241,15 +252,12 @@ async def main():
             await expect(page.locator('.grid .photo')).to_have_count(6)
             await page.locator('[data-gv-filter=selected]').click()
             await expect(page.locator('.grid .photo')).to_have_count(1)
-            await expect(page.locator('[data-gv-photo="2"]')).to_be_visible()
+            await expect(page.locator('[data-gv-photo="7"]')).to_be_visible()  # the sold copy of frame 2
             await page.locator('[data-gv-filter=all]').click()
             await expect(page.locator('.grid .photo')).to_have_count(6)
             await expect(page.locator('.hero img')).to_have_attribute('src', __import__('re').compile(r'^blob:'))
             await page.screenshot(path=str(output / 'gallery-desktop.png'), full_page=True)
-            await page.locator('[data-gv-favorite="2"]').click()
-            await expect(page.locator('[data-fav-count]')).to_have_text('1')
-            await page.locator('[data-gv-filter="fav"]').click()
-            await expect(page.locator('.grid .photo')).to_have_count(1)
+            # The staff mark on a full-shoot frame; guest access comes from the paid sale.
             await page.locator('[data-gv-photo="2"]').click()
             await expect(page.locator('dialog.viewer')).to_be_visible()
             with patch('app.delivery.configured_from_env', return_value=('fake', 'fake')), patch.object(YandexDisk, 'ensure_dir', new=AsyncMock()), patch.object(YandexDisk, 'upload_bytes', new=AsyncMock()), patch.object(YandexDisk, 'delete', new=AsyncMock()):
@@ -257,8 +265,17 @@ async def main():
                 await expect(page.locator('[data-v=selected]')).to_have_text('Выбрать для клиента')
                 await page.locator('[data-v=selected]').click()
                 await expect(page.locator('[data-v=selected]')).to_have_text('Убрать из выбранных')
+            await page.locator('[data-v="close"]').click()
+            # Favourite, cover and download act on the purchased copy the guest receives.
+            await page.locator('[data-gv-filter=selected]').click()
+            await page.locator('[data-gv-favorite="7"]').click()
+            await expect(page.locator('[data-fav-count]')).to_have_text('1')
+            await page.locator('[data-gv-filter="fav"]').click()
+            await expect(page.locator('.grid .photo')).to_have_count(1)
+            await page.locator('[data-gv-photo="7"]').click()
+            await expect(page.locator('dialog.viewer')).to_be_visible()
             await page.locator('[data-v="cover"]').click()
-            await expect(page.locator('.hero img')).to_have_attribute('data-gallery-image', '2')
+            await expect(page.locator('.hero img')).to_have_attribute('data-gallery-image', '7')
             async with page.expect_download() as download:
                 await page.locator('[data-v="download"]').click()
             assert (await download.value).suggested_filename == 'family-2.jpg'
@@ -329,8 +346,9 @@ async def main():
             await guest.locator('[data-v=close]').click()
             await page.locator('[data-gv=back]').click()
             await page.set_viewport_size({'width': 1440, 'height': 1000})
-            await expect(page.locator('#galleryWorkspace .side')).to_be_visible()
-            await page.locator('#galleryWorkspace [data-go=home]').first.click()
+            # Staff keep the workspace navigation while browsing gallery folders.
+            await expect(page.locator('#galleryWorkspace .side')).to_be_hidden()
+            await page.locator('#sidebar .side-item[data-go=home]').click()
             await expect(page.locator('#sidebar')).to_be_visible()
             assert not await page.locator('body').evaluate("el => el.classList.contains('gallery-mode')")
             await page.goto(BASE + '/app/#galleries')
