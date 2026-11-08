@@ -1,5 +1,4 @@
 import pytest
-
 from app.avito_dialogue import candidate_profile, validate_terms
 
 

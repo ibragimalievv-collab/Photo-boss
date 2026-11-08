@@ -458,7 +458,12 @@ async def deliver_push(engine, *, limit=20):
                     or notice.created_at < utc_now() - timedelta(seconds=60 if notice.kind == 'call' else 86400)):
                 delivery.status = 'SKIPPED'
             else:
-                from .notification_delivery import PREFIX as PREF_PREFIX, URGENT, quiet_until, saved_preferences
+                from .notification_delivery import PREFIX as PREF_PREFIX
+                from .notification_delivery import (
+                    URGENT,
+                    quiet_until,
+                    saved_preferences,
+                )
                 preference = await session.get(Setting, PREF_PREFIX + str(notice.user_id))
                 deferred = quiet_until(saved_preferences(preference.value if preference else None), current_utc()) if notice.kind not in URGENT else None
                 if deferred is not None:
@@ -726,7 +731,11 @@ class AppPush:
 
 
     async def preferences(self, request):
-        from .notification_delivery import DEFAULT, PREFIX, preferences, saved_preferences
+        from .notification_delivery import (
+            PREFIX,
+            preferences,
+            saved_preferences,
+        )
         async with AsyncSession(self.api.engine) as session:
             actor = await self.actor(session, request)
             saved = await session.get(Setting, PREFIX + str(actor.id))

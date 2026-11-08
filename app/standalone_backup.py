@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
-from datetime import UTC, datetime
 import fcntl
 import hashlib
 import hmac
 import json
 import os
-from pathlib import Path
 import secrets
 import stat
 import tempfile
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 MAX_DUMP_BYTES = 64 * 1024 * 1024
@@ -193,7 +193,7 @@ class StandaloneBackups:
         except BackupError as error:
             self.state['errorCode'] = str(error)
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 -- errors may contain credentials
             self.state['errorCode'] = 'standalone_backup_unavailable'
             raise BackupError('standalone_backup_unavailable') from None
 
@@ -285,7 +285,7 @@ class StandaloneBackups:
                 save_manifest(manifest_path, saved)
                 self.state.update(diskVerified=True, errorCode=None,
                                   diskVerifiedAt=saved['diskVerifiedAt'])
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 -- disk verification failure is recorded
                 code = str(error) if isinstance(error, BackupError) else 'backup_disk_unverified'
                 self.state.update(diskVerified=False, errorCode=code)
                 raise BackupError(code) from None

@@ -1,11 +1,10 @@
 """Bounded local OCR. Documents stay on this server; only text reaches AI."""
 import asyncio
-import io
 import os
-from pathlib import Path
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 from PIL import Image, ImageOps
 
@@ -20,8 +19,8 @@ os.execv(sys.argv[1],sys.argv[1:])
 
 async def command(arguments, directory):
     # OCR binaries have no reason to inherit database, bank or AI credentials.
-    env = dict(PATH=os.defpath, LANG='C.UTF-8', OMP_THREAD_LIMIT='1', OMP_NUM_THREADS='1',
-               HOME=str(directory), TMPDIR=str(directory))
+    env = {'PATH': os.defpath, 'LANG': 'C.UTF-8', 'OMP_THREAD_LIMIT': '1', 'OMP_NUM_THREADS': '1',
+           'HOME': str(directory), 'TMPDIR': str(directory)}
     process = await asyncio.create_subprocess_exec(sys.executable, '-c', CHILD, *arguments,
         stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL, cwd=directory, env=env)

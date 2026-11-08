@@ -1,6 +1,6 @@
 """Optional new-workspace scheduling boundary; never filters historical reads."""
-from datetime import date
 import re
+from datetime import date
 
 
 class OperationalStartError(ValueError):

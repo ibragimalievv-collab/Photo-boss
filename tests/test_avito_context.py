@@ -4,10 +4,10 @@ import hashlib
 import json
 from pathlib import Path
 
+from app.avito_dialogue import respond, validate_terms
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.avito_dialogue import respond, validate_terms
 from app.avito_hr import prepare
 
 ROWS = json.loads(Path('app/avito_hr_terms_20261020.json').read_text())

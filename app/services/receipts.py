@@ -131,8 +131,13 @@ async def extract_receipt(content):
             return {'status': 'waiting_configuration'}
         from .receipt_ai import extract
         return await extract(content)
-    from .ai_provider import (ComparisonLimitError, capture_comparison_response,
-                              reserve_comparison_response, response_text, responses_profile)
+    from .ai_provider import (
+        ComparisonLimitError,
+        capture_comparison_response,
+        reserve_comparison_response,
+        response_text,
+        responses_profile,
+    )
     profile = responses_profile(config, receipt=True)
     if not profile.configured:
         return {"status": "not_configured"}

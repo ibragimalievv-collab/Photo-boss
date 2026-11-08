@@ -1,5 +1,4 @@
 """Photo correction, separate from Academy. AI only selects bounded color parameters."""
-from .services.ai_provider import ai_configured
 import asyncio
 import base64
 import hashlib
@@ -17,6 +16,7 @@ from .config import config
 from .db import Session
 from .miniapp_security import AccessError
 from .models import Booking, PhotoEdit, PhotoStorage, Shooting, utc_now
+from .services.ai_provider import ai_configured
 from .services.booking_access import can_access_booking
 from .services.development_ai import structured
 from .yandex_disk import ROOT, YandexDiskError

@@ -6,11 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from app.avito_hr_console import Console
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.avito_hr import Worker, prepare
-from app.avito_hr_console import Console
 from app.miniapp_security import AccessError
 
 

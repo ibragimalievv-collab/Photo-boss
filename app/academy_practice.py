@@ -1,5 +1,4 @@
 """Authenticated Academy assignments, uploads and reviews inside the Mini App."""
-from .services.ai_provider import ai_configured
 import asyncio
 import hashlib
 import io
@@ -18,6 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from .config import config
 from .miniapp_security import AccessError
 from .services.ai_diagnostics import unavailable as ai_unavailable
+from .services.ai_provider import ai_configured
 from .services.training import (
     CATEGORY_BY_SLUG,
     FINAL_EXAM_REQUIREMENTS,

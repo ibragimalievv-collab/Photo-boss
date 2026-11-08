@@ -6,12 +6,12 @@ application configuration, database, bot entry points or background workers.
 from __future__ import annotations
 
 import asyncio
-from contextvars import ContextVar
 import ipaddress
 import json
 import os
 import re
 import ssl
+from contextvars import ContextVar
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
@@ -237,7 +237,7 @@ class LegacyProxy:
                 return web.json_response(value, headers=SAFE_HEADERS)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 -- relay answers 503 on any upstream failure
             return self.unavailable()
 
     async def http(self, request):
@@ -257,7 +257,7 @@ class LegacyProxy:
                 return response
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 -- relay must not acknowledge a truncated transfer
             if response is not None and response.prepared:
                 # Never acknowledge a truncated upload/download as complete.
                 response.force_close()
@@ -326,7 +326,7 @@ class LegacyProxy:
             return downstream
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 -- relay closes the socket on any failure
             if downstream is not None and downstream.prepared:
                 await downstream.close(code=1011, message=b'Temporarily unavailable')
                 return downstream

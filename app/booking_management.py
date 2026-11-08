@@ -131,7 +131,10 @@ class BookingManagement:
                 if moved and day < self.api.today():
                     raise AccessError('Новая дата съёмки не может быть в прошлом.', 400)
                 if moved and integration is not None:
-                    from .services.booking_reservations import ReservationConflict, append_slot_version
+                    from .services.booking_reservations import (
+                        ReservationConflict,
+                        append_slot_version,
+                    )
                     try:
                         reserved = await append_slot_version(session, b, actor['id'],
                             active_version_id=b.reservation_version_id, shoot_date=day,
@@ -187,7 +190,9 @@ class BookingManagement:
                                 'reason': notice.case.reason, 'cancellationCaseId': notice.case.id,
                                 'refundState': notice.case.state}, ensure_ascii=False))
                         if not notice.repeated:
-                            from .services.booking_notices import queue_photographer_change
+                            from .services.booking_notices import (
+                                queue_photographer_change,
+                            )
                             await queue_photographer_change(session, b, 'cancelled')
                     result = await integration.public_status(session, b)
                     await session.commit()
@@ -228,7 +233,10 @@ class BookingManagement:
                 if sale or started:
                     raise AccessError('Восстановление этой съёмки требует проверки владельцем.', 409)
                 if integration is not None:
-                    from .services.booking_reservations import ReservationConflict, append_slot_version
+                    from .services.booking_reservations import (
+                        ReservationConflict,
+                        append_slot_version,
+                    )
                     try:
                         reserved = await append_slot_version(session, b, actor['id'],
                             active_version_id=b.reservation_version_id, shoot_date=b.shoot_date,

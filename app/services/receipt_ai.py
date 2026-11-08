@@ -58,11 +58,12 @@ def document_format(content):
             reader = PdfReader(io.BytesIO(content), strict=True)
             if reader.is_encrypted or len(reader.pages) != 1:
                 raise ValueError
-        except Exception:
+        except Exception:  # noqa: BLE001 -- any PDF parser failure is an invalid upload
             raise ValueError('Прикрепите одностраничный PDF без пароля или фото чека.') from None
         return 'pdf', 'application/pdf'
-    from .photo_storage import image_format
     from PIL import Image
+
+    from .photo_storage import image_format
     ext, mime = image_format(content)
     try:
         with Image.open(io.BytesIO(content)) as image:
@@ -83,7 +84,7 @@ def credentials():
 async def _post(url, headers, body):
     # Only pinned provider endpoints; no redirect can receive credentials.
     assert url in {OCR_ENDPOINT, TEXT_ENDPOINT}
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:  # noqa: SIM117 -- long context managers read better nested
         async with session.post(url, headers=headers, json=body, allow_redirects=False) as response:
             raw = await response.content.read(2_000_001)
             if len(raw) > 2_000_000:
@@ -217,7 +218,7 @@ async def extract(content, *, post=None):
         payments = []
         for item in extracted['payments']:
             if not isinstance(item, dict):
-                raise ValueError('invalid_receipt_payment')
+                raise ValueError('invalid_receipt_payment')  # noqa: TRY004 -- callers treat ValueError as invalid input
             sources = item.get('sources')
             if (not isinstance(sources, list) or not 1 <= len(sources) <= len(texts)
                     or len(set(sources)) != len(sources)

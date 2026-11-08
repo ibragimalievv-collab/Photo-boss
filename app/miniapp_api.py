@@ -5,7 +5,6 @@ existing bot workflows. Plans are not presented as confirmed attendance.
 """
 from __future__ import annotations
 
-from .services.ai_provider import ai_configured
 import hashlib
 import html
 import json

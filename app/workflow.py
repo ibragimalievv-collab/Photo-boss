@@ -230,6 +230,7 @@ class Workflow:
 
     async def receipt_retry(self, request):
         from datetime import UTC, timedelta
+
         from .people import positive_id
         from .services.automatic_receipts import KEY, analysis_of, enabled
         if not enabled():
@@ -625,7 +626,11 @@ class Workflow:
                         raise AccessError('Нет доступа к записи.', 403)
                     if data['purpose'] not in ('DEPOSIT', 'PAYMENT'):
                         raise AccessError('Неизвестный вид чека.', 400)
-                    from .services.automatic_receipts import enabled, existing_upload, pending_upload
+                    from .services.automatic_receipts import (
+                        enabled,
+                        existing_upload,
+                        pending_upload,
+                    )
                     if enabled() and await existing_upload(session, bid, data['purpose'], hashlib.sha256(raw).hexdigest()):
                         prepared['target'] = bid
                         return prepared
@@ -850,7 +855,11 @@ class Workflow:
                 result |= {'saleId': complete.sale.id, 'amount': str(complete.sale_amount),
                            'soldPhotos': complete.sale.sold_photos, 'paymentStatus': complete.sale.payment_status}
         elif kind == 'sale_selected':
-            from .services.sale_gallery import link_photo, original_file_reference, storage_location
+            from .services.sale_gallery import (
+                link_photo,
+                original_file_reference,
+                storage_location,
+            )
             if prepared_media is not None and 'gallery_context' in prepared_media:
                 _folder, context = await storage_location(session, booking, draft.id)
                 if prepared_media['gallery_context'] != context:
@@ -910,8 +919,13 @@ class Workflow:
             raise AccessError('Нет доступа к записи.', 403)
         if data['purpose'] not in ('DEPOSIT', 'PAYMENT'):
             raise AccessError('Неизвестный вид чека.', 400)
-        from .services.automatic_receipts import (admit, enabled, existing_upload,
-                                                  pending_upload, supersede_exhausted)
+        from .services.automatic_receipts import (
+            admit,
+            enabled,
+            existing_upload,
+            pending_upload,
+            supersede_exhausted,
+        )
         if enabled():
             existing = await existing_upload(session, bid, data['purpose'], hashlib.sha256(raw).hexdigest())
             if existing:

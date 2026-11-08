@@ -5,8 +5,8 @@ from datetime import date, datetime, timezone
 from aiohttp import web
 from sqlalchemy import text
 
-from .miniapp_security import AccessError, parse_shift, require_schedule_editor
 from .miniapp_api import as_utc
+from .miniapp_security import AccessError, parse_shift, require_schedule_editor
 
 
 def shift_values(shift, tz):

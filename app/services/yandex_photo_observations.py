@@ -15,8 +15,12 @@ import uuid
 import aiohttp
 
 from .ai_diagnostics import http_failure, record, unavailable
-from .ai_provider import (ComparisonLimitError, capture_comparison_response, response_text,
-                          responses_profile)
+from .ai_provider import (
+    ComparisonLimitError,
+    capture_comparison_response,
+    response_text,
+    responses_profile,
+)
 
 INSTRUCTIONS = (
     'You are a careful image observer. Describe only the single attached photograph '
@@ -69,11 +73,11 @@ def image_digest(part):
 def usable_observation(text):
     if not isinstance(text, str) or not 100 <= len(text) <= 6500:
         return False
-    if re.search(r'\b(?:impossible|hybrid|composite|overlapping photos|overlapping pictures)\b', text, re.I):
+    if re.search(r'\b(?:impossible|hybrid|composite|overlapping photos|overlapping pictures)\b', text, re.IGNORECASE):
         return False
     words = re.findall(r'[A-Za-z]{2,}', text)
     letters = [c for c in text if c.isalpha()]
-    return (len(words) >= 25 and len(set(w.lower() for w in words)) >= 18
+    return (len(words) >= 25 and len({w.lower() for w in words}) >= 18
         and sum(not c.isascii() for c in letters) <= len(letters) * .02)
 
 
@@ -94,11 +98,13 @@ async def observe_image(part, configuration):
     reservation = None
     journal = os.environ.get('PHOTO_BOSS_AI_COMPARE_BUDGET')
     if journal:
-        from tools.ai_compare_budget import reserve_yandex
+        import stat
+
         # The isolated comparison must pin the authorized image fixture too.
         # Production has no comparison hook and never creates a test journal.
         from pathlib import Path
-        import stat
+
+        from tools.ai_compare_budget import reserve_yandex
         try:
             allowed = json.loads(os.environ.get('PHOTO_BOSS_AI_COMPARE_IMAGES_JSON', '[]'))
             if not isinstance(allowed, list) or image_digest(part) not in allowed:
@@ -118,7 +124,7 @@ async def observe_image(part, configuration):
         reservation |= {'attemptId': attempt, 'artifact': str(directory / (attempt + '.json')),
             'requestPayloadBytes': len(json.dumps(payload).encode())}
     try:
-        async with aiohttp.ClientSession(trust_env=False, cookie_jar=aiohttp.DummyCookieJar(),
+        async with aiohttp.ClientSession(trust_env=False, cookie_jar=aiohttp.DummyCookieJar(),  # noqa: SIM117 -- long context managers read better nested
                 timeout=aiohttp.ClientTimeout(total=35)) as client:
             async with client.post(profile.endpoint, headers=profile.headers,
                     json=payload, allow_redirects=False) as response:

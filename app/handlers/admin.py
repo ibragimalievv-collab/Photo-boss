@@ -13,7 +13,6 @@ from ..config import config, number
 from ..db import Session
 from ..keyboards import inline
 from ..miniapp_sessions import revoke_sessions
-from ..staff_qr_login import revoke_for_user as revoke_staff_qr
 from ..models import (
     AuditLog,
     Booking,
@@ -37,6 +36,7 @@ from ..services.bookings import (
 )
 from ..services.core import audit, get_user, has, roles_of
 from ..services.training import training_day
+from ..staff_qr_login import revoke_for_user as revoke_staff_qr
 
 r = Router()
 r.message.filter(StaffFilter("ADMIN"), F.text)

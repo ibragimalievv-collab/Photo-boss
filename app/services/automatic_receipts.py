@@ -6,21 +6,27 @@ settlement. Callers lock the booking before the receipt. Provider I/O belongs
 outside both the transaction and the database pool.
 """
 import asyncio
-from datetime import UTC, datetime, timedelta
-from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import os
 import re
 import uuid
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import BankPayment, Booking, Receipt, utc_now
 from .core import audit
-from .receipt_policy import MESSAGES, RecipientProfile, VERSION, evaluate, operation_identity
+from .receipt_policy import (
+    MESSAGES,
+    VERSION,
+    RecipientProfile,
+    evaluate,
+    operation_identity,
+)
 from .receipts import expected_amount, money, refresh_payment_statuses
 
 KEY = 'autoReceipt'
@@ -331,8 +337,8 @@ async def finish(engine, job, result, *, now=None):
 
 
 async def run_once(engine, context, *, extractor=None):
-    from .receipts import extract_receipt
     from .media_files import load_private_media
+    from .receipts import extract_receipt
     job = await claim(engine)
     if job is None:
         return False
@@ -341,7 +347,7 @@ async def run_once(engine, context, *, extractor=None):
         result = await (extractor or extract_receipt)(content)
     except asyncio.CancelledError:
         raise  # Durable lease expires; no unbounded immediate retry.
-    except Exception:
+    except Exception:  # noqa: BLE001 -- recognition failure becomes unavailable
         result = {'status': 'unavailable'}
     return await finish(engine, job, result)
 
@@ -352,6 +358,6 @@ async def worker(engine, context):
             worked = await run_once(engine, context)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 -- worker survives; bodies may hold private media
             worked = False  # Bodies can contain private media references.
         await asyncio.sleep(1 if worked else 5)

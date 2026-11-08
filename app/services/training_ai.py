@@ -183,8 +183,13 @@ def prepare_training_image(content):
 
 
 async def analyze_training_set(category, references, submissions, *, assignment_context=None, previous_review=None):
-    from .ai_provider import (ComparisonLimitError, capture_comparison_response,
-                              reserve_comparison_response, response_text, responses_profile)
+    from .ai_provider import (
+        ComparisonLimitError,
+        capture_comparison_response,
+        reserve_comparison_response,
+        response_text,
+        responses_profile,
+    )
     profile = responses_profile(config, vision=True)
     model = profile.model
     if not profile.configured:

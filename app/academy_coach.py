@@ -1,5 +1,4 @@
 """AI-only learning plans, normalized skills, quizzes and real-shoot requests."""
-from .services.ai_provider import ai_configured
 import asyncio
 import hashlib
 import json
@@ -18,6 +17,7 @@ from .services.academy_curriculum import (
     grade_quiz,
     public_quiz,
 )
+from .services.ai_provider import ai_configured
 from .services.booking_readiness import booking_readiness
 from .services.development_ai import (
     STR,

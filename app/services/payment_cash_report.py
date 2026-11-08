@@ -4,8 +4,9 @@ The legacy fallback is excluded by ANY event for a receipt, across all dates.
 Consequently a refund today cannot erase yesterday's income, and selecting only
 today cannot count both Receipt NET and a negative ledger event.
 """
-from ..refund_schema import enabled
 from datetime import UTC
+
+from ..refund_schema import enabled
 
 
 async def cash_rows(api, conn, lower, upper, *, booking_clause='', uid=None):

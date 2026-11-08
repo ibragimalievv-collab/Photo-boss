@@ -1,5 +1,4 @@
 """Real-shoot coaching queue and persisted sales practice."""
-from .services.ai_provider import ai_configured
 import asyncio
 import hashlib
 import io
@@ -18,6 +17,7 @@ from .models import Booking, Photo, ShootDevelopmentReview, Shooting, utc_now
 from .operations_guard import operation_lease
 from .people import positive_id
 from .services import development_ai as ai
+from .services.ai_provider import ai_configured
 from .services.insights import parsed
 from .yandex_disk import YandexDiskError
 

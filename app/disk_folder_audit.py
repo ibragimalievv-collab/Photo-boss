@@ -1,5 +1,4 @@
 """Owner-requested, read-only audits of private folders outside the app namespace."""
-from .services.ai_provider import ai_configured
 import asyncio
 import hashlib
 import json
@@ -16,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .config import config
 from .miniapp_security import AccessError, require_owner
 from .models import Booking, Setting, User, UserRole, utc_now
+from .services.ai_provider import ai_configured
 from .services.shooting_media_audit import audit_summary, inspect_original
 from .yandex_disk import (
     YandexDisk,

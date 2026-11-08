@@ -3,9 +3,9 @@
 This detects energy and pauses, not words or intent. Browser microphone capture,
 echo cancellation and authority checks remain in their existing owners.
 """
-from collections import deque
 import math
 import struct
+from collections import deque
 
 
 class AudioTurns:

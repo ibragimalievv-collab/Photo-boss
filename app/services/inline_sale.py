@@ -97,6 +97,7 @@ async def create(session, actor, roles, guest, *, now):
     from ..refund_schema import enabled as refund_schema_enabled
     if refund_schema_enabled():
         from datetime import UTC, datetime
+
         from .booking_reservations import create_initial_version
         reserved = await create_initial_version(session, booking, actor.id,
             recorded_at=datetime.now(UTC), walk_in=True)

@@ -1,10 +1,10 @@
 """Native application context: local identity and explicit Telegram refusal."""
 from __future__ import annotations
 
-import os
 import asyncio
-from datetime import UTC, datetime
 import logging
+import os
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,6 +85,7 @@ def worker_map(configuration, *, enabled):
 async def owner_failure_notice(engine, worker, code):
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession
+
     from .models import User, UserRole
     from .push_notifications import queue_notice
     async with AsyncSession(engine) as session:
@@ -109,20 +110,21 @@ async def periodic(engine, name, operation, *, interval):
             await operation()
         except asyncio.CancelledError:
             raise
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 -- errors may contain URLs or credentials
             # Exception bodies may contain storage URLs or database credentials.
             from .standalone_backup import BackupError
             code = str(error) if isinstance(error, BackupError) else type(error).__name__
             logger.warning('Standalone task unavailable name=%s code=%s', name, code)
             try:
                 await owner_failure_notice(engine, name, code)
-            except Exception:
+            except Exception:  # noqa: BLE001 -- notice delivery is best effort
                 logger.warning('Standalone task notice deferred name=%s', name)
         await asyncio.sleep(interval)
 
 
 async def ensure_owner_notice_checkpoint(engine):
     from sqlalchemy.ext.asyncio import AsyncSession
+
     from .models import Setting, utc_now
     from .owner_telegram import START_KEY
     # This checkpoint starts only current app notices, never old Telegram jobs.
@@ -141,22 +143,23 @@ async def owner_notice_cycle(engine, storage):
 
 async def default_worker_factories(app, api, engine, configuration, context):
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    from .bank_payments import payment_loop
+    from .disk_folder_audit import disk_audit_loop
     from .operations_guard import operation_lease
+    from .push_notifications import push_loop
     from .services.ai_provider import ai_configured
-    from .services.operations import run_operations_once
-    from .standalone_backup import StandaloneBackups
-    from .services.photo_storage import storage_loop
-    from .yandex_disk import storage_recovery_loop
     from .services.booking_reminders import booking_reminder_loop
     from .services.guest_sms import guest_sms_loop
-    from .push_notifications import push_loop
-    from .work_chat import cleanup_loop
-    from .disk_folder_audit import disk_audit_loop
+    from .services.operations import run_operations_once
+    from .services.photo_storage import storage_loop
+    from .standalone_backup import StandaloneBackups
     from .storage_inventory import log_recent_inventory
-    from .bank_payments import payment_loop
+    from .work_chat import cleanup_loop
+    from .yandex_disk import storage_recovery_loop
     storage = app['yandex_disk']
-    from .push_notifications import configured as push_configured
     from .bank_payments import configured as acquiring_configured
+    from .push_notifications import configured as push_configured
     from .sber_qr_client import qr_client_issues as qr_issues
     from .sber_qr_config import SberQRConfig
     state = app['worker_map']
@@ -198,7 +201,8 @@ async def default_worker_factories(app, api, engine, configuration, context):
         'bank_reconciliation': lambda: payment_loop(engine),
         'guest_sms': lambda: guest_sms_loop(engine, service=app.get('guest_sms')),
     }
-    from .services.automatic_receipts import enabled as receipt_auto_enabled, worker as receipt_worker
+    from .services.automatic_receipts import enabled as receipt_auto_enabled
+    from .services.automatic_receipts import worker as receipt_worker
     if receipt_auto_enabled():
         factories['receipt_evidence'] = lambda: receipt_worker(engine, context)
     from .attendance import review_required

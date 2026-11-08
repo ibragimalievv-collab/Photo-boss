@@ -3,12 +3,12 @@
 The model never receives the expected amount or recipient profile. It extracts
 visible fields; this module compares them with server-owned order/config data.
 """
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
 import hashlib
 import re
 import unicodedata
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
 VERSION = '2026-11-04-receipt-evidence-v1'

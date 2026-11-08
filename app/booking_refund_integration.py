@@ -52,6 +52,7 @@ async def bind_new_receipt(session, receipt, booking):
     if not refund_schema.enabled():
         return
     from sqlalchemy import inspect
+
     from .booking_reservation_models import BookingReservationVersion
     if not inspect(receipt).pending or receipt not in session.new:
         raise ValueError('new_receipt_binding_required')
@@ -87,8 +88,9 @@ class BookingRefundIntegration:
 
     async def bind_bill(self, session, bill, booking):
         from sqlalchemy import inspect
-        from .booking_reservation_models import BookingReservationVersion
+
         from .bank_refunds import RefundError
+        from .booking_reservation_models import BookingReservationVersion
         if not inspect(bill).pending or bill not in session.new:
             raise RefundError('new_bank_bill_binding_required')
         with session.no_autoflush:
@@ -98,8 +100,8 @@ class BookingRefundIntegration:
         bill.reservation_version_id = version.id
 
     async def bind_receipt_from_bill(self, session, bill, receipt, *, created):
-        from .booking_reservation_models import BookingReservationVersion
         from .bank_refunds import RefundError
+        from .booking_reservation_models import BookingReservationVersion
         if receipt.booking_id != bill.booking_id or not bill.reservation_version_id:
             raise RefundError('refund_original_reservation_unavailable')
         with session.no_autoflush:
@@ -178,11 +180,17 @@ class BookingRefundIntegration:
     async def cancel_booking(self, session, booking, actor_id, *, revision, current_revision,
                              reason, force_majeure, received_at, shooting, has_sale, mode,
                              requested_version_id=None, requested_version_present=False):
-        from .booking_reservation_models import BookingCancellationCase, BookingReservationVersion
-        from .models import AuditLog
-        from .models import DeliveryGallery
-        from .services.booking_reservations import (ReservationConflict, authorize_change,
-                                                   record_first_notice, _uuid)
+        from .booking_reservation_models import (
+            BookingCancellationCase,
+            BookingReservationVersion,
+        )
+        from .models import AuditLog, DeliveryGallery
+        from .services.booking_reservations import (
+            ReservationConflict,
+            _uuid,
+            authorize_change,
+            record_first_notice,
+        )
         actor = await authorize_change(session, booking, actor_id)
         requested = _uuid(requested_version_id) if requested_version_id is not None else None
         if requested is not None:
@@ -264,13 +272,18 @@ class BookingRefundIntegration:
         await refresh_payment_statuses(session, booking_id)
 
     async def assess_case(self, session, case):
-        from .bank_refunds import RefundError
         from dataclasses import asdict
+
         from .bank_refund_models import BankRefundIntent
+        from .bank_refunds import RefundError
         from .booking_reservation_models import BookingReservationVersion
         from .services.booking_deposit_policy import DepositReceipt
-        from .services.booking_reservations import (BoundPolicyReceipt, ReservationConflict,
-            apply_business_assessment, cancellation_assessment)
+        from .services.booking_reservations import (
+            BoundPolicyReceipt,
+            ReservationConflict,
+            apply_business_assessment,
+            cancellation_assessment,
+        )
         if not case.reservation_key or case.state in {'STALE_SLOT_REVIEW', 'LEGACY_FACTS_UNAVAILABLE'}:
             return
         versions = list(await session.scalars(select(BookingReservationVersion).where(
@@ -326,8 +339,14 @@ class BookingRefundIntegration:
 
     async def photo_credit(self, session, booking):
         from .bank_refund_models import OriginalBankPaymentFact
-        from .booking_reservation_models import BookingCancellationCase, BookingReservationVersion
-        from .services.booking_reservations import ReceiptCreditFact, resolve_photo_credit
+        from .booking_reservation_models import (
+            BookingCancellationCase,
+            BookingReservationVersion,
+        )
+        from .services.booking_reservations import (
+            ReceiptCreditFact,
+            resolve_photo_credit,
+        )
         versions = list(await session.scalars(select(BookingReservationVersion).where(
             BookingReservationVersion.booking_id == booking.id)))
         cases = list(await session.scalars(select(BookingCancellationCase).where(
@@ -434,7 +453,7 @@ class BookingRefundIntegration:
             try:
                 adapter.require_submission()
                 async with sessions() as session, session.begin():
-                    context = await self.service.lock_context(session, bid, case_id=cid)
+                    await self.service.lock_context(session, bid, case_id=cid)
                     case = await session.get(BookingCancellationCase, cid)
                     await self.prepare_case(session, case)
             except RefundError:
@@ -473,7 +492,7 @@ async def refund_loop(integration, *, interval=30):
             failures = 0
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 -- one-shot claims; never log bank or guest data
             # Do not log DB parameter values, bank responses or guest reasons.
             # Each durable claim remains one-shot; another cycle only reads
             # SUBMITTING/UNKNOWN and never turns it into a new submission.
