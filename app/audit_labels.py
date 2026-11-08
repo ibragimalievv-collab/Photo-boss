@@ -111,7 +111,8 @@ ACTIONS = {
     'shooting_ready': 'Съёмка подготовлена к продаже',
     'shooting_begin': 'Фотограф начал съёмку', 'shooting_complete': 'Съёмка завершена и готова к продаже',
     'booking_no_sale': 'Отмечено: гость не купил', 'booking_no_sale_cleared': 'Снята отметка «гость не купил»',
-    'sale_draft_cancelled': 'Незавершённая продажа отменена', 'academy_voice_turn': 'Сохранён голосовой ответ в тренировке',
+    'sale_draft_cancelled': 'Незавершённая продажа отменена',
+    'miniapp_shift_hours_normalized': 'Смена переведена на «с 09:00 до последней продажи»', 'academy_voice_turn': 'Сохранён голосовой ответ в тренировке',
     'academy_realtime_start': 'Начат живой голосовой разговор с ИИ',
     'academy_realtime_finish': 'Сохранён разбор живого разговора с ИИ',
 }

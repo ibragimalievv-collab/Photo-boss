@@ -15,14 +15,23 @@ from zoneinfo import ZoneInfo
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from playwright.async_api import async_playwright, expect
 from PIL import Image
+from playwright.async_api import async_playwright, expect
 from sqlalchemy import select, text
 from test_insights import fixture
 from test_miniapp_release import TOKEN, signed
 
 from app.miniapp_api import install_miniapp
-from app.models import Booking, Client, HotelEmployee, Photo, Sale, Shooting, UserRole, utc_now
+from app.models import (
+    Booking,
+    Client,
+    HotelEmployee,
+    Photo,
+    Sale,
+    Shooting,
+    UserRole,
+    utc_now,
+)
 from app.services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
 
 BASE = 'https://sale-flow.invalid'
@@ -54,10 +63,11 @@ async def main():
 
         async def fake_disk(_self, folder, raw):
             import hashlib
+
             from app.yandex_disk import ROOT
             return ROOT + folder + '/' + hashlib.sha256(raw).hexdigest() + '.jpg'
         Workflow.save_disk_original = fake_disk
-        import app.services.media_files as media_files
+        from app.services import media_files
         media_files.direct_disk_mode = lambda *_args, **_kwargs: True
         app = web.Application()
         bot = SimpleNamespace(token=TOKEN, me=AsyncMock(), send_message=AsyncMock())
@@ -94,7 +104,7 @@ async def main():
                             response = await client.request(method, url, data=r.request.post_data_buffer,
                                 headers={'X-Telegram-Init-Data': init, 'Content-Type': r.request.headers.get('content-type', 'application/json')})
                             body = await response.read()
-                        except Exception as exc:  # surface fixture faults instead of hanging the page
+                        except Exception as exc:  # noqa: BLE001 -- surface any fixture fault instead of hanging the page
                             print('route failure', method, url, repr(exc))
                             return await r.fulfill(status=599, body=repr(exc))
                         await r.fulfill(status=response.status, headers={'Content-Type': response.headers.get('Content-Type', 'text/plain')},

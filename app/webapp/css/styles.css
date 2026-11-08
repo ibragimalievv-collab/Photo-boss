@@ -133,3 +133,4 @@
 .file-button.is-disabled{opacity:.55;pointer-events:none}
 .check-line{display:flex;gap:10px;align-items:flex-start;font-size:.92em;line-height:1.35}
 .check-line input{width:20px;height:20px;flex:none;margin-top:1px}
+.legacy-hours{border-color:var(--warning);background:var(--warning-bg);display:grid;gap:10px}.legacy-hours p{margin:0}.legacy-hours .btn{justify-self:start;white-space:normal;text-align:left}

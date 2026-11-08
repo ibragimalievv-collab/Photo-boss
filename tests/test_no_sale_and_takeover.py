@@ -3,6 +3,7 @@ import asyncio
 import json
 from datetime import date, timedelta
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from sqlalchemy import select
@@ -201,7 +202,7 @@ def test_shoot_control_drops_sale_and_delivery_tasks_after_no_sale(tmp_path):
             delivery.api = api
 
             class Req(dict):
-                query = {'from': '2026-09-01', 'to': '2026-09-30'}
+                query: ClassVar[dict] = {'from': '2026-09-01', 'to': '2026-09-30'}
             owner = Req(miniapp_actor={'id': 4, 'roles': ['OWNER']})
             before = json.loads((await delivery.control(owner)).text)
             assert {'sale', 'delivery'} <= set(before['items'][0]['tasks'])
@@ -234,7 +235,7 @@ def test_hotel_admin_can_continue_a_stuck_sale_other_admin_cannot(tmp_path):
             feature.api = api
 
             class Req(dict):
-                match_info = {'id': str(bid)}
+                match_info: ClassVar[dict] = {'id': str(bid)}
             with pytest.raises(AccessError):
                 await feature.takeover(Req(miniapp_actor={'id': 6, 'roles': ['ADMIN']}))
             result = json.loads((await feature.takeover(Req(miniapp_actor={'id': 5, 'roles': ['ADMIN']}))).text)

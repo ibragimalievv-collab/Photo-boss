@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+from typing import ClassVar
 
 from sqlalchemy import func, select
 from test_sales_followups import prepared
@@ -80,9 +81,8 @@ def test_shoot_photo_stores_camera_file_name(tmp_path, monkeypatch):
                 photo = await session.get(Photo, result['photoId'])
                 assert photo.original_name == 'DSC_0123.JPG'
                 assert photo.source_sha256 == 'f' * 64
-            from types import SimpleNamespace
             class Req(dict):
-                match_info = {'id': str(body['data']['shooting']['id'])}
+                match_info: ClassVar[dict] = {'id': str(body['data']['shooting']['id'])}
             hashes = json.loads((await Workflow(workday.api).photo_hashes(Req(miniapp_actor=PHOTOGRAPHER))).text)
             assert 'f' * 64 in hashes['stored'], 'reduced copy is recognised by its original checksum'
         finally:
@@ -102,8 +102,9 @@ def test_link_reuses_selected_original_without_bytes(tmp_path, monkeypatch):
             sid = await _open_shoot(factory, bid)
             digest = hashlib.sha256(b'selected-original').hexdigest()
             await _selected(factory, bid, digest)
-            from types import SimpleNamespace
             from datetime import date
+            from types import SimpleNamespace
+
             from app.miniapp_api import MiniApp
             from app.workday import Workday
             api = MiniApp(engine, SimpleNamespace(), [])
@@ -168,8 +169,9 @@ def test_link_never_reuses_another_bookings_original(tmp_path):
             sid = await _open_shoot(factory, bid)
             digest = hashlib.sha256(b'other-guest').hexdigest()
             from test_workflow_services import booking_data
-            from app.services.bookings import create_booking_record
+
             from app.models import User
+            from app.services.bookings import create_booking_record
             async with factory() as session:
                 other = await create_booking_record(session, await session.get(User, 1), booking_data())
                 await session.commit()
@@ -232,10 +234,11 @@ def test_photo_hashes_lists_stored_and_reusable_selected(tmp_path):
             await _selected(factory, bid, selected_digest)
             await _selected(factory, bid, stored_digest, path='app:/PhotoBoss/sales/2/also-stored.jpg')
             from types import SimpleNamespace
+
             from app.miniapp_api import MiniApp
             workflow = Workflow(MiniApp(engine, SimpleNamespace(), []))
             class Req(dict):
-                match_info = {'id': str(sid)}
+                match_info: ClassVar[dict] = {'id': str(sid)}
             req = Req(miniapp_actor=PHOTOGRAPHER)
             data = json.loads((await workflow.photo_hashes(req)).text)
             assert data == {'shootingId': sid, 'stored': [stored_digest], 'selected': [selected_digest], 'open': True}

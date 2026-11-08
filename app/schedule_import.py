@@ -13,7 +13,6 @@ from datetime import date, datetime, timedelta, timezone
 from aiohttp import web
 from sqlalchemy import text
 
-from .shift_hours import OPEN_END, WORK_START
 from .miniapp_security import (
     AccessError,
     parse_shift,
@@ -21,6 +20,7 @@ from .miniapp_security import (
     utc_bounds,
 )
 from .schedule_text import parse_schedule
+from .shift_hours import OPEN_END, WORK_START
 
 DAY_PREFIX = "schedule.day:"
 RECEIPT_PREFIX = "schedule.import:"
@@ -315,7 +315,7 @@ class ScheduleImport:
             else:
                 result, days, by_day, protected, existing = await self.prepare(conn, actor, uid, parsed, defaults, grants)
                 if not result["canApply"]:
-                    raise AccessError("Укажите недостающие отель и часы один раз для всего графика, затем проверьте его.", 400)
+                    raise AccessError("Укажите отель один раз для всего графика, затем проверьте его.", 400)
                 if result["revision"] != body["revision"]:
                     raise AccessError("График, права или фактическая смена изменились после проверки. Проверьте текст заново.", 409)
                 changed, checks = 0, []

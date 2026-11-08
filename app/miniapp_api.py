@@ -833,8 +833,11 @@ class MiniApp:
                     "ORDER BY name", uid=actor['id'])]
             from .schedule_month import month_plan
             monthly = await month_plan(self, conn, actor, str(start)[:7])
+            from .shift_hours import legacy_summary
+            legacy = await legacy_summary(self, conn, actor)
         return web.json_response({"items": items, "employees": employees, "hotels": hotels,
-                                  "unavailableEmployees": unavailable, "monthPlan": monthly})
+                                  "unavailableEmployees": unavailable, "monthPlan": monthly,
+                                  "legacyHours": legacy})
 
     async def create_shift(self, request):
         payload = await self.body(request)
@@ -1219,6 +1222,8 @@ class MiniApp:
         install_academy_diagnostic(app, self)
         from .no_sale import install_no_sale
         install_no_sale(app, self)
+        from .shift_hours import install_shift_hours
+        install_shift_hours(app, self)
 
 
 def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/Moscow",
