@@ -35,6 +35,7 @@ def fixture_handler(me, data, sent, theme):
         files = {'/people/people.js': ROOT/'app/people_ui/people.js', '/people/people.css': ROOT/'app/people_ui/people.css',
                  '/app/js/localstore.js': ROOT/'app/webapp/js/localstore.js',
                  '/app/js/api.js': ROOT/'app/webapp/js/api.js', '/app/js/domain.js': ROOT/'app/webapp/js/domain.js',
+                 '/app/js/icons.js': ROOT/'app/webapp/js/icons.js',
                  '/app/css/styles.css': ROOT/'app/webapp/css/styles.css'}
         if path in files:
             return r.fulfill(body=files[path].read_text(), content_type='text/css' if path.endswith('.css') else 'text/javascript')
