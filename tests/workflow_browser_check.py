@@ -310,10 +310,9 @@ async def main():
                     assert await field.is_enabled()
                     assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                     await page.locator('[data-quick-booking-close]').click()  # the unsent guest stays in the closed form
-                    await page.evaluate("""async()=>{
-                        const m=await import('/app/js/workflow.js');await m.loadWorkflow(1);
-                        document.querySelector('#app').innerHTML=m.workflowView();
-                    }""")
+                    # Open the first sale the way its links do; a concurrent refresh can no
+                    # longer outrun a hand-drawn view.
+                    await page.evaluate("location.hash='#workflow?booking=1'")
                     await page.locator('[data-receipt-status]').get_by_role('button', name='Посмотреть чек · файл 1').click()
                     await wait_async(page, "()=>document.querySelector('dialog[aria-label=\"Фото чека\"] img')?.naturalWidth>0")
                     await page.locator('dialog[aria-label="Фото чека"]').get_by_role('button', name='Закрыть', exact=True).click()
