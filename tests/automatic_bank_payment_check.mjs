@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {fakeOpenLocal} from './fake_idb.mjs';
 
 const source=fs.readFileSync('app/webapp/js/outbox.js','utf8').replace(/^import .*;\n/gm,'').replaceAll('export ','');
 const settle=async()=>{for(let i=0;i<12;i++)await new Promise(setImmediate);};
@@ -13,6 +14,7 @@ function fixture(respond){
   setTimeout(fn,delay){timers.push({fn,delay});return timers.length;},clearTimeout(){},
   writeOperations:async updates=>{for(const row of updates)rows.set(row.key,structuredClone(row));return true;},
   localAction:async(_store,_mode,fn)=>fn({get:key=>structuredClone(rows.get(key)),put:row=>rows.set(row.key,structuredClone(row))}),
+  openLocal:fakeOpenLocal({operations:rows},{clone:structuredClone}),
   api:async(path,options)=>{const body=options.body instanceof FormData?JSON.parse(options.body.get('operation')):options.body;calls.push({path,body:structuredClone(body)});return respond(path,body);}});
  vm.runInContext(source,context);
  vm.runInContext("userId=42;outboxRows=async()=>[...rows.values()].map(row=>({...structuredClone(row),hasBlob:!!row.blob,blob:null}));",context);

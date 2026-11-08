@@ -5,7 +5,19 @@ const source=fs.readFileSync(new URL('../app/webapp/js/workflow.js',import.meta.
 const rows=[];let seq=0,resets=0,manualSync=0,automaticSync=0;
 class FD{constructor(form){this.form=form;}get(name){return this.form.values[name];}}
 const form={setAttribute(){},removeAttribute(){},id:'workflowSale',dataset:{draftScope:'7'},classList:{contains:()=>false},values:{total:'150',sold:'1'},elements:{selected:{files:[{type:'image/jpeg',size:1234,name:'one.jpg'}]},receipt:{files:[{type:'image/jpeg',size:1234,name:'receipt.jpg'}]}},reset(){resets++;}};
-const c=vm.createContext({FormData:FD,Date,Number,JSON,Error,Set,form,rows,checkSaleFiles:async()=>{},captureForm(){},captureForms(){},restoreForms(){},clearForm(){},todayKey:()=> '2026-10-16',crypto:{randomUUID:()=>`test-key-${++seq}`},window:{addEventListener(){}},document:{addEventListener(){},querySelector:()=>null,querySelectorAll:()=>[]},enqueueBatch:async batch=>{rows.push(...batch.map(x=>({...x,status:'local'})));},outboxRows:async()=>rows,retryOperation:async()=>{},flushOutbox:async()=>{automaticSync++;return {state:'offline'};},syncOutboxNow:async()=>{manualSync++;return {state:'done'};}});
+// Pricing math is checked for real below (balance cases); the recovery flow
+// only needs the confirmed quote a valid sale form produces.
+const quoteFor=(form,b)=>{const amount=Number(b?.price||0)*Number(form?.values?.sold||0);return {amount,due:amount,creditAmount:0,photoAmount:null,tariffId:null,discountId:null,albumId:null,albumQuantity:null};};
+const c=vm.createContext({updatePricePreview:quoteFor,FormData:FD,Date,Number,JSON,Error,Set,form,rows,checkSaleFiles:async()=>{},captureForm(){},captureForms(){},restoreForms(){},clearForm(){},todayKey:()=> '2026-10-16',crypto:{randomUUID:()=>`test-key-${++seq}`},window:{addEventListener(){}},document:{addEventListener(){},querySelector:()=>null,querySelectorAll:()=>[]},enqueueBatch:async batch=>{rows.push(...batch.map(x=>({...x,status:'local'})));},outboxRows:async()=>rows,retryOperation:async()=>{},flushOutbox:async()=>{automaticSync++;return {state:'offline'};},syncOutboxNow:async()=>{manualSync++;return {state:'done'};}});
+// workflow.js imports are stripped; give every imported name that this harness
+// does not model a neutral stub so a new import cannot break unrelated checks.
+const importedNames=[...fs.readFileSync(new URL('../app/webapp/js/workflow.js',import.meta.url),'utf8')
+ .matchAll(/^import\s*\{([^}]*)\}\s*from/gm)].flatMap(m=>m[1].split(',').map(x=>x.trim().split(/\s+as\s+/).pop()).filter(Boolean));
+// Pure helpers (phone normalisation, receipt selection) run for real; only the
+// rest gets a neutral stub.
+const realistic={...await import('../app/webapp/js/guest-phone.js'),...await import('../app/webapp/js/receipt-files.js')};
+const stubImports=(context,skip=new Set())=>{for(const name of importedNames)if(!(name in context)&&!skip.has(name))context[name]=realistic[name]||(()=>'');};
+stubImports(c);
 vm.runInContext(source,c);vm.runInContext("data={actorId:42,bookings:[{id:7,price:'400.00',draft:null}]};selected=7",c);
 await vm.runInContext('workflowSubmit(form)',c);assert.equal(resets,0);assert.equal(rows.length,5);assert.equal(JSON.parse(form.dataset.pendingKeys).length,5);
 await vm.runInContext('workflowSubmit(form)',c);assert.equal(rows.length,5,'second press must reuse saved operations');assert.equal(resets,0);
@@ -99,6 +111,7 @@ for(const example of balanceCases){
  const ctx=vm.createContext({FormData:FD,Date,Number,JSON,Error,Set,candidate,catalogue,checkSaleFiles:async()=>{},captureForm(){},todayKey:()=> '2026-10-29',
   crypto:{randomUUID:()=>`balance-${++key}`},window:{addEventListener(){}},document:{addEventListener(){},querySelector:()=>null,querySelectorAll:()=>[]},
   enqueueBatch:async batch=>queued.push(...batch),outboxRows:async()=>queued});
+ stubImports(ctx,new Set([...pricingSource.matchAll(/^function\s+(\w+)/gm)].map(m=>m[1])));
  vm.runInContext(pricingSource+'\n'+source,ctx);
  vm.runInContext('data=catalogue;state=catalogue;selected=7;',ctx);
  const quote=vm.runInContext('updatePricePreview(candidate,data.bookings[0],data.tariffs)',ctx);

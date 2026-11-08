@@ -5,7 +5,9 @@ const code=fs.readFileSync('app/webapp/js/sale-disk.js','utf8').replace(/^import
 const ctx=vm.createContext({document:{addEventListener(){}},window:{addEventListener(){}},setTimeout:()=>0,Map,Set,Number,encodeURIComponent,esc:x=>String(x).replaceAll('<','&lt;'),api:async()=>{throw Error('Unexpected API call');}});
 vm.runInContext(code,ctx);ctx.data={actorId:1,canAuditDisk:true};ctx.booking={id:7};
 const html=vm.runInContext('saleDiskView(booking,data)',ctx);
-for(const label of ['Загрузить с устройства','Прикрепить ссылку','Выбрать на Яндекс.Диске','Выбрать папку рабочего Диска'])assert.ok(html.includes(label),label);
+for(const label of ['Прикрепить ссылку','Выбрать на Яндекс.Диске','Выбрать папку рабочего Диска'])assert.ok(html.includes(label),label);
+// The device option now lives in the sale form itself (workflow.js), next to this panel.
+assert.ok(fs.readFileSync('app/webapp/js/workflow.js','utf8').includes('value="device" checked> Загрузить с устройства'));
 ctx.panel={dataset:{booking:'7'}};ctx.form={elements:{photoSource:{value:'device'}},querySelector:()=>ctx.panel};
 assert.equal(vm.runInContext('selectedDiskPhotos(form).length',ctx),0);
 ctx.form.elements.photoSource.value='disk';assert.throws(()=>vm.runInContext('selectedDiskPhotos(form)',ctx),/Сначала прикрепите/);

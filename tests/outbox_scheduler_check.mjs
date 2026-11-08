@@ -1,25 +1,33 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {fakeOpenLocal} from './fake_idb.mjs';
 
 const source=fs.readFileSync(new URL('../app/webapp/js/outbox.js',import.meta.url),'utf8')
  .replace(/^import .*;\n/gm,'').replaceAll('export ','') + '\nasync function writeOperations(items){for(const row of items)await localAction(\"operations\",\"readwrite\",store=>store.put(row));return true;}';
 const settle=async()=>{for(let i=0;i<8;i++)await new Promise(setImmediate);};
 function fixture(api){
- const rows=new Map(),calls=[],handlers={},timers=[];
+ const rows=new Map(),snapshots=new Map(),calls=[],handlers={},timers=[];
  let now=100000,seq=0;
- const context=vm.createContext({rows,Blob,FormData,Promise,Event,Error,Date:{now:()=>now},
+ // ArrayBuffer from this realm: outbox checks `instanceof ArrayBuffer` on stored receipts.
+ const context=vm.createContext({rows,Blob,FormData,Promise,Event,Error,ArrayBuffer,Date:{now:()=>now},
   crypto:{randomUUID:()=>`new-${++seq}`},navigator:{onLine:true},
   window:{dispatchEvent(){},addEventListener:(event,handler)=>{handlers[event]=handler;}},
   document:{hidden:false,addEventListener:(event,handler)=>{handlers[event]=handler;}},
   setTimeout(fn,delay){timers.push({fn,delay});return timers.length;},clearTimeout(){},
   localAction:async(_store,_mode,fn)=>fn({get:key=>rows.get(key),put:r=>rows.set(r.key,r),add:r=>rows.set(r.key,r)}),
+  openLocal:fakeOpenLocal({operations:rows,snapshots}),
+  // receipt-files.js is stripped with the imports; one file passes through unchanged.
+  receiptPayload:async files=>new Blob([await files[0].arrayBuffer()],{type:files[0].type||'image/jpeg'}),
   api:async(path,{body,...options})=>{const op=body instanceof FormData?JSON.parse(body.get('operation')):body;calls.push(op.key);return api(op,path,options);}});
  vm.runInContext(source,context);
  vm.runInContext(`userId=42;outboxRows=async()=>[...rows.values()].map(r=>({...r,hasBlob:!!r.blob,blob:null}));`,context);
  const add=(key,extra={})=>{rows.set(key,{key,userId:42,kind:'shoot_photo',date:'2026-10-17',data:{shooting:{id:7}},
   filename:`${key}.jpg`,blob:new Blob(['original'],{type:'image/jpeg'}),status:'local',createdAt:1,order:rows.size,...extra});};
- return {rows,calls,handlers,timers,context,add,setNow:value=>{now=value;},run:code=>vm.runInContext(code,context)};
+ // The app persists the reset generation (localstore.reconcileOperationsGeneration)
+ // before it hands the account to the outbox; markGeneration mirrors that step.
+ const markGeneration=generation=>snapshots.set('operations-generation:42',{key:'operations-generation:42',generation});
+ return {rows,snapshots,calls,handlers,timers,context,add,markGeneration,setNow:value=>{now=value;},run:code=>vm.runInContext(code,context)};
 }
 
 // A lost selected-file response belongs to that sale's chain. Another sale
@@ -145,13 +153,15 @@ function fixture(api){
  f.add('complete',{kind:'sale_complete',blob:null,data:{draft}});
  f.add('independent-photo');
  await f.run('flushOutbox()');
- assert.deepEqual(f.calls,['receipt','independent-photo']);
+ // The shoot photo has its own lane; only the sale chain's order is a contract.
+ assert.deepEqual([...f.calls].sort(),['independent-photo','receipt']);
  for(const key of ['counts','selected','complete'])assert.equal(f.rows.get(key).status,'local');
  assert.ok(f.rows.get('selected').blob,'waiting selected photo must retain its original');
  await f.run('flushOutbox()');
- assert.deepEqual(f.calls,['receipt','independent-photo'],'a receipt cooldown must also hold its sale steps');
+ assert.deepEqual([...f.calls].sort(),['independent-photo','receipt'],'a receipt cooldown must also hold its sale steps');
  receiptReady=true;f.setNow(130001);await f.run('flushOutbox()');
- assert.deepEqual(f.calls,['receipt','independent-photo','receipt','counts','selected','complete']);
+ assert.deepEqual(f.calls.slice(0,2).sort(),['independent-photo','receipt']);
+ assert.deepEqual(f.calls.slice(2),['receipt','counts','selected','complete']);
  assert.ok([...f.rows.values()].every(row=>row.status==='synced'));
 }
 // A permanent receipt error waits for correction without discarding later photos.
@@ -482,7 +492,7 @@ console.log('PASS: backoff isolates rows, in-flight additions flush, renewed aut
 {
  const packets=[];const f=fixture(async op=>{packets.push(op);return {ok:true};});
  f.add('legacy',{blob:null});f.add('old-generation',{blob:null,generation:'before'});f.add('new-generation',{blob:null,generation:'after'});
- await f.run('setOutboxUser(42,"after")');
+ f.markGeneration('after');await f.run('setOutboxUser(42,"after")');
  assert.deepEqual(f.calls,['new-generation']);assert.equal(packets[0].generation,'after');
  assert.equal(f.rows.get('legacy').status,'local');assert.equal(f.rows.get('old-generation').status,'local');
  await f.run('enqueueBatch([{key:"fresh-reset-operation",kind:"booking",date:"2026-10-17",data:{}}])');await settle();

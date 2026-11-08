@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {fakeOpenLocal} from './fake_idb.mjs';
 
 const source=fs.readFileSync(new URL('../app/webapp/js/outbox.js',import.meta.url),'utf8')
   .replace(/^import .*;\n/gm,'').replaceAll('export ','') + '\nasync function writeOperations(items){for(const row of items)await localAction(\"operations\",\"readwrite\",store=>store.put(row));return true;}';
@@ -21,7 +22,7 @@ const api=async(_path,{body})=>{
  return {ok:true,photoId:calls.length};
 };
 const context=vm.createContext({
- rows,api,localAction,Blob,FormData,Promise,Date,Error,Event,
+ rows,api,localAction, openLocal: fakeOpenLocal({operations: rows}),Blob,FormData,Promise,Date,Error,Event,
  crypto:{randomUUID:()=>String(++seed)},navigator:{onLine:true},
  window:{dispatchEvent(){},addEventListener(){}},
  document:{hidden:false,addEventListener(){}},

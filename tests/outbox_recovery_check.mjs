@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {fakeOpenLocal} from './fake_idb.mjs';
 const source=fs.readFileSync(new URL('../app/webapp/js/outbox.js',import.meta.url),'utf8')
  .replace(/^import .*;\n/gm,'').replaceAll('export ','') + '\nasync function writeOperations(items){for(const row of items)await localAction(\"operations\",\"readwrite\",store=>store.put(row));return true;}';
 const rows=new Map(),calls=[],timers=[];
@@ -14,6 +15,7 @@ const context=vm.createContext({rows,Blob,FormData,Promise,Event,Error,Date:{now
  document:{hidden:false,addEventListener(){}},
  setTimeout(_fn,delay){timers.push(delay);return timers.length;},clearTimeout(){},
  localAction:async(_store,_mode,fn)=>fn({get:key=>rows.get(key),put:r=>rows.set(r.key,r)}),
+ openLocal:fakeOpenLocal({operations:rows}),
  api:async(_path,{body})=>{
   const op=JSON.parse(body.get('operation'));calls.push(op.key);
   assert.equal(await body.get('file').text(),'original bytes');
@@ -40,7 +42,8 @@ rows.set('unrelated',row('unrelated',{status:'error',errorStatus:400,error:'Не
 rows.set('forbidden',row('forbidden',{status:'error',errorStatus:403,error:'Нет доступа'}));
 await vm.runInContext('flushOutbox()',context);
 await vm.runInContext('flushOutbox()',context);
-assert.deepEqual(calls,['legacy','previous-release'],'legacy media failure including last release recovery may be rechecked, once per fix');
+// Each shoot photo has its own lane, so the two may be rechecked in either order.
+assert.deepEqual([...calls].sort(),['legacy','previous-release'],'legacy media failure including last release recovery may be rechecked, once per fix');
 assert.ok(rows.get('legacy').legacyMediaRecovered);assert.ok(rows.get('legacy').blob);
 assert.equal(rows.get('previous-release').legacyMediaRecovery,'media-recovery-v2-20261017');assert.ok(rows.get('previous-release').blob);
 console.log('PASS: 429 honors Retry-After, preserves original/key, and legacy false-400 errors recover once without retrying access denials');
