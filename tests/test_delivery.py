@@ -42,7 +42,7 @@ def image(color='orange'):
     return output.getvalue()
 
 
-async def pay_for(session, *photos, booking_id=1):
+async def pay_for(session, *photos, booking_id=1, actor_id=2):
     """Guests see only photos of a completed, paid sale (sale_gallery.guest_photo_clause).
 
     The rule replaced "anything published is visible"; tests that publish a
@@ -51,10 +51,10 @@ async def pay_for(session, *photos, booking_id=1):
     from app.models import Sale, SaleDraft, SaleDraftPhoto
     from app.services.sale_gallery import storage_identity
     await session.flush()
-    draft = SaleDraft(booking_id=booking_id, created_by_id=2, status='COMPLETED', completed_at=utc_now())
+    draft = SaleDraft(booking_id=booking_id, created_by_id=actor_id, status='COMPLETED', completed_at=utc_now())
     session.add(draft)
     await session.flush()
-    session.add(Sale(booking_id=booking_id, created_by_id=2, credited_user_id=2, sold_photos=len(photos),
+    session.add(Sale(booking_id=booking_id, created_by_id=actor_id, credited_user_id=actor_id, sold_photos=len(photos),
                      source_draft_id=draft.id, amount=400 * len(photos), payment_status='PAID'))
     for photo in photos:
         photo.upload_set, photo.storage_identity = 'SELECTED', storage_identity()

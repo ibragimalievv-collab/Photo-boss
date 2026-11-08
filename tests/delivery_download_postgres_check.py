@@ -13,7 +13,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
-from test_delivery import image
+from test_delivery import image, pay_for
 from test_miniapp_release import TOKEN, signed
 
 from app import operations_guard, render_main
@@ -61,9 +61,16 @@ async def main():
                 title='Synthetic Album', created_by_id=1, published=True, delivery_mode='ALL')
             session.add(gallery)
             await session.flush()
-            session.add(DeliveryPhoto(id=1, gallery_id=1, uploaded_by_id=1, filename='synthetic.png',
+            purchased = DeliveryPhoto(id=1, gallery_id=1, uploaded_by_id=1, filename='synthetic.png',
                 disk_path='app:/PhotoBoss/delivery/booking-1/Все фото/synthetic.png', sha256='a' * 64,
-                byte_size=len(image()), upload_set='ALL'))
+                byte_size=len(image()), upload_set='ALL')
+            # Guests download purchased frames only; the staff selection check
+            # below works on a second, not yet sold frame.
+            session.add_all([purchased, DeliveryPhoto(id=2, gallery_id=1, uploaded_by_id=1,
+                filename='unsold.png', disk_path='app:/PhotoBoss/delivery/booking-1/Все фото/unsold.png',
+                sha256='b' * 64, byte_size=len(image()), upload_set='ALL')])
+            await session.flush()
+            await pay_for(session, purchased, actor_id=1)
             await session.commit()
         bot = SimpleNamespace(token=TOKEN, send_message=AsyncMock())
         app = web.Application()
@@ -121,7 +128,7 @@ async def main():
               patch.object(delivery_module, 'configured_from_env', lambda: ('fixture-token', 'fixture-client')),
               patch.object(delivery_module, 'YandexDisk', lambda *_: storage),
               patch.object(render_main, 'engine', engine)):
-            path='/api/miniapp/delivery/1/photos/1/selected'
+            path='/api/miniapp/delivery/1/photos/2/selected'
             headers={'X-Telegram-Init-Data': signed(1)}
             pending=[asyncio.create_task(client.post(path,headers=headers,json={'selected':True}))]
             await asyncio.wait_for(entered_selection.wait(),5)
