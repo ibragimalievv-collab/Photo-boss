@@ -16,6 +16,7 @@ from .db import user_lock_clause
 from .hotel_points import context_key, read_json, review_required, revision, save_json
 from .miniapp_security import AccessError, utc_bounds
 from .shift_hours import OPEN_END, is_open_end
+from .timeutil import as_utc as utc
 
 logger = logging.getLogger(__name__)
 RULES_KEY = 'attendance:fines:rules'
@@ -25,12 +26,6 @@ LABELS = {'late': 'Опоздание / нет прихода вовремя', '
 RULE_FIELD = {'late': 'lateAmount', 'early': 'earlyAmount', 'missing_end': 'missingEndAmount'}
 PAYROLL_KINDS = {'late': 'Штраф: опоздание', 'early': 'Штраф: ранний уход',
                  'missing_end': 'Штраф: нет ухода'}
-
-
-def utc(value):
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def fine_key(uid, day, kind):

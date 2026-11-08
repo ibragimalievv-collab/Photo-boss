@@ -9,10 +9,10 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from zoneinfo import ZoneInfo
+
+from ..timeutil import business_tz
 
 VERSION = '2026-11-04-receipt-evidence-v1'
-TZ = ZoneInfo('Europe/Moscow')
 MESSAGES = {
     'recipient_not_configured': 'Проверка получателя настраивается. Чек сохранён и будет проверен автоматически.',
     'analysis_unavailable': 'Сервис проверки временно недоступен. Повторим проверку автоматически.',
@@ -133,8 +133,9 @@ def evaluate(analysis, *, expected, profile, created_at, now=None):
                 or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', day)
                 or not re.fullmatch(r'\d{2}:\d{2}:\d{2}', clock)):
             raise ValueError
-        paid_at = datetime.fromisoformat(day + 'T' + clock).replace(tzinfo=TZ)
-        if paid_at > now.astimezone(TZ) + timedelta(minutes=5) or paid_at < created_at.astimezone(TZ) - timedelta(days=7):
+        tz = business_tz()  # receipts show the local time of the business
+        paid_at = datetime.fromisoformat(day + 'T' + clock).replace(tzinfo=tz)
+        if paid_at > now.astimezone(tz) + timedelta(minutes=5) or paid_at < created_at.astimezone(tz) - timedelta(days=7):
             codes.append('date_outside_window')
     except (ValueError, TypeError):
         codes.append('date_missing_or_invalid')

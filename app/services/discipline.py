@@ -1,18 +1,13 @@
 """Read-only discipline from the original schedule and attendance records."""
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from sqlalchemy import text
 
 from ..miniapp_security import utc_bounds
 from ..models import utc_now
+from ..timeutil import as_utc as utc
 from .insights import change
-
-
-def utc(value):
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 async def operational_reset_at(conn):

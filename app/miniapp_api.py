@@ -43,6 +43,7 @@ from .operations_guard import (
 )
 from .services.academy_growth import personal_tip
 from .services.booking_access import booking_scope_sql
+from .timeutil import as_utc
 from .yandex_disk import YandexDiskError
 
 logger = logging.getLogger(__name__)
@@ -134,12 +135,6 @@ def cents(value) -> int:
 def as_day(value):
     """A DATE column read by raw SQL: date in PostgreSQL, ISO text in SQLite."""
     return value if isinstance(value, date) and not isinstance(value, datetime) else date.fromisoformat(str(value)[:10])
-
-
-def as_utc(value):
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def first_role(roles):

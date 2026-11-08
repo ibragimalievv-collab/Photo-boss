@@ -7,7 +7,6 @@ import hashlib
 import json
 from datetime import datetime
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
 from aiohttp import web
 from sqlalchemy import func, select
@@ -62,6 +61,7 @@ from .services.sale_workflow import (
     set_sale_counts,
     start_sale_draft,
 )
+from .timeutil import business_tz
 from .yandex_disk import (
     ROOT,
     YandexDisk,
@@ -194,7 +194,7 @@ async def target(session, actor, value, field):
 class Workflow:
     def __init__(self, api):
         self.api = api
-        self.tz = getattr(api, 'tz', ZoneInfo('Europe/Moscow'))
+        self.tz = getattr(api, 'tz', None) or business_tz()
 
     async def photo_hashes(self, request):
         """Checksums already on the server for one shoot, so a re-selected

@@ -26,10 +26,7 @@ from .models import (
 )
 from .services.ai_provider import ai_configured
 from .services.development_ai import STR, obj, structured
-
-
-def utc(value):
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+from .timeutil import as_utc as utc
 
 
 async def preferences(session):

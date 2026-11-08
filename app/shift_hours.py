@@ -16,6 +16,7 @@ from aiohttp import web
 from sqlalchemy import text
 
 from .miniapp_security import AccessError, require_schedule_editor
+from .timeutil import as_utc as _utc
 
 WORK_START = '09:00'
 OPEN_END = '23:59'
@@ -34,12 +35,6 @@ def working_day(day, tz):
     end = datetime.fromisoformat(f'{day}T{OPEN_END}').replace(tzinfo=tz)
     return (start.astimezone(timezone.utc).replace(tzinfo=None),
             end.astimezone(timezone.utc).replace(tzinfo=None))
-
-
-def _utc(value):
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 async def legacy_shifts(api, conn, actor_id, roles, *, lock=False):

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from . import refund_schema
 from .miniapp_security import AccessError
 from .models import BankPayment, Booking, Receipt
+from .timeutil import as_utc as _utc
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +30,6 @@ logger = logging.getLogger(__name__)
 class StaleCancellationNotice:
     repeated: bool
     stale: bool = True
-
-
-def _utc(value):
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def _kopecks(value):
