@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -20,6 +21,11 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
+
+# Money amounts are stored exactly, to the kopeck. Python keeps receiving float
+# (asdecimal=False), so existing arithmetic and JSON output are unchanged;
+# schema_updates converts columns of older databases.
+MONEY = Numeric(14, 2, asdecimal=False)
 
 
 def utc_now():
@@ -219,18 +225,24 @@ class Package(Base):
     __tablename__ = "packages"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(150))
-    price_per_photo: Mapped[float] = mapped_column(Float)
+    price_per_photo: Mapped[float] = mapped_column(MONEY)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class Booking(Base):
     __tablename__ = "bookings"
+    __table_args__ = (
+        Index("ix_bookings_shoot_date_status", "shoot_date", "status"),
+        Index("ix_bookings_hotel_id_shoot_date", "hotel_id", "shoot_date"),
+        Index("ix_bookings_photographer_id_shoot_date", "photographer_id", "shoot_date"),
+        Index("ix_bookings_manager_id_shoot_date", "manager_id", "shoot_date"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     hotel_id: Mapped[int] = mapped_column(ForeignKey("hotels.id"))
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"))
     room: Mapped[str] = mapped_column(String(100))
     guest_count: Mapped[int] = mapped_column(Integer, default=1)
-    deposit: Mapped[float] = mapped_column(Float, default=1000)
+    deposit: Mapped[float] = mapped_column(MONEY, default=1000)
     shoot_date: Mapped[date] = mapped_column(Date)
     shoot_time: Mapped[time] = mapped_column(Time)
     package_id: Mapped[int] = mapped_column(ForeignKey("packages.id"))
@@ -271,6 +283,7 @@ class Shooting(Base):
 
 class Photo(Base):
     __tablename__ = "photos"
+    __table_args__ = (Index("ix_photos_shooting_id", "shooting_id"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     shooting_id: Mapped[int] = mapped_column(
         ForeignKey("shootings.id", ondelete="CASCADE")
@@ -390,6 +403,11 @@ class SaleDraftPhoto(Base):
 
 class Sale(Base):
     __tablename__ = "sales"
+    __table_args__ = (
+        Index("ix_sales_booking_id", "booking_id"),
+        Index("ix_sales_credited_user_id_created_at", "credited_user_id", "created_at"),
+        Index("ix_sales_created_at", "created_at"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     booking_id: Mapped[int | None] = mapped_column(
         ForeignKey("bookings.id"), nullable=True
@@ -402,10 +420,10 @@ class Sale(Base):
     source_draft_id: Mapped[int | None] = mapped_column(
         ForeignKey("sale_drafts.id", ondelete="SET NULL"), nullable=True, unique=True
     )
-    amount: Mapped[float] = mapped_column(Float)
+    amount: Mapped[float] = mapped_column(MONEY)
     pricing_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     percent: Mapped[float] = mapped_column(Float, default=0)
-    commission: Mapped[float] = mapped_column(Float, default=0)
+    commission: Mapped[float] = mapped_column(MONEY, default=0)
     commission_finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     manager_percent_applied: Mapped[str | None] = mapped_column(String(60), nullable=True)
     manager_payroll_entry_id: Mapped[int | None] = mapped_column(ForeignKey('payroll_entries.id', ondelete='SET NULL'), nullable=True)
@@ -466,16 +484,20 @@ class Compensation(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     role: Mapped[str] = mapped_column(String(30))
-    base_salary: Mapped[float] = mapped_column(Float, default=0)
+    base_salary: Mapped[float] = mapped_column(MONEY, default=0)
     sales_percent: Mapped[float] = mapped_column(Float, default=0)
 
 
 class PayrollEntry(Base):
     __tablename__ = "payroll_entries"
+    __table_args__ = (
+        Index("ix_payroll_entries_user_id_created_at", "user_id", "created_at"),
+        Index("ix_payroll_entries_created_at", "created_at"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     kind: Mapped[str] = mapped_column(String(30))
-    amount: Mapped[float] = mapped_column(Float)
+    amount: Mapped[float] = mapped_column(MONEY)
     period: Mapped[str] = mapped_column(String(30))
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
@@ -507,6 +529,7 @@ class CashMovement(Base):
 
 class Shift(Base):
     __tablename__ = "shifts"
+    __table_args__ = (Index("ix_shifts_user_id_start_at", "user_id", "start_at"), Index("ix_shifts_start_at", "start_at"))
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     hotel_id: Mapped[int] = mapped_column(ForeignKey("hotels.id"))
@@ -534,7 +557,7 @@ class ShiftCheckIn(Base):
     full_body_file_id: Mapped[str | None] = mapped_column(String(300), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     late: Mapped[bool] = mapped_column(Boolean, default=False)
-    fine_amount: Mapped[float] = mapped_column(Float, default=0)
+    fine_amount: Mapped[float] = mapped_column(MONEY, default=0)
     offline_claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     __table_args__ = (
         UniqueConstraint("user_id", "shift_date", name="uq_shift_check_in_user_day"),
@@ -574,7 +597,7 @@ class SalesPlan(Base):
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     hotel_id: Mapped[int | None] = mapped_column(ForeignKey("hotels.id"), nullable=True)
     period: Mapped[str] = mapped_column(String(30))
-    target_amount: Mapped[float] = mapped_column(Float)
+    target_amount: Mapped[float] = mapped_column(MONEY)
 
 
 class Notification(Base):
@@ -689,6 +712,7 @@ class Setting(Base):
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
+    __table_args__ = (Index("ix_audit_logs_created_at", "created_at"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     action: Mapped[str] = mapped_column(String(100))

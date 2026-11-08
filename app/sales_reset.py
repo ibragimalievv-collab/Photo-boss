@@ -77,7 +77,9 @@ async def reset_sales_fines(engine, request_id, admin_ids, *, hide_hotel_name=No
                          if clear_bookings else [(r, dict(r, status='READY_FOR_SALE')) for r in before['bookings']
                          if r['id'] in bids and r['status'] in {'SOLD', 'COMPLETED'}]),
             # Preserve actual arrival time and the late flag as historical fact.
-            'shift_check_ins': [(r, dict(r, fine_amount=type(r['fine_amount'])(0))) for r in before['shift_check_ins'] if r['fine_amount']],
+            # value * 0 keeps the column's own type and scale (0.0, or Decimal 0.00 for NUMERIC),
+            # so the preservation check compares like with like.
+            'shift_check_ins': [(r, dict(r, fine_amount=r['fine_amount'] * 0)) for r in before['shift_check_ins'] if r['fine_amount']],
             'receipts': [(r, dict(r, status='REJECTED', reviewed_by_id=owner,
                                  reviewed_at=datetime.now(UTC).replace(tzinfo=None)))
                          for r in before['receipts'] if r['booking_id'] in bids
