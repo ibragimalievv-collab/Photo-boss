@@ -322,30 +322,72 @@ class Workflow:
             assigned_photographers = {u.id: u for u in await session.scalars(select(User).where(
                 User.id.in_({b.photographer_id for b in bookings if b.photographer_id})))}
             rows = []
+            from .bank_payments import public_bill
             from .no_sale import public as public_no_sale
+            from .services.pricing import snapshot, unit_price
+            from .services.sale_discounts import public_approval
+            # One query per kind of record for all listed bookings instead of a
+            # dozen per booking (up to 200+ bookings per screen).
+            booking_ids = [b.id for b in bookings]
+            def by(items, key):
+                grouped = {}
+                for item in items:
+                    grouped.setdefault(key(item), []).append(item)
+                return grouped
+            bills_by_booking = by(await session.scalars(select(BankPayment).where(
+                BankPayment.booking_id.in_(booking_ids)).order_by(BankPayment.id)), lambda x: x.booking_id)
+            open_drafts = {}
+            for item in await session.scalars(select(SaleDraft).where(SaleDraft.booking_id.in_(booking_ids),
+                    SaleDraft.status.in_(['AWAITING_RECEIPT', 'AWAITING_COUNTS', 'AWAITING_SELECTED'])).order_by(SaleDraft.id)):
+                open_drafts[item.booking_id] = item  # the newest open draft, as before
+            shoots = {item.booking_id: item for item in await session.scalars(
+                select(Shooting).where(Shooting.booking_id.in_(booking_ids)))}
+            shoot_ids = [item.id for item in shoots.values()]
+            files_by_shoot = by(await session.scalars(select(PhotoStorage).where(
+                PhotoStorage.shooting_id.in_(shoot_ids)).order_by(PhotoStorage.id)), lambda x: x.shooting_id)
+            names_by_shoot = {}
+            for shooting_id, photo_id, name in (await session.execute(select(Photo.shooting_id, Photo.id, Photo.original_name)
+                    .where(Photo.shooting_id.in_(shoot_ids), Photo.original_name.is_not(None)))).all():
+                names_by_shoot.setdefault(shooting_id, {})[photo_id] = name
+            edits_by_shoot = {}
+            for edit, shooting_id in (await session.execute(select(PhotoEdit, PhotoStorage.shooting_id)
+                    .join(PhotoStorage, PhotoStorage.photo_id == PhotoEdit.photo_id)
+                    .where(PhotoStorage.shooting_id.in_(shoot_ids)).order_by(PhotoEdit.id))).all():
+                edits_by_shoot.setdefault(shooting_id, []).append(edit)
+            originals_by_shoot = dict((await session.execute(select(Photo.shooting_id, func.count(Photo.id))
+                .where(Photo.shooting_id.in_(shoot_ids)).group_by(Photo.shooting_id))).all())
+            sales_by_booking = by(await session.scalars(select(Sale).where(
+                Sale.booking_id.in_(booking_ids)).order_by(Sale.id)), lambda x: x.booking_id)
+            receipts_by_booking = by(await session.scalars(select(Receipt).where(
+                Receipt.booking_id.in_(booking_ids)).order_by(Receipt.id)), lambda x: x.booking_id)
+            discounts_by_booking = by(await session.scalars(select(SaleDiscountApproval).where(
+                SaleDiscountApproval.booking_id.in_(booking_ids)).order_by(SaleDiscountApproval.id.desc())),
+                lambda x: x.booking_id)
+            clients = {item.id: item for item in await session.scalars(
+                select(Client).where(Client.id.in_({b.client_id for b in bookings})))}
+            listed_hotels = {item.id: item for item in await session.scalars(
+                select(Hotel).where(Hotel.id.in_({b.hotel_id for b in bookings})))}
+            draft_authors = {item.id: item for item in await session.scalars(
+                select(User).where(User.id.in_({d.created_by_id for d in open_drafts.values()})))}
+            uploadable = set(await session.scalars(select(Booking.id).where(
+                Booking.id.in_(booking_ids), booking_scope(a['id'], a['roles'], photos=True))))
             for b in bookings:
-                from .services.pricing import snapshot, unit_price
                 effective_price = await unit_price(session, b)
-                from .bank_payments import public_bill
-                bank_bills = list(await session.scalars(select(BankPayment).where(BankPayment.booking_id == b.id).order_by(BankPayment.id)))
-                draft = await session.scalar(select(SaleDraft).where(SaleDraft.booking_id == b.id,
-                    SaleDraft.status.in_(['AWAITING_RECEIPT', 'AWAITING_COUNTS', 'AWAITING_SELECTED'])).order_by(SaleDraft.id.desc()).limit(1))
-                shoot = await session.scalar(select(Shooting).where(Shooting.booking_id == b.id))
-                files = (await session.scalars(select(PhotoStorage).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoStorage.id))).all() if shoot else []
-                names = dict((await session.execute(select(Photo.id, Photo.original_name).where(
-                    Photo.shooting_id == shoot.id, Photo.original_name.is_not(None)))).all()) if shoot else {}
-                edits = (await session.scalars(select(PhotoEdit).join(PhotoStorage, PhotoStorage.photo_id == PhotoEdit.photo_id).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoEdit.id))).all() if shoot else []
-                purchases = (await session.scalars(select(Sale).where(Sale.booking_id == b.id).order_by(Sale.id))).all()
-                receipts = (await session.scalars(select(Receipt).where(Receipt.booking_id == b.id).order_by(Receipt.id))).all()
-                can_upload = await can_access_booking(session, a['id'], set(a['roles']), b, photos=True)
-                customer = await session.get(Client, b.client_id)
-                hotel = await session.get(Hotel, b.hotel_id)
-                total, paid, due = await payment_totals(session, b.id)
-                original_count = await session.scalar(select(func.count(Photo.id)).where(Photo.shooting_id == shoot.id)) if shoot else 0
-                draft_actor = await session.get(User, draft.created_by_id) if draft else None
-                from .services.sale_discounts import public_approval
-                discounts = list(await session.scalars(select(SaleDiscountApproval).where(
-                    SaleDiscountApproval.booking_id == b.id).order_by(SaleDiscountApproval.id.desc())))
+                bank_bills = bills_by_booking.get(b.id, [])
+                draft = open_drafts.get(b.id)
+                shoot = shoots.get(b.id)
+                files = files_by_shoot.get(shoot.id, []) if shoot else []
+                names = names_by_shoot.get(shoot.id, {}) if shoot else {}
+                edits = edits_by_shoot.get(shoot.id, []) if shoot else []
+                purchases = sales_by_booking.get(b.id, [])
+                receipts = receipts_by_booking.get(b.id, [])
+                can_upload = b.id in uploadable  # same scope as can_access_booking(photos=True)
+                customer = clients.get(b.client_id)
+                hotel = listed_hotels.get(b.hotel_id)
+                total, paid, due = await payment_totals(session, b.id, sales=purchases, receipts=receipts)
+                original_count = originals_by_shoot.get(shoot.id, 0) if shoot else 0
+                draft_actor = draft_authors.get(draft.created_by_id) if draft else None
+                discounts = discounts_by_booking.get(b.id, [])
                 history = {'client': customer.name if customer else '', 'phone': customer.phone if customer else None,
                            'hotel': hotel.name if hotel else 'Отель не указан', 'sales': [
                     {'id': sale.id, 'at': sale.created_at.isoformat() + 'Z', 'photos': sale.sold_photos,

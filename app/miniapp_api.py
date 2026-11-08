@@ -131,6 +131,11 @@ def cents(value) -> int:
     return int((Decimal(str(value or 0)) * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
+def as_day(value):
+    """A DATE column read by raw SQL: date in PostgreSQL, ISO text in SQLite."""
+    return value if isinstance(value, date) and not isinstance(value, datetime) else date.fromisoformat(str(value)[:10])
+
+
 def as_utc(value):
     if isinstance(value, str):
         value = datetime.fromisoformat(value)
@@ -712,20 +717,27 @@ class MiniApp:
             WHERE s.start_at<:hi AND s.end_at>:lo {clause} ORDER BY s.start_at,u.name""",
             uid=actor["id"], lo=lower, hi=upper)
         items = []
-        for r in rows:
-            st, en = as_utc(r["start_at"]).astimezone(self.tz), as_utc(r["end_at"]).astimezone(self.tz)
+        local = [(r, as_utc(r["start_at"]).astimezone(self.tz), as_utc(r["end_at"]).astimezone(self.tz)) for r in rows]
+        # Three queries for the whole period instead of three per shift (a month
+        # of the team schedule is hundreds of shifts).
+        started, ended, breaks_by_shift = set(), set(), {}
+        if local:
+            window = {"first": min(st.date() for _, st, _ in local), "last": max(st.date() for _, st, _ in local)}
+            started = {(x["user_id"], as_day(x["shift_date"])) for x in await self.rows(conn,
+                """SELECT user_id,shift_date FROM shift_check_ins WHERE shift_date>=:first
+                AND shift_date<=:last AND started_at IS NOT NULL""", **window)}
+            ended = {(x["user_id"], as_day(x["shift_date"])) for x in await self.rows(conn,
+                """SELECT user_id,shift_date FROM shift_check_outs WHERE shift_date>=:first
+                AND shift_date<=:last AND ended_at IS NOT NULL""", **window)}
+            for item in await self.rows(conn, '''SELECT user_id,hotel_id,shift_date,started_at,ended_at
+                    FROM work_breaks WHERE shift_date>=:first AND shift_date<=:last ORDER BY started_at''', **window):
+                breaks_by_shift.setdefault((item["user_id"], item["hotel_id"], as_day(item["shift_date"])), []).append(item)
+        for r, st, en in local:
             attendance = "PLANNED"
-            checks = await self.rows(conn, """SELECT started_at FROM shift_check_ins
-                WHERE user_id=:uid AND shift_date=:day AND started_at IS NOT NULL""",
-                uid=r["user_id"], day=st.date())
-            outs = await self.rows(conn, """SELECT ended_at FROM shift_check_outs
-                WHERE user_id=:uid AND shift_date=:day AND ended_at IS NOT NULL""",
-                uid=r["user_id"], day=st.date())
-            if checks:
-                attendance = "ENDED" if outs else ("STARTED" if st.date() == self.today() else "MISSING_CHECKOUT")
-            breaks = await self.rows(conn, '''SELECT started_at,ended_at FROM work_breaks
-                WHERE user_id=:uid AND hotel_id=:hid AND shift_date=:day ORDER BY started_at''',
-                uid=r['user_id'], hid=r['hotel_id'], day=st.date())
+            if (r["user_id"], st.date()) in started:
+                attendance = ("ENDED" if (r["user_id"], st.date()) in ended
+                              else ("STARTED" if st.date() == self.today() else "MISSING_CHECKOUT"))
+            breaks = breaks_by_shift.get((r['user_id'], r['hotel_id'], st.date()), [])
             if attendance == 'STARTED' and any(not item['ended_at'] for item in breaks):
                 attendance = 'ON_BREAK'
             items.append({"id": r["id"], "userId": r["user_id"], "name": r["name"], "role": r["role"],
