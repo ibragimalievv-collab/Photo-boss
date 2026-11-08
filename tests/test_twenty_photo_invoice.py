@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from media_fixtures import real_jpeg
 from sqlalchemy import func, select
 from test_team import Request
 from test_workflow_replay import ACTOR, packet, setup
@@ -48,7 +49,7 @@ def test_twenty_originals_receipt_and_post_completion_invoice_use_same_purchase(
             did = json.loads((await work.execute(ACTOR, start)).text)['draftId']
             draft = {'key': start['key']}
             await work.execute(ACTOR, packet('twenty-receipt', 'sale_receipt', {'draft': draft}),
-                b'\xff\xd8\xff' + b'synthetic-receipt' * 20)
+                real_jpeg(b'synthetic-receipt'))
             await work.execute(ACTOR, packet('twenty-counts', 'sale_counts',
                 {'draft': draft, 'total': 150, 'sold': 20, 'price': '400.00'}))
             for number in range(20):

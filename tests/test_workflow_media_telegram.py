@@ -68,7 +68,7 @@ def test_web_upload_can_save_privately_when_bot_is_blocked(monkeypatch, receipt)
     monkeypatch.setattr(media_files, 'save_private_media', save)
     raw = b'\xff\xd8\xff' + b'original' * 25
     assert asyncio.run(workflow.save_telegram(SimpleNamespace(id=7, tg_id=42), raw, receipt=receipt)) == save.return_value
-    save.assert_awaited_once_with(7, raw)
+    save.assert_awaited_once_with(7, raw, receipt=receipt)
 
 
 def test_unknown_telegram_chat_uses_verified_private_storage(monkeypatch):

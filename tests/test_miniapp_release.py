@@ -208,6 +208,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
                 "CREATE TABLE bookings(id INTEGER PRIMARY KEY,room TEXT,shoot_date DATE,shoot_time TEXT,status TEXT,photographer_id INTEGER,manager_id INTEGER,hotel_id INTEGER,client_id INTEGER,package_id INTEGER,no_sale_reason TEXT,no_sale_note TEXT,no_sale_at DATETIME,no_sale_by_id INTEGER)",
                 "CREATE TABLE shootings(id INTEGER PRIMARY KEY,booking_id INTEGER,status TEXT,accepted_at DATETIME,started_at DATETIME,completed_at DATETIME,ready_for_sale_at DATETIME,full_upload_completed_at DATETIME)",
                 "CREATE TABLE photos(id INTEGER PRIMARY KEY,shooting_id INTEGER)",
+                "CREATE TABLE sale_drafts(id INTEGER PRIMARY KEY,booking_id INTEGER,created_by_id INTEGER,status TEXT,created_at DATETIME,completed_at DATETIME)",
                 "CREATE TABLE sales(id INTEGER PRIMARY KEY,manager_payroll_entry_id INTEGER,booking_id INTEGER,credited_user_id INTEGER,commission_role TEXT,amount NUMERIC,commission NUMERIC,payment_status TEXT,created_at DATETIME)",
                 "CREATE TABLE payroll_entries(id INTEGER PRIMARY KEY,user_id INTEGER,kind TEXT,amount NUMERIC,created_at DATETIME)",
                 "CREATE TABLE receipts(id INTEGER PRIMARY KEY,booking_id INTEGER,status TEXT,verified_amount NUMERIC,reviewed_at DATETIME)",
@@ -435,11 +436,12 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
             assert (await self.call("/finance?" + suffix, uid=1003))[0] == 400
 
     async def test_theme_is_personal_not_permission(self):
-        assert (await self.call("/preferences", uid=1003, method="PUT", body={"theme": "premium"}))[0] == 200
+        # "premium" is the default theme now; pick another one to prove it is personal.
+        assert (await self.call("/preferences", uid=1003, method="PUT", body={"theme": "photo"}))[0] == 200
         _, own, _ = await self.call("/me", uid=1003)
         _, other, _ = await self.call("/me", uid=1005)
-        assert own["user"]["theme"] == "premium" and own["user"]["roles"] == ["PHOTOGRAPHER"]
-        assert other["user"]["theme"] == "light"
+        assert own["user"]["theme"] == "photo" and own["user"]["roles"] == ["PHOTOGRAPHER"]
+        assert other["user"]["theme"] == "premium"
         for value in [[], {}, True, None, 42]:
             assert (await self.call("/preferences", method="PUT", body={"theme": value}))[0] == 400
         assert (await self.call("/preferences", method="PUT", body={"theme": "premium", "userId": 1}))[0] == 400

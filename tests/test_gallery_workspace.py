@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from test_delivery import ACTORS, image, setup
+from test_delivery import ACTORS, image, pay_for, setup
 
 from app.models import (
     Booking,
@@ -60,10 +60,11 @@ def test_gallery_actions_shared_favorites_trash_and_private_archives(monkeypatch
                 g = await delivery.ensure(session, ACTORS[1], b)
                 g.published = True
                 g.delivery_mode = 'SELECTED'
+                paid = DeliveryPhoto(id=2, gallery_id=g.id, uploaded_by_id=2, filename='paid.png',
+                    disk_path='paid', sha256='b'*64, byte_size=50, selected=True, upload_set='SELECTED')
                 session.add_all([DeliveryPhoto(id=1, gallery_id=g.id, uploaded_by_id=2, filename='private.png',
-                    disk_path='private', sha256='a'*64, byte_size=40, selected=False, upload_set='ALL'),
-                    DeliveryPhoto(id=2, gallery_id=g.id, uploaded_by_id=2, filename='paid.png',
-                    disk_path='paid', sha256='b'*64, byte_size=50, selected=True, upload_set='SELECTED')])
+                    disk_path='private', sha256='a'*64, byte_size=40, selected=False, upload_set='ALL'), paid])
+                await pay_for(session, paid)
                 token = g.access_token
                 session.add(Booking(id=2, hotel_id=1, client_id=1, package_id=1, room='201', manager_id=5,
                     photographer_id=3, shoot_date=utc_now().date(), shoot_time=time(13)))

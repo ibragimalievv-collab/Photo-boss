@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from test_delivery import ACTORS, image, setup
+from test_delivery import ACTORS, image, pay_for, setup
 
 from app.gallery_folders import (
     booking_storage_root,
@@ -142,6 +142,8 @@ def test_new_uploads_have_hierarchy_unique_bookings_and_replay_keeps_original_pa
                 gallery = await delivery.ensure(session, ACTORS[1], await session.get(Booking, 1))
                 gallery.published = True
                 token = gallery.access_token
+                # The guest sees purchased frames only; buy booking 1's frame.
+                await pay_for(session, await session.scalar(select(DeliveryPhoto).where(DeliveryPhoto.disk_path == legacy)))
                 await session.commit()
             public = await (await client.get('/g/' + token + '/data')).json()
             assert 'folderPath' not in public and len(public['photos']) == 1

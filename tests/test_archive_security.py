@@ -4,7 +4,7 @@ import io
 import zipfile
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from test_delivery import image, setup
+from test_delivery import image, pay_for, setup
 
 from app.models import DeliveryGallery, DeliveryPhoto
 
@@ -21,10 +21,12 @@ def test_public_and_staff_archives_flatten_untrusted_legacy_filenames(monkeypatc
                 names = ['../../../outside.png', r'..\..\outside.png',
                     '/absolute.png', 'C:\\folder\\frame.png', 'normal.png',
                     '..', 'bad\x00name.png', 'line\r\nname.png']
-                session.add_all([DeliveryPhoto(id=i, gallery_id=gallery.id,
+                photos = [DeliveryPhoto(id=i, gallery_id=gallery.id,
                     uploaded_by_id=2, filename=name, disk_path=f'app:/test/{i}',
                     sha256=str(i) * 64, byte_size=len(image()))
-                    for i, name in enumerate(names, start=1)])
+                    for i, name in enumerate(names, start=1)]
+                session.add_all(photos)
+                await pay_for(session, *photos)  # the guest archive holds purchased frames
                 await session.commit()
             async def content(_):
                 return image()

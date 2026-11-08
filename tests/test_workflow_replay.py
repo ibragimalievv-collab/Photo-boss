@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
+from media_fixtures import real_jpeg
 from sqlalchemy import func, select, text
 from test_workflow_services import booking_data, fixture
 
@@ -120,7 +121,7 @@ def test_sale_with_media_replays_once_and_rejects_changed_price(monkeypatch):
             await work.execute(ACTOR, start)
             draft = {'key': start['key']}
             operations = [
-                (packet('receipt', 'sale_receipt', {'draft': draft}), b'\xff\xd8\xff' + b'receipt' * 40),
+                (packet('receipt', 'sale_receipt', {'draft': draft}), real_jpeg(b'receipt')),
                 (packet('counts', 'sale_counts', {'draft': draft, 'total': 150, 'sold': 1, 'price': '400.00'}), None),
                 (packet('selected', 'sale_selected', {'draft': draft}), b'\xff\xd8\xff' + b'photo' * 40),
                 (packet('complete', 'sale_complete', {'draft': draft, 'price': '400.00'}), None),
@@ -144,7 +145,7 @@ def test_sale_with_media_replays_once_and_rejects_changed_price(monkeypatch):
             # Server acknowledgements win over later price changes on an exact replay.
             assert json.loads((await work.execute(ACTOR, operations[-1][0])).text)['saleId'] == sale.id
             with pytest.raises(AccessError) as err:
-                await work.execute(ACTOR, operations[0][0], b'\xff\xd8\xff' + b'changed' * 40)
+                await work.execute(ACTOR, operations[0][0], real_jpeg(b'changed'))
             assert err.value.status == 409
         finally:
             await engine.dispose()

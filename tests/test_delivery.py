@@ -42,6 +42,28 @@ def image(color='orange'):
     return output.getvalue()
 
 
+async def pay_for(session, *photos, booking_id=1):
+    """Guests see only photos of a completed, paid sale (sale_gallery.guest_photo_clause).
+
+    The rule replaced "anything published is visible"; tests that publish a
+    gallery therefore record the purchase the way the sale workflow does.
+    """
+    from app.models import Sale, SaleDraft, SaleDraftPhoto
+    from app.services.sale_gallery import storage_identity
+    await session.flush()
+    draft = SaleDraft(booking_id=booking_id, created_by_id=2, status='COMPLETED', completed_at=utc_now())
+    session.add(draft)
+    await session.flush()
+    session.add(Sale(booking_id=booking_id, created_by_id=2, credited_user_id=2, sold_photos=len(photos),
+                     source_draft_id=draft.id, amount=400 * len(photos), payment_status='PAID'))
+    for photo in photos:
+        photo.upload_set, photo.storage_identity = 'SELECTED', storage_identity()
+        session.add(SaleDraftPhoto(draft_id=draft.id, telegram_file_id='', telegram_unique_id=f'paid-{photo.id}',
+            storage_path=f'app:/PhotoBoss/sales/{draft.id}/{photo.sha256}.png', sha256=photo.sha256,
+            byte_size=photo.byte_size, delivery_photo_id=photo.id))
+    await session.flush()
+
+
 async def setup(monkeypatch):
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     async with engine.begin() as conn:
@@ -106,7 +128,9 @@ def test_private_album_publication_password_expiry_rotation_and_cross_album_acce
             assert response.status==409
             async with AsyncSession(engine) as session:
                 g=await session.scalar(select(DeliveryGallery))
-                session.add(DeliveryPhoto(gallery_id=g.id,uploaded_by_id=2,filename='photo.png',disk_path='app:/PhotoBoss/delivery/photo.png',sha256='a'*64,byte_size=len(image())))
+                photo=DeliveryPhoto(gallery_id=g.id,uploaded_by_id=2,filename='photo.png',disk_path='app:/PhotoBoss/delivery/photo.png',sha256='a'*64,byte_size=len(image()))
+                session.add(photo)
+                await pay_for(session, photo)
                 await session.commit()
             response=await client.post('/api/miniapp/delivery/1',headers={'X-Test-Actor':'4'},json={'published':True,'password':'secure-password','expiresDays':7})
             assert response.status==200
@@ -210,6 +234,9 @@ def test_large_album_upload_and_archive_above_previous_total_limits(monkeypatch)
                 await svc.apply(session, ACTORS[2], 'delivery_photo',
                     {'booking': 1, 'filename': 'another.png'}, image()+b'next-frame')
                 await session.commit()
+                # The guest archive holds purchased frames only; buy all 303.
+                await pay_for(session, *(await session.scalars(select(DeliveryPhoto))).all())
+                await session.commit()
             monkeypatch.setattr(svc, 'bytes', AsyncMock(return_value=image()))
             response = await client.get('/g/'+token+'/album.zip')
             assert response.status == 200
@@ -268,7 +295,10 @@ def test_photo_sets_upload_independently_and_deduplicate_within_their_own_folder
     asyncio.run(run())
 
 
-def test_client_pages_photos_and_archives_follow_independent_photo_sets(monkeypatch):
+def test_client_pages_photos_and_archives_show_only_paid_photos_in_every_mode(monkeypatch):
+    """Publication, a delivery mode, an ALL upload or a legacy "selected" flag
+    never expose an unpurchased original: in both modes the guest page, single
+    downloads and the archive hold exactly the paid SELECTED photos."""
     import zipfile
 
     from app import delivery
@@ -293,10 +323,9 @@ def test_client_pages_photos_and_archives_follow_independent_photo_sets(monkeypa
                     {'booking': 1, 'filename': 'all-source.png', 'photoSet': 'ALL'}, image())
                 chosen = await svc.apply(session, ACTORS[2], 'delivery_photo',
                     {'booking': 1, 'filename': 'client-retouched.png', 'photoSet': 'SELECTED'}, image('blue'))
-                # Existing marked photos still belong to the full folder and are
-                # available in the selected client view for older published albums.
                 legacy = await svc.apply(session, ACTORS[2], 'delivery_photo',
                     {'booking': 1, 'filename': 'legacy-chosen.png', 'selected': True}, image('green'))
+                await pay_for(session, await session.get(DeliveryPhoto, chosen['photoId']))
                 await session.commit()
             headers = {'X-Test-Actor': '4'}
             response = await client.post('/api/miniapp/delivery/1', headers=headers,
@@ -304,14 +333,9 @@ def test_client_pages_photos_and_archives_follow_independent_photo_sets(monkeypa
             assert response.status == 200
             token = (await response.json())['clientUrl'].rsplit('/', 1)[1]
             base = '/g/' + token
-            for mode, allowed, forbidden in [
-                ('SELECTED', [(chosen, 'client-retouched.png', image('blue')),
-                              (legacy, 'legacy-chosen.png', image('green'))],
-                 [(full, 'all-source.png')]),
-                ('ALL', [(full, 'all-source.png', image()),
-                         (legacy, 'legacy-chosen.png', image('green'))],
-                 [(chosen, 'client-retouched.png')]),
-            ]:
+            allowed = [(chosen, 'client-retouched.png', image('blue'))]
+            forbidden = [(full, 'all-source.png'), (legacy, 'legacy-chosen.png')]
+            for mode in ('SELECTED', 'ALL'):
                 response = await client.post('/api/miniapp/delivery/1', headers=headers,
                     json={'deliveryMode': mode})
                 assert response.status == 200
@@ -334,7 +358,6 @@ def test_client_pages_photos_and_archives_follow_independent_photo_sets(monkeypa
             await client.close()
             await engine.dispose()
     asyncio.run(run())
-
 
 def test_independent_upload_requires_assignment_and_valid_set_before_publishing(monkeypatch):
     from app import delivery
@@ -363,19 +386,25 @@ def test_independent_upload_requires_assignment_and_valid_set_before_publishing(
                     {'booking': 1, 'filename': 'chosen.png', 'photoSet': 'SELECTED'}, image())
                 await session.commit()
             headers = {'X-Test-Actor': '1'}
-            response = await client.post('/api/miniapp/delivery/1', headers=headers,
-                json={'published': True, 'deliveryMode': 'ALL'})
-            assert response.status == 409
+            # Nothing is paid yet: no mode may publish an album with no visible photo.
+            for mode in ('ALL', 'SELECTED'):
+                response = await client.post('/api/miniapp/delivery/1', headers=headers,
+                    json={'published': True, 'deliveryMode': mode})
+                assert response.status == 409
+            data = await (await client.get('/api/miniapp/delivery/1', headers=headers)).json()
+            assert not data['published']
+            async with AsyncSession(engine, expire_on_commit=False) as session:
+                await pay_for(session, await session.get(DeliveryPhoto, chosen['photoId']))
+                await session.commit()
             response = await client.post('/api/miniapp/delivery/1', headers=headers,
                 json={'published': True, 'deliveryMode': 'SELECTED'})
             assert response.status == 200
-            # A partial settings update must not expose an empty folder while
-            # leaving the gallery marked as published.
+            # The paid photo stays visible when the mode changes.
             response = await client.post('/api/miniapp/delivery/1', headers=headers,
                 json={'deliveryMode': 'ALL'})
-            assert response.status == 409
+            assert response.status == 200
             data = await (await client.get('/api/miniapp/delivery/1', headers=headers)).json()
-            assert data['published'] and data['deliveryMode'] == 'SELECTED'
+            assert data['published'] and data['deliveryMode'] == 'ALL'
             # Independent files cannot be moved by the legacy checkbox endpoint.
             response = await client.post('/api/miniapp/delivery/1/photos/' + str(chosen['photoId']) + '/selected',
                 headers=headers, json={'selected': False})
@@ -435,6 +464,9 @@ def test_legacy_unselect_preserves_a_shared_independently_uploaded_file(monkeypa
                 chosen_path = chosen_row.disk_path
                 legacy_only_row = await session.get(DeliveryPhoto, unshared['photoId'])
                 legacy_only_path = legacy_only_row.disk_path.replace('/Все фото/', '/Выбранные/')
+                # Only the direct SELECTED upload is bought; legacy marks grant nothing.
+                await pay_for(session, chosen_row)
+                await session.commit()
             headers = {'X-Test-Actor': '4'}
             response = await client.post('/api/miniapp/delivery/1', headers=headers,
                 json={'published': True, 'deliveryMode': 'SELECTED'})
@@ -453,13 +485,10 @@ def test_legacy_unselect_preserves_a_shared_independently_uploaded_file(monkeypa
                     for photo, name, contents in expected:
                         assert zipped.read(str(photo['photoId']) + '-' + name) == contents
 
-            # Prefer the independent upload over the identical legacy marked
-            # frame in both client lists, while keeping old direct links valid.
-            await visible_files([(chosen, 'separate.png', image()),
-                                 (unshared, 'legacy-only.png', image('blue'))])
-            response = await client.get(base + '/photos/' + str(legacy['photoId']) + '?download=1')
-            assert response.status == 200 and await response.read() == image()
+            # The guest gets exactly the paid frame; unpaid legacy marks stay hidden.
+            await visible_files([(chosen, 'separate.png', image())])
             for photo in [legacy, unshared]:
+                assert (await client.get(base + '/photos/' + str(photo['photoId']) + '?download=1')).status == 404
                 response = await client.post('/api/miniapp/delivery/1/photos/' + str(photo['photoId']) + '/selected',
                     headers=headers, json={'selected': False})
                 assert response.status == 200
@@ -473,16 +502,16 @@ def test_legacy_unselect_preserves_a_shared_independently_uploaded_file(monkeypa
                 assert (await client.get(base + '/photos/' + str(photo['photoId']))).status == 404
             page = await (await client.get(base)).text()
             assert 'separate.png' in page and 'legacy.png' not in page and 'legacy-only.png' not in page
+            # Staff still read the full-set original.
             response = await client.get('/api/miniapp/delivery/1/photos/' + str(legacy['photoId']), headers=headers)
             assert response.status == 200 and await response.read() == image()
             # An old still-open application can mark its full-set copy again;
-            # selected clients must continue to receive only one frame per SHA.
+            # the guest still receives only the one paid frame for that SHA.
             response = await client.post('/api/miniapp/delivery/1/photos/' + str(legacy['photoId']) + '/selected',
                 headers=headers, json={'selected': True})
             assert response.status == 200
             await visible_files([(chosen, 'separate.png', image())])
-            response = await client.get(base + '/photos/' + str(legacy['photoId']) + '?download=1')
-            assert response.status == 200 and await response.read() == image()
+            assert (await client.get(base + '/photos/' + str(legacy['photoId']) + '?download=1')).status == 404
         finally:
             await client.close()
             await engine.dispose()
