@@ -454,7 +454,8 @@ async def main():
                             const {api}=await import('/app/js/api.js');
                             const claimed=(await api('/attendance/pending')).items.find(r=>r.purpose===purpose).offline_claimed_at;
                             const time=new Date(claimed);
-                            return new Date(time.getTime()-time.getTimezoneOffset()*60000).toISOString().slice(0,19);
+                            // The input normalises a zero-second time to HH:MM; fill() rejects a value it changes.
+                            return new Date(time.getTime()-time.getTimezoneOffset()*60000).toISOString().slice(0,19).replace(/:00$/,'');
                         }""", purpose)
                         await form.locator('[name=verifiedAt]').fill(value)
                         await form.locator('[name=note]').fill('Checked photo and shift time')
