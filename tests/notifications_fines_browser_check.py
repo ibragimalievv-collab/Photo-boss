@@ -141,7 +141,7 @@ async def main():
      await page.locator('[data-notice-read]').first.click()
      await page.wait_for_function("document.querySelector('[data-notice-count]')?.textContent==='1'")
      await page.goto(BASE+'/app/#more')
-     await page.get_by_role('button',name='Штрафы и исключения',exact=True).click()
+     await page.locator('.menu-item[data-action="attendance-fines"]').click()  # «Штрафы и удержания» in All sections
      await page.locator('.attendance-fine-edit').locator('..').locator('summary').click()
      await page.locator('.attendance-fine-edit [name=amount]').fill('0')
      await page.locator('.attendance-fine-edit [name=reason]').fill('Уважительная причина проверена владельцем')

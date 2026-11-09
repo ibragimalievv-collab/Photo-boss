@@ -12,7 +12,7 @@ import {setFormActor,captureForms,restoreForms} from './form-state.js';
 import {academyCoachScreen,academyTrackSwitch,academyTrack,loadAcademyCoach,resetAcademyCoach,openAcademyLesson} from './academy-coach.js';
 import {loadShootControl,shootControlView,loadDeliveryContacts,deliveryContactsView} from './delivery.js';
 import {loadGalleries,galleriesView,mountGalleries,deactivateGalleries} from './galleries.js';
-import {loadWorkflow,workflowView,workflowClick,workflowSubmit,workflowSelect,workflowFolderChange,openWorkflowBooking,closeWorkflowBooking} from './workflow.js';
+import {loadWorkflow,workflowView,workflowClick,workflowSubmit,workflowSelect,workflowFolderChange,uploadShootFiles,isShootUploading,openWorkflowBooking,closeWorkflowBooking} from './workflow.js';
 import {developmentView,loadDevelopment,developmentClick,developmentSubmit} from './development.js';
 import {setOutboxUser} from './outbox.js';
 import {workdayView,loadWorkday,workdayClick,workdaySubmit} from './workday.js';
@@ -21,7 +21,7 @@ import {insightsView,loadInsights,insightsClick,insightsSubmit} from './insights
 import {academyScreen,academyReference} from './academy.js';
 import {openPractice} from './practice.js';
 import {icon} from './icons.js';
-import {esc,money,ROLE_NAMES,STATUS_NAMES,THEMES,defaultTheme,todayKey,addDays,dateLabel,initials} from './domain.js';
+import {esc,money,ROLE_NAMES,STATUS_NAMES,THEMES,defaultTheme,todayKey,addDays,dateLabel,initials,shiftTime,plural} from './domain.js';
 import {api,preferBrowserSession} from './api.js';
 import {initTelegram,applyTelegramTheme,haptic} from './telegram.js';
 import {startBrowserLogin,checkBrowserLogin,stopBrowserLogin} from './browser-login.js';
@@ -70,7 +70,7 @@ function employeeTable(f){
  if(!f.employees.length)return empty('Начислений пока нет','Здесь появятся учтённые комиссии, премии и удержания.','wallet');
  return `<div class="panel" data-sensitive="true"><div class="table-scroll"><table class="employee-table"><thead><tr><th>Сотрудник</th><th>Продажи</th><th>Начислено</th><th>Удержания</th><th>Итог</th></tr></thead><tbody>${f.employees.map(x=>`<tr><td><button class="employee-button" data-employee="${x.id}"><span class="avatar small-avatar">${esc(initials(x.name))}</span><span><b>${esc(x.name.split(' ')[0])}</b><span class="role">${esc(ROLE_NAMES[x.role]||x.role)}</span></span></button></td><td>${money(x.sales)}</td><td>${money(x.grossEarned)}</td><td>${money(x.deductions)}</td><td><b class="${x.earned<0?'negative':'accent'}">${money(x.earned)}</b></td></tr>`).join('')}</tbody></table></div><div class="table-note">Начисления и удержания показаны отдельно. Нажмите на сотрудника для расчёта; выплаты учитываются отдельно.</div></div>`;
 }
-function teamPerson(x){return `<div class="team-person avatar-colors"><div class="row"><span class="avatar">${esc(initials(x.name))}</span><div class="grow"><div class="name">${esc(x.name.split(' ')[0])}</div><div class="role">${esc(ROLE_NAMES[x.role]||x.role)}</div></div></div><div class="status-line">${mark(x.attendance||'PLANNED')}<span>${esc(x.start)}–${esc(x.end)}</span>${(x.breaks||[]).map(b=>`<small>Обед ${esc(b.start)}–${esc(b.end||'ещё на обеде')}</small>`).join('')}</div></div>`;}
+function teamPerson(x){return `<div class="team-person avatar-colors"><div class="row"><span class="avatar">${esc(initials(x.name))}</span><div class="grow"><div class="name">${esc(x.name.split(' ')[0])}</div><div class="role">${esc(ROLE_NAMES[x.role]||x.role)}</div></div></div><div class="status-line">${mark(x.attendance||'PLANNED')}<span>${esc(shiftTime(x))}</span>${(x.breaks||[]).map(b=>`<small>Обед ${esc(b.start)}–${esc(b.end||'ещё на обеде')}</small>`).join('')}</div></div>`;}
 function bookingCard(x){return `<button class="booking-row" data-booking="${x.id}"><div class="booking-time">${esc(x.time)}<small>${esc(dateLabel(x.date,{day:'numeric',month:'short',year:'numeric'}))}</small></div><div class="grow"><div class="booking-name">${esc(x.hotel)} · ${esc(x.client)}</div><div class="booking-meta">${esc(x.phone||'Телефон не указан')} · комната ${esc(x.room)}</div><div class="booking-meta">${esc(x.type)} · ${esc(x.manager||'Менеджер не указан')}</div><div class="booking-footer">${mark(x.status)}<small>${esc(x.photographer||'Фотограф не назначен')}</small></div></div>${icon('chevron')}</button>`;}
 function assignmentNoticesView(){
  if(!state.me?.user.roles.includes('PHOTOGRAPHER'))return '';
@@ -136,9 +136,17 @@ function shootingsView(){
  ${search?'<p class="small" role="status">Поиск по всем датам.'+(state.bookingsTruncated?' Найдено больше 200 записей — уточните запрос.':'')+'</p>':''}${state.bookingTrash?'<p class="notice">Корзина: записи можно восстановить. Продажи и финансовая история сохраняются.</p>':''}${supervisor?`<section id="bookingList" class="hotel-shootings-list stack">${hotelSections()||empty('Отелей пока нет','Добавьте отель в разделе команды.','camera')}</section>`:`<div id="bookingList" class="booking-list stack two-col">${rows.length?rows.map(bookingCard).join(''):empty('Съёмки не найдены','Измените дату или поисковый запрос.','camera')}</div>`}
  `;
 }
+// Shifts planned before "с 09:00 до последней продажи": one tap moves them.
+function legacyHoursNote(legacy){
+ if(!state.me.permissions.manageSchedule||!legacy||!(legacy.count||legacy.conflictCount))return '';
+ const names=new Map((state.schedule.employees||[]).map(e=>[e.id,e.name])),day=d=>dateLabel(d,{day:'numeric',month:'short'});
+ const period=legacy.count?(legacy.from===legacy.to?`на ${day(legacy.from)}`:`с ${day(legacy.from)} по ${day(legacy.to)}`):'';
+ const conflicts=legacy.conflictCount?`<p class="small">${legacy.conflictCount} ${plural(legacy.conflictCount,['день','дня','дней'])} с двумя сменами у одного сотрудника — оставьте одну (отмените лишнюю в дне), тогда её тоже можно перевести: ${legacy.conflicts.map(c=>esc(`${names.get(c.userId)||'№'+c.userId} · ${day(c.date)}`)).join(', ')}${legacy.conflictCount>legacy.conflicts.length?' и другие':''}</p>`:'';
+ return `<section class="panel panel-pad section legacy-hours" role="status"><strong>${legacy.count?'Часть будущих смен — со старыми часами':'У сотрудника две смены в один день'}</strong>${legacy.count?`<p class="small">${legacy.count} ${plural(legacy.count,['смена','смены','смен'])} ${period} ещё с назначенным временем окончания. Теперь все работают с 09:00 до последней продажи.</p><button class="btn primary" type="button" data-action="normalize-hours">Перевести ${legacy.count} ${plural(legacy.count,['смену','смены','смен'])} на 09:00 — до последней продажи</button>`:''}${conflicts}</section>`;
+}
 function scheduleView(){
  const data=state.schedule,days=Array.from({length:7},(_,i)=>addDays(state.week,i));const rows=monthDayRows(data.monthPlan,state.day,data.items.filter(x=>x.date===state.day&&x.status!=='CANCELLED'));
- return `${heading(state.me.permissions.manageSchedule?'График команды':'Мой график','Фотографы и менеджеры записи.',state.me.permissions.manageSchedule?`<button class="btn small ghost" data-action="new-team-shift">Общий график</button><button class="icon-button accent-button" data-action="new-shift" aria-label="Добавить смену">${icon('plus')}</button>`:'')}${state.me.permissions.manageSchedule?'<button class="btn primary" data-go="attendance">Контроль смен · фото и подтверждение</button>':''}${scheduleMonthView(data.monthPlan)}<div class="calendar-week-head"><button class="icon-button" data-week="-7" aria-label="Предыдущая неделя">‹</button><strong>${esc(dateLabel(days[0],{day:'numeric',month:'short'}))} — ${esc(dateLabel(days[6],{day:'numeric',month:'short'}))}</strong><button class="icon-button" data-week="7" aria-label="Следующая неделя">›</button></div><div class="calendar-strip">${days.map(d=>`<button class="day-button ${state.day===d?'selected':''}" data-day="${d}" aria-pressed="${state.day===d}"><small>${esc(dateLabel(d,{weekday:'short'}))}</small>${Number(d.slice(-2))}<span class="dot"></span></button>`).join('')}</div><div class="section-head"><h2>${esc(dateLabel(state.day))}</h2><button class="text-button" data-action="today-schedule">Сегодня</button></div><div class="panel">${rows.length?rows.map(s=>`<div class="schedule-person"><span class="avatar">${esc(initials(s.name))}</span><div><h3>${esc(s.name)}</h3><p class="small">${esc(s.role==='OFF'?'Выходной':ROLE_NAMES[s.role]||s.role)} · ${esc(s.hotel)}</p>${s.role==='OFF'?'<span class="badge">Выходной по графику</span>':s.status==='PLAN_ONLY'?`<span class="badge">${s.monthlyPlan?'Рабочий день · часы отдельно':'Только план · факт не изменён'}</span>`:mark(s.attendance||s.status)}</div><div class="schedule-hours">${s.role==='OFF'?'Отдых':s.start&&s.end?`${esc(s.start)}–${esc(s.end)}`:'Время не задано'}<small>${state.me.permissions.manageSchedule&&s.status==='PLANNED'&&s.attendance==='PLANNED'&&s.date>=state.me.today?`<button class="text-button negative" data-cancel-shift="${s.id}">Отменить</button>`:''}</small></div></div>`).join(''):empty('Выходной или смены не назначены','План и фактический выход на смену учитываются отдельно.','calendar')}</div><p class="compact-note">«По графику» — запланировано. «На смене» — подтверждён выход. План сам по себе не подтверждает присутствие.</p>`;
+ return `${heading(state.me.permissions.manageSchedule?'График команды':'Мой график','Фотографы и менеджеры записи.',state.me.permissions.manageSchedule?`<button class="btn small ghost" data-action="new-team-shift">Общий график</button><button class="icon-button accent-button" data-action="new-shift" aria-label="Добавить смену">${icon('plus')}</button>`:'')}${state.me.permissions.manageSchedule?'<button class="btn primary" data-go="attendance">Контроль смен · фото и подтверждение</button>':''}${legacyHoursNote(data.legacyHours)}${scheduleMonthView(data.monthPlan)}<div class="calendar-week-head"><button class="icon-button" data-week="-7" aria-label="Предыдущая неделя">‹</button><strong>${esc(dateLabel(days[0],{day:'numeric',month:'short'}))} — ${esc(dateLabel(days[6],{day:'numeric',month:'short'}))}</strong><button class="icon-button" data-week="7" aria-label="Следующая неделя">›</button></div><div class="calendar-strip">${days.map(d=>`<button class="day-button ${state.day===d?'selected':''}" data-day="${d}" aria-pressed="${state.day===d}"><small>${esc(dateLabel(d,{weekday:'short'}))}</small>${Number(d.slice(-2))}<span class="dot"></span></button>`).join('')}</div><div class="section-head"><h2>${esc(dateLabel(state.day))}</h2><button class="text-button" data-action="today-schedule">Сегодня</button></div><div class="panel">${rows.length?rows.map(s=>`<div class="schedule-person"><span class="avatar">${esc(initials(s.name))}</span><div><h3>${esc(s.name)}</h3><p class="small">${esc(s.role==='OFF'?'Выходной':ROLE_NAMES[s.role]||s.role)} · ${esc(s.hotel)}</p>${s.role==='OFF'?'<span class="badge">Выходной по графику</span>':s.status==='PLAN_ONLY'?`<span class="badge">${s.monthlyPlan?'Рабочий день':'Только план · факт не изменён'}</span>`:mark(s.attendance||s.status)}</div><div class="schedule-hours">${s.role==='OFF'?'Отдых':esc(shiftTime(s))}<small>${state.me.permissions.manageSchedule&&s.status==='PLANNED'&&s.attendance==='PLANNED'&&s.date>=state.me.today?`<button class="text-button negative" data-cancel-shift="${s.id}">Отменить</button>`:''}</small></div></div>`).join(''):empty('Выходной или смены не назначены','План и фактический выход на смену учитываются отдельно.','calendar')}</div><p class="compact-note">Все работают с 9:00 до последней продажи и закрывают смену в приложении. «По графику» — запланировано, «На смене» — подтверждён выход.</p>`;
 }
 function financialView(){const f=state.finance,p=state.me.permissions;return `${heading(p.financeScope==='self'?'Мои деньги':'Касса и начисления',p.financeScope==='today'?'Администратору доступна касса назначенных ему отелей только за сегодня.':'Продажи, поступления и начисления — отдельно.')}${receiptReviewButton(state.me.user.roles,null,'app')}<div class="segmented">${(p.financeScope==='today'?['today']:p.financeScope==='all'?['today','week','month','custom']:['today','week','month']).map(x=>`<button data-period="${x}" class="${x===state.period?'active':''}">${{today:'Сегодня',week:'Неделя',month:'Месяц',custom:'Период'}[x]}</button>`).join('')}</div><div class="section stack-lg">${financeCard(f,true)}<div><div class="section-head"><h2>${f.scope==='self'?'Мой расчёт':'Разбивка по сотрудникам'}</h2><span class="small muted">${esc(dateLabel(f.from,{day:'numeric',month:'short'}))}–${esc(dateLabel(f.to,{day:'numeric',month:'short'}))}</span></div>${employeeTable(f)}</div><p class="financial-footnote">${esc(f.note||'Касса: подтверждённые чеки по времени подтверждения. Начисления — не фактические выплаты и не чистая прибыль.')}</p><section><div class="section-head"><h2>Продажи за период</h2>${btn('Добавить','new-sale','small','plus')}</div><div class="stack">${f.salesRows.length?f.salesRows.map(s=>`<div class="panel panel-pad"><div class="row between"><div class="grow"><h3>${esc(s.client||`Продажа №${s.id}`)}</h3><p class="small">${esc(s.employee)} · ${esc(dateLabel(s.date,{day:'numeric',month:'short'}))}</p></div><strong class="mono">${money(s.amount)}</strong></div>${mark(s.status)}</div>`).join(''):empty('Продаж пока нет','','wallet')}</div>${f.salesListLimited?`<p class="compact-note">Показаны последние 100 из ${f.salesCount} продаж. Итоги рассчитаны по всему периоду.</p>`:''}</section></div>`;}
 function academyView(){return academyTrackSwitch()+(academyTrack()==='booking'||state.academyTab==='coach'?academyCoachScreen():academyScreen(state.academy,state.me.user,state.academyTab,{preview:false}));}
@@ -212,28 +220,60 @@ async function loadBookingSms(id){
  try{const config=await request(`/bookings/${id}/sms-reminder`,{allowSnapshot:false});if(!box.isConnected)return;box.innerHTML=bookingSmsView(id,config);}
  catch(error){if(box.isConnected){box.textContent='Не удалось проверить SMS-напоминание. ';const button=document.createElement('button');button.type='button';button.className='btn ghost';button.dataset.smsRefresh=String(id);button.textContent='Повторить проверку';box.append(button);}}
 }
+const NO_SALE_REASONS=[['NOT_LIKED','Не понравились фотографии'],['PRICE','Дорого'],['NO_MONEY','Нет денег с собой'],['LATER','Подумает, вернётся позже'],['OTHER','Другая причина']];
+// iOS Safari cannot pick folders; offer the folder button only where it works.
+const folderPicking=(()=>{try{return 'webkitdirectory' in document.createElement('input')&&!/iP(hone|ad|od)/.test(navigator.userAgent);}catch{return false;}})();
+function cardUploadView(b,own){
+ const roles=state.me.user.roles,canUpload=own||roles.some(r=>['OWNER','ADMIN'].includes(r));
+ const frames=Number(b.frames||0);
+ if(!canUpload||!b.shootingId)return '';
+ if(b.fullUploaded)return `<p class="small muted">Вся съёмка загружена: ${frames} ${frames%10===1&&frames%100!==11?'кадр':frames%10>=2&&frames%10<=4&&(frames%100<10||frames%100>=20)?'кадра':'кадров'}.</p>`;
+ const busy=isShootUploading(b.shootingId);
+ return `<section class="card-upload" data-card-upload="${b.shootingId}"><div><strong>Вся съёмка</strong><small>${frames?`На сервере уже ${frames}. Выберите ту же папку — отправятся только новые.`:'Выберите все кадры съёмки. Отправка начнётся сразу.'}</small></div>
+ <label class="btn full-width file-button${busy?' is-disabled':''}">${frames?'Догрузить фото':'Загрузить всю съёмку'}<input type="file" accept="image/jpeg,image/png,image/webp" multiple data-card-files="${b.shootingId}" ${busy?'disabled':''}></label>
+ ${folderPicking?`<label class="btn ghost full-width file-button${busy?' is-disabled':''}">Выбрать папку целиком<input type="file" webkitdirectory multiple data-card-files="${b.shootingId}" ${busy?'disabled':''}></label>`:''}
+ <label class="check-line"><input type="checkbox" data-card-fast="${b.shootingId}" checked> Быстрая загрузка: уменьшить до 4000 px (выбранные гостем уходят оригиналами)</label>
+ <p class="small" data-card-progress="${b.shootingId}" role="status" aria-live="polite">${busy?'Загрузка уже идёт…':''}</p></section>`;
+}
+function afterShootView(b,own){
+ const roles=state.me.user.roles,ready=b.shootingStatus==='READY_FOR_SALE'||b.status==='READY_FOR_SALE'||b.status==='SOLD';
+ if(!ready)return '<p class="small muted">Продажа и загрузка фото откроются после кнопки «Закончить съёмку».</p>';
+ const staff=own||roles.some(r=>['OWNER','ADMIN'].includes(r))||(roles.includes('MANAGER')&&b.managerId===state.me.user.id);
+ const upload=cardUploadView(b,own);
+ if(b.status==='SOLD')return `<p class="small muted">Продажа оформлена.</p><button class="btn ghost full-width" data-sale-booking="${b.id}">Открыть продажу / допродажа</button>${upload}`;
+ if(b.noSale)return `<div class="notice"><strong>Гость не купил</strong><p>${esc(b.noSale.label)}${b.noSale.note?' — '+esc(b.noSale.note):''}</p></div><button class="btn primary full-width" data-sale-booking="${b.id}">Гость вернулся — оформить продажу</button>${upload}${staff?`<button class="btn ghost full-width" data-no-sale-undo="${b.id}">Снять отметку «не купил»</button>`:''}`;
+ return `<button class="btn primary full-width" data-sale-booking="${b.id}">Оформить продажу</button>${upload}${staff?`<button class="btn ghost full-width" data-no-sale="${b.id}">Гость не купил</button>`:''}`;
+}
+function noSaleSheet(id){
+ showSheet('Гость не купил',`<form id="noSaleForm" class="form-grid" data-booking="${id}"><p>Отметка закроет съёмку без продажи. Если гость вернётся, продажу можно оформить позже — отметка снимется сама.</p>
+ <fieldset class="choice-list"><legend>Причина</legend>${NO_SALE_REASONS.map(([value,label],i)=>`<label><input type="radio" name="reason" value="${value}" ${i===0?'checked':''} required> ${label}</label>`).join('')}</fieldset>
+ <label class="field">Комментарий (для «Другая причина» обязателен)<textarea class="input" name="note" maxlength="500" rows="2"></textarea></label>
+ <p class="small muted">Подтверждённая предоплата не возвращается автоматически — решение о возврате принимает владелец.</p>
+ <button class="btn primary full-width" type="submit">Отметить «гость не купил»</button><p class="small" data-no-sale-feedback role="status"></p></form>`);
+}
 function showBooking(id){
  const b=[...state.bookings,...(state.dashboard?.bookings||[])].find(x=>x.id===id);if(!b)return;
  const roles=state.me.user.roles,own=roles.includes('PHOTOGRAPHER')&&b.photographerId===state.me.user.id;
- const steps={ASSIGNED:['pickup','📥 Забрать съёмку'],PICKED_UP:['start','▶️ Начать съёмку'],SHOOTING:['finish','⏹ Завершить съёмку'],SHOT:['ready','✅ Готово к продаже']};
+ const steps={ASSIGNED:['begin','▶️ Начать съёмку'],PICKED_UP:['begin','▶️ Начать съёмку'],SHOOTING:['complete','✅ Закончить съёмку'],SHOT:['complete','✅ Закончить съёмку']};
  const step=own&&b.shootingId?steps[b.shootingStatus]:null;
+ const done=b.shootingStatus==='READY_FOR_SALE'||['READY_FOR_SALE','SOLD'].includes(b.status);
  const canAssign=roles.some(r=>['OWNER','ADMIN'].includes(r))&&['NEW','CONFIRMED','PENDING_CONFIRMATION','RESCHEDULED','ASSIGNED'].includes(b.status)&&(!b.shootingStatus||['NEW','CONFIRMED','PENDING_CONFIRMATION','ASSIGNED'].includes(b.shootingStatus));
  const fields=[['Запись',`№ ${b.id}`],['Когда',`${dateLabel(b.date)} · ${b.time}`],['Отель',b.hotel],['Гость',b.client],['Телефон',b.phone||'Не указан'],['Менеджер',b.manager||'Не указан'],['Номер',b.room],['Фотограф',b.photographer||'Не назначен'],['Кадров в съёмке',b.frames??'—']];
  showSheet(esc(b.hotel+' · '+b.client),`${mark(b.shootingStatus||b.status)}<div class="detail-grid">${fields.map(([a,v])=>`<div class="detail"><small>${a}</small><b>${esc(v)}</b></div>`).join('')}</div>
- <section class="booking-sms section" data-booking-sms="${b.id}" aria-live="polite">Проверяем настройки SMS-напоминания…</section>
+ ${step?`<button class="btn primary full-width section" data-shoot-booking="${b.id}" data-shoot-action="${step[0]}">${step[1]}</button>`:''}
+ ${done?`<div class="section booking-next">${afterShootView(b,own)}</div>`:''}
+ ${done?'':`<section class="booking-sms section" data-booking-sms="${b.id}" aria-live="polite">Проверяем настройки SMS-напоминания…</section>`}
  ${receiptsOnly()&&['CANCELLED','REJECTED'].includes(b.status)?'<p class="notice">Запись отменена. Предоплата не используется для новой съёмки. Возврат проверяет владелец; подтверждения банковского возврата здесь пока нет.</p>':''}
- ${!b.trashed&&!['CANCELLED','REJECTED'].includes(b.status)?receiptsOnly()?`<button type="button" class="btn primary full-width section" data-booking-receipt="${b.id}">Прикрепить чек предоплаты</button>`:`<button type="button" class="btn primary full-width section" data-workflow="booking-payment" data-purpose="DEPOSIT" data-booking="${b.id}">Предоплата по QR</button>`:''}
+ ${!done&&!b.trashed&&!['CANCELLED','REJECTED'].includes(b.status)?receiptsOnly()?`<button type="button" class="btn primary full-width section" data-booking-receipt="${b.id}">Прикрепить чек предоплаты</button>`:`<button type="button" class="btn primary full-width section" data-workflow="booking-payment" data-purpose="DEPOSIT" data-booking="${b.id}">Предоплата по QR</button>`:''}
  ${b.canEdit?`<div class="row wrap section">${b.trashed||['CANCELLED','REJECTED'].includes(b.status)?`<button class="btn ghost" data-booking-manage="restore" data-id="${b.id}">Восстановить запись</button>`:`<button class="btn ghost" data-booking-manage="edit" data-id="${b.id}">Редактировать / перенести</button><button class="btn ghost" data-booking-manage="cancel" data-id="${b.id}">Отменить запись</button>`}${!b.trashed?`<button class="btn ghost" data-booking-manage="trash" data-id="${b.id}">Удалить в корзину</button>`:''}</div>`:''}
  ${roles.some(r=>['OWNER','ADMIN'].includes(r))||own?`<button class="btn full-width" data-gallery-booking="${b.id}">Галерея выдачи</button>`:''}
  ${canAssign?`<button class="btn full-width section" data-assign-photographer="${b.id}">${b.photographerId?'Изменить фотографа':'Назначить фотографа'}</button>`:''}
- ${step?`<button class="btn primary full-width section" data-shoot-booking="${b.id}" data-shoot-action="${step[0]}">${step[1]}</button>`:''}
  ${own&&!b.shootingId?`<p class="small muted">Этапы съёмки недоступны: не найдена карточка съёмки. Сообщите администратору.</p>`:''}
- ${!step&&b.shootingStatus==='READY_FOR_SALE'?'<p class="small muted">Съёмка готова к продаже.</p>':''}
- <div class="section">${b.shootingStatus==='READY_FOR_SALE'||b.status==='READY_FOR_SALE'?`<button class="btn ghost full-width" data-sale-booking="${b.id}">Перейти к продаже</button>`:'<p>Для продажи завершите предыдущие этапы съёмки и отметьте готовность фотографий.</p>'}</div>`);
+ ${done?'':`<div class="section">${afterShootView(b,own)}</div>`}`);
  void loadBookingSms(id);
 }
 async function shootingAction(id,step){
- const labels={pickup:'Съёмка принята.',start:'Съёмка начата.',finish:'Съёмка завершена.',ready:'Съёмка готова к продаже.'};
+ const labels={pickup:'Съёмка принята.',start:'Съёмка начата.',finish:'Съёмка завершена.',ready:'Съёмка готова к продаже.',begin:'Съёмка начата.',complete:'Съёмка завершена. Загрузите фото и оформите продажу.'};
  await request(`/bookings/${id}/shooting/${step}`,{method:'POST',body:{}});
  closeSheet();
  await loadRoute();
@@ -242,6 +282,7 @@ async function shootingAction(id,step){
 }
 function employeeDetail(id){const f=state.route==='finance'?state.finance:state.dashboard?.finance;const e=f?.employees.find(x=>x.id===id);if(!e)return;showSheet(esc(e.name),`<div class="detail-grid"><div class="detail"><small>Продажи</small><b>${money(e.sales)}</b></div><div class="detail"><small>Комиссия</small><b>${money(e.commission)}</b></div><div class="detail"><small>Премии и удержания</small><b>${money(e.adjustments)}</b></div><div class="detail"><small>Начислено</small><b>${money(e.earned)}</b></div></div><p class="small">Выплата и начисление — разные операции.</p>${watermark()}`);}
 async function action(name){
+ if(name==='normalize-hours'){const legacy=state.schedule?.legacyHours;if(!legacy?.count)return;showSheet('Перевести смены на новое правило?',`<p>${legacy.count} ${plural(legacy.count,['смена','смены','смен'])} с завтрашнего дня получат одно время: с 09:00 до последней продажи. Отели и даты не меняются, сегодняшние и прошедшие смены не трогаем. Изменение сохранится в истории.</p><div class="section"><button class="btn primary full-width" data-confirm-normalize-hours>Перевести</button></div>`);return;}
  if(['browser-login','browser-password'].includes(name)){if(standaloneMode())return toast('Войди по персональному QR или логину и паролю.');closeSheet();return startBrowserLogin(async()=>{preferBrowserSession();history.replaceState(null,'','#home');await boot();if(state.me&&(name==='browser-password'||!state.me.passwordConfigured))showSheet('Личный пароль',passwordForm(state.me));});}
  if(name==='password-settings')return showSheet('Личный пароль',passwordForm(state.me));
  if(name==='attendance-fines'){showSheet('Штрафы и исключения',await attendanceFinesView());return;}
@@ -273,7 +314,9 @@ document.addEventListener('click',async event=>{
  try{
   if(b.dataset.development)return await developmentClick(b);
   if(b.dataset.bookingReceipt){const actorId=state.me.user.id;return openBookingReceipt(Number(b.dataset.bookingReceipt),{isCurrent:()=>state.me?.user.id===actorId,onSaved:()=>toast(window.PHOTO_BOSS_CONFIG?.RECEIPT_AUTOMATIC===true?'Чек сохранён в очередь автоматической проверки.':'Чек сохранён в очередь. После отправки он появится у владельца для сверки поступления.')});}
-  if(b.dataset.saleBooking){const id=Number(b.dataset.saleBooking);await go('workflow');workflowSelect(id);document.querySelector('#workflowSale')?.scrollIntoView({block:'center'});return;}
+  if(b.dataset.saleBooking){closeSheet();const id=Number(b.dataset.saleBooking);await go('workflow');workflowSelect(id);document.querySelector('#workflowSale')?.scrollIntoView({block:'center'});return;}
+  if(b.dataset.noSale)return noSaleSheet(Number(b.dataset.noSale));
+  if(b.dataset.noSaleUndo){const id=Number(b.dataset.noSaleUndo);b.disabled=true;await request(`/bookings/${id}/no-sale`,{method:'DELETE'});closeSheet();await loadRoute();showBooking(id);toast('Отметка снята.');return;}
   if(b.dataset.workflow){await workflowClick(b);return;}
   if(b.dataset.workday)return await workdayClick(b);
   if(b.dataset.team)return await teamClick(b);
@@ -293,6 +336,7 @@ document.addEventListener('click',async event=>{
   if(b.dataset.themeChoice){const previous=state.me.user.theme,theme=b.dataset.themeChoice;setTheme(theme);b.disabled=true;try{await request('/preferences',{method:'PUT',body:{theme}});if($('#sheet').open)$('#sheetContent').innerHTML=`<div class="eyebrow">PHOTO BOSS</div><h2 id="sheetTitle">Ваш стиль</h2>${themeChoices()}<p class="compact-note">Тема сохранена для вашего профиля.</p>`;render();haptic(tg);}catch(e){setTheme(previous);throw e;}finally{b.disabled=false;}return;}
   if(b.dataset.lesson){const l=state.academy.lessons.find(x=>x.slug===b.dataset.lesson);if(!l||l.locked)return;if(state.academy.lessons.length===28)return openAcademyLesson(l.slug);return showSheet(`День ${l.day} · ${esc(l.title)}`,`<div class="lesson-body">${esc(l.body)}</div><button class="btn primary full-width" data-complete-lesson="${esc(l.slug)}">${state.academy.completed.includes(l.slug)?'Урок уже пройден':'Отметить изученным · +10 баллов'}</button>`);}
   if(b.dataset.completeLesson){b.disabled=true;await request(`/academy/lessons/${encodeURIComponent(b.dataset.completeLesson)}`,{method:'POST',body:{}});closeSheet();await loadRoute('academy');toast('Прогресс сохранён.');return;}
+  if(b.hasAttribute('data-confirm-normalize-hours')){b.disabled=true;try{const result=await request('/schedule/normalize-hours',{method:'POST',body:{confirm:true}});closeSheet();await loadRoute('schedule');toast(result.changed?`Готово: ${result.changed} ${plural(result.changed,['смена переведена','смены переведены','смен переведено'])} на 09:00 — до последней продажи.`:'Переводить нечего: смены уже по новому правилу.');}catch(err){b.disabled=false;toast(err.message);}return;}
   if(b.dataset.cancelShift){const id=Number(b.dataset.cancelShift);showSheet('Отменить смену?',`<p>Изменение будет сохранено в графике и аудите. Начавшуюся смену отменить нельзя.</p><div class="section"><button class="btn primary full-width" data-confirm-cancel="${id}">Подтвердить отмену</button></div>`);return;}
   if(b.dataset.confirmCancel){b.disabled=true;await request(`/schedule/${Number(b.dataset.confirmCancel)}`,{method:'DELETE'});closeSheet();await loadRoute('schedule');toast('Смена отменена.');}
  }catch(e){b.disabled=false;if(e.status===401)showError(e);else toast(e.message);}
@@ -303,6 +347,16 @@ document.addEventListener('toggle',event=>{
  const id=section.dataset.hotelSection;
  if(section.open)state.expandedHotels.add(id);else state.expandedHotels.delete(id);
 },true);
+document.addEventListener('change',async e=>{
+ const input=e.target;if(!input.matches?.('input[data-card-files]'))return;
+ const shootingId=Number(input.dataset.cardFiles),box=input.closest('[data-card-upload]');
+ const note=box?.querySelector('[data-card-progress]'),fast=box?.querySelector('[data-card-fast]')?.checked!==false;
+ const files=[...input.files];input.value='';if(!files.length)return;
+ const pickers=[...(box?.querySelectorAll('input[type=file]')||[])];pickers.forEach(x=>{x.disabled=true;x.closest('label')?.classList.add('is-disabled');});
+ try{await uploadShootFiles(files,{shootingId,compress:fast,note});}
+ catch(error){if(note?.isConnected)note.textContent=error.message;else toast(error.message);}
+ finally{pickers.forEach(x=>{x.disabled=false;x.closest('label')?.classList.remove('is-disabled');});}
+});
 document.addEventListener('change',async e=>{if(e.target.id==='workflowShootFolder'){try{await workflowFolderChange(e.target);}catch(error){const note=document.querySelector('#workflowFolderProgress');if(note)note.textContent=error.message;toast(error.message);}return;}if(e.target.id==='workflowSalePick'){workflowSelect(e.target.value);return;}if(e.target.id==='bookingDay'){if(!e.target.value)return;state.day=e.target.value;await loadRoute('shootings');}});
 let bookingSearchTimer=null,bookingSearchVersion=0;
 document.addEventListener('input',e=>{if(e.target.id!=='bookingSearch')return;state.search=e.target.value;clearTimeout(bookingSearchTimer);const ticket=++bookingSearchVersion;bookingSearchTimer=setTimeout(async()=>{const query=state.search,routeTicket=state.requestId;try{const d=await request(`/bookings?day=${state.day}&q=${encodeURIComponent(query)}&trash=${state.bookingTrash?'1':'0'}`);if(ticket!==bookingSearchVersion||state.route!=='shootings'||routeTicket!==state.requestId)return;const pos=document.querySelector('#bookingSearch')?.selectionStart;state.bookings=d.items;state.hotels=d.hotels||[];state.bookingsTruncated=d.truncated;$('#app').innerHTML=shootingsView();const input=$('#bookingSearch');input.focus();input.setSelectionRange(pos,pos);}catch(error){toast(error.message);}},300);});
@@ -316,6 +370,13 @@ document.addEventListener('click',async e=>{const b=e.target.closest('[data-audi
  }catch(error){toast(error.message);}});
 document.addEventListener('click',event=>{const button=event.target.closest('[data-sms-refresh]');if(button)void loadBookingSms(Number(button.dataset.smsRefresh));});
 document.addEventListener('submit',async e=>{
+ if(e.target.id==='noSaleForm'){
+  e.preventDefault();const form=e.target,id=Number(form.dataset.booking),button=form.querySelector('[type=submit]'),feedback=form.querySelector('[data-no-sale-feedback]');button.disabled=true;
+  try{const reason=form.elements.reason.value,note=form.elements.note.value.trim();if(reason==='OTHER'&&!note)throw new Error('Напишите коротко, почему гость не купил.');
+   await request(`/bookings/${id}/no-sale`,{method:'POST',body:{reason,note}});closeSheet();await loadRoute();showBooking(id);toast('Отмечено: гость не купил.');}
+  catch(error){if(feedback?.isConnected)feedback.textContent=error.message;button.disabled=false;}
+  return;
+ }
  if(e.target.classList.contains('booking-sms-form')){
   e.preventDefault();const form=e.target,id=Number(form.dataset.booking),button=form.querySelector('[type=submit]'),feedback=form.querySelector('[data-sms-feedback]');if(button)button.disabled=true;
   try{const config=await request(`/bookings/${id}/sms-reminder`,{method:'PUT',body:{enabled:form.elements.enabled.checked,consent:form.elements.consent.checked,leadMinutes:Number(form.elements.leadMinutes.value)}});if(!form.isConnected)return;const box=form.closest('[data-booking-sms]');box.innerHTML=bookingSmsView(id,config);box.querySelector('[data-sms-feedback]').textContent='Настройки сохранены. Статус отправки показан выше.';}

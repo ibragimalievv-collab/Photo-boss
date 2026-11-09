@@ -5,9 +5,19 @@ const source=fs.readFileSync(new URL('../app/webapp/js/workflow.js',import.meta.
 const outboxSource=fs.readFileSync(new URL('../app/webapp/js/outbox.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,'').replaceAll('export ','');
 const outboxContext=vm.createContext({window:{addEventListener(){}},document:{addEventListener(){}}});
 vm.runInContext(outboxSource,outboxContext);
-const ctx=vm.createContext({saleDiskView:()=>'',diskFolderPanel:()=>'',pricingView:()=>'',tariffOptions:()=>'',bankPanel:()=>'',bankConnectionPanel:()=>'',updatePricePreview(){},window:{addEventListener(){}},document:{addEventListener(){}},navigator:{onLine:true},Set,Date,Intl,Number,JSON,
+const ctx=vm.createContext({saleDiskView:()=>'',diskFolderPanel:()=>'',pricingView:()=>'',tariffOptions:()=>'',bankPanel:()=>'',bankConnectionPanel:()=>'',// Pricing math has its own check (workflow_form_recovery_check balance cases);
+ // this harness only needs the confirmed quote a valid sale form produces.
+ updatePricePreview:(form,b)=>({amount:Number(b?.price||0)*Number(form?.values?.sold||0),due:0,creditAmount:0,photoAmount:null,tariffId:null,discountId:null,albumId:null,albumQuantity:null}),
+ window:{addEventListener(){}},document:{addEventListener(){}},navigator:{onLine:true},Set,Date,Intl,Number,JSON,
  canReplaceOperationFile:vm.runInContext('canReplaceOperationFile',outboxContext),
  esc:x=>String(x??'').replaceAll('&','&amp;').replaceAll('<','&lt;'),todayKey:()=> '2026-10-16'});
+// Pure rendering helpers run for real: their words are what this check reads.
+vm.runInContext(fs.readFileSync(new URL('../app/webapp/js/receipt-state.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,'').replaceAll('export ',''),ctx);
+// workflow.js imports are stripped; give every imported name that this harness
+// does not model a neutral stub so a new import cannot break unrelated checks.
+for(const name of [...fs.readFileSync(new URL('../app/webapp/js/workflow.js',import.meta.url),'utf8')
+ .matchAll(/^import\s*\{([^}]*)\}\s*from/gm)].flatMap(m=>m[1].split(',').map(x=>x.trim().split(/\s+as\s+/).pop()).filter(Boolean)))
+ if(!(name in ctx))ctx[name]=()=>'';
 vm.runInContext(source,ctx);
 vm.runInContext(`data={canBook:false,bookings:[{id:7,client:'Guest <unsafe>',status:'COMPLETED',price:'400.00',date:'2026-10-15',room:'100',fullUploaded:true,totalFrames:10,soldTotal:2,salesAmount:'800.00',paidAmount:'800.00',dueAmount:'0.00',sales:[{id:1,at:'2026-10-15T10:00:00Z',photos:2,amount:'800.00',paymentStatus:'PAID'}]}]};selected=7;queue=[];`,ctx);
 const markup=vm.runInContext('workflowView()',ctx);

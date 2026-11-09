@@ -310,7 +310,8 @@ def test_receipt_vision_response_contract_and_failures(monkeypatch, result_kind)
         async def __aexit__(self, *args):
             pass
 
-        def post(self, url, *, headers, json):
+        def post(self, url, *, headers, json, allow_redirects=True):
+            assert allow_redirects is False  # an AI endpoint redirect must never be followed
             captured.append((url, headers, json))
             return Response()
 
@@ -319,7 +320,12 @@ def test_receipt_vision_response_contract_and_failures(monkeypatch, result_kind)
         receipt_analysis_model="gpt-4.1-mini",
     ))
     monkeypatch.setattr(service.aiohttp, "ClientSession", Client)
-    result = run(service.extract_receipt(b"\xff\xd8\xfftest-image"))
+    import io
+
+    from PIL import Image
+    jpeg = io.BytesIO()
+    Image.new("RGB", (32, 32), "white").save(jpeg, format="JPEG")  # format is checked first
+    result = run(service.extract_receipt(jpeg.getvalue()))
     if result_kind == "no_key":
         assert result == {"status": "not_configured"}
         assert captured == []

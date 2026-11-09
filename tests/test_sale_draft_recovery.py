@@ -3,6 +3,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from media_fixtures import real_jpeg
 from sqlalchemy import func, select
 from test_workflow_services import booking_data, fixture
 
@@ -47,7 +48,7 @@ def test_sixteen_frame_sale_resumes_after_only_four_files_were_stored(monkeypatc
             start = packet('16-start', 'sale_start', {'booking': {'id': created['bookingId']}, 'price': '400.00'})
             await work.execute(ACTOR, start)
             draft = {'key': start['key']}
-            await work.execute(ACTOR, packet('16-receipt', 'sale_receipt', {'draft': draft}), b'\xff\xd8\xff'+b'receipt'*40)
+            await work.execute(ACTOR, packet('16-receipt', 'sale_receipt', {'draft': draft}), real_jpeg(b'receipt'))
             await work.execute(ACTOR, packet('16-counts', 'sale_counts', {'draft': draft, 'total': 156, 'sold': 16, 'price': '400.00'}))
             for n in range(4):
                 await work.execute(ACTOR, packet(f'16-photo-{n}', 'sale_selected', {'draft': draft}), b'\xff\xd8\xff'+bytes([n])*200)

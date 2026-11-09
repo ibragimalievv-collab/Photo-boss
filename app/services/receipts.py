@@ -33,12 +33,20 @@ def money(value):
     return amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-async def payment_totals(session, booking_id):
-    sales = await session.scalars(select(Sale.amount).where(Sale.booking_id == booking_id))
+async def payment_totals(session, booking_id, *, sales=None, receipts=None):
+    """sales/receipts: this booking's rows when the caller has already loaded them."""
+    if sales is None:
+        sales = await session.scalars(select(Sale.amount).where(Sale.booking_id == booking_id))
+    else:
+        sales = [sale.amount for sale in sales]
     total = sum((money(amount) for amount in sales), Decimal(0))
-    paid = money(await session.scalar(select(func.coalesce(
-        func.sum(Receipt.verified_amount), 0
-    )).where(Receipt.booking_id == booking_id, Receipt.status == "APPROVED")))
+    if receipts is None:
+        paid = money(await session.scalar(select(func.coalesce(
+            func.sum(Receipt.verified_amount), 0
+        )).where(Receipt.booking_id == booking_id, Receipt.status == "APPROVED")))
+    else:
+        paid = money(sum((r.verified_amount for r in receipts
+                          if r.status == "APPROVED" and r.verified_amount is not None), Decimal(0)))
     from ..refund_schema import enabled as refund_schema_enabled
     if refund_schema_enabled():
         from ..booking_refund_integration import build_booking_refunds
@@ -131,8 +139,13 @@ async def extract_receipt(content):
             return {'status': 'waiting_configuration'}
         from .receipt_ai import extract
         return await extract(content)
-    from .ai_provider import (ComparisonLimitError, capture_comparison_response,
-                              reserve_comparison_response, response_text, responses_profile)
+    from .ai_provider import (
+        ComparisonLimitError,
+        capture_comparison_response,
+        reserve_comparison_response,
+        response_text,
+        responses_profile,
+    )
     profile = responses_profile(config, receipt=True)
     if not profile.configured:
         return {"status": "not_configured"}

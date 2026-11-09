@@ -20,18 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import config
 from ..models import Booking, Client, GuestSMSJob, GuestSMSPreference, Hotel, Setting
 from ..operations_guard import operation_lease
+from ..timeutil import as_utc as utc
+from ..timeutil import naive_utc as naive
 
 log = logging.getLogger(__name__)
 CONFIRMED_LIFECYCLE = {'CONFIRMED', 'ASSIGNED', 'PICKED_UP', 'ACCEPTED'}
 TERMINAL = {'delivered', 'cancelled', 'rescheduled', 'expired', 'off'}
-
-
-def utc(value):
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
-def naive(value):
-    return utc(value).replace(tzinfo=None)
 
 
 @dataclass(frozen=True)

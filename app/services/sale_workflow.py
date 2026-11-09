@@ -410,6 +410,11 @@ async def complete_sale(session, actor, draft_id, *, verified_references=None):
 
     draft.status = "COMPLETED"
     booking.status = "SOLD"
+    if booking.no_sale_at is not None:
+        # The guest came back and bought after all.
+        from ..no_sale import clear as clear_no_sale
+        await audit(session, actor, 'booking_no_sale_cleared', 'booking', booking.id,
+                    json.dumps({'by_sale': True, 'previous': clear_no_sale(booking)}, ensure_ascii=False))
     draft.completed_at = sale_recorded_at
     await audit(
         session,

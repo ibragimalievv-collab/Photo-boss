@@ -3,7 +3,6 @@
 Telegram has no send idempotency key: a process loss after provider acceptance
 and before committing can repeat a copy. No historical catch-up on activation.
 """
-from .services.ai_provider import ai_configured
 import asyncio
 import json
 import logging
@@ -25,6 +24,7 @@ from .models import (
     utc_now,
 )
 from .push_notifications import app_channel, eligible, payload_for, queue_notice
+from .services.ai_provider import ai_configured
 from .work_events import WORK_EVENTS
 
 log = logging.getLogger(__name__)

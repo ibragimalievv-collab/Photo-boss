@@ -704,6 +704,7 @@ class Delivery:
             return web.json_response({'id':campaign.id,'queued':len(contacts)})
 
     async def control(self, request):
+        from .no_sale import public as public_no_sale
         actor = request['miniapp_actor']
         start = self.api.day(request.query.get('from', str(self.api.today() - timedelta(days=30))))
         end = self.api.day(request.query.get('to', str(self.api.today())))
@@ -725,14 +726,16 @@ class Delivery:
                 shot = bool(shoot and (shoot.completed_at or shoot.status in {'SHOT','COMPLETED','READY_FOR_SALE'}))
                 paid = bool(sale and sale.payment_status == 'PAID')
                 delivered = bool(g and (g.handed_at or g.downloaded_at))
-                tasks = [] if cancelled else (['shoot'] if not shot else []) + (['sale'] if shot and not sale else []) + (['payment'] if sale and not paid else []) + (['delivery'] if shot and not delivered else [])
+                declined = bool(b.no_sale_at) and not sale
+                tasks = [] if cancelled else (['shoot'] if not shot else []) + (['sale'] if shot and not sale and not declined else []) + (['payment'] if sale and not paid else []) + (['delivery'] if shot and not delivered and not declined else [])
                 replies = (await session.scalars(select(DeliveryBookingResponse).where(DeliveryBookingResponse.booking_id == b.id))).all()
                 moment = datetime.combine(b.shoot_date,b.shoot_time).replace(tzinfo=self.api.tz).isoformat()
                 current_replies = [r for r in replies if r.moment == moment]
                 item = {'guestConfirmed':any(r.kind=='CONFIRM' for r in current_replies),'rescheduleRequested':any(r.kind=='RESCHEDULE' for r in current_replies),'id':b.id,'date':str(b.shoot_date),'time':str(b.shoot_time)[:5], 'client':client.name if client else '', 'room':b.room,
                     'hotel':hotel.name if hotel else '', 'photographer':user.name if user else 'Не назначен', 'photographerId':b.photographer_id,
                     'canGallery':can_view(actor,b),'tasks':tasks,'cancelled':cancelled,'shot':shot,'sold':bool(sale),'paid':paid,'delivered':delivered,
-                    'paymentStatus':sale.payment_status if sale else None,'openedAt':g.opened_at.isoformat() if g and g.opened_at else None}
+                    'paymentStatus':sale.payment_status if sale else None,'openedAt':g.opened_at.isoformat() if g and g.opened_at else None,
+                    'noSale':public_no_sale(b) if declined else None}
                 items.append(item)
                 for group, key, name in ((by_hotel,b.hotel_id,item['hotel']),(by_person,b.photographer_id,item['photographer'])):
                     row = group.setdefault(key,{'name':name,'booked':0,'shot':0,'sold':0,'cancelled':0})

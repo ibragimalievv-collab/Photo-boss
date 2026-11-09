@@ -210,7 +210,10 @@ def test_manual_close_is_not_reopened_by_payment_retry_or_sync(tmp_path, monkeyp
     asyncio.run(run())
 
 
-def test_pending_sale_duplicate_does_not_hide_existing_manual_selected_original(tmp_path, monkeypatch):
+def test_pending_sale_duplicate_does_not_expose_an_unpaid_manual_selected_original(tmp_path, monkeypatch):
+    # A legacy "selected" mark never grants access to an unpurchased original
+    # (sale_gallery.guest_photo_clause); a pending sale of the same frame
+    # must not open it either.
     async def run():
         f = await fixture(tmp_path, monkeypatch)
         try:
@@ -231,8 +234,9 @@ def test_pending_sale_duplicate_does_not_hide_existing_manual_selected_original(
                 await session.commit()
             await f.upload('blue')
             public = await (await f.client.get('/g/'+'m'*32+'/data')).json()
-            assert [p['id'] for p in public['photos']] == [manual_id]
-            assert (await f.client.get('/g/'+'m'*32+'/album.zip')).status == 200
+            assert public['photos'] == []
+            assert (await f.client.get(f'/g/{"m"*32}/photos/{manual_id}?download=1')).status == 404
+            assert (await f.client.get('/g/'+'m'*32+'/album.zip')).status != 200
         finally:
             await close(f)
     asyncio.run(run())

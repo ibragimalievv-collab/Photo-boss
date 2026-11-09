@@ -1,11 +1,11 @@
 """Explicit provider selection for Responses requests; credentials stay server-side."""
-from dataclasses import dataclass, field
 import json
 import os
-from pathlib import Path
 import re
 import stat
 import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,7 @@ def responses_profile(config, *, receipt=False, vision=False):
             if not budget:
                 raise ValueError
             _load(_path(budget), require_existing=True)
-        except Exception:
+        except Exception:  # noqa: BLE001 -- any parse failure means the model is not allowed
             raise ValueError('Эта модель доступна только в закрытом сравнении с существующим общим лимитом.') from None
     if ((visual and model != 'qwen3.6-35b-a3b')
             or (not visual and model not in {'qwen3.6-35b-a3b', 'aliceai-llm-flash', 'aliceai-llm', 'deepseek-v4.1-flash'})):
@@ -69,14 +69,14 @@ def ai_configured(config, *, vision=False):
 def response_text(body):
     """Read both documented Responses envelopes without bypassing refusals."""
     if not isinstance(body, dict):
-        raise ValueError('invalid_response_envelope')
+        raise ValueError('invalid_response_envelope')  # noqa: TRY004 -- callers treat ValueError as invalid input
     output_items = body.get('output', [])
     if not isinstance(output_items, list):
-        raise ValueError('invalid_response_envelope')
+        raise ValueError('invalid_response_envelope')  # noqa: TRY004 -- callers treat ValueError as invalid input
     parts = []
     for item in output_items:
         if not isinstance(item, dict):
-            raise ValueError('invalid_response_envelope')
+            raise ValueError('invalid_response_envelope')  # noqa: TRY004 -- callers treat ValueError as invalid input
         if item.get('type') != 'message':
             continue
         content = item.get('content', [])
@@ -171,7 +171,7 @@ def reserve_comparison_response(profile, payload, *, allow_extended_text=False):
                               'requestPayloadBytes': len(request_raw)}
     except ComparisonLimitError:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 -- budget store failure is reported, not raised
         raise ComparisonLimitError('comparison_budget_unavailable') from None
 
 
@@ -189,5 +189,5 @@ def capture_comparison_response(reservation, profile, http_status, body):
             target.write(raw)
             target.flush()
             os.fsync(target.fileno())
-    except Exception:
+    except Exception:  # noqa: BLE001 -- evidence store failure is reported, not raised
         raise ComparisonLimitError('comparison_evidence_unavailable') from None

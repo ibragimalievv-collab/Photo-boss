@@ -37,12 +37,14 @@ jobs:
       - name: Parser, permissions, preservation and rollback regression
         run: |
           ruff check app tests
-          python -m pytest -q tests/test_schedule_text_import.py tests/test_schedule_batch.py tests/test_miniapp_release.py
+          python -m pytest -q tests/test_schedule_text_import.py tests/test_schedule_batch.py tests/test_miniapp_release.py tests/test_shift_hours_normalize.py tests/test_attendance_fines.py
           for f in app/webapp/js/schedule-import.js app/webapp/js/schedule-editor.js app/webapp/js/app.js app/webapp/sw.js; do node --check "$f"; done
       - name: PostgreSQL concurrent import verification
         run: python tests/schedule_text_postgres_check.py
       - name: Desktop and narrow mobile browser verification
-        run: python tests/schedule_text_browser_check.py
+        run: |
+          python tests/schedule_text_browser_check.py
+          python tests/schedule_legacy_hours_browser_check.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:

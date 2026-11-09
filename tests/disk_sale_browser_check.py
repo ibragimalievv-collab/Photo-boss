@@ -84,7 +84,7 @@ async def main():
                     page.on('pageerror',lambda e:errors.append(str(e)))
                     await page.goto(str(server.make_url('/app/#workflow')))
                     await page.locator('#workflowSalePick').select_option(str(bid))
-                    await page.get_by_role('button',name='Продолжить продажу как владелец',exact=True).click()
+                    await page.locator('[data-workflow="takeover-sale"]').click()  # «Продолжить продажу»; the overview has a same-named link
                     form=page.locator('#workflowSale')
                     await reveal_disk_source(form)
                     for label in ['Загрузить с устройства','Прикрепить ссылку','Выбрать на Яндекс.Диске']:

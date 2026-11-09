@@ -4,7 +4,6 @@ The durable receipt reserves paid requests across workers and retries. Saved
 analytics remain available without an AI provider; a new answer never pretends
 to be an instantaneous or infallible reinspection of the original photographs.
 """
-from .services.ai_provider import ai_configured
 import asyncio
 import hashlib
 import json
@@ -20,6 +19,7 @@ from .config import config
 from .miniapp_security import STAFF_ROLES, AccessError
 from .models import utc_now
 from .services.academy_curriculum import BOOKING_RULES
+from .services.ai_provider import ai_configured
 from .services.development_ai import (
     SALES_RULES,
     STR,

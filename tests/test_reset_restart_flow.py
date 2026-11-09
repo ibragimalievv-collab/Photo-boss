@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 from aiohttp import FormData, web
 from aiohttp.test_utils import TestClient, TestServer
+from media_fixtures import real_jpeg
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from test_miniapp_release import TOKEN, signed
@@ -31,7 +32,7 @@ from app.workflow import KINDS, Workflow
 from app.yandex_disk import ROOT as DISK_ROOT
 
 RAW = b'\xff\xd8\xff' + b'fresh-camera-photo' * 40 + b'\xff\xd9'
-RECEIPT = b'\xff\xd8\xff' + b'new-sale-receipt' * 40 + b'\xff\xd9'
+RECEIPT = real_jpeg(b'new-sale-receipt')
 
 
 def test_reset_then_new_attendance_booking_shoot_and_sale_work_end_to_end(monkeypatch):

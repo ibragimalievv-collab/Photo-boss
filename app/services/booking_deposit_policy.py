@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
-
 POLICY_VERSION = 'booking-deposit-moscow-day-v1'
 RESERVATION_DEPOSIT_KOPECKS = 100_000
 MOSCOW = ZoneInfo('Europe/Moscow')

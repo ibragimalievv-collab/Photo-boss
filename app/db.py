@@ -84,7 +84,7 @@ async def init_db():
             await connection.execute(
                 text(
                     "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS deposit "
-                    "DOUBLE PRECISION NOT NULL DEFAULT 0"
+                    "NUMERIC(14,2) NOT NULL DEFAULT 0"
                 )
             )
             await connection.execute(text(

@@ -25,6 +25,7 @@ async def main():
     elif e=='/booking-photographers':data={'items':[{'id':3,'name':'Демо Фотограф'},{'id':4,'name':'Тестовый Фотограф'}]}
     elif e=='/workflow':data={'date':TODAY,'actorId':1,'canBook':True,'hotels':[{'id':1,'name':'Учебный отель'}],'packages':[{'id':1,'name':'Семейная съёмка'}],'bookings':[{'id':501,'date':TODAY,'time':'14:30','room':'201','status':'READY_FOR_SALE','canUpload':True,'fullUploaded':False,'shootingId':1,'price':'400','files':[],'edits':[]}]}
     elif e=='/workday':data={'date':TODAY,'timezone':'Europe/Moscow','closed':False,'canReport':True,'canConfigure':True,'note':'','sales':[],'configItems':[],'summary':{'bookings':6,'cancelled':0,'sales':2,'revenue':1200000,'unpaid':1},'items':[{'key':'photos','title':'Проверить загрузку готовых фотографий','done':False}]}
+    elif e=='/work-breaks':data={'actorId':1,'date':TODAY,'timezone':'Europe/Moscow','items':[],'hotels':[{'id':1,'name':'Учебный отель'}],'defaultHotelId':1,'employees':[{'id':3,'name':'Демо Фотограф'}],'canStart':True,'canEdit':True,'startPendingReview':False}
     elif e=='/delivery-contacts':data={'total':2,'subscribers':1,'items':[{'name':'Учебный гость','username':'training_guest','phone':None,'subscribed':True,'blocked':False}],'campaigns':[]}
     elif e=='/hr':data={'employees':[{'id':3,'name':'Демо Фотограф','active':True}],'items':[],'stages':{}}
     elif e=='/attendance/pending':data={'items':[]}
@@ -41,7 +42,7 @@ async def main():
     if file.is_file():return await route.fulfill(body=file.read_bytes(),content_type=mimetypes.guess_type(file.name)[0] or 'application/octet-stream')
    return await route.fulfill(body='',content_type='application/javascript' if plain.endswith('.js') else 'text/plain')
   await context.route('**/*',intercept)
-  await page.goto('https://photos.example/app/');await page.wait_for_selector('#topbar .avatar-btn');await page.wait_for_selector('#app .booking-row')
+  await page.goto('https://photos.example/app/');await page.wait_for_selector('#topbar .avatar-btn');await page.wait_for_selector('#app .home-review-heading h1')
   for name in ['home','shootings','schedule','workflow','control','contacts','finance','insights','team','academy','development','onboarding','workday','audit','profile','more']:
    await page.evaluate('(name)=>document.querySelector(`[data-go="${name}"]`)?.click()',name)
    # Use the module's own navigation button, including destinations in More.

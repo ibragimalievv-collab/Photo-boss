@@ -5,7 +5,6 @@ It carries no role or user ID. Upstream credentials never reach the browser.
 """
 import asyncio
 import base64
-from contextlib import suppress
 import hashlib
 import hmac
 import json
@@ -14,12 +13,13 @@ import re
 import secrets
 import socket
 import time
+from contextlib import suppress
 from urllib.parse import urlencode, urlsplit
 
 import aiohttp
 from aiohttp import web
 
-from .miniapp_security import AccessError, STAFF_ROLES
+from .miniapp_security import STAFF_ROLES, AccessError
 
 RATE = 44100
 MAX_FRAME = 32768
@@ -127,9 +127,8 @@ class YandexRealtime:
 
     async def sweep(self):
         for key, pending in list(self.pending.items()):
-            if pending['until'] < time.time():
-                if await self.parent.close(pending['actor']['id'], pending['lease']):
-                    self.pending.pop(key, None)
+            if pending['until'] < time.time() and await self.parent.close(pending['actor']['id'], pending['lease']):
+                self.pending.pop(key, None)
 
     async def connect(self, request, config):
         origin_guard(request)
@@ -167,7 +166,7 @@ class YandexRealtime:
         trace.on_request_redirect.append(no_redirect)
         prepared = False
         try:
-            async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar(), trust_env=False,
+            async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar(), trust_env=False,  # noqa: SIM117 -- long context managers read better nested
                     timeout=aiohttp.ClientTimeout(total=None, sock_connect=15), trace_configs=[trace]) as client:
                 async with client.ws_connect(pending['url'], heartbeat=20, max_msg_size=8 * 1024 * 1024,
                         headers={'Authorization': 'Api-Key ' + config.yandex_cloud_api_key}) as upstream:
@@ -252,7 +251,7 @@ class YandexRealtime:
                 if messages > (time.monotonic() - began + 3) * 100:
                     raise ValueError('event_limit')
                 if not isinstance(body, dict):
-                    raise ValueError('invalid_event')
+                    raise ValueError('invalid_event')  # noqa: TRY004 -- callers treat ValueError as invalid input
                 kind = body.get('type')
                 if kind == 'input_audio_buffer.append' and set(body) == {'type', 'audio'}:
                     value = body['audio']
@@ -298,9 +297,9 @@ class YandexRealtime:
                     continue
                 if kind == 'response.output_item.added':
                     item = body.get('item', {})
-                    if item.get('type') == 'message' and item.get('role') == 'assistant':
-                        if isinstance(item.get('id'), str):
-                            known_items.add(item['id'])
+                    if (item.get('type') == 'message' and item.get('role') == 'assistant'
+                            and isinstance(item.get('id'), str)):
+                        known_items.add(item['id'])
                 if kind:
                     await browser.send_json(body)
         async def authority():

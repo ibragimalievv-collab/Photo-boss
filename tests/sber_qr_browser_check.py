@@ -123,6 +123,14 @@ async def scenario(folder):
     api.rows = sqlite_rows
     install_attendance(app, api)
     install_people(app, api)
+    from app.bank_payments import payment_settings
+    if not payment_settings(refund_integration=getattr(api, 'booking_refunds', None))['bankConfigured']:
+        # The production gate behind the strict xfail marks in test_sber_qr_backend.py:
+        # QR stays closed until the bank confirms working access. Once it opens, this
+        # check runs in full again.
+        print('SKIP: Sber QR is closed in production mode until the bank confirms working access')
+        await engine.dispose()
+        return
     certificate, key = Path(folder) / 'test-cert.pem', Path(folder) / 'test-key.pem'
     await asyncio.to_thread(subprocess.run, ['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
         '-keyout', str(key), '-out', str(certificate), '-days', '1', '-subj', '/CN=localhost',

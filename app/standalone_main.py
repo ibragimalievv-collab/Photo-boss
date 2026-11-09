@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import AsyncExitStack, asynccontextmanager
 import logging
 import os
-from pathlib import Path
 import re
 import sys
+from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
@@ -21,8 +21,7 @@ def prepare_environment():
     sys.dont_write_bytecode = True
     for name in tuple(os.environ):
         if (name in {'BOT_TOKEN', 'TELEGRAM_API_BASE', 'EXPECTED_BOT_ID', 'HR_BOT_TOKEN'}
-                or name.startswith('TELEGRAM_')
-                or name.startswith('RENDER_')
+                or name.startswith(('TELEGRAM_', 'RENDER_'))
                 or any(marker in name for marker in ('RESET_REQUEST', 'POINT_SEED', 'TEXT_REQUEST'))):
             os.environ.pop(name, None)
     os.environ.update(PHOTO_BOSS_NOTIFICATION_CHANNEL='app', MINIAPP_SET_MENU='0',
@@ -42,9 +41,11 @@ async def verify_readiness(engine, configuration):
     """Read schema and existing owners; never run legacy init_db/seeds/resets."""
     import asyncio
     import uuid
+
     from sqlalchemy import inspect, text
-    from .db import Base
+
     from . import models  # noqa: F401 - register the real schema, without DDL.
+    from .db import Base
 
     async with asyncio.timeout(30), engine.connect() as connection:
         if connection.dialect.name == 'postgresql':
@@ -89,8 +90,14 @@ def create_app(*, start_workers=False, engine=None, readiness=verify_readiness, 
     if type(start_workers) is not bool:
         raise ValueError('Explicit worker mode required')
     from aiohttp import web
+
     from .config import config
-    from .standalone_runtime import LocalAppContext, start_worker_tasks, stop_worker_tasks, worker_map
+    from .standalone_runtime import (
+        LocalAppContext,
+        start_worker_tasks,
+        stop_worker_tasks,
+        worker_map,
+    )
 
     if not config.standalone:
         raise ValueError('Configuration was imported before standalone mode')
@@ -126,12 +133,12 @@ def create_app(*, start_workers=False, engine=None, readiness=verify_readiness, 
     api = install_miniapp(app, engine=engine, bot=context, lessons=ACADEMY_LESSONS,
         blocks=ACADEMY_BLOCKS, tz_name=config.training_timezone, standalone=True,
         qr_signing_key=bytes.fromhex(config.qr_signing_key))
-    from .browser_login import install_browser_login
-    from .attendance import install_attendance
-    from .people import install_people
-    from .work_chat import install_work_chat
-    from .work_calls import install_work_calls
     from .academy_practice import install_academy_practice
+    from .attendance import install_attendance
+    from .browser_login import install_browser_login
+    from .people import install_people
+    from .work_calls import install_work_calls
+    from .work_chat import install_work_chat
     from .yandex_disk import install_yandex_disk
     install_browser_login(app, api)
     install_attendance(app, api)
@@ -182,6 +189,7 @@ def create_app(*, start_workers=False, engine=None, readiness=verify_readiness, 
 
     async def health(_request):
         import asyncio
+
         from sqlalchemy import text
         ready = (bool(app['ready']) and 'failed' not in app['worker_map'].values()
                  and context.blocked_telegram_calls == 0)
@@ -191,7 +199,7 @@ def create_app(*, start_workers=False, engine=None, readiness=verify_readiness, 
         try:
             async with asyncio.timeout(5), engine.connect() as connection:
                 await connection.execute(text('SELECT 1'))
-        except Exception:
+        except Exception:  # noqa: BLE001 -- readiness probe reports false
             ready = False
         storage = app['yandex_disk'].public_status()
         return web.json_response({'service': 'photo-boss', 'mode': 'standalone',

@@ -6,7 +6,7 @@ def guest_phone(value):
     if value is None or value == '':
         return None
     if not isinstance(value, str):
-        raise ValueError('Укажите телефон гостя.')
+        raise ValueError('Укажите телефон гостя.')  # noqa: TRY004 -- callers treat ValueError as invalid input
     raw = value.strip()
     if not raw:
         return None

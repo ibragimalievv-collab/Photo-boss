@@ -70,24 +70,30 @@ body.gallery-mode .workspace{margin-left:0!important;padding:0}
 .pb-gallery-ui .card>button>b{display:block}
 @media(max-width:850px){.pb-gallery-ui .gallery-folders{grid-template-columns:1fr}.pb-gallery-ui .folder-breadcrumbs{font-size:12px}.pb-gallery-ui .gallery-folder{min-height:86px;padding:15px}.pb-gallery-ui .folder-heading{align-items:start}.pb-gallery-ui .folder-heading .ghost{white-space:nowrap}}
 
-/* Retain the workspace navigation while staff browse gallery folders. */
+/* Retain the workspace navigation while staff browse gallery folders. Scoped to the folder
+   browser: an open gallery and the guest page keep the approved look (no workspace variables there). */
 body.gallery-mode:not(.gallery-open){background:var(--bg);color:var(--text)}
 body.gallery-mode:not(.gallery-open) #topbar{display:flex!important;background:var(--bg);border-color:var(--line)}
 body.gallery-mode:not(.gallery-open) .workspace-footer{display:block}
 body.gallery-mode:not(.gallery-open) .content{max-width:1340px;padding:26px 36px 90px}
-.pb-gallery-ui{color:var(--text)}
-.pb-gallery-ui .side,.pb-gallery-ui .top{display:none!important}
-.pb-gallery-ui .app{display:block;min-height:0}
-.pb-gallery-ui .wrap{padding:0;max-width:none}
-.pb-gallery-ui .primary,.pb-gallery-ui .gbutton.primary{background:var(--accent);color:var(--accent-ink)}
-.pb-gallery-ui .ghost,.pb-gallery-ui .round,.pb-gallery-ui .pill{color:var(--text);background:var(--panel);border-color:var(--line)}
-.pb-gallery-ui .pill.active,.pb-gallery-ui .round.on{background:var(--accent);color:var(--accent-ink)}
-.pb-gallery-ui input,.pb-gallery-ui select{background:var(--panel);color:var(--text);border-color:var(--line)}
-.pb-gallery-ui .tab.active{color:var(--accent)}
-.pb-gallery-ui .folder-symbol{color:var(--accent);background:var(--accent-soft)}
-@media(min-width:1100px){body.gallery-mode:not(.gallery-open) #sidebar{display:flex!important;width:234px;background:var(--panel);border-right:1px solid var(--line);color:var(--muted)}body.gallery-mode:not(.gallery-open) .workspace{margin-left:234px}body.gallery-mode:not(.gallery-open) #bottomNav{display:none!important}}
+body.gallery-mode:not(.gallery-open) .pb-gallery-ui{color:var(--text)}
+body.gallery-mode:not(.gallery-open) .pb-gallery-ui .side,body.gallery-mode:not(.gallery-open) .pb-gallery-ui .top{display:none!important}
+body.gallery-mode:not(.gallery-open) .pb-gallery-ui .app{display:block;min-height:0}
+body.gallery-mode:not(.gallery-open) .pb-gallery-ui .wrap{padding:0;max-width:none}
+body.gallery-mode:not(.gallery-open) .pb-gallery-ui .primary,body.gallery-mode:not(.gallery-open) .pb-gallery-ui .gbutton.primary{background:var(--accent);color:var(--accent-ink)}
+body.gallery-mode:not(.gallery-open) .pb-gallery-ui .ghost,body.gallery-mode:not(.gallery-open) .pb-gallery-ui .round,body.gallery-mode:not(.gallery-open) .pb-gallery-ui .pill{color:var(--text);background:var(--panel);border-color:var(--line)}
+body.gallery-mode:not(.gallery-open) .pb-gallery-ui .pill.active,body.gallery-mode:not(.gallery-open) .pb-gallery-ui .round.on{background:var(--accent);color:var(--accent-ink)}
+body.gallery-mode:not(.gallery-open) .pb-gallery-ui input,body.gallery-mode:not(.gallery-open) .pb-gallery-ui select{background:var(--panel);color:var(--text);border-color:var(--line)}
+body.gallery-mode:not(.gallery-open) .pb-gallery-ui .tab.active{color:var(--accent)}
+body.gallery-mode:not(.gallery-open) .pb-gallery-ui .folder-symbol{color:var(--accent);background:var(--accent-soft)}
+@media(min-width:1100px){body.gallery-mode:not(.gallery-open) #sidebar{display:flex!important;width:234px;background:var(--panel);border-right:1px solid var(--line);color:var(--muted)}body.gallery-mode:not(.gallery-open) .workspace{margin-left:234px!important}body.gallery-mode:not(.gallery-open) #bottomNav{display:none!important}}
 @media(max-width:1099px){body.gallery-mode:not(.gallery-open) #sidebar{display:none!important}body.gallery-mode:not(.gallery-open) #bottomNav{display:grid!important}body.gallery-mode:not(.gallery-open) .workspace{margin-left:0}body.gallery-mode:not(.gallery-open) .content{padding:20px 18px 110px}}
 
 .gallery-mode:not(.gallery-open) .sidebar .brand-name,.gallery-mode:not(.gallery-open) .sidebar .brand-caption{color:var(--text)}
 
 .gallery-mode:not(.gallery-open) .pb-gallery-ui .mobile{display:none}
+
+/* The guest page loads only this file, without the workspace theme variables:
+   keep the approved palette (as in tests/fixtures/approved_gallery.html). */
+.pb-gallery-guest{--text:#202a35;--line:#e4e9ef;--bg:#f4f7fa;--muted:#77818d;--dark:#111317;--blue:#1685e5;--red:#e84e63}
+.pb-gallery-guest .pill:not(.active),.pb-gallery-guest .round:not(.on){color:#000}

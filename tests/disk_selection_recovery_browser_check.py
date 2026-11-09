@@ -20,7 +20,7 @@ async def main():
         name = request.match_info['name']
         if name == 'api.js':
             return web.Response(text=API, content_type='text/javascript')
-        if name not in {'outbox.js', 'localstore.js'}:
+        if name not in {'outbox.js', 'localstore.js', 'receipt-files.js'}:  # outbox imports receipt-files
             raise web.HTTPNotFound()
         return web.FileResponse(ROOT / 'app' / 'webapp' / 'js' / name)
 

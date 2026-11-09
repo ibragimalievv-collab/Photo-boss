@@ -35,6 +35,7 @@ def install():
         return False
     from sqlalchemy import BigInteger, Uuid
     from sqlalchemy.orm import mapped_column
+
     from .models import BankPayment, Booking, Receipt
     for model in (Booking, Receipt, BankPayment):
         if not hasattr(model, 'reservation_version_id'):
@@ -44,7 +45,7 @@ def install():
     if not hasattr(Booking, 'payment_money_version'):
         Booking.payment_money_version = mapped_column(BigInteger, default=0,
                                                        server_default='0', nullable=False)
-    from . import booking_reservation_models, bank_refund_models  # noqa: F401
+    from . import bank_refund_models, booking_reservation_models  # noqa: F401
     return True
 
 

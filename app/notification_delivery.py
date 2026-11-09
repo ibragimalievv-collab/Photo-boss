@@ -2,9 +2,9 @@
 import json
 import re
 from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from .miniapp_security import AccessError
+from .timeutil import business_tz
 
 PREFIX = 'push:preferences:'
 DEFAULT = {'quietEnabled': False, 'quietStart': '22:00', 'quietEnd': '08:00'}
@@ -34,7 +34,7 @@ def saved_preferences(raw):
 def quiet_until(value, now):
     if not value['quietEnabled']:
         return None
-    local = now.astimezone(ZoneInfo('Europe/Moscow'))
+    local = now.astimezone(business_tz())
     def minute(raw):
         hour, part = map(int, raw.split(':'))
         return hour * 60 + part

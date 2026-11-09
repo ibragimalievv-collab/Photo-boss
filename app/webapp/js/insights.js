@@ -2,14 +2,14 @@ import {api} from './api.js';
 import {esc,money,todayKey} from './domain.js';
 import {enqueueOperation} from './outbox.js';
 let report=null,events=[],preferences={daily:false,critical:false},period='week',from='',to='';
-const labels={netCash:'Чистая касса за период',paidOut:'Оплаченные расходы',receipts:'Загруженные чеки',missed:'Пропущенные смены',unclosed:'Незакрытые смены',pendingAttendance:'Отметки на проверке',guestReviews:'Отзывы гостей',guestRating:'Средняя оценка гостей',revenue:'Выручка',cash:'Подтверждённые поступления',accrued:'Начислено до удержаний',deductions:'Удержания',payableAccruals:'К выплате по начислениям',cashAfterAccruals:'Остаток после начислений',average:'Средний чек',sales:'Продажи',shootings:'Завершённые съёмки',bookings:'Записи',cancellations:'Отмены и отказы',late:'Опоздания',attendance:'Выходы на работу',employees:'Сотрудников на смене',receiptIssues:'Чеки для проверки'};
+const labels={netCash:'Чистая касса за период',paidOut:'Оплаченные расходы',receipts:'Загруженные чеки',missed:'Пропущенные смены',unclosed:'Незакрытые смены',pendingAttendance:'Отметки на проверке',guestReviews:'Отзывы гостей',guestRating:'Средняя оценка гостей',revenue:'Выручка',cash:'Подтверждённые поступления',accrued:'Начислено до удержаний',deductions:'Удержания',payableAccruals:'К выплате по начислениям',cashAfterAccruals:'Остаток после начислений',average:'Средний чек',sales:'Продажи',shootings:'Завершённые съёмки',bookings:'Записи',cancellations:'Отмены и отказы',noSales:'Гость не купил',late:'Опоздания',attendance:'Выходы на работу',employees:'Сотрудников на смене',receiptIssues:'Чеки для проверки'};
 const monetary=new Set(['netCash','paidOut','revenue','cash','accrued','deductions','payableAccruals','cashAfterAccruals','average']);
 export async function loadInsights(){const q=new URLSearchParams({period});if(period==='custom'){q.set('from',from);q.set('to',to);}report=await api('/insights?'+q);const result=await api('/events');events=result.items;preferences=result.preferences;}
 function value(k,v){return monetary.has(k)?money(v):esc(v);}
 function metricChange(key){
  const delta=report.changes[key];
  if(!delta||delta.percent===null)return '';
- const positive=delta.percent>0,unfavourable=['deductions','late','cancellations','missed','unclosed','receiptIssues'].includes(key);
+ const positive=delta.percent>0,unfavourable=['deductions','late','cancellations','noSales','missed','unclosed','receiptIssues'].includes(key);
  return `<p class="report-change ${delta.percent===0?'':positive!==unfavourable?'is-good':'is-warning'}">${positive?'+':''}${esc(delta.percent)}% к прошлому периоду</p>`;
 }
 function metricCard(key,caption=''){
@@ -19,11 +19,12 @@ function metricCard(key,caption=''){
 export function insightsView(){
  if(!report)return '';
  const m=report.metrics,primary=['revenue','cash','average','bookings','late','deductions'];
- const captions={cash:'По подтверждённым чекам',average:'На одну продажу',bookings:`Завершено ${esc(m.shootings)} · отменено ${esc(m.cancellations)}`,late:`Пропущено смен: ${esc(m.missed)}`,deductions:'Отдельно от начислений'};
+ const captions={cash:'По подтверждённым чекам',average:'На одну продажу',bookings:`Завершено ${esc(m.shootings)} · отменено ${esc(m.cancellations)}${m.noSales?` · не купили ${esc(m.noSales)}`:''}`,late:`Пропущено смен: ${esc(m.missed)}`,deductions:'Отдельно от начислений'};
  return `<div class="review-page-heading"><button class="icon-button" data-go="more" aria-label="Назад: все разделы">‹</button><h1>Контроль бизнеса</h1></div>
  <div class="report-periods">${['today','week','month'].map((p,i)=>`<button class="chip ${period===p?'active':''}" data-insight="period" data-period-value="${p}" aria-pressed="${period===p}">${['День','Неделя','Месяц'][i]}</button>`).join('')}</div>
  <p class="muted small report-dates">${esc(report.from)} — ${esc(report.to)}</p>
  <div class="report-primary-grid">${primary.map(key=>metricCard(key,captions[key])).join('')}</div>
+ ${report.noSaleReasons?.length?`<section class="panel section"><h2>Почему гости не купили</h2>${report.noSaleReasons.map(r=>`<p>${esc(r.label)} — <strong>${esc(r.count)}</strong></p>`).join('')}</section>`:''}
  <details class="panel section report-details"><summary>Все показатели (${Object.keys(m).length})</summary><div class="report-primary-grid section">${Object.keys(m).map(key=>metricCard(key)).join('')}</div></details>
  <details class="panel section"><summary>Выбрать даты и сравнить</summary><div class="form-row section"><label class="field">С<input id="insightFrom" type="date" class="input" value="${report.from}"></label><label class="field">По<input id="insightTo" type="date" class="input" value="${report.to}"></label><button class="btn ghost" data-insight="custom">Сравнить</button></div><p>Сравнение: ${esc(report.previous.from)} — ${esc(report.previous.to)}.</p><p>${esc(report.basis)}</p></details>
  ${report.flags.length?`<section class="section"><h2>Требует внимания</h2>${report.flags.map(f=>`<article class="panel"><h3>${esc(labels[f.metric])}</h3><p>${esc(f.reason)}</p><p>Было ${value(f.metric,f.previous)} · сейчас ${value(f.metric,f.current)}</p></article>`).join('')}</section>`:''}

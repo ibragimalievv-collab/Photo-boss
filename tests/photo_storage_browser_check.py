@@ -113,8 +113,16 @@ async def main():
                     await context.set_offline(False)
                     await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).some(r=>r.status==='local'&&r.error);}")
                     assert lost
+                    # Press «Синхронизировать сейчас» once nothing is in flight: a press during an
+                    # upload that fails afterwards leaves that file to its normal retry delay.
+                    await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return !(await m.outboxRows()).some(r=>r.status==='syncing');}")
                     await page.get_by_role('button',name='Синхронизировать сейчас').click()
-                    await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).every(r=>r.status==='synced');}")
+                    try:
+                        await wait_async(page,"async()=>{const m=await import('/app/js/outbox.js');return (await m.outboxRows()).every(r=>r.status==='synced');}")
+                    except AssertionError:
+                        print('PHOTO_STORAGE_QUEUE_DIAGNOSTIC', await page.evaluate("""async()=>(await (await import('/app/js/outbox.js')).outboxRows())
+                            .map(r=>({kind:r.kind,status:r.status,error:r.error,errorStatus:r.errorStatus,retryAt:r.retryAt,now:Date.now()}))"""))
+                        raise
                     async with factory() as session:
                         assert await session.scalar(select(func.count(Photo.id))) == 2
                         assert await session.scalar(select(func.count(PhotoStorage.id))) == 2

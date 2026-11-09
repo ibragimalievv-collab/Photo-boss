@@ -29,6 +29,7 @@ from .hotel_points import (
     save_json,
 )
 from .miniapp_security import AccessError, utc_bounds
+from .timeutil import as_utc as utc
 
 WORK_ROLES = frozenset({'PHOTOGRAPHER', 'MANAGER'})
 MAX_JSON = 900_000
@@ -91,12 +92,6 @@ def photo_bytes(body):
         except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
             raise AccessError('Фотография повреждена или слишком мала. Сделайте новый снимок.', 400) from exc
     return raw
-
-
-def utc(value):
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 class Attendance:

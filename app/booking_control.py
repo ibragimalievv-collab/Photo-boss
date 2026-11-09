@@ -1,5 +1,4 @@
 """On-shift booking reminders and hotel staffing advice from recorded activity."""
-from .services.ai_provider import ai_configured
 import asyncio
 import hashlib
 import json
@@ -25,11 +24,9 @@ from .models import (
     User,
     UserRole,
 )
+from .services.ai_provider import ai_configured
 from .services.development_ai import STR, obj, structured
-
-
-def utc(value):
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+from .timeutil import as_utc as utc
 
 
 async def preferences(session):

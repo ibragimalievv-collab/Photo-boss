@@ -1,6 +1,7 @@
 """Private web originals remain readable without a Telegram conversation."""
 import asyncio
 import hashlib
+import io
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import SendPhoto
+from PIL import Image
 
 from app.services import media_files
 from app.services.photo_storage import _download
@@ -15,7 +17,15 @@ from app.services.receipts import download_receipt
 from app.workflow import Workflow
 from app.yandex_disk import ROOT, YandexDiskError
 
-RAW = b'\x89PNG\r\n\x1a\n' + b'original-pixels' * 20
+
+def _real_png():
+    # Receipts are now decoded with Pillow; a PNG signature with junk is rejected.
+    output = io.BytesIO()
+    Image.linear_gradient('L').resize((64, 48)).convert('RGB').save(output, format='PNG')
+    return output.getvalue()
+
+
+RAW = _real_png()
 PATH = ROOT + '/web-media/7/test.png'
 
 

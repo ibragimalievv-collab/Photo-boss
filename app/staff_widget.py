@@ -11,13 +11,14 @@ import json
 import math
 import re
 import secrets
-from datetime import UTC, date, datetime, time as clock_time, timedelta
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as clock_time
 
 from aiohttp import web
 from sqlalchemy import text
 
 from . import miniapp_sessions
-from .miniapp_security import AccessError, STAFF_ROLES
+from .miniapp_security import STAFF_ROLES, AccessError
 from .services.booking_access import booking_scope_sql
 
 GRANTS = 'staff-widget:grant:'

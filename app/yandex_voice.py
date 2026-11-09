@@ -1,10 +1,10 @@
 """Optional SpeechKit transport; credentials and recording conversion stay server-side."""
 import asyncio
-from io import BytesIO
 import json
 import os
 import shutil
 import wave
+from io import BytesIO
 
 import aiohttp
 
@@ -93,7 +93,7 @@ def chunks(pcm):
     while len(pcm) > size:
         # Find the lowest-energy 20ms interval in the last half second.
         candidates = range(size - RATE, size, RATE // 25 * 2)
-        def energy(offset):
+        def energy(offset, pcm=pcm):
             part = pcm[offset:offset + RATE // 50 * 2]
             return sum(abs(int.from_bytes(part[i:i+2], 'little', signed=True))
                        for i in range(0, len(part), 2))
@@ -121,7 +121,7 @@ async def transcribe(raw, mime, config):
                     body = json.loads(await response_bytes(response, purpose, STT_MODEL, 32 * 1024))
                 value = body.get('result') if isinstance(body, dict) else None
                 if not isinstance(value, str):
-                    raise ValueError('invalid_output')
+                    raise ValueError('invalid_output')  # noqa: TRY004 -- callers treat ValueError as invalid input
                 if value.strip():
                     pieces.append(value.strip())
         result = ' '.join(pieces)

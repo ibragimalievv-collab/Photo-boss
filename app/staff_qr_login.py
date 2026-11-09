@@ -7,25 +7,27 @@ It never contains the employee's password or grants a client-supplied role.
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
 import hashlib
 import hmac
-from io import BytesIO
 import json
 import logging
-from pathlib import Path
 import re
 import secrets
 import time
+from datetime import datetime, timezone
+from io import BytesIO
+from pathlib import Path
 from urllib.parse import urlsplit
 
-from aiohttp import web
 import qrcode
+from aiohttp import web
 from sqlalchemy import text
 
 from . import miniapp_sessions as sessions
-from .browser_login import BrowserLogin, COOKIE as APPROVAL_COOKIE, PREFIX as APPROVAL_PREFIX
-from .miniapp_security import AccessError, STAFF_ROLES
+from .browser_login import COOKIE as APPROVAL_COOKIE
+from .browser_login import PREFIX as APPROVAL_PREFIX
+from .browser_login import BrowserLogin
+from .miniapp_security import STAFF_ROLES, AccessError
 
 logger = logging.getLogger(__name__)
 USER_PREFIX = 'miniapp:qr:user:'

@@ -38,7 +38,8 @@ FINANCE_TEXTS = frozenset({"💰 Продажи", "📊 Отчёты", "💵 З�
 def app_url(page="home", tg_id=None):
     base = os.getenv("WEBHOOK_BASE_URL", "").strip().rstrip("/")
     if not base:
-        host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "photo-boss.onrender.com").strip()
+        # photo-boss.ru is hosted in Russia; the old Render address needs a VPN there.
+        host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "photo-boss.ru").strip()
         base = "https://" + host
     parsed = urlsplit(base)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:

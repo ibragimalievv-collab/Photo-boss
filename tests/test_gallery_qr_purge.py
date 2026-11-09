@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from test_delivery import ACTORS, setup
+from test_delivery import ACTORS, pay_for, setup
 
 from app.models import Booking, DeliveryPhoto, HotelEmployee, Setting
 from app.yandex_disk import ROOT, YandexDisk, YandexDiskError
@@ -25,10 +25,12 @@ def test_qr_and_purge_scope_retry_and_revocation(monkeypatch):
                 g.delivery_mode = 'SELECTED'
                 token = g.access_token
                 gid = g.id
-                session.add_all([DeliveryPhoto(gallery_id=gid, uploaded_by_id=2, filename=f'{i}.png',
+                photos = [DeliveryPhoto(gallery_id=gid, uploaded_by_id=2, filename=f'{i}.png',
                     disk_path=ROOT + f'/delivery/booking-1/test/{i}.png', sha256=str(i)*64,
                     byte_size=100, selected=i == 2, upload_set='SELECTED' if i == 2 else 'ALL')
-                    for i in (1, 2)])
+                    for i in (1, 2)]
+                session.add_all(photos)
+                await pay_for(session, photos[1])  # only the purchased frame is public
                 await session.commit()
             owner = {'X-Test-Actor': '1'}
             qr = '/api/miniapp/delivery/1/qr'

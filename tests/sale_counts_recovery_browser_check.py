@@ -193,6 +193,8 @@ async def main():
                             assert await session.scalar(select(func.count(Receipt.id))) == 1
                             assert await session.scalar(select(OperationRequest.id).where(OperationRequest.request_key == receipt_key)) is None
                         await replacement.set_input_files('app/webapp/assets/academy/child.jpg')
+                        # A receipt may have two parts now, so the choice is sent with an explicit button.
+                        await page.locator('#workflowQueue [data-workflow="replace-receipt-files"]').click()
                         await expect(form.locator('[data-operation-progress]')).to_contain_text('сохранена сервером', timeout=20000)
                         assert await page.evaluate("async()=> (await (await import('/app/js/outbox.js')).outboxRows()).map(r=>r.key)") == original_keys
                         async with factory() as session:

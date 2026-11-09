@@ -1,9 +1,28 @@
 """Additive, repeatable upgrades for databases created before the current release."""
 import json
+import logging
 from decimal import Decimal
 
 from sqlalchemy import MetaData, Table, UniqueConstraint, inspect, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.schema import CreateIndex, CreateTable
+
+log = logging.getLogger(__name__)
+
+# Money columns created as double precision by earlier releases (models.MONEY).
+MONEY_COLUMNS = (
+    ('packages', 'price_per_photo'), ('bookings', 'deposit'), ('sales', 'amount'),
+    ('sales', 'commission'), ('compensation', 'base_salary'), ('payroll_entries', 'amount'),
+    ('shift_check_ins', 'fine_amount'), ('sales_plans', 'target_amount'),
+)
+# Indexes for the daily lists, finance periods and history screens (see models).
+PERFORMANCE_INDEXES = (
+    'ix_photos_shooting_id', 'ix_bookings_shoot_date_status', 'ix_bookings_hotel_id_shoot_date',
+    'ix_bookings_photographer_id_shoot_date', 'ix_bookings_manager_id_shoot_date',
+    'ix_sales_booking_id', 'ix_sales_credited_user_id_created_at', 'ix_sales_created_at',
+    'ix_payroll_entries_user_id_created_at', 'ix_payroll_entries_created_at',
+    'ix_shifts_user_id_start_at', 'ix_shifts_start_at', 'ix_audit_logs_created_at',
+)
 
 
 async def add_columns(connection, table, columns):
@@ -129,12 +148,64 @@ async def prepare_delivery_photos(connection):
     await connection.run_sync(_delivery_photo_sets)
 
 
+async def _postponable(connection, statement, label):
+    """Run an optional upgrade step; never fail startup because of it.
+
+    init_db limits lock waits to 2 s while the previous instance may still serve
+    requests. A step that cannot get its lock is rolled back to its savepoint and
+    retried at the next start; the application works either way.
+    """
+    try:
+        async with connection.begin_nested():
+            await connection.execute(text(statement) if isinstance(statement, str) else statement)
+    except DBAPIError as exc:
+        reason = str(getattr(exc, 'orig', exc)).splitlines()[0][:200]
+        log.warning('Schema upgrade postponed until the next start (%s): %s', label, reason)
+        return False
+    return True
+
+
+async def exact_money_and_indexes(connection, tables):
+    from .db import Base
+
+    busy = set()  # a table that is in use now: do not wait for it again in this start
+    if connection.dialect.name == 'postgresql':
+        for table, column in MONEY_COLUMNS:
+            if table not in tables or table in busy:
+                continue
+            data_type = await connection.scalar(text(
+                'SELECT data_type FROM information_schema.columns '
+                'WHERE table_schema=current_schema() AND table_name=:table AND column_name=:column'),
+                {'table': table, 'column': column})
+            if data_type not in ('double precision', 'real'):
+                continue
+            # Values were written as rounded roubles and kopecks; round() keeps them exact.
+            statement = (f'ALTER TABLE {table} ALTER COLUMN {column} '
+                         f'TYPE NUMERIC(14,2) USING round({column}::numeric, 2)')
+            if not await _postponable(connection, statement, f'{table}.{column}'):
+                busy.add(table)
+    indexes = {index.name: index for table in Base.metadata.tables.values() for index in table.indexes}
+    for name in PERFORMANCE_INDEXES:
+        index = indexes[name]
+        if index.table.name not in tables or index.table.name in busy:
+            continue
+        if not await _postponable(connection, CreateIndex(index, if_not_exists=True), name):
+            busy.add(index.table.name)
+
+
 async def upgrade(connection):
     tables = await connection.run_sync(lambda conn: set(inspect(conn).get_table_names()))
     if 'hotels' in tables:
         await add_columns(connection, 'hotels', {'fixed_unit_tariff_id': 'INTEGER'})
+    if 'photos' in tables:
+        await add_columns(connection, 'photos', {'original_name': 'VARCHAR(255)', 'source_sha256': 'VARCHAR(64)'})
+        await connection.execute(text('CREATE INDEX IF NOT EXISTS ix_photos_source_sha256 ON photos(source_sha256)'))
     if 'bookings' in tables:
         await add_columns(connection, 'bookings', {'pricing_snapshot': 'TEXT'})
+        await add_columns(connection, 'bookings', {
+            'no_sale_reason': 'VARCHAR(30)', 'no_sale_note': 'TEXT', 'no_sale_at': 'TIMESTAMP',
+            'no_sale_by_id': 'INTEGER REFERENCES users(id)',
+        })
     if 'shoot_development_reviews' in tables:
         await add_columns(connection,'shoot_development_reviews',{'summary_parts':"TEXT NOT NULL DEFAULT '[]'"})
     if 'delivery_galleries' in tables:
@@ -187,5 +258,6 @@ async def upgrade(connection):
         'acknowledged_at': 'TIMESTAMP', 'resolved_at': 'TIMESTAMP',
     })
     await connection.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_event ON notifications(user_id,event_key)'))
+    await exact_money_and_indexes(connection, tables)
     from .operational_reset import install_archive_guards
     await install_archive_guards(connection)

@@ -75,7 +75,7 @@ async def run():
                     viewport={'width':320 if mobile else 1366,'height':844 if mobile else 900},
                     is_mobile=mobile,has_touch=mobile,service_workers='block',locale='ru-RU')
                 # Unrelated extension entrypoints are excluded; app/account/editor modules are real.
-                for path in ['/shift/attendance.js','/people/people.js','/work-chat/chat.js',
+                for path in ['/shift/attendance.js','/people/people.js','/work-chat/chat.js','/staff-login/scan.js',
                              'https://telegram.org/js/telegram-web-app.js']:
                     await context.route('**'+path if path.startswith('/') else path,
                                         lambda route: route.fulfill(status=200,body='',content_type='text/javascript'))
@@ -113,7 +113,7 @@ async def run():
                 await roster_search.press('Enter')
                 assert await page.locator('#shiftForm').is_visible()
                 with fixture.engine.inner.connect() as conn:
-                    assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == (24 if mobile else 0)
+                    assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == (12 if mobile else 0)
                 assert 'Найдено: 1 из 108' in await page.locator('#scheduleRosterCount').inner_text()
                 assert await page.locator('#shiftForm [name=userId]').input_value() == previous
                 await page.locator('#shiftForm [name=userId]').select_option('112')
@@ -130,27 +130,41 @@ async def run():
                 tomorrow = fixture.service.today()+timedelta(days=4 if mobile else 1)
                 await page.locator('#shiftForm [name=from]').fill(str(tomorrow))
                 await page.locator('#shiftForm [name=to]').fill(str(tomorrow+timedelta(days=2)))
-                await page.locator('#shiftForm summary').click()
+                await page.locator('#shiftForm details').first.evaluate('e=>e.open=true')  # open by default now
+                # Hours are never entered: everyone works from 09:00 to the last sale.
+                assert await page.locator('#shiftForm input[type=time]').count() == 0
                 await page.locator('[name=templateHotel]').select_option('1')
-                await page.locator('[name=templateEnd]').fill('12:00')
                 await page.locator('[data-action=fill-shift-days]').click()
+                assert await page.locator('.shift-slot').count() == 3
+                # "Поставить" on a listed day changes its hotel instead of adding a second shift.
+                last_day = str(tomorrow+timedelta(days=2))
                 await page.locator('[name=templateHotel]').select_option('2')
-                await page.locator('[name=templateStart]').fill('12:00')
-                await page.locator('[name=templateEnd]').fill('18:00')
+                await page.locator('#shiftForm [name=from]').fill(last_day)
+                await page.locator('#shiftForm [name=to]').fill(last_day)
                 await page.locator('[data-action=append-shift-days]').click()
-                assert await page.locator('.shift-slot').count() == 6
+                assert await page.locator('.shift-slot').count() == 3
+                assert await page.locator('.shift-slot').evaluate_all('''rows=>rows.map(row=>[
+                    row.querySelector('[data-slot=date]').value,row.querySelector('[data-slot=hotelId]').value,
+                    row.querySelector('[data-slot=start]').value,row.querySelector('[data-slot=end]').value])''') == [
+                    [str(tomorrow),'1','09:00','23:59'],[str(tomorrow+timedelta(days=1)),'1','09:00','23:59'],[last_day,'2','09:00','23:59']]
+                assert 'С 09:00 до последней продажи.' in await page.locator('.shift-slot').first.inner_text()
                 assert await page.locator('#shiftForm [name=userId]').count() == 1
+                # A second shift on the same day cannot be saved: one hotel per day.
                 await page.locator('[data-action=add-shift-slot]').click()
-                assert await page.locator('.shift-slot').count() == 7
+                assert await page.locator('.shift-slot').count() == 4
+                await page.locator('#shiftForm [type=submit]').click()
+                await page.locator('#formError:not([hidden])').wait_for()
+                assert 'в один день — один отель' in await page.locator('#formError').inner_text()
                 await page.locator('.shift-slot').last.locator('[data-action=remove-shift-slot]').click()
-                assert await page.locator('.shift-slot').count() == 6
+                assert await page.locator('.shift-slot').count() == 3
                 await page.screenshot(path=str(qa/f'schedule-period-{mobile}.png'),full_page=True)
                 await page.locator('#shiftForm [type=submit]').click()
                 await page.locator('#sheet[open]').wait_for(state='hidden')
                 await page.locator('.schedule-person').first.wait_for()
-                assert await page.locator('.schedule-person').count() == 2
+                assert await page.locator('.schedule-person').count() == 1
+                assert 'с 09:00' in (await page.locator('.schedule-person').first.inner_text()).lower()
                 with fixture.engine.inner.connect() as conn:
-                    assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == (30 if mobile else 6)
+                    assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == (15 if mobile else 3)
                 # Group editor: separate templates must preserve other employees' rows.
                 await page.locator('[data-action=new-team-shift]').click()
                 await page.locator('#shiftForm').wait_for()
@@ -181,10 +195,9 @@ async def run():
                 team_day = fixture.service.today()+timedelta(days=10 if mobile else 7)
                 await page.locator('#shiftForm [name=from]').fill(str(team_day))
                 await page.locator('#shiftForm [name=to]').fill(str(team_day+timedelta(days=2)))
-                await page.locator('#shiftForm summary').click()
+                await page.locator('#shiftForm details').first.evaluate('e=>e.open=true')  # open by default now
                 await page.locator('[name=teamUser][value="3"]').check()
                 await page.locator('[name=teamUser][value="4"]').check()
-                await page.locator('[name=templateEnd]').fill('12:00')
                 await page.locator('[data-action=fill-shift-days]').click()
                 assert await page.locator('.shift-slot').count() == 6
                 await page.locator('[name=teamUser][value="3"]').uncheck()
@@ -193,26 +206,32 @@ async def run():
                 await page.locator('[name=templateHotel]').select_option('2')
                 await page.locator('[data-action=fill-shift-days]').click()
                 assert await page.locator('.shift-slot').count() == 9
+                # Move employee 3 to the second hotel on the last day: the day is replaced, not doubled.
                 await page.locator('[name=teamUser][value="3"]').check()
-                await page.locator('[name=teamUser][value="4"]').check()
-                await page.locator('[name=templateStart]').fill('12:00')
-                await page.locator('[name=templateEnd]').fill('18:00')
+                team_last = str(team_day+timedelta(days=2))
+                await page.locator('#shiftForm [name=from]').fill(team_last)
+                await page.locator('#shiftForm [name=to]').fill(team_last)
                 await page.locator('[data-action=append-shift-days]').click()
-                assert await page.locator('.shift-slot').count() == 18
-                # Different employees can share a time; a cross-hotel overlap for one cannot save.
-                await page.locator('.shift-slot').last.locator('[data-slot=start]').fill('11:00')
+                assert await page.locator('.shift-slot').count() == 9
+                assert await page.locator('.shift-slot').evaluate_all(f'''rows=>rows.filter(row=>row.querySelector('[data-slot=userId]').value==='3'
+                    &&row.querySelector('[data-slot=date]').value==='{team_last}').map(row=>row.querySelector('[data-slot=hotelId]').value)''') == ['2']
+                # Different employees share the day; a second shift for the same person cannot save.
+                await page.locator('[data-action=add-shift-slot]').click()
                 await page.locator('#shiftForm [type=submit]').click()
                 await page.locator('#formError:not([hidden])').wait_for()
                 with fixture.engine.inner.connect() as conn:
-                    assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == (30 if mobile else 6)
-                await page.locator('.shift-slot').last.locator('[data-slot=start]').fill('12:00')
+                    assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == (15 if mobile else 3)
+                await page.locator('.shift-slot').last.locator('[data-action=remove-shift-slot]').click()
+                assert await page.locator('.shift-slot').count() == 9
                 await page.screenshot(path=str(qa/f'team-schedule-{mobile}.png'),full_page=True)
                 await page.locator('#shiftForm [type=submit]').click()
                 await page.locator('#sheet[open]').wait_for(state='hidden')
                 await page.locator('.schedule-person').first.wait_for()
-                assert await page.locator('.schedule-person').count() == 6
+                assert await page.locator('.schedule-person').count() == 3
                 with fixture.engine.inner.connect() as conn:
-                    assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == (48 if mobile else 24)
+                    assert conn.execute(text('SELECT COUNT(*) FROM shifts')).scalar_one() == (24 if mobile else 12)
+                    hours = {tuple(r) for r in conn.execute(text("SELECT strftime('%H:%M',start_at),strftime('%H:%M',end_at) FROM shifts"))}
+                    assert hours == {('06:00','20:59')}, hours   # 09:00-23:59 Moscow
                 assert await page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
                 # Open the profile on either layout and switch away from the owner account.
                 await page.locator('#topbar [data-go=profile]').click()
@@ -236,8 +255,8 @@ async def run():
             ['Telegram bootstrap','personal password setup','password login','wrong password',
              'switch account','all 108 employees in plus and team editors','search last employee without changing selection',
              'search keeps hidden team selections','add and remove shift buttons',
-             'one employee for three days and two hotels','three employees across three days and two hotels',
-             'group overlap rejected before save','320px layout without roster overflow','no page errors']},ensure_ascii=False))
+             'no hour fields: 09:00 until the last sale','one employee for three days, last day moved to another hotel',
+             'three employees across three days and two hotels','second shift on the same day rejected before save','320px layout without roster overflow','no page errors']},ensure_ascii=False))
     finally:
         await runner.cleanup()
         await fixture.asyncTearDown()

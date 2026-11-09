@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {fakeOpenLocal} from './fake_idb.mjs';
 
 const code = fs.readFileSync(new URL('../app/webapp/js/outbox.js', import.meta.url), 'utf8')
   .replace(/^import .*;\n/gm, '').replaceAll('export ', '') + '\nasync function writeOperations(items){for(const row of items)await localAction(\"operations\",\"readwrite\",store=>store.put(row));return true;}';
@@ -30,7 +31,7 @@ const localAction = async (_store, _mode, fn) => fn({
   put: row => rows.set(row.key, row),
 });
 const context = vm.createContext({
-  rows, api, localAction, Blob, FormData, Promise, Event, Date, Error,
+  rows, api, localAction, openLocal: fakeOpenLocal({operations: rows}), Blob, FormData, Promise, Event, Date, Error,
   navigator: {onLine: true},
   window: {dispatchEvent() {}, addEventListener() {}},
   document: {hidden: false, addEventListener() {}},
@@ -49,7 +50,10 @@ assert.ok(rows.get('receipt').blob, 'failed receipt retains original image bytes
 assert.equal(rows.get('photo').status, 'synced');
 assert.equal(rows.get('photo').blob, null);
 assert.equal(rows.get('finish').status, 'synced');
-assert.deepEqual(calls, ['booking_receipt','shoot_photo','shoot_complete']);
+// Receipts and shoot photos use separate workers (shoot photos have their own
+// parallel lanes), so only the order within the shoot is a contract.
+assert.deepEqual([...calls].sort(), ['booking_receipt','shoot_complete','shoot_photo']);
+assert.ok(calls.indexOf('shoot_photo') < calls.indexOf('shoot_complete'), 'the shoot closes after its photos');
 
 receiptFixed = true;
 const second = await vm.runInContext('retryOperation("receipt")', context);

@@ -8,6 +8,21 @@ const display=window.matchMedia('(display-mode: standalone)');
 const ios=/iPhone|iPad|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
 const android=/Android/.test(navigator.userAgent);
 const installed=()=>display.matches||navigator.standalone===true;
+// The previous address (photo-boss.onrender.com: abroad, behind Cloudflare) needs a VPN
+// in Russia; photo-boss.ru is hosted in Russia and does not. Send everyone there.
+const CANONICAL_ORIGIN='https://photo-boss.ru';
+const legacyAddress=/(^|\.)onrender\.com$/i.test(new URL(window.location.origin).hostname);
+let newAddress=document.querySelector('#newAddressBar');
+if(!newAddress&&legacyAddress&&typeof document.createElement==='function'){
+ // A page shell cached before this notice existed: draw it here.
+ newAddress=document.createElement('div');newAddress.id='newAddressBar';newAddress.className='new-address-bar';newAddress.setAttribute('role','alert');
+ const text=document.createElement('p');text.textContent='Photo Boss переехал на photo-boss.ru — там вход работает без VPN. Откройте новый адрес, войдите по личному QR или логину и паролю и установите приложение заново.';
+ const link=document.createElement('a');link.className='btn primary';link.href=CANONICAL_ORIGIN+'/app/';link.rel='noopener';link.textContent='Открыть photo-boss.ru';
+ newAddress.append(text,link);
+ const workspace=document.querySelector('.workspace');
+ if(workspace)workspace.prepend(newAddress);else document.body.prepend(newAddress);
+}
+if(newAddress)newAddress.hidden=!legacyAddress;
 let deferredPrompt=null,installing=false,installationCompleted=false;
 if(standaloneMode()){
  const hint=document.querySelector('#installLoginHint');
@@ -48,7 +63,7 @@ button.addEventListener('click',async()=>{
  finally{installing=false;button.disabled=false;refresh();}
 });
 document.querySelector('#closeInstall').addEventListener('click',()=>dialog.close());
-const link=new URL('/app/',window.location.origin).href;
+const link=new URL('/app/',legacyAddress?CANONICAL_ORIGIN:window.location.origin).href;
 document.querySelector('#installLink').value=link;
 document.querySelector('#openInstallLink').href=link;
 document.querySelector('#copyInstallLink').addEventListener('click',async()=>{

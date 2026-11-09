@@ -4,13 +4,13 @@ import asyncio
 import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from test_delivery import ACTORS, image, setup
+from test_delivery import ACTORS, image, pay_for, setup
 
 from app.delivery_downloads import MAX_DOWNLOAD_REQUESTS
 from app.models import Booking, DeliveryGallery, DeliveryPhoto, UserRole
 
 
-async def album(engine, delivery):
+async def album(engine, delivery, *, paid=False):
     async with AsyncSession(engine) as session:
         booking = await session.get(Booking, 1)
         gallery = await delivery.ensure(session, ACTORS[1], booking)
@@ -20,6 +20,8 @@ async def album(engine, delivery):
             byte_size=len(image()))
         session.add(photo)
         await session.flush()
+        if paid:
+            await pay_for(session, photo)  # guests may download purchased frames only
         result = gallery.access_token, photo.id
         await session.commit()
         return result
@@ -38,7 +40,7 @@ def test_public_download_rechecks_publication_after_slow_provider(monkeypatch, a
 
         monkeypatch.setattr(delivery, 'bytes', slow_bytes)
         try:
-            token, photo = await album(engine, delivery)
+            token, photo = await album(engine, delivery, paid=True)
             path = f'/g/{token}/' + ('album.zip' if archive else f'photos/{photo}?download=1')
             request = asyncio.create_task(client.get(path))
             await asyncio.wait_for(entered.wait(), 2)
@@ -112,7 +114,7 @@ def test_download_admission_rejects_excess_while_gallery_reads_remain_available(
         monkeypatch.setattr(delivery, 'bytes', slow_bytes)
         pending = []
         try:
-            token, photo = await album(engine, delivery)
+            token, photo = await album(engine, delivery, paid=True)
             path = f'/g/{token}/photos/{photo}'
             pending = [asyncio.create_task(client.get(path)) for _ in range(MAX_DOWNLOAD_REQUESTS)]
             await asyncio.wait_for(entered.wait(), 2)

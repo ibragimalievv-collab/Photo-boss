@@ -28,3 +28,8 @@ export function computeCommission(amountKopeks,frames){
 export function maySeeFinancialPeriod(roles,period){return !(roles.includes('ADMIN')&&!roles.includes('OWNER')&&period!=='today');}
 export function overlap(a,b){return a.start<b.end&&b.start<a.end;}
 export function validAmount(value){const s=String(value).trim().replace(',','.');if(!/^\d+(\.\d{1,2})?$/.test(s))throw new Error('Введите сумму с точностью до копейки');const n=Math.round(Number(s)*100);if(!Number.isSafeInteger(n)||n<=0||n>1000000000)throw new Error('Сумма должна быть от 0,01 до 10 000 000 ₽');return n;}
+
+// Working day rule of the business: everyone starts at 09:00 and works until
+// the last sale, closing the shift in the app. Plans store 09:00–23:59.
+export const WORK_START='09:00',OPEN_END='23:59';
+export function shiftTime(shift){return `с ${shift?.start||WORK_START}`;}

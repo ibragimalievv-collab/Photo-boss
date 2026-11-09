@@ -7,7 +7,6 @@ import hashlib
 import json
 from datetime import datetime
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
 from aiohttp import web
 from sqlalchemy import func, select
@@ -62,6 +61,7 @@ from .services.sale_workflow import (
     set_sale_counts,
     start_sale_draft,
 )
+from .timeutil import business_tz
 from .yandex_disk import (
     ROOT,
     YandexDisk,
@@ -71,9 +71,10 @@ from .yandex_disk import (
 )
 
 KINDS = frozenset({'booking', 'sale_start', 'sale_start_inline', 'sale_counts', 'sale_complete', 'sale_receipt',
-                   'sale_selected', 'sale_disk_selected', 'sale_gallery_selected', 'booking_receipt', 'shoot_photo', 'shoot_complete', 'shoot_retry', 'photo_edit', 'delivery_photo', 'delivery_handoff', 'gallery_reserve_photo'})
+                   'sale_selected', 'sale_disk_selected', 'sale_gallery_selected', 'booking_receipt', 'shoot_photo', 'shoot_photo_link', 'shoot_complete', 'shoot_retry', 'photo_edit', 'delivery_photo', 'delivery_handoff', 'gallery_reserve_photo'})
 MEDIA_KINDS = frozenset({'sale_receipt', 'sale_selected', 'booking_receipt', 'shoot_photo', 'delivery_photo', 'gallery_reserve_photo'})
-PREPARED_MEDIA_KINDS = MEDIA_KINDS | {'sale_disk_selected', 'sale_gallery_selected', 'sale_complete'}
+PREPARED_MEDIA_KINDS = MEDIA_KINDS | {'sale_disk_selected', 'sale_gallery_selected', 'sale_complete', 'shoot_photo_link'}
+LINK_FALLBACK = 'Кадр не найден среди выбранных. Загрузите файл обычным способом.'
 
 
 def validate_media(kind, raw):
@@ -101,6 +102,45 @@ def media_identity(kind, data, raw):
 def fields(data, expected):
     if set(data) != set(expected.split()):
         raise AccessError('Некорректные поля рабочей операции.', 400)
+
+
+SHA256_HEX = frozenset('0123456789abcdef')
+
+
+def original_name(value):
+    """Camera file name for display only; never used as a storage path."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise AccessError('Некорректное имя файла.', 400)
+    name = value.replace('\\', '/').rsplit('/', 1)[-1]
+    name = ''.join(ch for ch in name if ch.isprintable()).strip()
+    return name[:255] or None
+
+
+def valid_sha256(value):
+    return isinstance(value, str) and len(value) == 64 and set(value) <= SHA256_HEX
+
+
+def shoot_fields(kind, data):
+    """Full-shoot operations accept an optional camera file name and, for a
+    phone-reduced copy, the checksum of the camera original."""
+    expected = 'shooting sha256' if kind == 'shoot_photo_link' else 'shooting'
+    optional = ['filename'] + (['source_sha256'] if kind == 'shoot_photo' else [])
+    fields(data, expected + ''.join(' ' + key for key in optional if key in data))
+    if kind == 'shoot_photo_link' and not valid_sha256(data['sha256']):
+        raise AccessError('Некорректная контрольная сумма кадра.', 400)
+    if 'source_sha256' in data and not valid_sha256(data['source_sha256']):
+        raise AccessError('Некорректная контрольная сумма оригинала.', 400)
+    original_name(data.get('filename'))
+
+
+async def selected_original(session, booking_id, digest):
+    """A guest-selected original of this booking stored in the app folder."""
+    return await session.scalar(select(SaleDraftPhoto).join(
+        SaleDraft, SaleDraft.id == SaleDraftPhoto.draft_id).where(
+        SaleDraft.booking_id == booking_id, SaleDraftPhoto.sha256 == digest,
+        SaleDraftPhoto.storage_path.like(ROOT + '/%')).order_by(SaleDraftPhoto.id).limit(1))
 
 
 def receipt_analysis(value):
@@ -154,7 +194,33 @@ async def target(session, actor, value, field):
 class Workflow:
     def __init__(self, api):
         self.api = api
-        self.tz = getattr(api, 'tz', ZoneInfo('Europe/Moscow'))
+        self.tz = getattr(api, 'tz', None) or business_tz()
+
+    async def photo_hashes(self, request):
+        """Checksums already on the server for one shoot, so a re-selected
+        folder sends only missing files and reuses guest-selected originals."""
+        a = request['miniapp_actor']
+        try:
+            sid = int(request.match_info['id'])
+        except (KeyError, ValueError):
+            raise AccessError('Съёмка не найдена.', 404) from None
+        async with AsyncSession(self.api.engine) as session:
+            shooting = await session.get(Shooting, sid)
+            booking = await session.get(Booking, shooting.booking_id) if shooting else None
+            if booking is None or not await can_access_booking(session, a['id'], set(a['roles']), booking, photos=True):
+                raise AccessError('Нет доступа к съёмке.', 403)
+            stored = set((await session.scalars(select(PhotoStorage.sha256).where(
+                PhotoStorage.shooting_id == sid, PhotoStorage.sha256.is_not(None)))).all())
+            stored |= set((await session.scalars(select(Photo.source_sha256).where(
+                Photo.shooting_id == sid, Photo.source_sha256.is_not(None)))).all())
+            selected = (await session.scalars(select(SaleDraftPhoto.sha256).join(
+                SaleDraft, SaleDraft.id == SaleDraftPhoto.draft_id).where(
+                SaleDraft.booking_id == booking.id,
+                SaleDraftPhoto.storage_path.like(ROOT + '/%')))).all()
+        return web.json_response({'shootingId': sid, 'stored': sorted(set(stored)),
+                                  'selected': sorted(set(selected) - set(stored)),
+                                  'open': shooting.status == 'READY_FOR_SALE' and not shooting.full_upload_completed_at},
+                                 headers={'Cache-Control': 'no-store'})
 
     async def receipt_image(self, request):
         return await self._receipt_image(request, draft=False)
@@ -164,6 +230,7 @@ class Workflow:
 
     async def receipt_retry(self, request):
         from datetime import UTC, timedelta
+
         from .people import positive_id
         from .services.automatic_receipts import KEY, analysis_of, enabled
         if not enabled():
@@ -255,27 +322,72 @@ class Workflow:
             assigned_photographers = {u.id: u for u in await session.scalars(select(User).where(
                 User.id.in_({b.photographer_id for b in bookings if b.photographer_id})))}
             rows = []
+            from .bank_payments import public_bill
+            from .no_sale import public as public_no_sale
+            from .services.pricing import snapshot, unit_price
+            from .services.sale_discounts import public_approval
+            # One query per kind of record for all listed bookings instead of a
+            # dozen per booking (up to 200+ bookings per screen).
+            booking_ids = [b.id for b in bookings]
+            def by(items, key):
+                grouped = {}
+                for item in items:
+                    grouped.setdefault(key(item), []).append(item)
+                return grouped
+            bills_by_booking = by(await session.scalars(select(BankPayment).where(
+                BankPayment.booking_id.in_(booking_ids)).order_by(BankPayment.id)), lambda x: x.booking_id)
+            open_drafts = {}
+            for item in await session.scalars(select(SaleDraft).where(SaleDraft.booking_id.in_(booking_ids),
+                    SaleDraft.status.in_(['AWAITING_RECEIPT', 'AWAITING_COUNTS', 'AWAITING_SELECTED'])).order_by(SaleDraft.id)):
+                open_drafts[item.booking_id] = item  # the newest open draft, as before
+            shoots = {item.booking_id: item for item in await session.scalars(
+                select(Shooting).where(Shooting.booking_id.in_(booking_ids)))}
+            shoot_ids = [item.id for item in shoots.values()]
+            files_by_shoot = by(await session.scalars(select(PhotoStorage).where(
+                PhotoStorage.shooting_id.in_(shoot_ids)).order_by(PhotoStorage.id)), lambda x: x.shooting_id)
+            names_by_shoot = {}
+            for shooting_id, photo_id, name in (await session.execute(select(Photo.shooting_id, Photo.id, Photo.original_name)
+                    .where(Photo.shooting_id.in_(shoot_ids), Photo.original_name.is_not(None)))).all():
+                names_by_shoot.setdefault(shooting_id, {})[photo_id] = name
+            edits_by_shoot = {}
+            for edit, shooting_id in (await session.execute(select(PhotoEdit, PhotoStorage.shooting_id)
+                    .join(PhotoStorage, PhotoStorage.photo_id == PhotoEdit.photo_id)
+                    .where(PhotoStorage.shooting_id.in_(shoot_ids)).order_by(PhotoEdit.id))).all():
+                edits_by_shoot.setdefault(shooting_id, []).append(edit)
+            originals_by_shoot = dict((await session.execute(select(Photo.shooting_id, func.count(Photo.id))
+                .where(Photo.shooting_id.in_(shoot_ids)).group_by(Photo.shooting_id))).all())
+            sales_by_booking = by(await session.scalars(select(Sale).where(
+                Sale.booking_id.in_(booking_ids)).order_by(Sale.id)), lambda x: x.booking_id)
+            receipts_by_booking = by(await session.scalars(select(Receipt).where(
+                Receipt.booking_id.in_(booking_ids)).order_by(Receipt.id)), lambda x: x.booking_id)
+            discounts_by_booking = by(await session.scalars(select(SaleDiscountApproval).where(
+                SaleDiscountApproval.booking_id.in_(booking_ids)).order_by(SaleDiscountApproval.id.desc())),
+                lambda x: x.booking_id)
+            clients = {item.id: item for item in await session.scalars(
+                select(Client).where(Client.id.in_({b.client_id for b in bookings})))}
+            listed_hotels = {item.id: item for item in await session.scalars(
+                select(Hotel).where(Hotel.id.in_({b.hotel_id for b in bookings})))}
+            draft_authors = {item.id: item for item in await session.scalars(
+                select(User).where(User.id.in_({d.created_by_id for d in open_drafts.values()})))}
+            uploadable = set(await session.scalars(select(Booking.id).where(
+                Booking.id.in_(booking_ids), booking_scope(a['id'], a['roles'], photos=True))))
             for b in bookings:
-                from .services.pricing import snapshot, unit_price
                 effective_price = await unit_price(session, b)
-                from .bank_payments import public_bill
-                bank_bills = list(await session.scalars(select(BankPayment).where(BankPayment.booking_id == b.id).order_by(BankPayment.id)))
-                draft = await session.scalar(select(SaleDraft).where(SaleDraft.booking_id == b.id,
-                    SaleDraft.status.in_(['AWAITING_RECEIPT', 'AWAITING_COUNTS', 'AWAITING_SELECTED'])).order_by(SaleDraft.id.desc()).limit(1))
-                shoot = await session.scalar(select(Shooting).where(Shooting.booking_id == b.id))
-                files = (await session.scalars(select(PhotoStorage).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoStorage.id))).all() if shoot else []
-                edits = (await session.scalars(select(PhotoEdit).join(PhotoStorage, PhotoStorage.photo_id == PhotoEdit.photo_id).where(PhotoStorage.shooting_id == shoot.id).order_by(PhotoEdit.id))).all() if shoot else []
-                purchases = (await session.scalars(select(Sale).where(Sale.booking_id == b.id).order_by(Sale.id))).all()
-                receipts = (await session.scalars(select(Receipt).where(Receipt.booking_id == b.id).order_by(Receipt.id))).all()
-                can_upload = await can_access_booking(session, a['id'], set(a['roles']), b, photos=True)
-                customer = await session.get(Client, b.client_id)
-                hotel = await session.get(Hotel, b.hotel_id)
-                total, paid, due = await payment_totals(session, b.id)
-                original_count = await session.scalar(select(func.count(Photo.id)).where(Photo.shooting_id == shoot.id)) if shoot else 0
-                draft_actor = await session.get(User, draft.created_by_id) if draft else None
-                from .services.sale_discounts import public_approval
-                discounts = list(await session.scalars(select(SaleDiscountApproval).where(
-                    SaleDiscountApproval.booking_id == b.id).order_by(SaleDiscountApproval.id.desc())))
+                bank_bills = bills_by_booking.get(b.id, [])
+                draft = open_drafts.get(b.id)
+                shoot = shoots.get(b.id)
+                files = files_by_shoot.get(shoot.id, []) if shoot else []
+                names = names_by_shoot.get(shoot.id, {}) if shoot else {}
+                edits = edits_by_shoot.get(shoot.id, []) if shoot else []
+                purchases = sales_by_booking.get(b.id, [])
+                receipts = receipts_by_booking.get(b.id, [])
+                can_upload = b.id in uploadable  # same scope as can_access_booking(photos=True)
+                customer = clients.get(b.client_id)
+                hotel = listed_hotels.get(b.hotel_id)
+                total, paid, due = await payment_totals(session, b.id, sales=purchases, receipts=receipts)
+                original_count = originals_by_shoot.get(shoot.id, 0) if shoot else 0
+                draft_actor = draft_authors.get(draft.created_by_id) if draft else None
+                discounts = discounts_by_booking.get(b.id, [])
                 history = {'client': customer.name if customer else '', 'phone': customer.phone if customer else None,
                            'hotel': hotel.name if hotel else 'Отель не указан', 'sales': [
                     {'id': sale.id, 'at': sale.created_at.isoformat() + 'Z', 'photos': sale.sold_photos,
@@ -285,7 +397,7 @@ class Workflow:
                     'salesAmount': str(total), 'paidAmount': str(paid), 'dueAmount': str(due),
                     'creditAmount': str(money(max(Decimal(0), paid - total))),
                     'totalFrames': max([original_count or 0, draft.declared_photo_count or 0 if draft else 0] + [sale.declared_photo_count or 0 for sale in purchases])}
-                rows.append({**history, 'receipts': [receipt_state(receipt) for receipt in receipts], 'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
+                rows.append({**history, 'receipts': [receipt_state(receipt) for receipt in receipts], 'edits': [{'id': e.id, 'photo': e.photo_id, 'status': e.status, 'error': e.last_error} for e in edits], 'files': [{'id': f.photo_id, 'name': names.get(f.photo_id), 'status': f.status, 'error': (('Хранилище заполнено. Освободите место и повторите.' if 'заполнено' in f.last_error else 'Не удалось сохранить. Повторите загрузку.') if f.last_error else None)} for f in files], 'id': b.id, 'date': str(b.shoot_date), 'time': str(b.shoot_time)[:5],
                     'room': b.room, 'status': b.status, 'hotelId': b.hotel_id, 'price': effective_price,
                     'photographerId': b.photographer_id,
                     'photographer': (assigned_photographers[b.photographer_id].name
@@ -295,6 +407,7 @@ class Workflow:
                     'declaredDeposit': str(money(b.deposit)),
                     'bankPayments': [public_bill(bill) for bill in bank_bills],
                     'saleRecorded': bool(purchases),
+                    'noSale': public_no_sale(b),
                     'shootingId': shoot.id if shoot else None, 'fullUploaded': bool(shoot and shoot.full_upload_completed_at),
                     'uploadedOriginals': int(original_count or 0),
                     'shootingStatus': shoot.status if shoot else None,
@@ -367,6 +480,7 @@ class Workflow:
                         'price': str(money(album.price))} for album in albums],
             'canApproveDiscount': bool({'OWNER', 'ADMIN'} & set(a['roles'])),
             'canAuditDisk': 'OWNER' in a['roles'],
+            'canTakeOverSales': bool({'OWNER', 'ADMIN'} & set(a['roles'])),
             'canCheckBankConnection': 'OWNER' in a['roles'],
             **payment_settings(refund_integration=getattr(self.api, 'booking_refunds', None)),
             'packages': [{'id': p.id, 'name': p.name, 'price': prices[p.id]} for p in packages if p.active],
@@ -422,6 +536,29 @@ class Workflow:
             booking = await session.get(Booking, draft.booking_id)
             folder, _context = await storage_location(session, booking, draft.id)
         return await self.save_disk_original(folder[len(ROOT):], raw)
+
+    async def copy_disk_original(self, source, folder, digest, size):
+        """Copy a confirmed original into another app folder on the Disk itself."""
+        token, client_id = configured_from_env()
+        if not token:
+            raise AccessError('Яндекс.Диск не подключён. Кадр остаётся в локальной очереди.', 503)
+        name = source.rsplit('/', 1)[-1]
+        ext = name.rsplit('.', 1)[-1].lower() if '.' in name else 'jpg'
+        ext = ext if ext in {'jpg', 'jpeg', 'png', 'webp'} else 'jpg'
+        storage = YandexDisk(token, client_id)
+        path = ROOT + folder + f'/{digest}.{ext}'
+        try:
+            await storage.copy(source, path, size=size, sha256=digest)
+        except YandexDiskError as exc:
+            if 'HTTP 409' not in str(exc):
+                raise
+            # The shoot folder may not exist yet.
+            parent = ROOT
+            for part in folder.strip('/').split('/'):
+                parent += '/' + part
+                await storage.ensure_dir(parent)
+            await storage.copy(source, path, size=size, sha256=digest)
+        return path
 
     async def save_disk_original(self, folder, raw):
         token, client_id = configured_from_env()
@@ -531,7 +668,11 @@ class Workflow:
                         raise AccessError('Нет доступа к записи.', 403)
                     if data['purpose'] not in ('DEPOSIT', 'PAYMENT'):
                         raise AccessError('Неизвестный вид чека.', 400)
-                    from .services.automatic_receipts import enabled, existing_upload, pending_upload
+                    from .services.automatic_receipts import (
+                        enabled,
+                        existing_upload,
+                        pending_upload,
+                    )
                     if enabled() and await existing_upload(session, bid, data['purpose'], hashlib.sha256(raw).hexdigest()):
                         prepared['target'] = bid
                         return prepared
@@ -542,17 +683,23 @@ class Workflow:
                         raise AccessError('Дополнительная оплата не требуется.', 409)
                     prepared['target'] = bid
                 else:
-                    fields(data, 'shooting')
+                    shoot_fields(kind, data)
                     sid = await target(session, actor, data['shooting'], 'shootingId')
                     shooting = await session.get(Shooting, sid)
                     booking = await session.get(Booking, shooting.booking_id) if shooting else None
                     if not await can_access_booking(session, actor.id, roles, booking, photos=True):
                         raise AccessError('Нет доступа к съёмке.', 403)
+                    digest = data['sha256'] if kind == 'shoot_photo_link' else hashlib.sha256(raw).hexdigest()
                     old = await session.scalar(select(PhotoStorage.id).where(PhotoStorage.shooting_id == sid,
-                        PhotoStorage.sha256 == hashlib.sha256(raw).hexdigest()).limit(1))
+                        PhotoStorage.sha256 == digest).limit(1))
                     if not old and (shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at):
                         raise AccessError('Загрузка новых кадров уже закрыта или ещё недоступна.', 409)
                     prepared['target'] = sid
+                    if kind == 'shoot_photo_link' and not old:
+                        selected = await selected_original(session, booking.id, digest)
+                        if selected is None:
+                            raise AccessError(LINK_FALLBACK, 409)
+                        prepared['link_source'] = (selected.storage_path, selected.byte_size)
             # Detached identity/targets above are all that provider calls need.
             # No connection, transaction or business row lock remains checked out.
             if kind in {'sale_receipt', 'booking_receipt'}:
@@ -562,6 +709,9 @@ class Workflow:
                 prepared['analysis']['documents'] = manifest(raw)
             elif kind == 'sale_selected' and not prepared.get('completed_duplicate'):
                 prepared['path'] = await self.save_selected(draft, raw)
+            elif kind == 'shoot_photo_link' and prepared.get('link_source'):
+                source, size = prepared['link_source']
+                prepared['path'] = await self.copy_disk_original(source, f'/shootings/{sid}', data['sha256'], size)
             elif kind == 'shoot_photo':
                 from .services.media_files import direct_disk_mode
                 if direct_disk_mode(getattr(self.api, 'standalone', None)):
@@ -747,7 +897,11 @@ class Workflow:
                 result |= {'saleId': complete.sale.id, 'amount': str(complete.sale_amount),
                            'soldPhotos': complete.sale.sold_photos, 'paymentStatus': complete.sale.payment_status}
         elif kind == 'sale_selected':
-            from .services.sale_gallery import link_photo, original_file_reference, storage_location
+            from .services.sale_gallery import (
+                link_photo,
+                original_file_reference,
+                storage_location,
+            )
             if prepared_media is not None and 'gallery_context' in prepared_media:
                 _folder, context = await storage_location(session, booking, draft.id)
                 if prepared_media['gallery_context'] != context:
@@ -807,8 +961,13 @@ class Workflow:
             raise AccessError('Нет доступа к записи.', 403)
         if data['purpose'] not in ('DEPOSIT', 'PAYMENT'):
             raise AccessError('Неизвестный вид чека.', 400)
-        from .services.automatic_receipts import (admit, enabled, existing_upload,
-                                                  pending_upload, supersede_exhausted)
+        from .services.automatic_receipts import (
+            admit,
+            enabled,
+            existing_upload,
+            pending_upload,
+            supersede_exhausted,
+        )
         if enabled():
             existing = await existing_upload(session, bid, data['purpose'], hashlib.sha256(raw).hexdigest())
             if existing:
@@ -841,8 +1000,55 @@ class Workflow:
         await audit(session, actor, 'receipt_uploaded', 'receipt', receipt.id)
         return {'bookingId': bid, 'receiptId': receipt.id, 'receipt': receipt_state(receipt)}
 
+    async def link_selected_original(self, session, actor, booking, shooting, data, *, prepared_path=None):
+        """Count a guest-selected original in the full shoot without a second upload.
+
+        The selected original of this same booking is already stored and
+        checksum-verified on Disk. Reuse that exact file; never another guest's.
+        """
+        sid, digest = shooting.id, data['sha256']
+        name = original_name(data.get('filename'))
+        existing = await session.scalar(select(PhotoStorage).where(
+            PhotoStorage.shooting_id == sid, PhotoStorage.sha256 == digest).limit(1))
+        if existing is not None:
+            photo = await session.get(Photo, existing.photo_id)
+            if name and photo is not None and not photo.original_name:
+                photo.original_name = name
+            return {'shootingId': sid, 'photoId': existing.photo_id, 'duplicate': True,
+                    'storageStatus': existing.status, 'linked': True}
+        if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
+            raise AccessError('Загрузка новых кадров уже закрыта или ещё недоступна.', 409)
+        selected = await selected_original(session, booking.id, digest)
+        if selected is None:
+            # The browser falls back to a normal upload of this file.
+            raise AccessError(LINK_FALLBACK, 409)
+        # The full-shoot archive must hold its own copy in the shoot folder:
+        # completion checks every original there, and a sale gallery may be
+        # purged later. The copy was made and verified before this transaction.
+        expected = ROOT + f'/shootings/{sid}/{digest}.'
+        if not prepared_path or not prepared_path.startswith(expected):
+            raise AccessError('Копия кадра для архива съёмки не подготовлена. Повторите отправку.', 409)
+        path = prepared_path
+        photo = Photo(shooting_id=sid, file_id=path, original_name=name, source_sha256=digest)
+        session.add(photo)
+        await session.flush()
+        storage, _ = await ensure_photo_storage(session, photo_id=photo.id, shooting_id=sid,
+            file_id=path, file_unique_id='web-sha256:' + digest, source_kind='DOCUMENT')
+        storage.telegram_file_id = storage.disk_path = path
+        storage.sha256, storage.byte_size = digest, selected.byte_size
+        storage.status, storage.attempts, storage.last_error = 'STORED', 0, None
+        storage.stored_at = storage.updated_at = utc_now()
+        storage.started_at = None
+        await audit(session, actor, 'shoot_photo_uploaded', 'shooting', sid,
+                    f'linked_selected_original; sale_draft_photo={selected.id}')
+        return {'shootingId': sid, 'photoId': photo.id, 'duplicate': False,
+                'storageStatus': 'STORED', 'storageVerified': True, 'linked': True}
+
     async def shoot(self, session, actor, roles, kind, data, raw, *, prepared_media=None):
-        fields(data, 'shooting')
+        if kind in {'shoot_photo', 'shoot_photo_link'}:
+            shoot_fields(kind, data)
+        else:
+            fields(data, 'shooting')
         sid = await target(session, actor, data['shooting'], 'shootingId')
         if prepared_media is not None and prepared_media['target'] != sid:
             raise AccessError('Съёмка изменилась. Повторите отправку.', 409)
@@ -857,6 +1063,9 @@ class Workflow:
             await audit(session, actor, 'shoot_storage_recovery', 'shooting', sid,
                         json.dumps(recovery))
             return {'shootingId': sid, **recovery}
+        if kind == 'shoot_photo_link':
+            return await self.link_selected_original(session, actor, booking, shooting, data,
+                                                     prepared_path=(prepared_media or {}).get('path'))
         if kind == 'shoot_photo':
             from .services.media_files import direct_disk_mode
             digest = hashlib.sha256(raw).hexdigest()
@@ -875,6 +1084,8 @@ class Workflow:
                     storage, _ = await ensure_photo_storage(session, photo_id=photo.id, shooting_id=sid,
                         file_id=path, file_unique_id='web-sha256:' + digest, source_kind='DOCUMENT')
                 photo.file_id = storage.telegram_file_id = storage.disk_path = path
+                photo.original_name = original_name(data.get('filename')) or photo.original_name
+                photo.source_sha256 = data.get('source_sha256') or photo.source_sha256
                 storage.sha256, storage.byte_size = digest, len(raw)
                 storage.status, storage.attempts, storage.last_error = 'STORED', 0, None
                 storage.stored_at = storage.updated_at = utc_now()
@@ -894,7 +1105,8 @@ class Workflow:
             if shooting.status != 'READY_FOR_SALE' or shooting.full_upload_completed_at:
                 raise AccessError('Загрузка новых кадров уже закрыта или ещё недоступна.', 409)
             file_id, unique_id = prepared_media['file'] if prepared_media is not None else await self.save_telegram(actor, raw)
-            photo = Photo(shooting_id=sid, file_id=file_id)
+            photo = Photo(shooting_id=sid, file_id=file_id, original_name=original_name(data.get('filename')),
+                          source_sha256=data.get('source_sha256'))
             session.add(photo)
             await session.flush()
             storage, _ = await ensure_photo_storage(session, photo_id=photo.id, shooting_id=sid,

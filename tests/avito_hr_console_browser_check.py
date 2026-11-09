@@ -96,4 +96,9 @@ export const api=async(path,options={})=>{
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    # Version 3.62 from Timeweb ships the Avito worker but not its HR console
+    # (same reason the Avito dialogue tests use importorskip).
+    if not Path('app/webapp/hr-avito.html').exists():
+        print('SKIP: HR console is not part of this version (app/webapp/hr-avito.html is absent)')
+    else:
+        asyncio.run(main())

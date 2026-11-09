@@ -20,8 +20,14 @@ from test_miniapp_release import TOKEN, signed
 from test_workflow_services import fixture
 
 from app.miniapp_api import install_miniapp
-from app.models import Booking, Client, OperationRequest, Shooting
+from app.models import Booking, Client, OperationRequest, Package, Shooting
 from app.services.academy import ACADEMY_BLOCKS, ACADEMY_LESSONS
+
+
+async def set_package_active(factory, active):
+    async with factory() as session:
+        (await session.get(Package, 1)).active = active
+        await session.commit()
 
 
 async def main():
@@ -60,24 +66,36 @@ async def main():
                     await page.get_by_text('Новая бронь', exact=True).click()
                     form = page.locator('#workflowBooking')
                     await form.locator('[name=client_name]').fill('Гость для проверки')
-                    await form.locator('[name=client_phone]').fill('123')
+                    await form.locator('[name=client_phone]').fill('+7 999 000-00-00')
                     await form.locator('[name=room]').fill('101')
                     await form.locator('[name=shoot_time]').fill('12:00')
                     await form.locator('[name=deposit]').fill('0')
+                    # The phone is now checked on the device with the server's rules, so
+                    # the rejection comes from server-only data: the package was switched
+                    # off after this screen loaded.
+                    await set_package_active(factory, False)
                     await form.get_by_role('button', name='Сохранить бронь', exact=True).click()
-                    repair = form.get_by_role('button', name='Исправить запись', exact=True)
-                    await expect(repair).to_be_visible(timeout=30000)
-                    await expect(form.locator('[data-operation-progress]')).to_contain_text('Запись не была создана')
-                    await expect(form.locator('[name=client_phone]')).to_be_disabled()
+                    # The form is free for the next guest at once; the rejected booking
+                    # waits in this device's booking list with the server's reason.
+                    history = page.locator('#bookingHistory [data-booking-history]')
+                    await expect(history).to_have_count(1, timeout=30000)
+                    await expect(history).to_contain_text('Запись требует исправления', timeout=30000)
+                    await expect(history).to_contain_text('Отель или пакет больше не доступны')
+                    await expect(form.locator('[name=client_name]')).to_have_value('')
                     before = await page.evaluate("async()=>await (await import('/app/js/outbox.js')).outboxRows()")
                     assert len(before) == 1 and before[0]['status'] == 'error'
                     async with factory() as session:
                         assert await session.scalar(select(func.count(Booking.id))) == 0
-                    await repair.click()
-                    await expect(form.locator('[name=client_phone]')).to_be_enabled()
-                    await form.locator('[name=client_phone]').fill('+79991234567')
-                    await form.get_by_role('button', name='Сохранить исправленную запись', exact=True).click()
-                    await expect(form.locator('[data-operation-progress]')).to_contain_text('сохранена сервером', timeout=30000)
+                    await set_package_active(factory, True)  # the owner restores the package
+                    await history.get_by_role('button', name='Исправить запись', exact=True).click()
+                    correction = page.locator('#workflowBookingCorrection')
+                    await expect(correction).to_be_visible()
+                    await expect(correction.locator('[role=alert]')).to_contain_text('Отель или пакет больше не доступны')
+                    await expect(correction.locator('[name=client_name]')).to_have_value('Гость для проверки')
+                    await correction.locator('[name=client_phone]').fill('+79991234567')
+                    await correction.get_by_role('button', name='Сохранить исправление', exact=True).click()
+                    await expect(history).to_contain_text('сохранена сервером', timeout=30000)
+                    await expect(correction).to_have_count(0)
                     after = await page.evaluate("async()=>await (await import('/app/js/outbox.js')).outboxRows()")
                     assert len(after) == 1 and after[0]['key'] == before[0]['key'] and after[0]['status'] == 'synced'
                     async with factory() as session:
@@ -86,10 +104,10 @@ async def main():
                         assert (await session.scalar(select(Client))).phone == '+79991234567'
                     await page.reload()
                     await page.get_by_text('Новая бронь', exact=True).click()
-                    await expect(page.locator('#workflowBooking [data-operation-progress]')).to_contain_text('сохранена сервером')
+                    await expect(page.locator('#bookingHistory [data-booking-history]')).to_contain_text('сохранена сервером')
                     assert not errors, errors
                     bot.send_message.assert_not_awaited()
-                    print('PASS: mobile booking validation failure can be edited and saved under the original key; one booking/client/shooting, no duplicates after reload')
+                    print('PASS: a booking the server rejects waits in the device list, is corrected and saved under the original key; one booking/client/shooting, no duplicates after reload')
                 finally:
                     await browser.close()
         finally:

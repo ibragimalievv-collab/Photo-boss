@@ -136,13 +136,14 @@ def main():
                 page.route("**/*", handler(state, role, sent))
                 page.goto(BASE)
                 page.locator("[data-open-chat]").wait_for()
-                page.locator(".pb-chat-trigger .pb-chat-unread").wait_for()
-                assert page.locator(".pb-chat-trigger .pb-chat-unread").inner_text() == "3"
-                page.locator("[data-open-chat]").wait_for()
-                page.wait_for_timeout(100)
-                assert "3" in page.locator("[data-open-chat]").inner_text()
+                # Nothing is polled before the work rules are accepted (no repeated HTTP 428).
+                page.wait_for_timeout(300)
+                assert page.locator(".pb-chat-trigger .pb-chat-unread").count() == 0
                 page.locator("[data-open-chat]").click()
                 page.get_by_text("Принять общие правила и открыть чат", exact=True).click()
+                page.locator(".pb-chat-trigger .pb-chat-unread").wait_for()
+                assert page.locator(".pb-chat-trigger .pb-chat-unread").inner_text() == "3"
+                assert "3" in page.locator("[data-open-chat]").inner_text()
                 page.locator('[data-chat="general"] .pb-chat-unread').wait_for()
                 assert page.locator('[data-peer="2"] .pb-chat-unread').inner_text() == "2"
                 expect(page.locator('[data-peer="2"] .pb-chat-presence')).to_have_text("В сети")

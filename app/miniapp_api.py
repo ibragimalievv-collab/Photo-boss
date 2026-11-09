@@ -5,7 +5,6 @@ existing bot workflows. Plans are not presented as confirmed attendance.
 """
 from __future__ import annotations
 
-from .services.ai_provider import ai_configured
 import hashlib
 import html
 import json
@@ -44,6 +43,7 @@ from .operations_guard import (
 )
 from .services.academy_growth import personal_tip
 from .services.booking_access import booking_scope_sql
+from .timeutil import as_utc
 from .yandex_disk import YandexDiskError
 
 logger = logging.getLogger(__name__)
@@ -132,10 +132,9 @@ def cents(value) -> int:
     return int((Decimal(str(value or 0)) * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
-def as_utc(value):
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+def as_day(value):
+    """A DATE column read by raw SQL: date in PostgreSQL, ISO text in SQLite."""
+    return value if isinstance(value, date) and not isinstance(value, datetime) else date.fromisoformat(str(value)[:10])
 
 
 def first_role(roles):
@@ -427,6 +426,7 @@ class MiniApp:
         import re
 
         from .booking_management import version
+        from .no_sale import public_row as public_no_sale
         clause = f"AND ({booking_scope_sql(actor['id'], actor['roles'])})"
         params = {'uid': actor['id'], 'day': day}
         where = '1=1' if search else 'b.shoot_date=:day'
@@ -445,7 +445,8 @@ class MiniApp:
         refund_columns = 'b.reservation_version_id,' if getattr(self, 'booking_refunds', None) is not None else ''
         rows = await self.rows(conn, f"""SELECT {refund_columns} b.id,b.room,b.guest_count,b.shoot_date,b.shoot_time,b.status,
             b.photographer_id,b.manager_id,b.hotel_id,c.name AS client,c.phone,h.name AS hotel,
-            sh.id AS shooting_id,sh.status AS shooting_status,
+            b.no_sale_reason,b.no_sale_note,b.no_sale_at,
+            sh.id AS shooting_id,sh.status AS shooting_status,sh.full_upload_completed_at AS full_uploaded_at,
             p.name AS photographer,m.name AS manager,pk.name AS package,
             (SELECT COUNT(*) FROM photos ph JOIN shootings sh ON sh.id=ph.shooting_id
              WHERE sh.booking_id=b.id) AS frames
@@ -463,7 +464,8 @@ class MiniApp:
                  "trashed": trash,
                  "refundEnabled": getattr(self, 'booking_refunds', None) is not None,
                  "canEdit": bool({'OWNER', 'ADMIN'} & set(actor['roles']) or ('MANAGER' in actor['roles'] and r['manager_id'] == actor['id'])),
-                 "type": r["package"] or "Съёмка", "frames": r["frames"]} for r in rows]
+                 "type": r["package"] or "Съёмка", "frames": r["frames"], "fullUploaded": r["full_uploaded_at"] is not None,
+                 "noSale": public_no_sale(r["no_sale_reason"], r["no_sale_note"], r["no_sale_at"])} for r in rows]
         for item in items:
             item['revision'] = version(item)
         if getattr(self, 'booking_refunds', None) is not None:
@@ -569,16 +571,21 @@ class MiniApp:
         if await self.body(request):
             raise AccessError("Лишние параметры действия.", 400)
         action = request.match_info["action"]
+        # The four original steps stay for the Telegram bot and older clients.
+        # The app shows two: "begin" (take + start) and "complete" (finish +
+        # ready for sale). Earlier timestamps are filled once, never overwritten.
         transitions = {
-            "pickup": ("ASSIGNED", "PICKED_UP", "accepted_at"),
-            "start": ("PICKED_UP", "SHOOTING", "started_at"),
-            "finish": ("SHOOTING", "SHOT", "completed_at"),
-            "ready": ("SHOT", "READY_FOR_SALE", "ready_for_sale_at"),
+            "pickup": (("ASSIGNED",), "PICKED_UP", ("accepted_at",)),
+            "start": (("PICKED_UP",), "SHOOTING", ("started_at",)),
+            "finish": (("SHOOTING",), "SHOT", ("completed_at",)),
+            "ready": (("SHOT",), "READY_FOR_SALE", ("ready_for_sale_at",)),
+            "begin": (("ASSIGNED", "PICKED_UP"), "SHOOTING", ("accepted_at", "started_at")),
+            "complete": (("SHOOTING", "SHOT"), "READY_FOR_SALE", ("completed_at", "ready_for_sale_at")),
         }
         if action not in transitions:
             raise AccessError("Неизвестное действие съёмки.", 400)
         bid = int(request.match_info["id"])
-        expected, target, timestamp = transitions[action]
+        allowed, target, timestamps = transitions[action]
         async with self.engine.begin() as conn:
             bookings = await self.rows(conn,
                 "SELECT photographer_id,status FROM bookings WHERE id=:bid FOR UPDATE", bid=bid)
@@ -591,17 +598,19 @@ class MiniApp:
                 raise AccessError("Это не ваша съёмка.", 403)
             if bookings[0]["status"] in {"PENDING_CONFIRMATION", "REJECTED", "CANCELLED"}:
                 raise AccessError("Съёмка ещё не подтверждена или отменена.", 409)
-            if shoot["status"] != expected:
+            if shoot["status"] not in allowed:
                 raise AccessError("Этот шаг уже выполнен или предыдущий ещё не завершён. Обновите карточку.", 409)
             now = datetime.now(timezone.utc).replace(tzinfo=None)
+            # Column names come only from the fixed table above.
+            stamps = [f"{name}=COALESCE({name},:now)" for name in timestamps[:-1]] + [f"{timestamps[-1]}=:now"]
             await conn.execute(text(
-                f"UPDATE shootings SET status=:status,{timestamp}=:now WHERE id=:sid"),
+                f"UPDATE shootings SET status=:status,{','.join(stamps)} WHERE id=:sid"),
                 {"status": target, "now": now, "sid": shoot["id"]})
             await conn.execute(text("UPDATE bookings SET status=:status WHERE id=:bid"),
                 {"status": target, "bid": bid})
             await self.audit_write(conn, actor, f"shooting_{action}", "shooting",
-                                   shoot["id"], f"Mini App: {expected} → {target}")
-        if action == "ready":
+                                   shoot["id"], f"Mini App: {shoot['status']} → {target}")
+        if action in {"ready", "complete"}:
             # Notify using the same template as the Telegram bot, after commit.
             try:
                 from .services.bookings import send_manager_ready_message
@@ -703,20 +712,27 @@ class MiniApp:
             WHERE s.start_at<:hi AND s.end_at>:lo {clause} ORDER BY s.start_at,u.name""",
             uid=actor["id"], lo=lower, hi=upper)
         items = []
-        for r in rows:
-            st, en = as_utc(r["start_at"]).astimezone(self.tz), as_utc(r["end_at"]).astimezone(self.tz)
+        local = [(r, as_utc(r["start_at"]).astimezone(self.tz), as_utc(r["end_at"]).astimezone(self.tz)) for r in rows]
+        # Three queries for the whole period instead of three per shift (a month
+        # of the team schedule is hundreds of shifts).
+        started, ended, breaks_by_shift = set(), set(), {}
+        if local:
+            window = {"first": min(st.date() for _, st, _ in local), "last": max(st.date() for _, st, _ in local)}
+            started = {(x["user_id"], as_day(x["shift_date"])) for x in await self.rows(conn,
+                """SELECT user_id,shift_date FROM shift_check_ins WHERE shift_date>=:first
+                AND shift_date<=:last AND started_at IS NOT NULL""", **window)}
+            ended = {(x["user_id"], as_day(x["shift_date"])) for x in await self.rows(conn,
+                """SELECT user_id,shift_date FROM shift_check_outs WHERE shift_date>=:first
+                AND shift_date<=:last AND ended_at IS NOT NULL""", **window)}
+            for item in await self.rows(conn, '''SELECT user_id,hotel_id,shift_date,started_at,ended_at
+                    FROM work_breaks WHERE shift_date>=:first AND shift_date<=:last ORDER BY started_at''', **window):
+                breaks_by_shift.setdefault((item["user_id"], item["hotel_id"], as_day(item["shift_date"])), []).append(item)
+        for r, st, en in local:
             attendance = "PLANNED"
-            checks = await self.rows(conn, """SELECT started_at FROM shift_check_ins
-                WHERE user_id=:uid AND shift_date=:day AND started_at IS NOT NULL""",
-                uid=r["user_id"], day=st.date())
-            outs = await self.rows(conn, """SELECT ended_at FROM shift_check_outs
-                WHERE user_id=:uid AND shift_date=:day AND ended_at IS NOT NULL""",
-                uid=r["user_id"], day=st.date())
-            if checks:
-                attendance = "ENDED" if outs else ("STARTED" if st.date() == self.today() else "MISSING_CHECKOUT")
-            breaks = await self.rows(conn, '''SELECT started_at,ended_at FROM work_breaks
-                WHERE user_id=:uid AND hotel_id=:hid AND shift_date=:day ORDER BY started_at''',
-                uid=r['user_id'], hid=r['hotel_id'], day=st.date())
+            if (r["user_id"], st.date()) in started:
+                attendance = ("ENDED" if (r["user_id"], st.date()) in ended
+                              else ("STARTED" if st.date() == self.today() else "MISSING_CHECKOUT"))
+            breaks = breaks_by_shift.get((r['user_id'], r['hotel_id'], st.date()), [])
             if attendance == 'STARTED' and any(not item['ended_at'] for item in breaks):
                 attendance = 'ON_BREAK'
             items.append({"id": r["id"], "userId": r["user_id"], "name": r["name"], "role": r["role"],
@@ -760,6 +776,19 @@ class MiniApp:
             ('NEW','PENDING_CONFIRMATION','CONFIRMED','RESCHEDULED','ASSIGNED','PICKED_UP','ARRIVED','SHOOTING','IN_PROGRESS')
             AND ({scope}) AND {visible} ORDER BY b.shoot_date,b.shoot_time,b.id LIMIT 5""",
             uid=actor['id'], since=today-timedelta(days=7), today=today)
+        # Finished shoots with neither a sale, an open sale nor "гость не купил"
+        # for over two hours: someone still has to record the outcome.
+        awaiting = await self.rows(conn, f"""SELECT b.id,b.shoot_date,b.shoot_time,c.name AS client,h.name AS hotel
+            FROM bookings b JOIN clients c ON c.id=b.client_id JOIN hotels h ON h.id=b.hotel_id
+            JOIN shootings sh ON sh.booking_id=b.id
+            WHERE b.status='READY_FOR_SALE' AND b.no_sale_at IS NULL AND b.shoot_date>=:since
+            AND sh.ready_for_sale_at IS NOT NULL AND sh.ready_for_sale_at<:cutoff
+            AND NOT EXISTS (SELECT 1 FROM sales s WHERE s.booking_id=b.id)
+            AND NOT EXISTS (SELECT 1 FROM sale_drafts d WHERE d.booking_id=b.id
+                AND d.status IN ('AWAITING_RECEIPT','AWAITING_COUNTS','AWAITING_SELECTED'))
+            AND ({scope}) AND {visible} ORDER BY b.shoot_date,b.shoot_time,b.id LIMIT 5""",
+            uid=actor['id'], since=today-timedelta(days=7),
+            cutoff=datetime.now(timezone.utc).replace(tzinfo=None)-timedelta(hours=2))
         pending = None
         if 'OWNER' in actor['roles']:
             rows = await self.rows(conn, """SELECT
@@ -773,6 +802,8 @@ class MiniApp:
                     'createdAt': str(r['created_at'])} for r in drafts],
                 'overdueBookings': [{'id': r['id'], 'date': str(r['shoot_date']),
                     'time': str(r['shoot_time'])[:5], 'client': r['client'], 'hotel': r['hotel']} for r in overdue],
+                'awaitingSale': [{'id': r['id'], 'date': str(r['shoot_date']),
+                    'time': str(r['shoot_time'])[:5], 'client': r['client'], 'hotel': r['hotel']} for r in awaiting],
                 'pendingAttendance': pending}
 
     async def schedule(self, request):
@@ -808,8 +839,11 @@ class MiniApp:
                     "ORDER BY name", uid=actor['id'])]
             from .schedule_month import month_plan
             monthly = await month_plan(self, conn, actor, str(start)[:7])
+            from .shift_hours import legacy_summary
+            legacy = await legacy_summary(self, conn, actor)
         return web.json_response({"items": items, "employees": employees, "hotels": hotels,
-                                  "unavailableEmployees": unavailable, "monthPlan": monthly})
+                                  "unavailableEmployees": unavailable, "monthPlan": monthly,
+                                  "legacyHours": legacy})
 
     async def create_shift(self, request):
         payload = await self.body(request)
@@ -1171,7 +1205,7 @@ class MiniApp:
             ("GET", "/booking-photographers", self.booking_photographers),
             ("GET", "/assignment-notifications", self.assignment_notifications),
             ("POST", r"/bookings/{id:\d+}/photographer", self.assign_booking_photographer),
-            ("POST", r"/bookings/{id:\d+}/shooting/{action:pickup|start|finish|ready}", self.shooting_action),
+            ("POST", r"/bookings/{id:\d+}/shooting/{action:pickup|start|finish|ready|begin|complete}", self.shooting_action),
             ("GET", "/finance", self.finance), ("GET", "/schedule", self.schedule),
             ("POST", "/schedule", self.create_shift), ("POST", "/schedule/batch", self.create_shift_batch), ("POST", "/schedule/team", self.create_team_schedule), ("DELETE", "/schedule/{id}", self.cancel_shift),
             ("GET", "/audit", self.audit), ("GET", "/academy", self.academy),
@@ -1192,6 +1226,10 @@ class MiniApp:
         install_academy_mentor(app, self, app["academy_coach"])
         from .academy_diagnostic import install_academy_diagnostic
         install_academy_diagnostic(app, self)
+        from .no_sale import install_no_sale
+        install_no_sale(app, self)
+        from .shift_hours import install_shift_hours
+        install_shift_hours(app, self)
 
 
 def install_miniapp(app, *, engine, bot, lessons, blocks=None, tz_name="Europe/Moscow",

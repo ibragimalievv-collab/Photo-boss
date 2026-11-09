@@ -45,7 +45,7 @@ async def main():
             for width in (1366, 320):
                 context = await browser.new_context(ignore_https_errors=True, viewport={'width': width, 'height': 900}, locale='ru-RU', service_workers='block')
                 await context.add_init_script('window.Telegram={WebApp:{initData:'+json.dumps(fixtures.signed())+',ready(){},expand(){},onEvent(){},setHeaderColor(){},setBackgroundColor(){},BackButton:{onClick(){},hide(){},show(){}}}};')
-                for path in ('/shift/attendance.js','/people/people.js','/work-chat/chat.js','https://telegram.org/js/telegram-web-app.js'):
+                for path in ('/shift/attendance.js','/people/people.js','/work-chat/chat.js','/staff-login/scan.js','https://telegram.org/js/telegram-web-app.js'):
                     await context.route('**'+path if path.startswith('/') else path,
                         lambda route: route.fulfill(status=200, body='', content_type='text/javascript'))
                 page = await context.new_page()
@@ -63,14 +63,21 @@ async def main():
                 await form.locator('[name=employee]').select_option('3')
                 await form.locator('[name=scheduleText]').fill(SOURCE)
                 await form.locator('[type=submit]').click()
-                await page.wait_for_function('document.querySelector("#scheduleTextForm")._preview?.days?.length === 31')
+                # Poll with evaluate: string predicates of wait_for_function need
+                # 'unsafe-eval', which the app's CSP rightly forbids.
+                for _ in range(300):
+                    if await page.evaluate('document.querySelector("#scheduleTextForm")._preview?.days?.length === 31'):
+                        break
+                    await asyncio.sleep(.1)
+                else:
+                    raise AssertionError('31-day preview did not appear')
                 # First pass must ask for missing settings; later runs reuse confirmed data.
                 if not await form.evaluate('f=>f._preview?.canApply'):
                     assert 'Укажите один раз' in await form.locator('[data-import-message]').inner_text()
                 await form.locator('[data-import-defaults]').evaluate('e=>e.open=true')
                 await form.locator('[name=hotelId]').select_option('1')
-                await form.locator('[name=start]').fill('09:00')
-                await form.locator('[name=end]').fill('19:00')
+                # Hours are never asked: everyone works from 09:00 to the last sale.
+                assert not await form.locator('[name=start],[name=end]').count()
                 await form.locator('[type=submit]').click()
                 apply = form.locator('[data-import-apply]')
                 await apply.wait_for(state='visible')
@@ -78,10 +85,11 @@ async def main():
                 assert 'Всего 31 дней · Менеджер 15 · Фотограф 11 · Выходные 5' in await form.inner_text()
                 assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                 assert await page.locator('#sheetContent').evaluate('e=>e.scrollWidth<=e.clientWidth')
+                assert 'с 09:00 до последней продажи' in await form.locator('[data-import-preview]').inner_text()
                 # Editing any parameter invalidates preview, then forces one recheck.
-                await form.locator('[name=end]').fill('18:00')
+                await form.locator('[name=hotelId]').select_option('')
                 assert not await apply.is_visible()
-                await form.locator('[name=end]').fill('19:00')
+                await form.locator('[name=hotelId]').select_option('1')
                 await form.locator('[type=submit]').click()
                 await apply.wait_for(state='visible')
                 await page.screenshot(path=str(evidence / f'preview-{width}.png'), full_page=True)

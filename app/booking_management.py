@@ -3,7 +3,6 @@ import hashlib
 import json
 from datetime import UTC, date, datetime, time
 from uuid import UUID, uuid4
-from zoneinfo import ZoneInfo
 
 from aiohttp import web
 from sqlalchemy import select
@@ -15,6 +14,7 @@ from .payment_mode import receipts_only
 from .people import positive_id
 from .services.booking_access import can_access_booking
 from .services.core import audit, roles_of
+from .timeutil import business_tz
 
 
 def version(values):
@@ -49,7 +49,7 @@ def first_cancellation_notice(raw, notice_id, booking, now):
                 or not isinstance(kind, str) or kind not in {'ordinary', 'force_majeure'}):
             raise ValueError
         category = ('FORCE_MAJEURE' if kind == 'force_majeure' else
-                    'EARLY' if received.astimezone(ZoneInfo('Europe/Moscow')).date() < day else 'LATE')
+                    'EARLY' if received.astimezone(business_tz()).date() < day else 'LATE')
         if notice['category'] != category:
             raise ValueError
         return reason, received.replace(tzinfo=None)
@@ -131,7 +131,10 @@ class BookingManagement:
                 if moved and day < self.api.today():
                     raise AccessError('Новая дата съёмки не может быть в прошлом.', 400)
                 if moved and integration is not None:
-                    from .services.booking_reservations import ReservationConflict, append_slot_version
+                    from .services.booking_reservations import (
+                        ReservationConflict,
+                        append_slot_version,
+                    )
                     try:
                         reserved = await append_slot_version(session, b, actor['id'],
                             active_version_id=b.reservation_version_id, shoot_date=day,
@@ -187,7 +190,9 @@ class BookingManagement:
                                 'reason': notice.case.reason, 'cancellationCaseId': notice.case.id,
                                 'refundState': notice.case.state}, ensure_ascii=False))
                         if not notice.repeated:
-                            from .services.booking_notices import queue_photographer_change
+                            from .services.booking_notices import (
+                                queue_photographer_change,
+                            )
                             await queue_photographer_change(session, b, 'cancelled')
                     result = await integration.public_status(session, b)
                     await session.commit()
@@ -208,7 +213,7 @@ class BookingManagement:
                             'revision': body['revision'], 'kind': body.get('cancellationKind', 'ordinary'),
                             'bankRefundConfirmed': False}
                         notice['category'] = ('FORCE_MAJEURE' if notice['kind'] == 'force_majeure' else
-                            'EARLY' if cancelled_at.replace(tzinfo=UTC).astimezone(ZoneInfo('Europe/Moscow')).date() < b.shoot_date else 'LATE')
+                            'EARLY' if cancelled_at.replace(tzinfo=UTC).astimezone(business_tz()).date() < b.shoot_date else 'LATE')
                         session.add_all([Setting(key=active_key, value=notice_id),
                             Setting(key='booking:cancel-notice:' + notice_id, value=json.dumps(notice, ensure_ascii=False))])
                     else:
@@ -228,7 +233,10 @@ class BookingManagement:
                 if sale or started:
                     raise AccessError('Восстановление этой съёмки требует проверки владельцем.', 409)
                 if integration is not None:
-                    from .services.booking_reservations import ReservationConflict, append_slot_version
+                    from .services.booking_reservations import (
+                        ReservationConflict,
+                        append_slot_version,
+                    )
                     try:
                         reserved = await append_slot_version(session, b, actor['id'],
                             active_version_id=b.reservation_version_id, shoot_date=b.shoot_date,

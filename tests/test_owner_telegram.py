@@ -88,6 +88,13 @@ def test_owner_copy_preserves_app_read_state_and_never_sends_staff_or_history(mo
                 assert notice.acknowledged_at is None and not notice.sent
                 assert (await session.get(OwnerTelegramDelivery, nid)).status == 'ACCEPTED'
                 assert len(list(await session.scalars(select(OwnerTelegramDelivery)))) == 1
+                # The owner's copy links to the booking only while that booking exists.
+                from datetime import date, time
+
+                from app.models import Booking, Client
+                session.add(Client(id=42, name='Guest'))
+                session.add(Booking(id=42, hotel_id=1, client_id=42, package_id=1, room='100', manager_id=1,
+                    shoot_date=date(2026, 9, 22), shoot_time=time(12), status='NEW'))
                 session.add(AuditLog(action='booking_created', entity='booking', entity_id=42,
                     details='Private audit details must never be copied'))
                 await session.commit()

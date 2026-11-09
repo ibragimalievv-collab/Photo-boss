@@ -9,8 +9,14 @@ from PIL import Image, ImageOps
 from ..config import config
 from .academy_curriculum import BOOKING_RULES, BOOKING_SCENARIOS
 from .ai_diagnostics import compatible_schema, http_failure, record, unavailable
-from .ai_provider import (ComparisonLimitError, capture_comparison_response,
-                          reserve_comparison_response, response_text, responses_profile, structured_json)
+from .ai_provider import (
+    ComparisonLimitError,
+    capture_comparison_response,
+    reserve_comparison_response,
+    response_text,
+    responses_profile,
+    structured_json,
+)
 
 SALES_RULES = '''Съёмка бесплатная; покупать фотографии необязательно. Цена кадра определяется тарифом выбранного отеля и фиксируется в записи: 300 ₽, 400 ₽ или 500 ₽. Называй только подтверждённую цену из приложения; если отель и цена неизвестны, уточни их, не выбирай цену самостоятельно. Гость может купить выбранные кадры или пакет этого отеля. Фотограф или менеджер может согласовать с гостем итоговую сумму за выбранные фотографии и ввести её в поле «Продал фотографии за, ₽» без запроса скидки и без ограничения в 50%. Скидка уже включена в эту сумму; повторно её не вычитать. Печатные альбомы — отдельные товары по тарифу отеля, скидка на фотографии к ним не применяется. Слайд-шоу показывают при выборе, отдельно не продают; его включение можно обсуждать при переговорах. Нельзя давить на гостя, придумывать дефицит, обещать неподтверждённую скидку или скрывать цену. Менеджер объясняет условия до записи. Фото чека само по себе не доказывает поступление денег; подтверждение выполняется по фактическому поступлению владельцем либо подключённым банком. Бронь времени — 1 000 ₽: подтверждённую предоплату вычесть из стоимости фото. При отмене до дня съёмки по Москве, включая вечер накануне, вернуть; в день съёмки — только при форс-мажоре с объяснением менеджера. Возврат считается выполненным после подтверждения банка. Если съёмка состоялась, но фото не выбраны, условия возврата уточни у владельца.'''
 SALES_SCENARIOS = [
@@ -25,7 +31,11 @@ async def structured(instructions, content, schema, name, *, limit=5000):
     has_images = any(item.get('type') == 'input_image' for item in content)
     if (has_images and getattr(config, 'ai_provider', 'openai') == 'yandex'
             and getattr(config, 'yandex_vision_pipeline', 'direct') == 'observations'):
-        from .yandex_photo_observations import GROUNDING, ObservationError, observe_content
+        from .yandex_photo_observations import (
+            GROUNDING,
+            ObservationError,
+            observe_content,
+        )
         text_model = responses_profile(config).model
         try:
             content = await observe_content(content, config)

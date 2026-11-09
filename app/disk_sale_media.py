@@ -292,14 +292,16 @@ class DiskSaleMedia:
             raise AccessError(provider_error(exc), 403 if exc.http_status in {401, 403} else 503) from exc
 
     async def takeover(self, request):
-        if 'OWNER' not in request['miniapp_actor']['roles']:
-            raise AccessError('Продолжить чужой черновик может только владелец.', 403)
+        # The owner, or an administrator with access to this hotel (checked by
+        # authorize/can_sell), may continue a sale another employee started.
+        if not {'OWNER', 'ADMIN'} & set(request['miniapp_actor']['roles']):
+            raise AccessError('Продолжить чужую продажу может владелец или администратор отеля.', 403)
         if await self.api.body(request) != {}:
             raise AccessError('Некорректный запрос продолжения продажи.', 400)
         async with AsyncSession(self.api.engine, expire_on_commit=False) as session:
             actor, booking = await self.authorize(session, request, lock=True)
-            if 'OWNER' not in request['disk_sale_roles']:
-                raise AccessError('Продолжить чужой черновик может только владелец.', 403)
+            if not {'OWNER', 'ADMIN'} & request['disk_sale_roles']:
+                raise AccessError('Продолжить чужую продажу может владелец или администратор отеля.', 403)
             draft = await active_draft(session, booking.id)
             if not draft:
                 raise AccessError('Незавершённая продажа не найдена. Обновите съёмку.', 409)
