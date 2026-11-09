@@ -44,7 +44,7 @@ function startRecorder(stream){
 function meter(capture){const Context=window.AudioContext||window.webkitAudioContext;if(!Context)return;try{const context=new Context(),analyser=context.createAnalyser();capture.context=context;context.createMediaStreamSource(capture.stream).connect(analyser);analyser.fftSize=256;const values=new Uint8Array(analyser.fftSize);context.resume().catch(()=>{});capture.meterTimer=setInterval(()=>{if(recording!==capture)return;analyser.getByteTimeDomainData(values);let power=0;for(const value of values)power+=((value-128)/128)**2;const level=host(capture.id)?.querySelector('[data-voice-level]');if(level)level.value=Math.min(1,Math.sqrt(power/values.length)*4);},150);}catch{/* Recording does not depend on AudioContext availability. */}}
 function stopRecording(id){const capture=recording;if(capture?.id!==id||capture.stopping)return;capture.stopping=true;status(id,'Сохраняем запись…','stopping');buttons(id);try{capture.recorder.stop();}catch{discardCapture();buttons(id);status(id,'Не удалось завершить запись. Запишите ответ ещё раз.','error');}}
 async function record(id,revision){
- if(window.isSecureContext===false)throw Error('Микрофон работает по защищённой ссылке. Откройте https://photo-boss.onrender.com/app/.');
+ if(window.isSecureContext===false)throw Error('Микрофон работает по защищённой ссылке. Откройте https://photo-boss.ru/app/.');
  if(!navigator.mediaDevices?.getUserMedia||typeof MediaRecorder==='undefined')throw Error('Запись голоса недоступна в этом браузере. Откройте Photo Boss в Safari или Chrome с доступом к микрофону.');
  if(recording||opening)throw Error('Сначала завершите текущую запись.');
  audioPlaying=false;document.querySelectorAll('[data-voice-player]').forEach(a=>a.pause());

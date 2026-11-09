@@ -134,3 +134,6 @@
 .check-line{display:flex;gap:10px;align-items:flex-start;font-size:.92em;line-height:1.35}
 .check-line input{width:20px;height:20px;flex:none;margin-top:1px}
 .legacy-hours{border-color:var(--warning);background:var(--warning-bg);display:grid;gap:10px}.legacy-hours p{margin:0}.legacy-hours .btn{justify-self:start;white-space:normal;text-align:left}
+
+/* Old address notice: shown only on photo-boss.onrender.com (needs a VPN in Russia). */
+.new-address-bar{position:relative;z-index:45;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between;margin:0;padding:12px 18px;background:var(--accent);color:var(--accent-ink)}.new-address-bar[hidden]{display:none}.new-address-bar p,.new-address-bar b{margin:0;color:var(--accent-ink)}.new-address-bar p{flex:1 1 260px;font-size:14px;line-height:1.4}.new-address-bar .btn{background:var(--accent-ink);color:var(--accent);white-space:nowrap}

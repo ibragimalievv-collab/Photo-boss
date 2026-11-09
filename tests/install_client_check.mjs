@@ -3,9 +3,9 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source=fs.readFileSync(new URL('../app/webapp/js/install.js',import.meta.url),'utf8');
-function scenario({ua='Chrome',platform='',touch=0,standalone=false,clipboard=true,telegram=false}={}){
+function scenario({ua='Chrome',platform='',touch=0,standalone=false,clipboard=true,telegram=false,origin='https://photo-boss.ru'}={}){
  const elements={},events={},display={matches:standalone,addEventListener:(name,fn)=>events.display=fn};
- for(const id of ['installBar','installApp','installDialog','installStatus','installInstructions','installEmbedded','closeInstall','installLink','openInstallLink','copyInstallLink']){
+ for(const id of ['newAddressBar','installBar','installApp','installDialog','installStatus','installInstructions','installEmbedded','closeInstall','installLink','openInstallLink','copyInstallLink']){
   elements[id]={hidden:true,disabled:false,open:false,textContent:'',innerHTML:'',value:'',href:'',listeners:{},
    addEventListener(name,fn){this.listeners[name]=fn;},showModal(){this.open=true;},close(){this.open=false;},select(){this.selected=true;}};
  }
@@ -13,7 +13,7 @@ function scenario({ua='Chrome',platform='',touch=0,standalone=false,clipboard=tr
  const context=vm.createContext({URL,console,
   document:{querySelector:selector=>elements[selector.slice(1)]},
   navigator:{userAgent:ua,platform,maxTouchPoints:touch,standalone,clipboard:clipboard?{writeText:async text=>writes.push(text)}:undefined},
-  window:{location:{origin:'https://photo-boss.onrender.com'},Telegram:telegram?{WebApp:{initData:'signed'}}:undefined,matchMedia:()=>display,addEventListener:(name,fn)=>events[name]=fn}});
+  window:{location:{origin},Telegram:telegram?{WebApp:{initData:'signed'}}:undefined,matchMedia:()=>display,addEventListener:(name,fn)=>events[name]=fn}});
  vm.runInContext(source,context);
  return {elements,events,display,writes,click:id=>elements[id].listeners.click()};
 }
@@ -21,7 +21,8 @@ const desktop=scenario();
 assert.equal(desktop.elements.installBar.hidden,false);
 await desktop.click('installApp');assert.equal(desktop.elements.installDialog.open,true);
 assert.match(desktop.elements.installInstructions.innerHTML,/Компьютер/);
-await desktop.click('copyInstallLink');assert.deepEqual(desktop.writes,['https://photo-boss.onrender.com/app/']);
+await desktop.click('copyInstallLink');assert.deepEqual(desktop.writes,['https://photo-boss.ru/app/']);
+assert.equal(desktop.elements.newAddressBar.hidden,true,'no notice on the current address');
 assert.equal(desktop.elements.openInstallLink.href,desktop.writes[0]);
 await desktop.click('closeInstall');assert.equal(desktop.elements.installDialog.open,false);
 const iphone=scenario({ua:'iPhone Safari'});await iphone.click('installApp');assert.match(iphone.elements.installInstructions.innerHTML,/На экран Домой/);
@@ -41,4 +42,11 @@ await cancelled.click('installApp');assert.equal(cancelled.elements.installDialo
 const failed=scenario();failed.events.beforeinstallprompt({preventDefault(){},prompt:async()=>{throw Error('Unavailable');}});
 await failed.click('installApp');assert.equal(failed.elements.installDialog.open,true);
 desktop.display.matches=true;desktop.events.display();assert.equal(desktop.elements.installBar.hidden,true);
+// The old Render address needs a VPN in Russia: point people to photo-boss.ru,
+// including the link they copy or open to install the app again.
+const legacy=scenario({origin:'https://photo-boss.onrender.com'});
+assert.equal(legacy.elements.newAddressBar.hidden,false);
+await legacy.click('installApp');await legacy.click('copyInstallLink');
+assert.deepEqual(legacy.writes,['https://photo-boss.ru/app/']);assert.equal(legacy.elements.openInstallLink.href,'https://photo-boss.ru/app/');
+console.log('PASS: old onrender address shows the move notice and installs from photo-boss.ru');
 console.log('PASS: native prompt, dismissal, failed prompts, installed detection, iPhone/iPad/Android instructions, embedded browser and safe sharing');

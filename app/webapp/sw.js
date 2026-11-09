@@ -1,6 +1,6 @@
 // Cache executable shell only. Authenticated API responses never enter CacheStorage.
 const STANDALONE=(()=>{try{return new URL(self.location.href||self.location.origin+'/app/sw.js').searchParams.get('standalone')==='1';}catch{return false;}})();
-const CACHE=STANDALONE?'photo-boss-shell-v81-standalone':'photo-boss-shell-v81-ru-migration';
+const CACHE=STANDALONE?'photo-boss-shell-v82-standalone':'photo-boss-shell-v82-ru-migration';
 const SDK=STANDALONE?null:'https://telegram.org/js/telegram-web-app.js';
 const STATIC=['/app/','/app/js/schedule-hours.js','/app/config.js','/app/manifest.webmanifest','/app/css/styles.css','/app/css/galleries.css','/app/css/staff-widget.css','/app/css/workspace-review.css','/app/css/schedule-month.css','/app/assets/icon.svg','/app/assets/widget-aperture.svg',
  ...['icon-192','icon-512','icon-maskable-512','apple-touch-icon'].map(n=>`/app/assets/${n}.png`),
