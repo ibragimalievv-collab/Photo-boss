@@ -45,6 +45,7 @@ jobs:
           PB_PROVIDER_DIAG=1 PB_PROVIDER_FAKE=1 PB_PROVIDER_DATABASE_URL="$UPDATE_POSTGRES_TEST_URL" python tests/sale_gallery_provider_check.py
           python tests/app_postgres_audit.py
           python tests/money_indexes_postgres_check.py
+          python tests/standalone_schema_postgres_check.py
 
   render-runtime:
     runs-on: ubuntu-latest
